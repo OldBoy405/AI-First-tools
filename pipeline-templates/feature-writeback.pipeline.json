@@ -1,0 +1,83 @@
+{
+  "id": "feature-writeback",
+  "name": "需求回写",
+  "description": "回写期主流水线：代码审批通过后以 CR workspace 为原子交付集合，将全部参与仓同名分支一起检查并合并回各仓 trunk，再把 change-requests/{CR-ID}/ 下的 PRD / SDD / TASK 回写到 specs/{id}/ 与 delivery/task/，最后归档 CR。任一仓未通过评审、未提交、未 push 或合并失败，整个 CR 不进入 writeback。",
+  "triggerCommand": "writeback",
+  "scope": "product-dev",
+  "isDefault": false,
+  "inputs": [
+    {
+      "key": "cr_id",
+      "label": "CR ID",
+      "type": "text",
+      "required": true,
+      "placeholder": "CR-2026-001",
+      "description": "已完成代码审批的 CR-ID；前置要求 status=code-approved"
+    },
+    {
+      "key": "spec_id",
+      "label": "Spec ID",
+      "type": "text",
+      "required": true,
+      "placeholder": "collaboration-dashboard",
+      "description": "回写目标 specs/{id}；必须显式提供，避免后续 writeback 节点收到空路径"
+    },
+    {
+      "key": "target_version",
+      "label": "目标版本",
+      "type": "text",
+      "required": true,
+      "placeholder": "v0.16.0",
+      "description": "用于 delivery/task 文件命名 TASK-{ver}-{NNN}-{NN}-*.md；必须显式提供并传递给所有 writeback 节点"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "00000000-0000-0000-0013-000000000001",
+      "kind": "skill",
+      "label": "合并 CR workspace 全仓同名分支",
+      "ref": "merge-feature-branch",
+      "prompt": "以 CR workspace 为单位执行各仓同名分支合并：\n1. 校验 change-requests/{{inputs.cr_id}} 当前 status=code-approved，否则 abort\n2. 读取 dir-graph.yaml repositories[*]（active≠false），解析全部参与仓与对应 CR worktree；role=knowledge-base 使用 bucket=knowledge-base，独立代码仓使用 bucket=repo.id，非独立代码目录随 knowledge-base worktree\n3. 对所有参与仓一起检查：代码评审已通过、工作区无未提交改动、requirement/{{inputs.cr_id}} 已 push 到远端、远端分支存在且 SHA 可记录；任一仓失败则整个 CR abort，不得单仓提前结束\n4. 对每个独立仓解析 repo.trunk；若返回 REPO_TRUNK_UNRESOLVED 则 abort\n5. 通过 controlled-shell 执行两阶段合并：先对所有 repo fetch + rev-parse origin/trunk + merge-tree --write-tree dry-run；全部通过后才 checkout trunk + pull --ff-only + merge --no-commit --no-ff；全部本地合并成功后才 commit\n6. push 前再次 fetch 并确认 origin/trunk 未变化；不得在全部参与仓本地合并成功前 push 任何 trunk\n7. 若部分 repo push 失败，必须自动 revert 已 push 的 merge commit，输出 MERGE_REMOTE_COMPENSATED 或 MERGE_REMOTE_COMPENSATION_FAILED，CR status 保持 code-approved，pipeline abort，不得进入 writeback\n8. 全部 repo push origin trunk 成功后，必须在同一 knowledge-base commit 中写入 merge-commits[] 并将 CR status 由 code-approved → merging；若 metadata commit/push 失败，必须先确认 metadata SHA 是否已到达 origin/trunk，未到达时自动 revert 全部已 push 的 merge commit，并回滚 knowledge-base 本地 metadata 到 code-approved，输出 MERGE_METADATA_PUBLISH_COMPENSATED、MERGE_METADATA_PUBLISH_COMPENSATION_FAILED 或 MERGE_METADATA_ROLLBACK_FAILED，pipeline abort，不得进入 writeback\n9. 本节点不移除本地 worktree、不删除远端分支；这些清理统一由 cr-archive 完成\n\n在 node-1.md 输出各仓 merge commit SHA、source branch SHA、trunk 分支名、远端 checkpoint SHA、metadata 发布结果、补偿/回滚记录与是否发生冲突。",
+      "onFail": "abort",
+      "timeoutMinutes": 20
+    },
+    {
+      "id": "00000000-0000-0000-0013-000000000002",
+      "kind": "skill",
+      "label": "回写 PRD / SDD 到 specs/",
+      "ref": "writeback-prd-sdd",
+      "prompt": "将 change-requests/{{inputs.cr_id}}/{prd.md,sdd.md} 回写到 specs/{{inputs.spec_id}}/{PRD.md,SDD.md}：\n- 若 specs/{{inputs.spec_id}} 不存在则新建目录并登记 specs/_index.yml\n- 若已存在，执行全量覆盖，并将旧版本备份到 change-requests/{{inputs.cr_id}}/writeback-backups/{{inputs.spec_id}}/{timestamp}/；不得写 _archived/**\n- 通过 engineering-docs skill 保证 frontmatter 合规\n- 维护 specs/_index.yml 的 status / last-updated-at / cr-ref 字段\n\n在 node-2.md 输出目标 spec_id 与新建/更新标记、变更文件清单。",
+      "onFail": "abort",
+      "timeoutMinutes": 20
+    },
+    {
+      "id": "00000000-0000-0000-0013-000000000003",
+      "kind": "skill",
+      "label": "回写 TASK 到 delivery/",
+      "ref": "writeback-tasks",
+      "prompt": "将 change-requests/{{inputs.cr_id}}/tasks/TASK-NN.md 映射为 delivery/task/TASK-{{inputs.target_version}}-{NNN}-{NN}-*.md：\n- NNN 取 CR 在 backlog 中的序号，NN 保留原任务编号\n- 每个 TASK 的 frontmatter 记录 cr-ref、spec-ref、commit-range\n- 维护 delivery/task/_index.yaml\n- 使用必填输入 target_version={{inputs.target_version}}，不得在本节点重新推导版本\n\n在 node-3.md 输出生成的 TASK 文件清单。",
+      "onFail": "abort",
+      "timeoutMinutes": 15
+    },
+    {
+      "id": "00000000-0000-0000-0013-000000000004",
+      "kind": "skill",
+      "label": "回写追溯链",
+      "ref": "writeback-traceability",
+      "prompt": "生成或更新 specs/{{inputs.spec_id}}/traceability.yml：\n- PRD FR-* ↔ SDD 章节 ↔ delivery/task/TASK-* ↔ merge-commits[] repo/SHA ↔ CR-ID\n- 从 change-requests/_backlog.yml 的 merge-commits[] 动态生成 code evidence，不使用固定仓字段\n- 标记每条链路的 verified-at 时间戳\n- 与 change-requests/{{inputs.cr_id}}/traceability.yml 保持一致（本条为权威版本）\n\n在 node-4.md 输出链路条目数与未对齐项。",
+      "onFail": "abort",
+      "timeoutMinutes": 15
+    },
+    {
+      "id": "00000000-0000-0000-0013-000000000005",
+      "kind": "skill",
+      "label": "归档 CR",
+      "ref": "cr-archive",
+      "prompt": "将 CR {{inputs.cr_id}} 从 change-requests/_backlog.yml 移入 _history.yml：\n- 对 writing-back → archived 使用 cr-status-set 的 embedded 校验，不单独提交中间 archived 状态\n- 在同一归档账本 commit 中同步 cr.md、_backlog.yml、_history.yml 与 _index.yml，记录 archived-at、merge-commits、writeback_spec_id={{inputs.spec_id}}\n- 若上次归档发布失败导致 backlog 中 status 已为 archived，按 archive-repair 继续完成 backlog→history 移动\n- 若 history 已存在但 origin/trunk 尚未包含归档账本，按 publish-retry 只重试归档账本 commit/push，不重复移动 backlog/history\n- 若 history 已存在且 cleanup-report.yml 为 pending，跳过账本移动，只重试 cleanup\n- 先确认归档账本已推送到 knowledge-base trunk，成功后才进入清理阶段\n- 清理阶段通过 controlled-shell 删除远端 requirement/{{inputs.cr_id}} 分支，并移除本地 CR worktree；缺失 worktree 视为 skipped-missing\n- 清理失败不得回滚已发布归档记录，必须写 cleanup-report.yml 并输出 cleanup-pending，后续可重试 cleanup\n- 保留 change-requests/{{inputs.cr_id}}/ 目录作为历史痕迹，下次 CR 可参考\n\n在 node-5.md 输出归档汇总：spec_id、task 数、追溯链条数、归档 commit SHA 与 cleanup 状态。",
+      "onFail": "abort",
+      "timeoutMinutes": 10
+    }
+  ],
+  "createdAt": "2026-05-07T00:00:00+08:00",
+  "updatedAt": "2026-05-07T00:00:00+08:00"
+}

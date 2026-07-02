@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-first-rd-platform/skills/engineering-docs/plan.schema.json",
+  "title": "PLAN frontmatter",
+  "allOf": [
+    { "$ref": "https://ai-first-rd-platform/skills/engineering-docs/common-defs.schema.json#/definitions/baseFrontmatter" },
+    {
+      "type": "object",
+      "required": ["type", "version", "sprint"],
+      "properties": {
+        "id": { "pattern": "^PLAN-v\\d+(?:\\.\\d+)*(?:-[a-z0-9]+)?-\\d{3}$" },
+        "type": { "const": "PLAN" },
+        "version": { "$ref": "https://ai-first-rd-platform/skills/engineering-docs/common-defs.schema.json#/definitions/semver" },
+        "sprint": { "type": "string" }
+      }
+    }
+  ]
+}

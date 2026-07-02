@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-first-rd-platform/skills/engineering-docs/form.schema.json",
+  "title": "FORM frontmatter",
+  "allOf": [
+    { "$ref": "https://ai-first-rd-platform/skills/engineering-docs/common-defs.schema.json#/definitions/baseFrontmatter" },
+    {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "id": { "pattern": "^FORM-\\d{3}$" },
+        "type": { "const": "FORM" },
+        "fields": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  ]
+}

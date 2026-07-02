@@ -1,0 +1,118 @@
+# tools/pipeline-templates — Pipeline 模板台账
+# 新增模板时必须在此注册一条记录。
+# 模板文件格式遵循系统侧 PipelineDefinition 类型。
+# 本目录在 workspace mount 时由 loadWorkspaceTemplates() 动态读取，无需手动同步代码。
+#
+# 机器可读约定（供后续代码接入）：
+#   path   — 相对 workspace 根目录的 JSON 文件路径，由 readWorkspaceFile 直接使用
+#   status — active | deprecated，加载时只取 active 条目
+#   其余字段仅供人类阅读，代码不依赖。
+
+pipeline-templates:
+  # ── 四阶段主流程（新研发工作流）──────────────────────────────────
+  - id: product-planning-v1
+    path: tools/pipeline-templates/product-planning.pipeline.json
+    name: 调研规划
+    scope: product-planning
+    trigger: planning
+    nodes: 8
+    status: active
+    brief: >-
+      调研规划期主流水线：用户反馈分析 → 市场调研 → 竞品分析 → 当前产品分析
+      → 产品规划报告（可跳过任意环节）→ AI 评审 → 人工审批 → 路标规划。
+      全程在 main 分支，产物落 docs/product-planning/。
+    added: "2026-05-07"
+
+  - id: requirement-authoring-v1
+    path: tools/pipeline-templates/requirement-authoring.pipeline.json
+    name: 需求编写
+    scope: product-design
+    trigger: requirement
+    nodes: 6
+    status: active
+    brief: >-
+      需求编写期主流水线：CR 注册（含需求/开发/测试三角色 owner 与 assigned-at）+ active repo worktree 创建 → PRD 编写
+      → 远端 checkpoint（可选）→ 需求评审 → 人工审批 → approve-requirement 状态推进。
+      产物落 change-requests/CR-*/prd.md，specs/ 保持不动。
+    added: "2026-05-07"
+
+  - id: architecture-design-v1
+    path: tools/pipeline-templates/architecture-design.pipeline.json
+    name: 架构设计
+    scope: product-dev
+    trigger: architecture
+    nodes: 5
+    status: active
+    brief: >-
+      架构设计流水线：承接已审批需求 PRD，输出 sdd.md 技术设计文档
+      → 技术设计评审 → 人工审批 → approve-tech-design 状态推进 → 远端 checkpoint（可选）。
+      前置 CR status=requirement-approved，审批后 CR status=tech-design-reviewed，可进入 /coding。
+    added: "2026-05-18"
+
+  - id: code-implementation-v1
+    path: tools/pipeline-templates/code-implementation.pipeline.json
+    name: 代码编写
+    scope: product-dev
+    trigger: coding
+    nodes: 12
+    status: active
+    brief: >-
+      代码编写流水线：根据已评审 SDD 生成 plan.md → 拆分 TASK
+      → 远端 checkpoint（可选）→ 人工确认进入 developing
+      → 根据配置调用 code generation runtime/CLI 编码
+      → 生成测试报告 → 统一 checkpoint → 代码评审 → 代码审批（人工）→ approve-code 状态推进
+      → 审批结果 checkpoint。
+      前置 CR status=tech-design-reviewed，审批后 CR status=code-approved，可进入 writeback。
+    added: "2026-05-18"
+
+  - id: feature-writeback-v1
+    path: tools/pipeline-templates/feature-writeback.pipeline.json
+    name: 需求回写
+    scope: product-dev
+    trigger: writeback
+    nodes: 5
+    status: active
+    brief: >-
+      回写期主流水线：active repo 同名分支合并回各自 trunk → PRD/SDD 回写到 specs/
+      → TASK 回写到 delivery/task/ → 追溯链生成 → CR 归档。
+      前置 CR status=code-approved，此前 specs/ 保持不动。
+    added: "2026-05-07"
+
+  - id: resume-cr-v1
+    path: tools/pipeline-templates/resume-cr.pipeline.json
+    name: 接手在途 CR
+    scope: product-dev
+    trigger: resume
+    nodes: 3
+    status: active
+    brief: >-
+      辅助流水线：换电脑或协作者接手在途 CR 时，核对远端 checkpoint
+      → active repo worktree 恢复 → 展示 CR 当前状态与下一步建议。
+    added: "2026-05-07"
+
+  # ── 规划期子流程（继续保留）──────────────────────────────────────
+  - id: competitive-radar-v1
+    path: tools/pipeline-templates/competitive-radar.pipeline.json
+    name: 竞品雷达
+    scope: product-planning
+    trigger: comp-radar
+    nodes: 5
+    status: active
+    brief: >-
+      针对指定竞品抓取最新动态，生成竞品分析报告，并自动转化为产品规划建议。
+      覆盖：抓取动态 → 生成报告 → 转化建议 → 人工确认 → write-planning-entry 写入规划知识库。
+    added: "2026-05-07"
+
+  - id: market-to-plan-v1
+    path: tools/pipeline-templates/market-to-plan.pipeline.json
+    name: 市场洞察转规划
+    scope: product-planning
+    trigger: insight-brief
+    nodes: 5
+    status: active
+    brief: >-
+      将市场调研或用户反馈洞察转化为结构化产品规划条目，写入知识库并更新规划 Tab 视图。
+      覆盖：提取关键信号 → 撰写洞察简报 → 生成规划建议 → 人工确认 → write-planning-entry 写入规划知识库。
+    added: "2026-05-07"
+
+  # 废弃条目已迁移至 tools/old/pipeline-templates/_index.yml

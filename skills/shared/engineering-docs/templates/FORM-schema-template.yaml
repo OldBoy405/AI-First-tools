@@ -1,0 +1,29 @@
+# FORM 数据结构（对应 DDD Aggregate Root）
+# 由 engineering-docs skill 渲染生成
+# 关联 FORM 文档：<%= formId || '待绑定' %>
+form:
+  id: <%= formId || id %>
+  name: <%= name %>
+  title: <%= title %>
+  version: "<%= version %>"
+
+fields:
+  - name: example
+    type: string
+    required: true
+    default: null
+    constraints:
+      minLength: 1
+      maxLength: 64
+      pattern: "^.+$"
+    description: "占位字段，生成后请按实际需求替换"
+
+enums: {}
+#  example-status:
+#    - active
+#    - inactive
+
+relations: []
+#  - name: belongsToUser
+#    target: User
+#    cardinality: many-to-one

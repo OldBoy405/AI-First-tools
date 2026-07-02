@@ -1,0 +1,159 @@
+{
+  "id": "requirement-authoring",
+  "name": "需求编写",
+  "description": "需求编写期主流水线：先在 knowledge-base trunk 注册 CR → 按 dir-graph active repos 派生同名 worktree → 写 prd.md → 评审 → 人工审批。支持中途推送到远端 checkpoint，方便换机或协作者接手。",
+  "triggerCommand": "requirement",
+  "scope": "product-design",
+  "isDefault": false,
+  "inputs": [
+    {
+      "key": "title",
+      "label": "需求标题",
+      "type": "text",
+      "required": true,
+      "placeholder": "例：启动面板多方案调研",
+      "description": "写入 cr.md title 字段"
+    },
+    {
+      "key": "cr_id",
+      "label": "CR ID（可选）",
+      "type": "text",
+      "required": false,
+      "placeholder": "留空则自动生成，如 CR-2026-001",
+      "description": "显式指定 CR-ID；为空时由 requirement-register 根据 _index.yml 自动生成"
+    },
+    {
+      "key": "summary",
+      "label": "需求摘要",
+      "type": "multiline",
+      "required": true,
+      "placeholder": "1-3 句话描述本次需求的目标与价值",
+      "description": "写入 cr.md summary 字段，作为 PRD 起草的主输入"
+    },
+    {
+      "key": "source",
+      "label": "关联规划报告路径",
+      "type": "text",
+      "required": false,
+      "placeholder": "docs/product-planning/2026-05-07-xxx.md",
+      "description": "留空则表示跳过规划直接写需求"
+    },
+    {
+      "key": "target_version",
+      "label": "目标版本",
+      "type": "text",
+      "required": true,
+      "placeholder": "例：v0.16.0",
+      "description": "决定 worktree 分支是否关联目标版本"
+    },
+    {
+      "key": "requirement_owner",
+      "label": "需求负责人",
+      "type": "text",
+      "required": true,
+      "placeholder": "product-owner",
+      "description": "写入 cr.md owners.requirement.id，并记录 assigned-at"
+    },
+    {
+      "key": "dev_owner",
+      "label": "开发负责人",
+      "type": "text",
+      "required": true,
+      "placeholder": "dev-owner",
+      "description": "写入 cr.md owners.development.id，并记录 assigned-at"
+    },
+    {
+      "key": "test_owner",
+      "label": "测试负责人",
+      "type": "text",
+      "required": true,
+      "placeholder": "test-owner",
+      "description": "写入 cr.md owners.test.id，并记录 assigned-at"
+    },
+    {
+      "key": "auto_push_after_prd",
+      "label": "PRD 完成后自动推送远端",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "勾选后 PRD 起草完成立即 push-progress 推送到 origin，方便换机续写"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "00000000-0000-0000-0011-000000000001",
+      "kind": "skill",
+      "label": "注册需求并派生 worktree",
+      "ref": "requirement-register",
+      "prompt": "执行 requirement-register：\n- cr_id: {{inputs.cr_id}}\n- title: {{inputs.title}}\n- summary: {{inputs.summary}}\n- source: {{inputs.source}}\n- target_version: {{inputs.target_version}}\n- requirement_owner: {{inputs.requirement_owner}}\n- dev_owner: {{inputs.dev_owner}}\n- test_owner: {{inputs.test_owner}}\n\n动作：\n1. 读取 dir-graph.yaml repositories[*]（active≠false），解析 knowledge-base repo、各 repo.trunk 与 worktree bucket；若返回 REPO_TRUNK_UNRESOLVED 则 abort\n2. 若 inputs.cr_id 为空，生成 CR-ID（格式 CR-YYYY-NNN）；若不为空，校验格式与唯一性\n3. 在 knowledge-base trunk 创建 change-requests/{cr_id}/cr.md，写入 owners.requirement / owners.development / owners.test 三个角色负责人及 assigned-at 时间戳；顶层 owner 仅作为兼容字段，取 requirement_owner\n4. 登记 change-requests/_backlog.yml（status=drafting，含 remote-ref 占位、owners 与 owner-history）与 _index.yml\n5. 通过 controlled-shell 提交并推送 registration commit 到 knowledge-base trunk，确保 trunk 可感知在途 CR，且后续 worktree 能包含 cr.md\n6. 对每个 active repo 创建 worktree 到 workspace 根目录的 `.xinyiai-worktrees/{bucket}/requirement/{cr_id}`；role=knowledge-base 的仓固定 bucket=`knowledge-base`，其他仓 bucket=repo.id；不得切换主工作区 HEAD\n\n在 node-1.md 末尾必须输出机器可读 YAML：\n```yaml\nexecution_context:\n  cr_id: CR-YYYY-NNN\n  branch: requirement/CR-YYYY-NNN\n  owners:\n    requirement:\n      id: {{inputs.requirement_owner}}\n      assigned-at: ISO-8601\n    development:\n      id: {{inputs.dev_owner}}\n      assigned-at: ISO-8601\n    test:\n      id: {{inputs.test_owner}}\n      assigned-at: ISO-8601\n  knowledge_base_worktree: /abs/path/.xinyiai-worktrees/knowledge-base/requirement/CR-YYYY-NNN\n  repo_worktrees:\n    - repo: knowledge-base\n      role: knowledge-base\n      path: /abs/path/.xinyiai-worktrees/knowledge-base/requirement/CR-YYYY-NNN\n```\n后续节点只能从 execution_context.cr_id、execution_context.owners 与 knowledge_base_worktree 取值。",
+      "onFail": "abort",
+      "timeoutMinutes": 10
+    },
+    {
+      "id": "00000000-0000-0000-0011-000000000002",
+      "kind": "skill",
+      "label": "撰写需求 PRD",
+      "ref": "write-requirement-prd",
+      "prompt": "读取 node-1.md 末尾的 execution_context，取得 cr_id 与 knowledge_base_worktree。执行 write-requirement-prd：\n- cr_id: {execution_context.cr_id}\n- source: {{inputs.source}}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n在 knowledge_base_worktree 中写 `change-requests/{cr_id}/prd.md`，不得写入主 workspace 的同名目录：\n- 背景与目标（继承 {{inputs.summary}} 与规划报告 {{inputs.source}} 上下文）\n- 用户故事（US-*）\n- 功能需求（FR-*）\n- 非功能需求（NFR-*）\n- 验收标准（AC-*）\n- 依赖与风险\n\n若来自 reviewLoop 回修，必须逐条消费 review_feedback.blockers 与 repair-instructions，修订同一 PRD，并在 node-2.md 输出 fixed-blockers 清单。常规或回修完成后，输出 PRD 关键章节摘要、字数统计与实际写入路径，并保留 execution_context.cr_id。",
+      "onFail": "abort",
+      "timeoutMinutes": 25
+    },
+    {
+      "id": "00000000-0000-0000-0011-000000000003",
+      "kind": "skill",
+      "label": "推送 PRD 草稿到远端",
+      "ref": "push-progress",
+      "prompt": "若 {{inputs.auto_push_after_prd}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则读取 node-1.md 的 execution_context，执行 push-progress：\n- cr_id: {execution_context.cr_id}\n- 按 dir-graph active repos 提交并推送 requirement/{cr_id}；knowledge-base 提交 PRD 和 backlog 更新，其他 repo clean 时只 push 确认远端分支\n- 更新 change-requests/_backlog.yml 中 CR 条目的 remote-ref / last-push-at / last-push-by / checkpoints[]\n\n在 node-3.md 输出各 repo 推送结果与远端分支 URL（若可获取）。",
+      "onFail": "skip",
+      "timeoutMinutes": 10
+    },
+    {
+      "id": "00000000-0000-0000-0011-000000000004",
+      "kind": "skill",
+      "label": "需求评审",
+      "ref": "review-requirement",
+      "prompt": "读取 node-1.md 的 execution_context，执行 review-requirement：\n- cr_id: {execution_context.cr_id}\n- reviewer: ai-reviewer\n\n对 knowledge_base_worktree 中 change-requests/{cr_id}/prd.md 执行需求评审，检查：\n① 完整性（US/FR/AC 覆盖）\n② 可测试性（AC 可验证）\n③ 一致性（与 {{inputs.source}} 规划报告不冲突）\n④ 边界与风险\n\n将评审结论写入 change-requests/{cr_id}/review-annotations/requirement.yml 与 traceability.yml，并持久化 review-loop.current-attempt 与 review-loop.attempts[]。在 node-4.md 输出 verdict、blockers、repair-target、repair-instructions、review-loop.current-attempt 与评审摘要。若 verdict=block 或 blockers 非空，pipeline 不得进入 human_approval；必须把 review_feedback 传回 write-requirement-prd 自动修订，并重新执行本评审，直至 verdict=pass 且 blockers 为空，或达到 reviewLoop.maxAttempts 后停止。",
+      "reviewLoop": {
+        "repairNodeId": "00000000-0000-0000-0011-000000000002",
+        "repairRef": "write-requirement-prd",
+        "feedbackInput": "review_feedback",
+        "attemptInput": "self_repair_attempt",
+        "maxAttempts": 3,
+        "passCondition": {
+          "allOf": [
+            {
+              "path": "verdict",
+              "equals": "pass"
+            },
+            {
+              "path": "blockers",
+              "isEmpty": true
+            }
+          ]
+        },
+        "onBlock": "route-to-repair-node"
+      },
+      "onFail": "abort",
+      "timeoutMinutes": 15
+    },
+    {
+      "id": "00000000-0000-0000-0011-000000000005",
+      "kind": "human_approval",
+      "label": "需求审批",
+      "approvalPrompt": "需求文档已完成自动评审，且 review-annotations/requirement.yml 必须满足 verdict=pass、blockers=[] 后才可进入本节点。请根据 node-1.md 的 execution_context.cr_id 检阅对应 change-requests/{cr_id}/prd.md 后决定：\n\n✅ 批准：勾选此 Todo，下一节点 approve-requirement 会记录审批并推进 CR 状态\n❌ 驳回：在 review-annotations/requirement.yml 补充 reject_reason 后中止流水线",
+      "onFail": "abort",
+      "timeoutMinutes": 2880
+    },
+    {
+      "id": "00000000-0000-0000-0011-000000000006",
+      "kind": "skill",
+      "label": "记录需求审批并推进状态",
+      "ref": "approve-requirement",
+      "prompt": "读取 node-1.md 的 execution_context。在 human_approval 通过后执行 approve-requirement：\n- cr_id: {execution_context.cr_id}\n- approver: {execution_context.owners.requirement.id}\n\n校验 review-annotations/requirement.yml 已通过，写入 approval.yml，并将 CR status 推进到 requirement-approved。在 node-6.md 输出审批记录路径、当前 status、需求负责人和下一步 architecture pipeline 指令。",
+      "onFail": "abort",
+      "timeoutMinutes": 5
+    }
+  ],
+  "createdAt": "2026-05-07T00:00:00+08:00",
+  "updatedAt": "2026-05-07T00:00:00+08:00"
+}

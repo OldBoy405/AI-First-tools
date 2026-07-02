@@ -1,0 +1,153 @@
+{
+  "id": "product-planning",
+  "name": "产品规划",
+  "description": "调研规划期主流水线：串联用户反馈分析、市场调研、竞品分析、当前产品分析、规划报告与路标输出。除规划报告必选外，其他前置调研环节均可通过 skip_* 输入跳过。全程在主分支执行，不涉及分支切换。",
+  "triggerCommand": "planning",
+  "scope": "product-planning",
+  "isDefault": false,
+  "inputs": [
+    {
+      "key": "topic",
+      "label": "规划主题",
+      "type": "text",
+      "required": true,
+      "placeholder": "例：v0.16.0 产品规划",
+      "description": "将作为规划报告文件名 slug 与路标段落标题"
+    },
+    {
+      "key": "target_version",
+      "label": "目标版本",
+      "type": "text",
+      "required": false,
+      "placeholder": "例：v0.16.0",
+      "description": "留空则路标按时间分组，不绑定版本"
+    },
+    {
+      "key": "skip_feedback",
+      "label": "跳过用户反馈分析",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "勾选后跳过 analyze-user-feedback 节点"
+    },
+    {
+      "key": "skip_market",
+      "label": "跳过市场调研",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "勾选后跳过 conduct-market-research 节点"
+    },
+    {
+      "key": "skip_competitive",
+      "label": "跳过竞品分析",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "勾选后跳过 run-competitive-analysis 节点"
+    },
+    {
+      "key": "skip_product",
+      "label": "跳过当前产品分析",
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "勾选后跳过 analyze-current-product 节点"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "00000000-0000-0000-0010-000000000001",
+      "kind": "skill",
+      "label": "用户反馈分析",
+      "ref": "analyze-user-feedback",
+      "prompt": "若 {{inputs.skip_feedback}}=true 则直接在 node-1.md 输出 SKIPPED 并 return。\n否则执行 analyze-user-feedback：读取 docs/feedback/ 下的反馈记录，提炼高频痛点 TOP5、分类统计、代表性反馈摘录，输出结构化分析到 node-1.md。",
+      "onFail": "skip",
+      "timeoutMinutes": 15
+    },
+    {
+      "id": "00000000-0000-0000-0010-000000000002",
+      "kind": "skill",
+      "label": "市场调研",
+      "ref": "conduct-market-research",
+      "prompt": "若 {{inputs.skip_market}}=true 则直接在 node-2.md 输出 SKIPPED 并 return。\n否则执行 conduct-market-research：围绕主题「{{inputs.topic}}」产出市场洞察文档并落盘到 docs/market-insights/market-{YYYY-MM-DD}-{topic-slug}.md，并同步更新 docs/market-insights/_index.yml；文件名必须与 id: market-{YYYY-MM-DD}-{topic-slug} 对齐。",
+      "onFail": "skip",
+      "timeoutMinutes": 20
+    },
+    {
+      "id": "00000000-0000-0000-0010-000000000003",
+      "kind": "skill",
+      "label": "竞品分析",
+      "ref": "run-competitive-analysis",
+      "prompt": "若 {{inputs.skip_competitive}}=true 则直接在 node-3.md 输出 SKIPPED 并 return。\n否则执行 run-competitive-analysis：串联 fetch-competitor-updates 与 write-competitive-report 生成最新竞品报告，节点输出引用路径。",
+      "onFail": "skip",
+      "timeoutMinutes": 20
+    },
+    {
+      "id": "00000000-0000-0000-0010-000000000004",
+      "kind": "skill",
+      "label": "当前产品分析",
+      "ref": "analyze-current-product",
+      "prompt": "若 {{inputs.skip_product}}=true 则直接在 node-4.md 输出 SKIPPED 并 return。\n否则执行 analyze-current-product：读取 specs/_index.yml、specs/_history.yml、metrics.yml，产出当前产品能力矩阵与 gap 清单到 node-4.md。",
+      "onFail": "skip",
+      "timeoutMinutes": 15
+    },
+    {
+      "id": "00000000-0000-0000-0010-000000000005",
+      "kind": "skill",
+      "label": "生成产品规划报告",
+      "ref": "write-planning-report",
+      "prompt": "聚合前序 node-1/2/3/4 的产出（跳过节点标注 SKIPPED），撰写产品规划报告：\n- 目标版本：{{inputs.target_version}}\n- 主题：{{inputs.topic}}\n- 章节：背景 → 机会与风险 → 规划目标 → 路线图候选项 → 成功指标\n落盘到 docs/product-planning/{YYYY-MM-DD}-{topic-slug}.md，并在 docs/product-planning/_index.yml 追加 draft 条目。",
+      "onFail": "abort",
+      "timeoutMinutes": 25
+    },
+    {
+      "id": "00000000-0000-0000-0010-000000000006",
+      "kind": "skill",
+      "label": "产品规划报告评审",
+      "ref": "review-planning-report",
+      "prompt": "读取上一节点生成的产品规划报告，执行 review-planning-report：\n- 校验调研依据、规划建议、路标建议、成功指标、待决策项\n- 将评审记录写入 docs/product-planning/review-annotations/{report-id}.yml\n- 将 docs/product-planning/_index.yml 中对应规划报告 status 从 draft 更新为 reviewing（如存在）\n- 输出 approved、blockers、risks、recommendations、repair-target、repair-instructions、review-loop.current-attempt、review-loop.attempts[]\n\n若 approved=false 或 blockers 非空，pipeline 不得进入 human_approval；必须将 review_feedback 传回 write-planning-report 节点自动修订，并重新执行本评审，直至 approved=true 且 blockers 为空，或达到 reviewLoop.maxAttempts 后停止。每次评审必须持久化 review-loop.attempts[]，避免恢复后重置自修复轮次。",
+      "reviewLoop": {
+        "repairNodeId": "00000000-0000-0000-0010-000000000005",
+        "repairRef": "write-planning-report",
+        "feedbackInput": "review_feedback",
+        "attemptInput": "self_repair_attempt",
+        "maxAttempts": 3,
+        "passCondition": {
+          "allOf": [
+            {
+              "path": "approved",
+              "equals": true
+            },
+            {
+              "path": "blockers",
+              "isEmpty": true
+            }
+          ]
+        },
+        "onBlock": "route-to-repair-node"
+      },
+      "onFail": "abort",
+      "timeoutMinutes": 15
+    },
+    {
+      "id": "00000000-0000-0000-0010-000000000007",
+      "kind": "human_approval",
+      "label": "规划报告审批",
+      "approvalPrompt": "产品规划报告已生成，且 AI 评审必须满足 approved=true、blockers=[] 后才可进入本节点（docs/product-planning/review-annotations/{report-id}.yml）。请结合评审结论审阅后决定：\n\n✅ 批准：勾选继续执行路标写入\n❌ 驳回：在报告末尾补充 reject_reason 后中止流水线，修改后重新触发",
+      "onFail": "abort",
+      "timeoutMinutes": 2880
+    },
+    {
+      "id": "00000000-0000-0000-0010-000000000008",
+      "kind": "skill",
+      "label": "形成路标规划",
+      "ref": "write-roadmap",
+      "prompt": "将已批准的规划报告中的路线图候选项落入 docs/product-planning/roadmap.md：\n- 按 target_version={{inputs.target_version}} 分组追加；未指定版本则按季度分组\n- 保留既有条目不覆盖，追加时幂等\n- 同步更新 docs/product-planning/_index.yml 对应条目 status=approved",
+      "onFail": "abort",
+      "timeoutMinutes": 15
+    }
+  ],
+  "createdAt": "2026-05-07T00:00:00+08:00",
+  "updatedAt": "2026-05-07T00:00:00+08:00"
+}

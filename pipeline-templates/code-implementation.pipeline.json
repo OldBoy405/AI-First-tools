@@ -1,0 +1,224 @@
+{
+  "id": "code-implementation",
+  "name": "代码编写",
+  "description": "代码编写流水线：在架构设计审批通过后，根据技术设计文档 sdd.md 生成 plan.md，拆分可执行 TASK，人工确认任务拆分后推进到 developing，并根据配置选择 code generation runtime 调用对应 CLI 完成实际代码编写，随后推送统一 checkpoint、执行代码评审并等待人工审批进入 Review 通过状态。",
+  "triggerCommand": "coding",
+  "scope": "product-dev",
+  "isDefault": false,
+  "inputs": [
+    {
+      "key": "cr_id",
+      "label": "CR ID",
+      "type": "text",
+      "required": true,
+      "placeholder": "CR-2026-001",
+      "description": "已完成架构设计审批的 CR-ID；前置要求 status=tech-design-reviewed"
+    },
+    {
+      "key": "target_version",
+      "label": "目标版本",
+      "type": "text",
+      "required": false,
+      "placeholder": "v0.16.0",
+      "description": "写入 plan.md frontmatter；留空则由 write-dev-plan 推导或标记 tbd"
+    },
+    {
+      "key": "auto_push_after_task",
+      "label": "任务拆分后自动推送远端",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "勾选后 plan.md 与 tasks/ 完成后立即 push-progress 到 origin"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "00000000-0000-0000-0015-000000000001",
+      "kind": "skill",
+      "label": "编写开发计划",
+      "ref": "write-dev-plan",
+      "prompt": "校验 CR {{inputs.cr_id}} 当前 status=tech-design-reviewed。基于 CR worktree 中 change-requests/{{inputs.cr_id}}/sdd.md 编写 plan.md：\n- 交付里程碑与排期\n- 任务依赖图\n- 风险与回滚策略\n- 验收与发布策略\n- target_version: {{inputs.target_version}}\n\n在 node-1.md 输出计划关键里程碑摘要、估算总工时和实际写入路径。",
+      "onFail": "abort",
+      "timeoutMinutes": 15
+    },
+    {
+      "id": "00000000-0000-0000-0015-000000000002",
+      "kind": "skill",
+      "label": "拆分开发任务",
+      "ref": "write-dev-tasks",
+      "prompt": "将 CR worktree 中 change-requests/{{inputs.cr_id}}/plan.md 与 sdd.md 拆解为独立可执行的 TASK，每个 TASK 产出 change-requests/{{inputs.cr_id}}/tasks/TASK-NN.md：\n- 任务描述（目标、输入、输出）\n- 涉及文件/模块清单\n- 实现要点（引用 SDD 对应章节）\n- 验收条件（测试用例或验证步骤）\n- 依赖的其他 TASK\n\n同时生成 tasks/_index.yml，并将 CR status 推进到 task-breakdown。在 node-2.md 输出 TASK 列表、总数和依赖关系。",
+      "onFail": "abort",
+      "timeoutMinutes": 20
+    },
+    {
+      "id": "00000000-0000-0000-0015-000000000003",
+      "kind": "skill",
+      "label": "推送设计/任务到远端",
+      "ref": "push-progress",
+      "prompt": "若 {{inputs.auto_push_after_task}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则执行 push-progress：\n- 在 CR worktree 中提交 plan.md、tasks/ 与相关 traceability 改动\n- commit message 使用 `wip: {{inputs.cr_id}} plan & tasks`\n- 按 dir-graph active repos 推送 requirement/{{inputs.cr_id}} 到 origin\n- 更新 change-requests/_backlog.yml 中 remote-ref / last-push-at / last-push-by / checkpoints[]\n\n在 node-3.md 输出各 repo 推送结果。",
+      "onFail": "skip",
+      "timeoutMinutes": 10
+    },
+    {
+      "id": "00000000-0000-0000-0015-000000000004",
+      "kind": "human_approval",
+      "label": "确认进入代码开发",
+      "approvalPrompt": "TASK 拆分已完成（change-requests/{{inputs.cr_id}}/plan.md 与 tasks/），当前应为 task-breakdown。请确认是否进入代码开发：\n\n✅ 通过：勾选此 Todo，下一节点 approve-dev-start 会记录确认并推进到 developing\n❌ 暂缓：补充任务拆分意见，重新执行 write-dev-tasks 后再确认",
+      "onFail": "abort",
+      "timeoutMinutes": 4320
+    },
+    {
+      "id": "00000000-0000-0000-0015-000000000005",
+      "kind": "skill",
+      "label": "记录开发启动确认并推进状态",
+      "ref": "approve-dev-start",
+      "prompt": "在 human_approval 通过后执行 approve-dev-start：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n校验 cr.md 中 owners.development.id 与 assigned-at 均存在，校验 plan.md、tasks/_index.yml 与 TASK-*.md 均存在，写入 approval.yml 的 development-start 段，并将 CR status 从 task-breakdown 推进到 developing。在 node-5.md 输出审批记录路径、当前 status、开发负责人和下一步 implement-code 指令。",
+      "onFail": "abort",
+      "timeoutMinutes": 5
+    },
+    {
+      "id": "00000000-0000-0000-0015-000000000006",
+      "kind": "code_generation",
+      "label": "代码编写",
+      "ref": "implement-code",
+      "prompt": "启动前校验 CR {{inputs.cr_id}} 当前 status=developing。根据配置选择 code generation runtime：优先使用代码执行设置中的 defaultRuntimeId；不可用时 fallback 到第一个可用 external CLI runner，并在输出中记录 runtime 与 fallback 情况。\n\n解析 dir-graph.yaml#repositories，为 CR {{inputs.cr_id}} 构造 CR workspace repo map：\n- 文档 worktree：.xinyiai-worktrees/knowledge-base/requirement/{{inputs.cr_id}}\n- 独立代码仓 worktree：.xinyiai-worktrees/{repo.id}/requirement/{{inputs.cr_id}}\n- 非独立代码目录：knowledge-base CR worktree 内对应代码路径\n\n启动前校验所有 active repo 的 CR worktree 存在、分支均为 requirement/{{inputs.cr_id}}，并且以下 CR worktree 文档完整：\n- {crWorkspaceDocsRoot}/change-requests/{{inputs.cr_id}}/prd.md\n- {crWorkspaceDocsRoot}/change-requests/{{inputs.cr_id}}/sdd.md\n- {crWorkspaceDocsRoot}/change-requests/{{inputs.cr_id}}/tasks/TASK-*.md\n\n按 TASK 实现代码：优先使用 subagent-driven-development；不支持子 agent 时使用 executing-plans；每个 TASK 必须遵循 test-driven-development。代码写入对应 repo 的 CR worktree，禁止触碰主工作区 change-requests/ 或主工作区代码目录。\n\n若来自 reviewLoop 回修，读取 review_feedback（来自 write-test-report 或 review-code 的 blockers、repair-instructions、repair-target=implement-code）和 self_repair_attempt，只修复被指出的问题，保持无关代码不扩散，并重新运行受影响验证。\n\n在 node-6.md 输出实际读取路径、实际写入仓库、runtime、fallback、run/session id、验证命令与结果、fixed-blockers（如有）。",
+      "onFail": "abort",
+      "timeoutMinutes": 240
+    },
+    {
+      "id": "00000000-0000-0000-0015-000000000007",
+      "kind": "skill",
+      "label": "生成测试报告",
+      "ref": "write-test-report",
+      "prompt": "读取 implement-code 的 node-6.md 输出，执行 write-test-report：\n- cr_id: {{inputs.cr_id}}\n- source_node: node-6.md\n- tester: {cr.md owners.test.id}\n\n校验 cr.md 中 owners.test.id 与 assigned-at 均存在。汇总 lint / test / build 命令、执行目录、结果、TASK 验收覆盖、新增/修改测试文件与未覆盖风险，写入 CR worktree 的 change-requests/{{inputs.cr_id}}/test-report.md，并同步更新 traceability.yml#tests，持久化 review-loop.current-attempt 与 review-loop.attempts[]。在 node-7.md 输出 status、blockers、repair-target、repair-instructions、review-loop.current-attempt、测试报告路径、测试负责人、结果与未覆盖风险。\n\n若 status=block、验证证据缺失或测试失败，pipeline 不得进入 human_approval，也不得进入后续 push-progress / review-code；必须按 reviewLoop.replayNodes 将 review_feedback 传回 implement-code 自动修复，并重新生成测试报告，直至 status=pass，或达到 reviewLoop.maxAttempts 后停止。",
+      "reviewLoop": {
+        "repairNodeId": "00000000-0000-0000-0015-000000000006",
+        "repairRef": "implement-code",
+        "feedbackInput": "review_feedback",
+        "attemptInput": "self_repair_attempt",
+        "replayPolicy": "rerun-listed-nodes-in-order",
+        "replayNodes": [
+          {
+            "nodeId": "00000000-0000-0000-0015-000000000006",
+            "ref": "implement-code",
+            "purpose": "repair-code-or-test-evidence"
+          },
+          {
+            "nodeId": "00000000-0000-0000-0015-000000000007",
+            "ref": "write-test-report",
+            "purpose": "regenerate-and-recheck-test-report"
+          }
+        ],
+        "maxAttempts": 3,
+        "passCondition": {
+          "allOf": [
+            {
+              "path": "status",
+              "equals": "pass"
+            },
+            {
+              "path": "blockers",
+              "isEmpty": true
+            }
+          ]
+        },
+        "onBlock": "route-to-repair-node"
+      },
+      "onFail": "abort",
+      "timeoutMinutes": 20
+    },
+    {
+      "id": "00000000-0000-0000-0015-000000000008",
+      "kind": "skill",
+      "label": "推送代码+文档统一 checkpoint",
+      "ref": "push-progress",
+      "prompt": "执行 push-progress，必须覆盖同一 CR workspace 下全部参与仓库，禁止只推文档或只推代码：\n- knowledge-base worktree 提交并推送 requirement/{{inputs.cr_id}}\n- 每个独立代码仓 CR worktree 提交并推送 requirement/{{inputs.cr_id}}\n- 非独立代码目录随 knowledge-base worktree 一起提交\n- 提交 change-requests/{{inputs.cr_id}}/test-report.md 与 traceability.yml#tests\n- 更新 change-requests/_backlog.yml 中 remote-ref / last-push-at / last-push-by，并记录每个 repo 的 checkpoint SHA\n\n在 node-8.md 输出各仓提交 SHA、远端分支和是否存在未提交改动。",
+      "onFail": "abort",
+      "timeoutMinutes": 15
+    },
+    {
+      "id": "00000000-0000-0000-0015-000000000009",
+      "kind": "skill",
+      "label": "代码评审",
+      "ref": "review-code",
+      "prompt": "在 CR workspace 的各参与代码仓 worktree 执行只读评审取证：读取真实 changed files、完整 diff、近 20 条相关提交、implement-code 节点验证命令与结果，以及 change-requests/{{inputs.cr_id}}/test-report.md；仅有 diff stat、commit log 或口头测试结论不足以通过评审。对照 CR worktree 中 change-requests/{{inputs.cr_id}}/sdd.md 与 tasks/* 评审：\n① 代码↔TASK↔SDD 对齐度\n② 工程质量（lint / test / build 结果）\n③ 关键路径可读性与安全性\n④ 测试覆盖与 test-report 可信度\n\n将结论写入 CR worktree 的 change-requests/{{inputs.cr_id}}/review-annotations/code.yml 与 traceability.yml，并持久化 review-loop.current-attempt 与 review-loop.attempts[]。在 node-9.md 输出 verdict、blockers、repair-target、repair-instructions、review-loop.current-attempt、diff range、验证证据与建议。若 verdict=block、blockers 非空或 test-report.status 非 pass，pipeline 不得进入 human_approval；必须按 reviewLoop.replayNodes 将 review_feedback 传回 implement-code 自动修复，并重新执行 write-test-report、push-progress 与 review-code，直至 verdict=pass 且 blockers 为空且 test-report.status=pass，或达到 reviewLoop.maxAttempts 后停止。",
+      "reviewLoop": {
+        "repairNodeId": "00000000-0000-0000-0015-000000000006",
+        "repairRef": "implement-code",
+        "feedbackInput": "review_feedback",
+        "attemptInput": "self_repair_attempt",
+        "replayPolicy": "rerun-listed-nodes-in-order",
+        "replayNodes": [
+          {
+            "nodeId": "00000000-0000-0000-0015-000000000006",
+            "ref": "implement-code",
+            "purpose": "repair-code"
+          },
+          {
+            "nodeId": "00000000-0000-0000-0015-000000000007",
+            "ref": "write-test-report",
+            "purpose": "regenerate-test-evidence"
+          },
+          {
+            "nodeId": "00000000-0000-0000-0015-000000000008",
+            "ref": "push-progress",
+            "purpose": "publish-repaired-code-and-evidence-checkpoint"
+          },
+          {
+            "nodeId": "00000000-0000-0000-0015-000000000009",
+            "ref": "review-code",
+            "purpose": "rerun-current-review"
+          }
+        ],
+        "maxAttempts": 3,
+        "passCondition": {
+          "allOf": [
+            {
+              "path": "verdict",
+              "equals": "pass"
+            },
+            {
+              "path": "blockers",
+              "isEmpty": true
+            },
+            {
+              "path": "test-report.status",
+              "equals": "pass"
+            }
+          ]
+        },
+        "onBlock": "route-to-repair-node"
+      },
+      "onFail": "abort",
+      "timeoutMinutes": 30
+    },
+    {
+      "id": "00000000-0000-0000-0015-000000000010",
+      "kind": "human_approval",
+      "label": "代码审查通过",
+      "approvalPrompt": "代码自动评审已完成，且 review-annotations/code.yml 必须满足 verdict=pass、blockers=[]，test-report.md 必须满足 status=pass 后才可进入本节点；当前应为 code-reviewing。请审查人决定：\n\n✅ 通过：勾选此 Todo，下一节点 approve-code 会记录审批并推进到 code-approved\n❌ 驳回：在评审批注中补充 reject_reason，开发者修复后重新执行 /coding 中的代码编写与 review-code 节点",
+      "onFail": "abort",
+      "timeoutMinutes": 4320
+    },
+    {
+      "id": "00000000-0000-0000-0015-000000000011",
+      "kind": "skill",
+      "label": "记录代码审批并推进状态",
+      "ref": "approve-code",
+      "prompt": "在 human_approval 通过后执行 approve-code：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n校验 review-annotations/code.yml verdict=pass、change-requests/{{inputs.cr_id}}/test-report.md 存在且 status=pass，并确认验证记录完整；同时确认 test-report.md 的 tester 与 cr.md owners.test.id 一致或记录偏差原因。写入 approval.yml 的 code 段，并将 CR status 推进到 code-approved。在 node-11.md 输出审批记录路径、当前 status、开发负责人、测试负责人和下一步 writeback pipeline 指令。",
+      "onFail": "abort",
+      "timeoutMinutes": 5
+    },
+    {
+      "id": "00000000-0000-0000-0015-000000000012",
+      "kind": "skill",
+      "label": "推送代码审批结果到远端",
+      "ref": "push-progress",
+      "prompt": "执行 push-progress，提交 review-annotations/code.yml、approval.yml、test-report.md、traceability.yml 与 _backlog.yml 中 code-approved 状态：\n- commit message 使用 `wip: {{inputs.cr_id}} code approved`\n- 按 dir-graph active repos 推送 requirement/{{inputs.cr_id}} 到 origin\n\n在 node-12.md 输出各仓提交 SHA、远端分支和是否存在未提交改动。",
+      "onFail": "skip",
+      "timeoutMinutes": 10
+    }
+  ],
+  "createdAt": "2026-05-18T00:00:00+08:00",
+  "updatedAt": "2026-05-18T00:00:00+08:00"
+}

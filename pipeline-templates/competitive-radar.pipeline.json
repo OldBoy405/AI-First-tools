@@ -1,0 +1,84 @@
+{
+  "id": "competitive-radar",
+  "name": "竞品雷达",
+  "description": "针对指定竞品抓取最新动态，生成竞品分析报告，并自动转化为产品规划建议写入知识库。",
+  "triggerCommand": "comp-radar",
+  "scope": "product-planning",
+  "isDefault": false,
+  "inputs": [
+    {
+      "key": "competitor_slug",
+      "label": "竞品标识",
+      "type": "text",
+      "required": true,
+      "placeholder": "例：notion / linear / figma",
+      "description": "与 docs/competitive/_index.yml 中 slug 字段对应；留空则分析所有已注册竞品"
+    },
+    {
+      "key": "since_days",
+      "label": "追溯天数",
+      "type": "text",
+      "required": false,
+      "placeholder": "7",
+      "default": "7",
+      "description": "只关注最近 N 天内的更新动态；缺省 7 天"
+    },
+    {
+      "key": "focus_dimension",
+      "label": "重点维度",
+      "type": "select",
+      "required": false,
+      "options": ["功能对比", "定价策略", "UI/UX", "技术架构", "市场定位", "全量"],
+      "default": "全量",
+      "description": "报告聚焦的分析维度"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "00000000-0000-0000-0002-000000000001",
+      "kind": "skill",
+      "label": "抓取竞品最新动态",
+      "ref": "fetch-competitor-updates",
+      "prompt": "根据竞品标识「{{inputs.competitor_slug}}」和追溯天数「{{inputs.since_days}}」，检索并整理竞品最新产品动态、版本更新、博客和公告。重点关注「{{inputs.focus_dimension}}」维度。将原始采集内容保存到 node-1.md。",
+      "onFail": "abort",
+      "timeoutMinutes": 15
+    },
+    {
+      "id": "00000000-0000-0000-0002-000000000002",
+      "kind": "skill",
+      "label": "生成竞品分析报告",
+      "ref": "write-competitive-report",
+      "prompt": "基于采集结果（{{prev.output}}），按「{{inputs.focus_dimension}}」维度撰写结构化竞品分析报告。报告需包含：① 执行摘要 ② 功能/策略对比矩阵 ③ 差距识别 ④ 机会点列表。结果写入 node-2.md，同时追加一条 entry 到 docs/competitive/_index.yml。",
+      "onFail": "abort",
+      "timeoutMinutes": 20
+    },
+    {
+      "id": "00000000-0000-0000-0002-000000000003",
+      "kind": "skill",
+      "label": "转化为规划建议",
+      "ref": "report-to-planning-suggestion",
+      "prompt": "将竞品分析报告（{{prev.output}}）中的机会点转化为可纳入产品规划的具体建议条目。每条建议含：优先级（P0-P3）、关联竞品功能、对应己方需补强点、参考证据链接。输出写入 node-3.md。",
+      "onFail": "skip",
+      "timeoutMinutes": 10
+    },
+    {
+      "id": "00000000-0000-0000-0002-000000000004",
+      "kind": "human_approval",
+      "label": "确认报告与建议",
+      "approvalPrompt": "竞品分析报告与规划建议已生成，请审阅 node-2.md（报告）和 node-3.md（建议）。确认后流水线将把建议写入产品规划知识库。",
+      "onFail": "abort",
+      "timeoutMinutes": 1440
+    },
+    {
+      "id": "00000000-0000-0000-0002-000000000005",
+      "kind": "skill",
+      "label": "写入产品规划知识库",
+      "ref": "write-planning-entry",
+      "prompt": "将审批通过的规划建议（node-3.md）落盘为产品规划条目：\n- source: node-3.md\n- title: {{inputs.competitor_slug}} 竞品雷达规划建议\n- target_version: unassigned\n- owner: product-owner\n\n写入 docs/product-planning/{YYYY-MM-DD}-{slug}.md，并更新 docs/product-planning/_index.yml。竞品报告归档由 write-competitive-report 负责，本节点不得重复写 docs/competitive/。",
+      "onFail": "abort",
+      "timeoutMinutes": 10
+    }
+  ],
+  "createdAt": "2026-05-07T00:00:00+08:00",
+  "updatedAt": "2026-05-07T00:00:00+08:00"
+}

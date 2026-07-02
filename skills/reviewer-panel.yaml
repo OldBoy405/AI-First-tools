@@ -1,0 +1,36 @@
+# tools/skills/reviewer-panel.yaml — phase0 CR Reviewer Panel 配置
+# 仅登记当前 active review skill：review-requirement / review-tech-design / review-code。
+
+schema: reviewer-panel/v2
+version: 2.0.0
+updated: "2026-06-16"
+
+panels:
+  review-requirement:
+    - { perspective: structure-completeness, severity: hard, weight: 3, checklist: [REQ-01, REQ-02] }
+    - { perspective: testability,            severity: hard, weight: 3, checklist: [REQ-03, REQ-04] }
+    - { perspective: scope-control,          severity: hard, weight: 2, checklist: [REQ-05] }
+    - { perspective: planning-alignment,     severity: soft, weight: 1, checklist: [REQ-06] }
+
+  review-tech-design:
+    - { perspective: prd-sdd-alignment,      severity: hard, weight: 3, checklist: [SDD-01, SDD-02] }
+    - { perspective: architecture-boundary,  severity: hard, weight: 3, checklist: [SDD-03] }
+    - { perspective: contract-completeness,  severity: hard, weight: 2, checklist: [SDD-04] }
+    - { perspective: risk-testability,       severity: hard, weight: 2, checklist: [SDD-05, SDD-06] }
+
+  review-code:
+    - { perspective: task-traceability,       severity: hard, weight: 3, checklist: [CODE-01, CODE-02] }
+    - { perspective: implementation-coverage, severity: hard, weight: 3, checklist: [CODE-03] }
+    - { perspective: diff-reviewability,      severity: hard, weight: 2, checklist: [CODE-04] }
+    - { perspective: verification-evidence,   severity: hard, weight: 3, checklist: [CODE-05, CODE-06, CODE-07] }
+
+aggregation:
+  result:
+    fail: "任一 severity=hard perspective result=fail"
+    warn: "所有 hard=pass，但存在 soft=fail 或 soft=warn"
+    pass: "所有 hard=pass 且无 blockers"
+  score-formula: "sum(perspective.weight * {pass:1, warn:0.5, fail:0}) / sum(weight) * 100"
+  blockers: "收集所有 severity=hard 且 result=fail 的 perspective"
+  warnings: "收集所有 severity=soft 且 result in [warn, fail] 的 perspective"
+
+overrides: {}

@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-first-rd-platform/skills/engineering-docs/sdd.schema.json",
+  "title": "SDD frontmatter",
+  "allOf": [
+    { "$ref": "https://ai-first-rd-platform/skills/engineering-docs/common-defs.schema.json#/definitions/baseFrontmatter" },
+    {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "id": { "pattern": "^SDD-\\d{3}$" },
+        "type": { "const": "SDD" },
+        "components": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  ]
+}

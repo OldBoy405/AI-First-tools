@@ -1,0 +1,323 @@
+# tools/skills — Skill 台账（四阶段重构后版本）
+# 废弃 skill 已迁移至 tools/old/skills/_index.yml，此处不再登记。
+# 新增 skill 时必须在此注册一条记录。
+# 更新日期: 2026-05-07
+
+skills:
+
+  # ─── 调研规划期 Skill（product-planning-agent / planning/ 子目录）────────
+
+  - id: analyze-user-feedback
+    path: ./planning/analyze-user-feedback/SKILL.md
+    brief: "分析 docs/feedback/ 下的用户反馈，归纳高频诉求与痛点，输出对话内摘要"
+    status: active
+
+  - id: conduct-market-research
+    path: ./planning/conduct-market-research/SKILL.md
+    brief: "调研目标市场现状，生成市场洞察报告写入 docs/market-insights/"
+    status: active
+
+  - id: run-competitive-analysis
+    path: ./planning/run-competitive-analysis/SKILL.md
+    brief: "薄封装竞品分析流水线：委托 fetch-competitor-updates + write-competitive-report"
+    status: active
+
+  - id: analyze-current-product
+    path: ./planning/analyze-current-product/SKILL.md
+    brief: "读取 specs 基线索引、CR backlog、metrics.yml，输出当前产品现状分析"
+    status: active
+
+  - id: write-planning-report
+    path: ./planning/write-planning-report/SKILL.md
+    brief: "综合各项分析输出规划报告到 docs/product-planning/{YYYY-MM-DD}-{topic}.md"
+    status: active
+
+  - id: review-planning-report
+    path: ./planning/review-planning-report/SKILL.md
+    brief: "评审产品规划报告，写入 docs/product-planning/review-annotations/ 供人工审批参考"
+    status: active
+
+  - id: write-roadmap
+    path: ./planning/write-roadmap/SKILL.md
+    brief: "追写/更新 docs/product-planning/roadmap.md（每次 planning pipeline 结束时调用）"
+    status: active
+
+  - id: write-planning-entry
+    path: ./planning/write-planning-entry/SKILL.md
+    brief: "将已审批的规划建议落盘到 docs/product-planning/ 并维护 _index.yml；用于 planning-draft 之后的显式写入"
+    status: active
+
+  - id: extract-market-insight
+    path: ./planning/extract-market-insight/SKILL.md
+    brief: "将市场/用户/竞品洞察原始素材提取为 raw insight 并写入 docs/market-insights/"
+    status: active
+
+  - id: write-insight-brief
+    path: ./planning/write-insight-brief/SKILL.md
+    brief: "基于 raw insight 生成产品洞察简报，并推进 docs/market-insights/_index.yml 状态"
+    status: active
+
+  # 规划期通用（原有，保留）
+  - id: gather-product-context
+    path: ./planning/gather-product-context/SKILL.md
+    brief: "聚合 workspace 全量产品知识（specs/CR/竞品/市场洞察/想法池）生成结构化产品上下文快照（只读）"
+    status: active
+
+  - id: planning-draft
+    path: ./planning/planning-draft/SKILL.md
+    brief: "生成产品规划文档草稿供预览，不落盘；由 product-planning-agent 在规划场景中内部调用"
+    status: active
+
+  - id: record-idea
+    path: ./planning/record-idea/SKILL.md
+    brief: "快速记录产品想法到 docs/ideas/（原文落盘，不扩写）"
+    status: active
+
+  - id: record-adr
+    path: ./planning/record-adr/SKILL.md
+    brief: "记录架构决策 ADR（无前置 gate）"
+    status: active
+
+  - id: focus-briefing
+    path: ./planning/focus-briefing/SKILL.md
+    brief: "生成当前焦点版本与在途 CR 的简报摘要（只读）"
+    status: active
+
+  # ─── 需求编写期 Skill（requirement-writer 领域 / requirement/ 子目录）────
+
+  - id: requirement-register
+    path: ./requirement/requirement-register/SKILL.md
+    brief: "注册新需求：生成 CR-ID，写入需求/开发/测试三角色 owner 与 assigned-at，先在 knowledge-base trunk 提交 cr.md/_backlog，再按 dir-graph active repos 创建同名 worktree"
+    status: active
+
+  - id: write-requirement-prd
+    path: ./requirement/write-requirement-prd/SKILL.md
+    brief: "在 CR worktree 内交互式生成 change-requests/{CR-ID}/prd.md"
+    status: active
+
+  - id: review-requirement
+    path: ./requirement/review-requirement/SKILL.md
+    brief: "评审 prd.md，写入 review-annotations/requirement.yml，推进 status=requirement-reviewing"
+    status: active
+
+  - id: approve-requirement
+    path: ./requirement/approve-requirement/SKILL.md
+    brief: "记录需求审批结论，写入 approval.yml，推进 status=requirement-approved"
+    status: active
+
+  # ─── 开发期 Skill（developer-agent / develop/ 子目录）──────────────────
+
+  - id: write-tech-design
+    path: ./develop/write-tech-design/SKILL.md
+    brief: "编写 change-requests/{CR-ID}/sdd.md（技术架构、接口契约），推进 status=tech-designing"
+    status: active
+
+  - id: review-tech-design
+    path: ./develop/review-tech-design/SKILL.md
+    brief: "评审 sdd.md，写入 review-annotations/sdd.yml；通过后等待 approve-tech-design，blocker 时回退 tech-designing"
+    status: active
+
+  - id: approve-tech-design
+    path: ./develop/approve-tech-design/SKILL.md
+    brief: "记录架构设计人工审批结论，校验 sdd 评审通过后推进 status=tech-design-reviewed"
+    status: active
+
+  - id: write-dev-plan
+    path: ./develop/write-dev-plan/SKILL.md
+    brief: "编写 change-requests/{CR-ID}/plan.md（里程碑、风险、依赖）"
+    status: active
+
+  - id: write-dev-tasks
+    path: ./develop/write-dev-tasks/SKILL.md
+    brief: "拆解 change-requests/{CR-ID}/tasks/TASK-NN.md，推进 status=task-breakdown"
+    status: active
+
+  - id: approve-dev-start
+    path: ./develop/approve-dev-start/SKILL.md
+    brief: "记录任务拆分后的开发启动人工确认，校验 plan/tasks 后推进 status=developing"
+    status: active
+
+  - id: implement-code
+    path: ./develop/implement-code/SKILL.md
+    brief: "在同一 CR workspace 内按 PRD/SDD/TASK 编码，读取 CR worktree 文档并写入对应代码仓 CR worktree"
+    status: active
+
+  - id: write-test-report
+    path: ./develop/write-test-report/SKILL.md
+    brief: "汇总实现后的验证命令、TASK 验收覆盖与测试证据，生成 change-requests/{CR-ID}/test-report.md"
+    status: active
+
+  - id: review-code
+    path: ./develop/review-code/SKILL.md
+    brief: "代码评审（读 CR 代码 worktree diff、验证日志 + change-requests/CR-*/sdd.md），写入 review-annotations/code.yml"
+    status: active
+
+  - id: approve-code
+    path: ./develop/approve-code/SKILL.md
+    brief: "记录代码人工审批结论，校验代码评审通过后推进 status=code-approved"
+    status: active
+
+  # ─── 回写期 Skill（writeback/ 子目录）──────────────────────────────────
+
+  - id: merge-feature-branch
+    path: ./writeback/merge-feature-branch/SKILL.md
+    brief: "按 dir-graph 动态合并各仓 requirement/CR-* 分支到 trunk，记录 merge SHA；worktree 清理由 cr-archive 负责"
+    status: active
+
+  - id: writeback-prd-sdd
+    path: ./writeback/writeback-prd-sdd/SKILL.md
+    brief: "将 change-requests/{CR-ID}/prd.md + sdd.md 回写到 specs/{id}/PRD.md + SDD.md，维护 specs/_index.yml"
+    status: active
+
+  - id: writeback-tasks
+    path: ./writeback/writeback-tasks/SKILL.md
+    brief: "将 change-requests/{CR-ID}/tasks/ 映射为 delivery/task/TASK-{ver}-{CR-NNN}-*.md，维护 _index.yaml"
+    status: active
+
+  - id: writeback-traceability
+    path: ./writeback/writeback-traceability/SKILL.md
+    brief: "生成 specs/{id}/traceability.yml（PRD↔SDD↔TASK↔代码↔CR 追溯链），供 cr-archive 做最终归档"
+    status: active
+
+  # ─── 远端同步 Skill（跨阶段通用 / sync/ 子目录）────────────────────────
+
+  - id: push-progress
+    path: ./sync/push-progress/SKILL.md
+    brief: "按 dir-graph active repos 将 CR worktree 变更打包为 wip checkpoint 并推送 origin，更新 _backlog.yml checkpoint 字段"
+    status: active
+
+  - id: pull-progress
+    path: ./sync/pull-progress/SKILL.md
+    brief: "按 dir-graph active repos 在已有本地 CR worktree 中从远端 fast-forward 拉取最新进度"
+    status: active
+
+  - id: resume-from-remote
+    path: ./sync/resume-from-remote/SKILL.md
+    brief: "新电脑/新成员：按 dir-graph active repos 从 origin/requirement/{CR-ID} 重建同名 CR worktree"
+    status: active
+
+  - id: list-remote-checkpoints
+    path: ./sync/list-remote-checkpoints/SKILL.md
+    brief: "列出 origin 上所有在途 requirement/* 分支，展示各 CR 状态/持有者/最后推送时间"
+    status: active
+
+  - id: handover-cr
+    path: ./sync/handover-cr/SKILL.md
+    brief: "正式移交 CR 某一角色 owner：push-progress 后更新 owners.{role}.id 与 assigned-at，向新持有者发 inbox 事件"
+    status: active
+
+  # ─── Spec 查询视图（spec-agent 领域保留部分）────────────────────────────
+
+  - id: spec-show
+    path: ./spec/spec-show/SKILL.md
+    brief: "展示单个 feature 完整状态：PRD摘要/SDD摘要/stage/traceability 覆盖率"
+    status: active
+
+  - id: spec-query
+    path: ./spec/spec-query/SKILL.md
+    brief: "多维度 baseline spec 检索：按 status/scope/version/owner/priority 过滤（含历史）"
+    status: active
+
+  - id: spec-dashboard
+    path: ./spec/spec-dashboard/SKILL.md
+    brief: "Spec 全局看板：阶段分布/版本分组/Blockers 汇总/traceability 健康度"
+    status: active
+
+  # ─── 竞品分析（competitive-analyst-agent 领域）──────────────────────────
+
+  - id: fetch-competitor-updates
+    path: ./competitive/fetch-competitor-updates/SKILL.md
+    brief: "抓取竞品官网与互联网近期新闻，输出结构化动态块（只读 + 网络）"
+    status: active
+
+  - id: write-competitive-report
+    path: ./competitive/write-competitive-report/SKILL.md
+    brief: "生成独立竞品分析报告并落盘到 docs/competitive/reports/，幂等回写主文件 updates"
+    status: active
+
+  - id: report-to-planning-suggestion
+    path: ./competitive/report-to-planning-suggestion/SKILL.md
+    brief: "将指定竞品报告转换为产品规划建议草稿（对话内，不落盘）"
+    status: active
+
+  # ─── 质量门与对齐校验（quality-reviewer-agent 领域，review/ 保留部分）──
+
+  - id: review-alignment
+    path: ./review/review-alignment/SKILL.md
+    brief: "跨节点对齐校验：检测 PRD↔SDD↔TASK↔代码↔RELEASE drift"
+    status: active
+
+  - id: change-impact-analysis
+    path: ./review/change-impact-analysis/SKILL.md
+    brief: "变更影响分析：上游变更时自动标记下游 perspective 为 stale"
+    status: active
+
+  # ─── 跨领域通用（shared）──────────────────────────────────────────────
+
+  - id: validate-doc
+    path: ./shared/validate-doc/SKILL.md
+    brief: "通用文档校验（所有写入型 Skill 自动调用）"
+    status: active
+
+  - id: engineering-docs
+    path: ./shared/engineering-docs/SKILL.md
+    brief: "按模板生成/校验 PRD·SDD·MODULE·PLAN·TASK·FORM·RELEASE frontmatter + 正文骨架；Agent 按步骤执行（已去 MCP 化）"
+    status: active
+
+  - id: controlled-shell
+    path: ./shared/controlled-shell/SKILL.md
+    brief: "受控 shell 执行规范（方案 a）：给 requirement/sync 组 skill 提供白名单化 git 命令执行入口，禁止手工指引文本回退"
+    status: active
+
+  # ─── Change Request (CR) 通用 Skill（cr/ 子目录，保留部分）─────────────
+
+  - id: cr-review-record
+    path: ./cr/cr-review-record/SKILL.md
+    brief: "记录 CR 补充审查意见；仅 reject/withdraw 时通过 cr-status-set 推进终止态"
+    status: active
+
+  - id: cr-status-set
+    path: ./cr/cr-status-set/SKILL.md
+    brief: "CR 状态原子写入：写 cr.md frontmatter + _backlog.yml 同步（幂等）"
+    status: active
+
+  - id: inbox-emit
+    path: ./cr/inbox-emit/SKILL.md
+    brief: "向 inbox 写入单条事件条目（所有 pipeline 关键节点的统一 inbox 写入入口）"
+    status: active
+
+  - id: cr-archive
+    path: ./cr/cr-archive/SKILL.md
+    brief: "归档新四阶段 CR：writing-back→archived，或归档 rejected/withdrawn 终止态"
+    status: active
+
+  - id: feedback-writeback
+    path: ./cr/feedback-writeback/SKILL.md
+    brief: "将 CR 实施结论写回 spec traceability.yml 和 docs/tech-notes（闭环可追溯）"
+    status: active
+
+  - id: cr-inbox
+    path: ./cr/cr-inbox/SKILL.md
+    brief: "CR 收件箱：按角色展示需要行动的待办 CR（submitter/reviewer）"
+    status: active
+
+  - id: cr-query
+    path: ./cr/cr-query/SKILL.md
+    brief: "多维度 CR 检索：按类型/状态/target-spec/提交人过滤（在途+历史）"
+    status: active
+
+  - id: cr-show
+    path: ./cr/cr-show/SKILL.md
+    brief: "展示单个 CR 完整详情：基本信息/delta 摘要/审查记录/追溯链路"
+    status: active
+
+  - id: cr-dashboard
+    path: ./cr/cr-dashboard/SKILL.md
+    brief: "CR 全局看板：状态分布/SLA 风险/阻塞项/近期活动统计"
+    status: active
+
+  # ─── 外部方法论 Skill ───────────────────────────────────────────────
+  # using-superpowers / brainstorming / writing-plans / executing-plans /
+  # subagent-driven-development / test-driven-development 等由目标运行时
+  # 的 superpowers 安装提供。phase0 tools 不复制这些同名 SKILL.md，避免
+  # 与 .qoder/.agents/.opencode 或全局安装路径发生重复注册。

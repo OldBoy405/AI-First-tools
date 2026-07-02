@@ -1,0 +1,56 @@
+# 文档命名规范（对齐 ENGINEERING-STRUCTURE-TEAM.md 第八节）
+# 命名格式分三类：
+#   baseline        : {TYPE}-{NNN}-{name}.md
+#   process-delivery: {TYPE}-{VERSION}-{NNN}[-{NN}]-{name}.md
+#   process-research: {TYPE}-{YYYYQN}-{NNN}-{name}.md
+#
+# 每条 pattern 为 JS 可编译正则（不含首尾斜杠）。
+# `id` 字段对应 frontmatter 中的 id 格式。
+
+types:
+  # ---- 基线文档 ----
+  PRD:
+    category: baseline
+    filename: "^PRD-(\\d{3})-([a-z0-9][a-z0-9-]*)\\.md$"
+    id: "^PRD-(\\d{3})$"
+
+  SDD:
+    category: baseline
+    filename: "^SDD-(\\d{3})-([a-z0-9][a-z0-9-]*)\\.md$"
+    id: "^SDD-(\\d{3})$"
+
+  MODULE:
+    category: baseline
+    filename: "^MODULE-(\\d{3})-([a-z0-9][a-z0-9-]*)\\.md$"
+    id: "^MODULE-(\\d{3})$"
+
+  OpenAPI:
+    category: baseline
+    filename: "^([a-z0-9][a-z0-9-]*)-(v\\d+(?:\\.\\d+)*(?:-[a-z0-9]+)?)\\.yaml$"
+    id: "^OPENAPI-([a-z0-9-]+)-(v\\d+(?:\\.\\d+)*(?:-[a-z0-9]+)?)$"
+
+  FORM:
+    category: baseline
+    filename: "^FORM-(\\d{3})-([a-z0-9][a-z0-9-]*)\\.md$"
+    id: "^FORM-(\\d{3})$"
+
+  # ---- 过程文档（交付类） ----
+  PLAN:
+    category: process-delivery
+    filename: "^PLAN-(v\\d+(?:\\.\\d+)*(?:-[a-z0-9]+)?)-(\\d{3})-([a-z0-9][a-z0-9-]*)\\.md$"
+    id: "^PLAN-(v\\d+(?:\\.\\d+)*(?:-[a-z0-9]+)?)-(\\d{3})$"
+
+  TASK:
+    category: process-delivery
+    filename: "^TASK-(v\\d+(?:\\.\\d+)*(?:-[a-z0-9]+)?)-(\\d{3})-(\\d{2})-([a-z0-9][a-z0-9-]*)\\.md$"
+    id: "^TASK-(v\\d+(?:\\.\\d+)*(?:-[a-z0-9]+)?)-(\\d{3})-(\\d{2})$"
+
+  RELEASE:
+    category: process-delivery
+    filename: "^RELEASE-(v\\d+(?:\\.\\d+)*(?:-[a-z0-9]+)?)\\.md$"
+    id: "^RELEASE-(v\\d+(?:\\.\\d+)*(?:-[a-z0-9]+)?)$"
+
+# slug（--name 参数）通用规则
+slug:
+  pattern: "^[a-z0-9][a-z0-9-]*$"
+  max-length: 48

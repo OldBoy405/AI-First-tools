@@ -1,0 +1,295 @@
+# dir-graph.yaml — AI First phase0 tools 目录规约
+# 权威来源：本文件描述 tools 平台包自身结构；运行时产品知识目录以目标 workspace 的 dir-graph.yaml 为准。
+# 所有路径默认相对于本文件所在的 phase0/tools/ 目录。
+schema: "ai-first.tools.dir-graph/v1"
+
+workspace:
+  root: "."
+  timezone: "Asia/Shanghai"
+  edition: phase0-tools-package
+  path_basis: "tools-package-root"
+  target_install_path: "tools/"
+
+repositories:
+  - id: phase0-tools
+    path: "."
+    trunk: main
+    role: platform-tools-package
+    description: "AI First 研发协同平台 phase0 预置 tools 包；包含 agents、skills 与 pipeline templates"
+
+package:
+  root: "."
+  description: "可被目标 workspace 挂载到 tools/ 下的平台预置包"
+  source_of_truth:
+    behavior: "AGENTS.md"
+    graph: "dir-graph.yaml"
+    claude-entry: "CLAUDE.MD"
+    usage-playbook: "README.md"
+    agent-skill-matrix: "agent-skill-matrix.yml"
+
+docs:
+  root: "."
+  files:
+    playbook:
+      path: "README.md"
+      role: usage-flow
+      description: "完整使用流程、流程图、节点输入/作用/产出/可跳过说明"
+    agent-skill-matrix-doc:
+      path: "AGENT-SKILL-MATRIX.md"
+      role: permission-matrix-doc
+      description: "Agent / Skill 权限矩阵的人读说明"
+    agent-skill-matrix:
+      path: "agent-skill-matrix.yml"
+      role: permission-matrix
+      description: "Agent / Skill owns、can-call、external、forbidden 与 pipeline owner 的机器可读事实源"
+    agents-entry:
+      path: "AGENTS.md"
+      role: ai-behavior-entry
+      description: "所有 AI 工具共享的行为约束入口"
+    claude-entry:
+      path: "CLAUDE.MD"
+      role: claude-forwarder
+      description: "Claude 专用入口；只转发到 AGENTS.md，不另设规则"
+
+tools:
+  root: "."
+  subdirs:
+    agents:
+      path: "agents/"
+      index: "agents/_index.yml"
+      description: "预置 Agent 定义；按职责分工承接 pipeline 或 orchestrator 调度"
+      naming: "{agent-id}.md"
+      active_source: "agents/_index.yml"
+    skills:
+      path: "skills/"
+      index: "skills/_index.yml"
+      description: "预置 Skill 定义；每个 Skill 对应一种文档、流程节点或工具能力"
+      naming: "{domain}/{skill-id}/SKILL.md"
+      active_source: "skills/_index.yml"
+    pipeline-templates:
+      path: "pipeline-templates/"
+      index: "pipeline-templates/_index.yml"
+      description: "Pipeline 模板定义；JSON 文件由 _index.yml 登记并由运行时动态读取"
+      naming: "{flow}.pipeline.json"
+
+agents:
+  root: "agents/"
+  index: "agents/_index.yml"
+  required_files:
+    - "agents/_index.yml"
+  primary:
+    - product-planning-agent
+    - requirement-writer
+    - dev-agent
+    - competitive-analyst-agent
+    - customer-support-agent
+  subagents:
+    - spec-agent
+    - delivery-agent
+    - quality-reviewer-agent
+    - knowledge-agent
+  contract:
+    - "新增 Agent 必须先创建 agents/{agent-id}.md，再登记 agents/_index.yml"
+    - "Agent references 中引用的 Skill 必须已在 skills/_index.yml 中登记为 active"
+    - "Agent 正文和 references 中作为可调用能力出现的 active Skill 必须同步登记到 agent-skill-matrix.yml 的 owns 或 can-call；作为禁止项出现时必须登记到 forbidden"
+    - "Agent 不直接绕过 Skill 写入目标 workspace 的受控账本或状态文件"
+
+skills:
+  root: "skills/"
+  index: "skills/_index.yml"
+  domains:
+    planning:
+      path: "skills/planning/"
+      description: "调研规划、洞察转规划、想法与 ADR 记录"
+    requirement:
+      path: "skills/requirement/"
+      description: "CR 注册、PRD 编写、需求评审与需求审批"
+    develop:
+      path: "skills/develop/"
+      description: "SDD、开发计划、任务拆分、编码、测试报告、代码评审与代码审批"
+    writeback:
+      path: "skills/writeback/"
+      description: "分支合入、PRD/SDD 回写、TASK 回写与追溯链生成"
+    sync:
+      path: "skills/sync/"
+      description: "远端 checkpoint、拉取同步、接手恢复与移交"
+    spec:
+      path: "skills/spec/"
+      description: "baseline spec 查询、展示与看板"
+    competitive:
+      path: "skills/competitive/"
+      description: "竞品动态抓取、竞品报告与规划建议转换"
+    review:
+      path: "skills/review/"
+      description: "跨节点对齐校验与变更影响分析"
+    cr:
+      path: "skills/cr/"
+      description: "CR 状态、收件箱、查询、看板、归档与反馈回写"
+    shared:
+      path: "skills/shared/"
+      description: "通用文档生成校验与受控 shell 能力"
+  contract:
+    - "新增 Skill 必须包含 SKILL.md frontmatter name 字段，并登记 skills/_index.yml"
+    - "新增 active Skill 必须在 agent-skill-matrix.yml 中拥有唯一 owns owner"
+    - "pipeline node ref 必须指向 active Skill；外部 superpowers 只声明依赖，不打包进 phase0/tools"
+    - "所有写入型 Skill 必须说明读取来源、写入位置、状态推进和失败处理"
+
+pipeline_templates:
+  root: "pipeline-templates/"
+  index: "pipeline-templates/_index.yml"
+  templates:
+    - id: product-planning-v1
+      trigger: planning
+      path: "pipeline-templates/product-planning.pipeline.json"
+      phase: planning
+    - id: market-to-plan-v1
+      trigger: insight-brief
+      path: "pipeline-templates/market-to-plan.pipeline.json"
+      phase: planning
+    - id: competitive-radar-v1
+      trigger: comp-radar
+      path: "pipeline-templates/competitive-radar.pipeline.json"
+      phase: planning
+    - id: requirement-authoring-v1
+      trigger: requirement
+      path: "pipeline-templates/requirement-authoring.pipeline.json"
+      phase: requirement
+    - id: architecture-design-v1
+      trigger: architecture
+      path: "pipeline-templates/architecture-design.pipeline.json"
+      phase: develop
+    - id: code-implementation-v1
+      trigger: coding
+      path: "pipeline-templates/code-implementation.pipeline.json"
+      phase: develop
+    - id: feature-writeback-v1
+      trigger: writeback
+      path: "pipeline-templates/feature-writeback.pipeline.json"
+      phase: writeback
+    - id: resume-cr-v1
+      trigger: resume
+      path: "pipeline-templates/resume-cr.pipeline.json"
+      phase: sync
+  contract:
+    - "新增或修改 pipeline JSON 后必须同步 pipeline-templates/_index.yml 的 nodes 数量"
+    - "human_approval 节点如涉及状态推进，后续节点必须是显式 approve-* 或写入型 Skill"
+    - "code-implementation 必须在 review-code 前生成并消费 test-report.md"
+    - "自动审查节点必须声明 reviewLoop；blocker 未清空时必须回到 repairRef 节点并传入 review_feedback，完整通过 Review 后才可进入 human_approval"
+    - "若修复后必须重跑多个节点，reviewLoop 必须声明 replayNodes[]，按顺序列出修复、证据、checkpoint 与当前评审节点"
+    - "自动审查节点必须持久化 review-loop.current-attempt 与 review-loop.attempts[]；CR 类闭环必须同步写入 traceability.yml"
+
+target_workspace_contract:
+  description: "本 tools 包安装到目标 workspace 后，Skill 运行时应读取目标 workspace 的目录图与事实源。以下为约定模型，不是本包内目录。"
+  required_roots:
+    specs: "baseline PRD/SDD/traceability 的发布态目录"
+    change-requests: "在途 CR 与审批记录目录"
+    docs: "市场洞察、竞品、产品规划、反馈、想法与参考资料目录"
+    delivery: "开发任务与交付过程目录"
+    constraints: "schema、feature flags 与 linter 配置目录"
+  repository_resolution:
+    authority: "目标 workspace 的 dir-graph.yaml#repositories"
+    rule: "所有 requirement 分支、CR worktree、合入与同步操作均从 repositories 解析 active 仓库与 trunk"
+  cr_owner_model:
+    authority: "change-requests/{CR-ID}/cr.md frontmatter 与 change-requests/_backlog.yml 条目"
+    compatibility_owner: "owner 字段仅兼容旧视图，默认等于 owners.requirement.id"
+    required_roles:
+      requirement:
+        fields: ["id", "assigned-at"]
+        description: "需求负责人"
+      development:
+        fields: ["id", "assigned-at"]
+        description: "开发负责人"
+      test:
+        fields: ["id", "assigned-at"]
+        description: "测试负责人"
+    history: "owner-history[] 记录 role/from/to/at/reason；handover-history[] 可保留给协作通知"
+
+change-request-track:
+  state_machine:
+    field: "status"
+    scope: "目标 workspace/change-requests/_backlog.yml"
+    transitions:
+      - { from: "(new)", to: drafting, trigger: "requirement-register" }
+      - { from: drafting, to: requirement-reviewing, trigger: "review-requirement" }
+      - { from: requirement-reviewing, to: requirement-reviewing, trigger: "review-requirement" }
+      - { from: drafting, to: drafting, trigger: "review-requirement:block -> write-requirement-prd" }
+      - { from: requirement-reviewing, to: requirement-approved, trigger: "approve-requirement" }
+      - { from: requirement-approved, to: tech-designing, trigger: "write-tech-design" }
+      - { from: tech-designing, to: tech-design-review-pending, trigger: "write-tech-design-complete" }
+      - { from: tech-design-review-pending, to: tech-designing, trigger: "review-tech-design:block -> write-tech-design" }
+      - { from: tech-design-review-pending, to: tech-design-reviewed, trigger: "approve-tech-design" }
+      - { from: tech-design-reviewed, to: task-breakdown, trigger: "write-dev-tasks" }
+      - { from: task-breakdown, to: developing, trigger: "approve-dev-start" }
+      - { from: developing, to: developing, trigger: "write-test-report:block -> implement-code" }
+      - { from: developing, to: developing, trigger: "review-code:block -> implement-code" }
+      - { from: developing, to: code-reviewing, trigger: "review-code" }
+      - { from: code-reviewing, to: code-approved, trigger: "approve-code" }
+      - { from: code-approved, to: merging, trigger: "merge-feature-branch" }
+      - { from: merging, to: writing-back, trigger: "writeback-prd-sdd" }
+      - { from: writing-back, to: archived, trigger: "cr-archive" }
+      - { from: any-active, to: rejected, trigger: "cr-review-record:reject" }
+      - { from: any-active, to: withdrawn, trigger: "cr-review-record:withdraw" }
+    wildcards:
+      any-active:
+        - drafting
+        - requirement-reviewing
+        - requirement-approved
+        - tech-designing
+        - tech-design-review-pending
+        - tech-design-reviewed
+        - task-breakdown
+        - developing
+        - code-reviewing
+        - code-approved
+        - merging
+        - writing-back
+    terminal: [archived, rejected, withdrawn]
+
+agent_hints:
+  read_before_write:
+    - "AGENTS.md"
+    - "dir-graph.yaml"
+    - "README.md"
+    - "skills/_index.yml"
+    - "agents/_index.yml"
+    - "pipeline-templates/_index.yml"
+
+  protected:
+    - pattern: "skills/**/SKILL.md"
+      reason: "Skill 是平台能力单元；修改时必须同步 skills/_index.yml 并运行一致性校验"
+    - pattern: "agents/*.md"
+      reason: "Agent 是调度入口；修改时必须同步 agents/_index.yml 并检查 references"
+    - pattern: "pipeline-templates/*.pipeline.json"
+      reason: "Pipeline 是流程编排入口；修改时必须同步 _index.yml nodes 数量并校验 ref"
+    - pattern: "docs/references/**"
+      reason: "该路径属于目标 workspace 只读资料模型；本包不得假设可写"
+
+  intent_signals:
+    - intent: "了解完整使用流程"
+      read: "README.md"
+    - intent: "新增或调整 pipeline"
+      read: ["pipeline-templates/_index.yml", "skills/_index.yml", "agents/_index.yml"]
+    - intent: "新增或调整 skill"
+      read: ["skills/_index.yml", "agent-skill-matrix.yml"]
+      write: ["skills/{domain}/{skill-id}/SKILL.md", "skills/_index.yml"]
+    - intent: "新增或调整 agent"
+      read: ["agents/_index.yml", "agent-skill-matrix.yml"]
+      write: ["agents/{agent-id}.md", "agents/_index.yml"]
+    - intent: "审查 phase0 设计"
+      read: ["README.md", "agent-skill-matrix.yml", "pipeline-templates/_index.yml"]
+
+  skill_context:
+    review-alignment:
+      read:
+        - "change-request-track.state_machine"
+        - "target_workspace_contract.repository_resolution"
+        - "target_workspace_contract.required_roots"
+    change-impact-analysis:
+      read:
+        - "change-request-track.state_machine"
+        - "target_workspace_contract.repository_resolution"
+        - "target_workspace_contract.required_roots"
+
+validation:
+  required_before_delivery:
+    - "node -e \"const fs=require('fs'); for (const f of fs.readdirSync('pipeline-templates').filter(f=>f.endsWith('.json'))) JSON.parse(fs.readFileSync('pipeline-templates/'+f,'utf8')); console.log('json ok')\""

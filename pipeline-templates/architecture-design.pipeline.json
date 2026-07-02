@@ -1,0 +1,102 @@
+{
+  "id": "architecture-design",
+  "name": "架构设计",
+  "description": "架构设计流水线：在需求审批通过的 CR workspace 内，承接 prd.md 输出 sdd.md 技术设计文档，执行架构设计评审，并等待人工审批后进入可编码状态。产物保留在 change-requests/{CR-ID}/，specs/ 仍在回写期统一更新。",
+  "triggerCommand": "architecture",
+  "scope": "product-dev",
+  "isDefault": false,
+  "inputs": [
+    {
+      "key": "cr_id",
+      "label": "CR ID",
+      "type": "text",
+      "required": true,
+      "placeholder": "CR-2026-001",
+      "description": "需求期已审批的 CR-ID；初次进入要求 status=requirement-approved，reviewLoop 回修允许 status=tech-designing"
+    },
+    {
+      "key": "tech_context",
+      "label": "技术背景",
+      "type": "multiline",
+      "required": false,
+      "placeholder": "可补充现有架构约束、已知风险、复用组件或边界要求",
+      "description": "作为 write-tech-design 的额外技术上下文"
+    },
+    {
+      "key": "auto_push_after_sdd",
+      "label": "架构设计审批后自动推送远端",
+      "type": "boolean",
+      "required": false,
+      "default": true,
+      "description": "勾选后 SDD 评审和人工审批完成后立即 push-progress 到 origin"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "00000000-0000-0000-0014-000000000001",
+      "kind": "skill",
+      "label": "编写架构设计",
+      "ref": "write-tech-design",
+      "prompt": "读取 CR worktree 中 change-requests/{{inputs.cr_id}}/prd.md，结合技术背景「{{inputs.tech_context}}」在同目录写 sdd.md：\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n- 架构概览（模块/边界/依赖）\n- 数据模型\n- 接口契约（API / IPC / 事件）\n- 关键算法与流程\n- 技术选型与替代方案\n- 每个 FR-* 映射到技术实现条目\n- 安全与性能考量\n\n状态要求：初次生成要求 CR status=requirement-approved；若来自 reviewLoop 回修，允许 status=tech-designing，并读取 review_feedback 或上一轮 review-annotations/sdd.yml verdict=block 作为修复输入。回修时必须逐条消费 review_feedback.blockers 与 repair-instructions，修订同一 sdd.md，并在 node-1.md 输出 self_repair_attempt 与 fixed-blockers 清单。要求：只写 CR worktree 中的 change-requests/{{inputs.cr_id}}/sdd.md，不写 specs/。在 node-1.md 输出 SDD 关键章节摘要、FR 覆盖率和实际写入路径。",
+      "onFail": "abort",
+      "timeoutMinutes": 25
+    },
+    {
+      "id": "00000000-0000-0000-0014-000000000002",
+      "kind": "skill",
+      "label": "架构设计评审",
+      "ref": "review-tech-design",
+      "prompt": "对 CR worktree 中 change-requests/{{inputs.cr_id}}/sdd.md 执行评审：\n① PRD↔SDD 对齐度（每个 FR 都有对应技术方案）\n② 架构合理性与可扩展性\n③ 性能、安全、兼容性风险\n④ 接口契约完整性\n⑤ 可测试性\n\n将结论写入 change-requests/{{inputs.cr_id}}/review-annotations/sdd.yml 与 traceability.yml，并持久化 review-loop.current-attempt 与 review-loop.attempts[]。在 node-2.md 输出 verdict、blockers、repair-target、repair-instructions、review-loop.current-attempt 与评审摘要。若 verdict=block 或 blockers 非空，pipeline 不得进入 human_approval；必须把 review_feedback 传回 write-tech-design 自动修订，并重新执行本评审，直至 verdict=pass 且 blockers 为空，或达到 reviewLoop.maxAttempts 后停止。",
+      "reviewLoop": {
+        "repairNodeId": "00000000-0000-0000-0014-000000000001",
+        "repairRef": "write-tech-design",
+        "feedbackInput": "review_feedback",
+        "attemptInput": "self_repair_attempt",
+        "maxAttempts": 3,
+        "passCondition": {
+          "allOf": [
+            {
+              "path": "verdict",
+              "equals": "pass"
+            },
+            {
+              "path": "blockers",
+              "isEmpty": true
+            }
+          ]
+        },
+        "onBlock": "route-to-repair-node"
+      },
+      "onFail": "abort",
+      "timeoutMinutes": 15
+    },
+    {
+      "id": "00000000-0000-0000-0014-000000000003",
+      "kind": "human_approval",
+      "label": "架构设计审批",
+      "approvalPrompt": "架构设计自动评审已完成，且 review-annotations/sdd.yml 必须满足 verdict=pass、blockers=[] 后才可进入本节点；当前仍应为 tech-design-review-pending。请审批人检阅 sdd.md 后决定：\n\n✅ 批准：勾选此 Todo，下一节点 approve-tech-design 会记录审批并推进到 tech-design-reviewed\n❌ 驳回：在 review-annotations/sdd.yml 补充 reject_reason，回到架构设计修订",
+      "onFail": "abort",
+      "timeoutMinutes": 2880
+    },
+    {
+      "id": "00000000-0000-0000-0014-000000000004",
+      "kind": "skill",
+      "label": "记录架构审批并推进状态",
+      "ref": "approve-tech-design",
+      "prompt": "在 human_approval 通过后执行 approve-tech-design：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n校验 cr.md 中 owners.development.id 与 assigned-at 均存在；校验 review-annotations/sdd.yml verdict=pass，写入 approval.yml 的 tech-design 段，并将 CR status 推进到 tech-design-reviewed。在 node-4.md 输出审批记录路径、当前 status、开发负责人和下一步 coding pipeline 指令。",
+      "onFail": "abort",
+      "timeoutMinutes": 5
+    },
+    {
+      "id": "00000000-0000-0000-0014-000000000005",
+      "kind": "skill",
+      "label": "推送架构设计到远端",
+      "ref": "push-progress",
+      "prompt": "若 {{inputs.auto_push_after_sdd}}=false 则在 node-5.md 输出 SKIPPED 并 return。\n否则执行 push-progress：\n- 在 CR worktree 中提交 sdd.md、review-annotations/sdd.yml、approval.yml、traceability.yml 等架构设计相关改动\n- commit message 使用 `wip: {{inputs.cr_id}} architecture design approved`\n- 按 dir-graph active repos 推送 requirement/{{inputs.cr_id}} 到 origin\n- 更新 change-requests/_backlog.yml 中 remote-ref / last-push-at / last-push-by / checkpoints[]\n\n在 node-5.md 输出各 repo 推送结果、远端分支和提交 SHA。",
+      "onFail": "skip",
+      "timeoutMinutes": 10
+    }
+  ],
+  "createdAt": "2026-05-18T00:00:00+08:00",
+  "updatedAt": "2026-05-18T00:00:00+08:00"
+}

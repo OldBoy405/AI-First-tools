@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ai-first-rd-platform/skills/engineering-docs/release.schema.json",
+  "title": "RELEASE frontmatter",
+  "allOf": [
+    { "$ref": "https://ai-first-rd-platform/skills/engineering-docs/common-defs.schema.json#/definitions/baseFrontmatter" },
+    {
+      "type": "object",
+      "required": ["type", "version"],
+      "properties": {
+        "id": { "pattern": "^RELEASE-v\\d+(?:\\.\\d+)*(?:-[a-z0-9]+)?$" },
+        "type": { "const": "RELEASE" },
+        "version": { "$ref": "https://ai-first-rd-platform/skills/engineering-docs/common-defs.schema.json#/definitions/semver" }
+      }
+    }
+  ]
+}

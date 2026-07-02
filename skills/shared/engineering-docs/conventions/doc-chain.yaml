@@ -1,0 +1,53 @@
+# 注意：本文件沿用历史 v1 edges 格式；phase0 中由 engineering-docs skill 步骤读取，不再要求 CLI。
+# workspace 层面的 gate 约束权威来源：constraints/doc-chain.yaml（v2 nodes 格式）。
+# 两者格式不同，不得合并；CLI 重构后可统一。
+#
+# 文档链路门禁（对齐 ENGINEERING-STRUCTURE-TEAM.md 第十一节 doc-chain）
+# gate 表达式的语义：下游文档存在时，其所有上游文档必须满足 gate 条件。
+# 校验器会解析 from 文档的 frontmatter status 字段判定。
+
+edges:
+  - from: PRD
+    to: SDD
+    gate: "from.status in ['approved']"
+    message: "PRD 未 approved，不允许创建 SDD"
+
+  - from: SDD
+    to: MODULE
+    gate: "from.status in ['approved']"
+    message: "SDD 未 approved，不允许创建 MODULE"
+
+  - from: MODULE
+    to: PLAN
+    gate: "from.status in ['approved']"
+    message: "MODULE 未 approved，不允许创建 PLAN"
+
+  - from: PLAN
+    to: TASK
+    gate: "from.status in ['approved']"
+    message: "PLAN 未 approved，不允许创建 TASK"
+
+  - from: MODULE
+    to: OpenAPI
+    gate: "from.status in ['approved','review']"
+    message: "MODULE 未进入 review/approved，不允许创建 OpenAPI"
+
+  # Team 特有：PRD/MODULE → FORM
+  - from: PRD
+    to: FORM
+    gate: "from.status in ['approved']"
+    message: "PRD 未 approved，不允许创建 FORM"
+
+  - from: MODULE
+    to: FORM
+    gate: "from.status in ['approved']"
+    message: "MODULE 未 approved，不允许创建 FORM"
+
+# TASK 隶属关系（非 gate，但需校验 task.refs.upstream 必须包含一个 PLAN id）
+required-upstream:
+  SDD: [PRD]
+  MODULE: [SDD]
+  PLAN: [MODULE]
+  TASK: [PLAN]
+  FORM: [PRD, MODULE]
+  OpenAPI: [MODULE]

@@ -1,0 +1,65 @@
+{
+  "id": "resume-cr",
+  "name": "接手在途 CR",
+  "description": "辅助流水线：换电脑或协作者接手在途 CR 时，从 origin 拉取 requirement/{CR-ID} 分支并按 dir-graph active repos 重建 worktree，无需从头再走需求 / 架构设计 / 代码编写 pipeline。",
+  "triggerCommand": "resume",
+  "scope": "product-dev",
+  "isDefault": false,
+  "inputs": [
+    {
+      "key": "cr_id",
+      "label": "CR ID",
+      "type": "text",
+      "required": true,
+      "placeholder": "CR-2026-001",
+      "description": "要接手的 CR-ID；origin 必须存在同名 requirement/{CR-ID} 分支"
+    },
+    {
+      "key": "new_owner",
+      "label": "新 Owner",
+      "type": "text",
+      "required": false,
+      "description": "若本次接手伴随正式移交，填入新 owner 后会自动更新指定角色 owner 与 handover-history"
+    },
+    {
+      "key": "new_owner_role",
+      "label": "接手角色",
+      "type": "select",
+      "required": false,
+      "default": "development",
+      "options": ["requirement", "development", "test"],
+      "description": "new_owner 非空时生效；默认接手开发负责人"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "00000000-0000-0000-0014-000000000001",
+      "kind": "skill",
+      "label": "核对远端 checkpoint",
+      "ref": "list-remote-checkpoints",
+      "prompt": "读取 dir-graph.yaml repositories[*]（active≠false），对每个 active repo 执行 `git ls-remote --heads origin 'requirement/{{inputs.cr_id}}'` 并与 change-requests/_backlog.yml 中的 remote-ref / last-push-at / checkpoints[] 比对：\n- 若任一 active repo 远端不存在分支：abort，提示原 owner 先执行 push-progress\n- 若 checkpoints[] 中 repo SHA 与远端不一致：输出警告但允许继续（由用户决定）\n\n在 node-1.md 输出各 repo 最新 checkpoint SHA、last-push-at、last-push-by。",
+      "onFail": "abort",
+      "timeoutMinutes": 5
+    },
+    {
+      "id": "00000000-0000-0000-0014-000000000002",
+      "kind": "skill",
+      "label": "从远端恢复 worktree",
+      "ref": "resume-from-remote",
+      "prompt": "读取 dir-graph.yaml repositories[*]（active≠false），对每个仓执行恢复：\n1. 通过 controlled-shell 在对应 repo.path fetch origin\n2. 将 worktree 恢复到 workspace 根目录的 `.xinyiai-worktrees/{bucket}/requirement/{{inputs.cr_id}}`；role=knowledge-base 的仓固定 bucket=`knowledge-base`，其他仓 bucket=repo.id；必须使用 controlled-shell worktree add，不输出手工命令\n3. 若 {{inputs.new_owner}} 非空：更新 change-requests/{{inputs.cr_id}}/cr.md 的 owners.{{inputs.new_owner_role || 'development'}}.id 与 assigned-at；若角色为 requirement，同步顶层兼容字段 owner；在 _backlog.yml.owner-history / handover-history 追加 {role, from, to, at}\n\n在 node-2.md 输出各仓 worktree 绝对路径、当前 HEAD、三角色 owner、是否有未合并改动。",
+      "onFail": "abort",
+      "timeoutMinutes": 15
+    },
+    {
+      "id": "00000000-0000-0000-0014-000000000003",
+      "kind": "skill",
+      "label": "展示 CR 当前状态",
+      "ref": "cr-show",
+      "prompt": "读取 change-requests/{{inputs.cr_id}}/ 下所有文件与 _backlog.yml 条目，输出：\n- CR 元数据（title、owners.requirement/development/test、status、created-at、target-version）\n- 已产出文件清单（cr.md / prd.md / sdd.md / plan.md / tasks/ / test-report.md / review-annotations/）\n- 最近 3 次 push-progress 记录\n- 读取 review-annotations/requirement.yml、review-annotations/sdd.yml、review-annotations/code.yml 与 test-report.md（如存在），按 status + 评审结论给出下一步节点，而不是只按 status 粗略推荐整条 pipeline：\n  - status=drafting：继续 requirement-authoring，从 write-requirement-prd / review-requirement 进入\n  - status=requirement-reviewing 且 requirement.yml verdict=pass、blockers=[]：等待 human_approval，下一节点 approve-requirement；否则回到 write-requirement-prd 自修复并重审\n  - status=requirement-approved：进入 architecture-design，从 write-tech-design 开始\n  - status=tech-designing：继续 architecture-design，从 write-tech-design / review-tech-design 进入\n  - status=tech-design-review-pending 且 sdd.yml verdict=pass、blockers=[]：等待 human_approval，下一节点 approve-tech-design；否则继续 review-tech-design 或回到 write-tech-design 自修复\n  - status=tech-design-reviewed：进入 code-implementation，从 write-dev-plan 开始\n  - status=task-breakdown：等待开发启动 human_approval，下一节点 approve-dev-start；若任务需修订则回到 write-dev-tasks\n  - status=developing：继续 code-implementation，从 implement-code / write-test-report / review-code 进入\n  - status=code-reviewing 且 code.yml verdict=pass、blockers=[] 且 test-report.md status=pass：等待 human_approval，下一节点 approve-code；否则回到 implement-code 自修复并重测重审\n  - status=code-approved：进入 feature-writeback（/writeback）\n\n在 node-3.md 输出上述信息与明确的下一步 skill / pipeline 指令。",
+      "onFail": "abort",
+      "timeoutMinutes": 5
+    }
+  ],
+  "createdAt": "2026-05-07T00:00:00+08:00",
+  "updatedAt": "2026-05-18T00:00:00+08:00"
+}
