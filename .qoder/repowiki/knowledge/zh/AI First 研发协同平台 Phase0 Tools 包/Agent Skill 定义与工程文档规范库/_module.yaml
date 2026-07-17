@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: skills
+title: Agent Skill 定义与工程文档规范库
+scope:
+    - skills/
+source_files: []
+depends_on: []
+related_to: []

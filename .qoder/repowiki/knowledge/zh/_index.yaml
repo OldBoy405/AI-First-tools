@@ -1,0 +1,54 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: main
+nodes_managed: true
+exported_at: "2026-07-17T09:39:55Z"
+modules:
+    "":
+        dir_name: AI First 研发协同平台 Phase0 Tools 包
+        title: AI First 研发协同平台 Phase0 Tools 包
+        scope:
+            - CLAUDE.MD
+            - AGENT-SKILL-MATRIX.md
+            - agent-skill-matrix.yml
+            - AGENTS.md
+            - dir-graph.yaml
+            - .gitignore
+            - LICENSE
+            - README.md
+            - README.pdf
+        source_files: []
+        children:
+            - agents
+            - pipeline_templates
+            - skills
+        depends_on: []
+        related_to: []
+    agents:
+        dir_name: 预置 Agent 能力台账与角色契约
+        title: 预置 Agent 能力台账与角色契约
+        scope:
+            - agents/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    pipeline_templates:
+        dir_name: AI First 研发协同平台 Pipeline 模板集
+        title: AI First 研发协同平台 Pipeline 模板集
+        scope:
+            - pipeline-templates/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    skills:
+        dir_name: Agent Skill 定义与工程文档规范库
+        title: Agent Skill 定义与工程文档规范库
+        scope:
+            - skills/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
