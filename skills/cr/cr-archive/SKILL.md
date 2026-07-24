@@ -152,8 +152,8 @@ payload:
 2. 读取 `dir-graph.yaml#repositories`，解析所有 active repo 与对应 CR worktree。
 3. 对所有 active repo 先做删除预检：确认当前 trunk 已包含 `merge-commits[]` 中对应 SHA；任一 repo 预检失败则跳过所有远端分支删除，只写 `cleanup-pending` 报告并保留本地 worktree。
 4. 通过 `controlled-shell` 清理本地 worktree：
-   - knowledge-base: `.xinyiai-worktrees/knowledge-base/requirement/{cr_id}`
-   - 独立代码仓: `.xinyiai-worktrees/{repo.id}/requirement/{cr_id}`
+   - knowledge-base: `.rayai-worktrees/knowledge-base/requirement/{cr_id}`
+   - 独立代码仓: `.rayai-worktrees/{repo.id}/requirement/{cr_id}`
 5. worktree 不存在时视为已清理，记录为 `skipped-missing`，不得让归档失败。
 6. 预检通过后删除远端 `requirement/{cr_id}` 分支：
    ```yaml

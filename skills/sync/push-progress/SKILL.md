@@ -34,7 +34,7 @@ description: "按 dir-graph.yaml repositories 遍历所有 active repo，将 CR 
 3. 对每个 repo 计算：
    - `branch = requirement/{cr_id}`
    - `bucket = knowledge-base`（当 `repo.role=knowledge-base`）或 `repo.id`
-   - `worktreePath = {workspaceRoot}/.xinyiai-worktrees/{bucket}/requirement/{cr_id}`
+   - `worktreePath = {workspaceRoot}/.rayai-worktrees/{bucket}/requirement/{cr_id}`
 4. 读取 `change-requests/_backlog.yml`，确认存在 `cr_id` 条目。
 5. 任一 active repo 的 worktree 不存在则返回 `WORKTREE_MISSING`，不得只推部分 repo。
 

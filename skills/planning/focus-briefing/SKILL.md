@@ -23,7 +23,7 @@ description: "生成今日焦点 AI 简报，聚合多源数据写入 focus.yml"
 | 2 | `change-requests/_backlog.yml` | status=developing/code-reviewing/writing-back 的 CR，提醒当前主攻方向 |
 | 3 | `docs/competitive/reports/_index.yml` | status=new 的最新报告，生成关注提醒 |
 | 4 | `delivery/task/_index.yaml`（进行中任务） | in-progress 任务，防止遗漏 |
-| 5 | `.xinyiai/pipelines/_index.yml` | 已激活 pipeline 列表与默认入口（可选） |
+| 5 | `.rayai/pipelines/_index.yml` | 已激活 pipeline 列表与默认入口（可选） |
 | 6 | （上下文最近操作） | 关键操作或待确认事项 |
 
 > 以上数据源按优先级排序。若文件不存在，静默跳过，不影响整体简报生成。
@@ -38,7 +38,7 @@ description: "生成今日焦点 AI 简报，聚合多源数据写入 focus.yml"
 read_file: delivery/task/_index.yaml
 read_file: change-requests/_backlog.yml
 read_file: docs/competitive/reports/_index.yml（可选）
-read_file: .xinyiai/pipelines/_index.yml（可选）
+read_file: .rayai/pipelines/_index.yml（可选）
 ```
 
 ### Step 2 — LLM 提炼
@@ -58,7 +58,7 @@ read_file: .xinyiai/pipelines/_index.yml（可选）
 ### Step 3 — 写入 focus.yml
 
 ```yaml
-schema: xinyiai.focus/v1
+schema: rayai.focus/v1
 date: "{YYYY-MM-DD}"
 summary: "..."
 items:
@@ -78,13 +78,13 @@ items:
 ## 输出
 
 - 文件：`focus.yml`（workspace 根目录）
-- schema 必须为 `xinyiai.focus/v1`
+- schema 必须为 `rayai.focus/v1`
 - date 字段为当日日期（`YYYY-MM-DD`）
 - items 数组 1~5 条
 
 ## 校验清单
 
-- [ ] schema 字段值为 `xinyiai.focus/v1`
+- [ ] schema 字段值为 `rayai.focus/v1`
 - [ ] date 字段为今日日期
 - [ ] items 不为空
 - [ ] 每条 item 含 id / title / priority / reason

@@ -34,7 +34,7 @@ description: 在 requirement/CR-* worktree 内编写 PRD 需求文档，落盘�
 ### Step 1 — 前置校验
 
 1. 确认 `change-requests/{cr_id}/cr.md` 存在且 `status: drafting`
-2. 确认 knowledge-base worktree `.xinyiai-worktrees/knowledge-base/requirement/{cr_id}` 存在（若不存在，停止并提示先执行 requirement-register）
+2. 确认 knowledge-base worktree `.rayai-worktrees/knowledge-base/requirement/{cr_id}` 存在（若不存在，停止并提示先执行 requirement-register）
 
 ### Step 2 — 读取上下文
 
@@ -80,7 +80,7 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 
 ### Step 4 — 落盘
 
-落盘到当前 knowledge-base worktree（`.xinyiai-worktrees/knowledge-base/requirement/{cr_id}`）的 `change-requests/{cr_id}/prd.md`。
+落盘到当前 knowledge-base worktree（`.rayai-worktrees/knowledge-base/requirement/{cr_id}`）的 `change-requests/{cr_id}/prd.md`。
 
 Commit：`feat({cr_id}): draft PRD - {title}`
 

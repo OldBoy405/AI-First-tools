@@ -33,7 +33,7 @@ options:
 
 ## 禁止范围
 
-- 不得读取任何 `.` 开头的隐藏目录内容，包括 `.opencode/`、`.qoder/`、`.xinyiai/`、`.git/`
+- 不得读取任何 `.` 开头的隐藏目录内容，包括 `.opencode/`、`.qoder/`、`.rayai/`、`.git/`
 - 不得读取或写入 `change-requests/`
 - 不得读取 `docs/product-planning/`
 - 不得读取或写入 `delivery/`

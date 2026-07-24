@@ -46,7 +46,7 @@
       "kind": "skill",
       "label": "从远端恢复 worktree",
       "ref": "resume-from-remote",
-      "prompt": "读取 dir-graph.yaml repositories[*]（active≠false），对每个仓执行恢复：\n1. 通过 controlled-shell 在对应 repo.path fetch origin\n2. 将 worktree 恢复到 workspace 根目录的 `.xinyiai-worktrees/{bucket}/requirement/{{inputs.cr_id}}`；role=knowledge-base 的仓固定 bucket=`knowledge-base`，其他仓 bucket=repo.id；必须使用 controlled-shell worktree add，不输出手工命令\n3. 若 {{inputs.new_owner}} 非空：更新 change-requests/{{inputs.cr_id}}/cr.md 的 owners.{{inputs.new_owner_role || 'development'}}.id 与 assigned-at；若角色为 requirement，同步顶层兼容字段 owner；在 _backlog.yml.owner-history / handover-history 追加 {role, from, to, at}\n\n在 node-2.md 输出各仓 worktree 绝对路径、当前 HEAD、三角色 owner、是否有未合并改动。",
+      "prompt": "读取 dir-graph.yaml repositories[*]（active≠false），对每个仓执行恢复：\n1. 通过 controlled-shell 在对应 repo.path fetch origin\n2. 将 worktree 恢复到 workspace 根目录的 `.rayai-worktrees/{bucket}/requirement/{{inputs.cr_id}}`；role=knowledge-base 的仓固定 bucket=`knowledge-base`，其他仓 bucket=repo.id；必须使用 controlled-shell worktree add，不输出手工命令\n3. 若 {{inputs.new_owner}} 非空：更新 change-requests/{{inputs.cr_id}}/cr.md 的 owners.{{inputs.new_owner_role || 'development'}}.id 与 assigned-at；若角色为 requirement，同步顶层兼容字段 owner；在 _backlog.yml.owner-history / handover-history 追加 {role, from, to, at}\n\n在 node-2.md 输出各仓 worktree 绝对路径、当前 HEAD、三角色 owner、是否有未合并改动。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },

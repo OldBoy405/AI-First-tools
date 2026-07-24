@@ -37,7 +37,7 @@ description: 在新电脑或新成员环境下，按 CR-ID 与 dir-graph.yaml re
 2. 选择 `active != false` 的 repo。
 3. 对每个 repo 计算：
    - `bucket = knowledge-base`（当 `repo.role=knowledge-base`）或 `repo.id`
-   - `worktreePath = {workspaceRoot}/.xinyiai-worktrees/{bucket}/requirement/{cr_id}`
+   - `worktreePath = {workspaceRoot}/.rayai-worktrees/{bucket}/requirement/{cr_id}`
    - `branch = requirement/{cr_id}`
 4. 对所有 active repo 先执行远端分支预检；任一 repo 缺少远端分支则整体 abort，不创建任何 worktree。
 
@@ -91,7 +91,7 @@ await runGit({ subcommand: "worktree",
 ✅ 工作区恢复完成
    CR              : {cr_id}
    当前状态        : {status}
-   worktrees       : [{repo.id}: .xinyiai-worktrees/{bucket}/requirement/{cr_id}, ...]
+   worktrees       : [{repo.id}: .rayai-worktrees/{bucket}/requirement/{cr_id}, ...]
    owners          : requirement={id@assigned-at}, development={id@assigned-at}, test={id@assigned-at}
    新 owner        : {new_owner_role}:{new_owner}（如已指定）
    最后推送时间    : {last-push-at}

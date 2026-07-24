@@ -556,7 +556,7 @@ TASK 实现边界 ──精确到──→ 表单组件
 
 ## 十一、目录文档关系图谱（dir-graph.yaml）
 
-产品初始化时，系统会在 `.xinyiai/dir-graph.yaml` 自动生成一份结构化的目录文档关系图谱。该图谱是 **Agent 差异化解析目录结构的机器可读索引**，与 AGENTS.md（面向人类）互补。
+产品初始化时，系统会在 `.rayai/dir-graph.yaml` 自动生成一份结构化的目录文档关系图谱。该图谱是 **Agent 差异化解析目录结构的机器可读索引**，与 AGENTS.md（面向人类）互补。
 
 ### 11.1 定位与用途
 
@@ -573,7 +573,7 @@ Agent 通过读取 `dir-graph.yaml` 可以：
 ### 11.2 Team 模式完整 Schema
 
 ```yaml
-# .xinyiai/dir-graph.yaml
+# .rayai/dir-graph.yaml
 version: "1.0"
 mode: team
 generated-at: "2026-04-15T00:00:00Z"
@@ -862,7 +862,7 @@ agents:
 | `AGENTS.md` | Markdown | 人类 + Agent | 角色-目录所有权、命名规范、台账规则 |
 | `.opencode/agents/{brain}.md` | Markdown | 单个 Agent | 该 Agent 的输出目录表和检查清单 |
 | `.opencode/skills/knowledge-conventions/SKILL.md` | Markdown | 所有 Agent | 文档放置路径和命名格式的详细速查 |
-| **`.xinyiai/dir-graph.yaml`** | **YAML** | **Agent 程序化解析** | **结构化的层级、文档类型、链路、产出映射** |
+| **`.rayai/dir-graph.yaml`** | **YAML** | **Agent 程序化解析** | **结构化的层级、文档类型、链路、产出映射** |
 
 三层 Markdown 规约提供人类可读的规范描述，`dir-graph.yaml` 提供机器可读的结构化索引。两者信息同源但形态不同，共同确保 Agent 既能理解规范语义，也能程序化定位文档。
 
@@ -871,7 +871,7 @@ agents:
 | 维度 | 说明 |
 |------|------|
 | 生成函数 | `buildTeamDirGraph(ctx: PathCtx, domainSlugs: string[], appSlugs: string[])` |
-| 触发入口 | `buildTeamRootConfig()` 中 `.xinyiai/config.yaml` 之后 |
-| 输出路径 | `.xinyiai/dir-graph.yaml` |
+| 触发入口 | `buildTeamRootConfig()` 中 `.rayai/config.yaml` 之后 |
+| 输出路径 | `.rayai/dir-graph.yaml` |
 | 路径变量 | 使用实际目录名，支持多 domain/app 数组 |
 | Team 差异 | 六层 layers、含 FORM/form-schema/TC-FORM、多仓库路径 |

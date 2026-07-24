@@ -44,7 +44,7 @@ description: 按 dir-graph.yaml repositories 动态解析参与仓，通过 dry-
    - `repo.path`
    - `repo.trunk`
    - CR 分支：`requirement/{cr_id}`
-   - CR worktree：`.xinyiai-worktrees/{bucket}/requirement/{cr_id}`，其中 knowledge-base 使用 `knowledge-base`，独立代码仓使用 `repo.id`
+   - CR worktree：`.rayai-worktrees/{bucket}/requirement/{cr_id}`，其中 knowledge-base 使用 `knowledge-base`，独立代码仓使用 `repo.id`
 4. 确认每个参与仓 CR worktree 无未提交变更，且 `origin/requirement/{cr_id}` 存在。
 5. 任一仓校验失败则 abort，不得单仓提前合并。
 

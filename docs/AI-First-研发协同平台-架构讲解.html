@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI First 研发协同平台 · 架构与流程全解</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<style>
+  :root{
+    --ink:#14181f; --ink-2:#3a424e; --muted:#6b7684; --line:#e5e8ec;
+    --bg:#ffffff; --bg-soft:#f6f7f9; --bg-code:#0f1622;
+    --brand:#3b5bdb; --brand-soft:#eaefff; --brand-ink:#26408b;
+    --amber:#b5730a; --amber-soft:#fff3dd;
+    --green:#1c7a4a; --green-soft:#e5f4ec;
+    --purple:#6741d9; --purple-soft:#efeafe;
+    --rose:#c2255c; --rose-soft:#ffe9f1;
+    --teal:#0c8599; --teal-soft:#e0f4f7;
+    --radius:14px; --maxw:1080px;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;font-family:var(--sans);color:var(--ink);background:var(--bg);line-height:1.72;font-size:16px;-webkit-font-smoothing:antialiased}
+
+  /* ---------- layout ---------- */
+  .wrap{display:grid;grid-template-columns:264px minmax(0,1fr);gap:0;max-width:1440px;margin:0 auto}
+  nav.toc{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;border-right:1px solid var(--line);padding:26px 20px 60px;background:var(--bg-soft)}
+  nav.toc .brand{font-weight:800;font-size:15px;letter-spacing:.3px;color:var(--brand-ink);margin-bottom:4px}
+  nav.toc .brand small{display:block;font-weight:500;color:var(--muted);font-size:11.5px;letter-spacing:.5px;margin-top:3px}
+  nav.toc a{display:block;color:var(--ink-2);text-decoration:none;font-size:13.5px;padding:5px 10px;border-radius:8px;margin:1px 0;transition:.15s}
+  nav.toc a:hover{background:var(--brand-soft);color:var(--brand-ink)}
+  nav.toc a.sub{padding-left:22px;font-size:12.5px;color:var(--muted)}
+  nav.toc .grp{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:18px 0 6px 10px;font-weight:700}
+  main{padding:0 clamp(20px,5vw,72px) 120px;max-width:calc(var(--maxw) + 144px)}
+
+  /* ---------- hero ---------- */
+  header.hero{padding:64px 0 40px;border-bottom:1px solid var(--line);margin-bottom:12px}
+  .eyebrow{display:inline-block;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--brand);background:var(--brand-soft);padding:5px 12px;border-radius:100px}
+  h1{font-size:clamp(30px,5vw,46px);line-height:1.15;margin:18px 0 10px;letter-spacing:-.5px;font-weight:800}
+  .lede{font-size:18px;color:var(--ink-2);max-width:720px}
+  .hero-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:24px}
+  .chip{font-size:12.5px;padding:5px 12px;border-radius:100px;background:var(--bg-soft);border:1px solid var(--line);color:var(--ink-2)}
+  .chip b{color:var(--brand-ink)}
+
+  /* ---------- headings ---------- */
+  h2{font-size:27px;margin:64px 0 8px;padding-top:20px;letter-spacing:-.3px;font-weight:800;scroll-margin-top:20px}
+  h2 .num{color:var(--brand);font-variant-numeric:tabular-nums;margin-right:10px}
+  h3{font-size:20px;margin:38px 0 6px;font-weight:750;letter-spacing:-.2px;scroll-margin-top:20px}
+  h4{font-size:16px;margin:26px 0 4px;font-weight:700;color:var(--ink)}
+  .section-sub{color:var(--muted);font-size:15px;margin:0 0 8px}
+  p{margin:12px 0}
+
+  /* ---------- callouts ---------- */
+  .note{border-left:3px solid var(--brand);background:var(--brand-soft);padding:14px 18px;border-radius:0 10px 10px 0;margin:20px 0;font-size:14.5px;color:var(--brand-ink)}
+  .note.amber{border-color:var(--amber);background:var(--amber-soft);color:var(--amber)}
+  .note.green{border-color:var(--green);background:var(--green-soft);color:var(--green)}
+  .note.rose{border-color:var(--rose);background:var(--rose-soft);color:var(--rose)}
+  .note b{font-weight:750}
+  .note .t{display:block;font-weight:750;margin-bottom:2px}
+
+  /* ---------- figure ---------- */
+  figure{margin:26px 0;border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:var(--bg)}
+  figure .cap{background:var(--bg-soft);border-bottom:1px solid var(--line);padding:9px 16px;font-size:12.5px;font-weight:700;color:var(--ink-2);letter-spacing:.2px}
+  figure .cap .tag{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.5px;color:#fff;background:var(--brand);padding:2px 7px;border-radius:5px;margin-right:8px;vertical-align:middle}
+  figure .cap .tag.svg{background:var(--purple)}
+  figure .body{padding:22px 18px;overflow-x:auto}
+  figure .desc{padding:12px 16px;border-top:1px dashed var(--line);font-size:13px;color:var(--muted);background:#fcfcfd}
+  .mermaid{display:flex;justify-content:center}
+
+  /* ---------- tables ---------- */
+  .tw{overflow-x:auto;margin:20px 0;border:1px solid var(--line);border-radius:12px}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;min-width:540px}
+  th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:var(--bg-soft);font-weight:700;color:var(--ink);white-space:nowrap;position:sticky;top:0}
+  tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:#fafbfc}
+  td code,th code{white-space:nowrap}
+
+  /* ---------- code ---------- */
+  code{font-family:var(--mono);font-size:.88em;background:var(--bg-soft);padding:2px 6px;border-radius:5px;color:var(--rose);border:1px solid var(--line)}
+  pre{background:var(--bg-code);color:#e6edf3;border-radius:12px;padding:18px 20px;overflow-x:auto;margin:20px 0;font-size:13px;line-height:1.7;border:1px solid #1f2937}
+  pre code{background:none;border:none;color:inherit;padding:0;font-size:13px;white-space:pre}
+  pre .c{color:#7d8590}  /* comment */
+  pre .k{color:#79c0ff}  /* keyword */
+  pre .s{color:#a5d6ff}  /* string */
+  pre .g{color:#7ee787}  /* green */
+  pre .y{color:#ffa657}  /* orange */
+  pre .p{color:#d2a8ff}  /* purple */
+
+  /* ---------- cards ---------- */
+  .grid{display:grid;gap:14px;margin:22px 0}
+  .grid.c2{grid-template-columns:repeat(2,1fr)}
+  .grid.c3{grid-template-columns:repeat(3,1fr)}
+  .card{border:1px solid var(--line);border-radius:12px;padding:16px 18px;background:var(--bg)}
+  .card h5{margin:0 0 6px;font-size:14.5px;font-weight:750;display:flex;align-items:center;gap:8px}
+  .card p{margin:4px 0 0;font-size:13px;color:var(--ink-2);line-height:1.6}
+  .card .k{font-family:var(--mono);font-size:11px;color:var(--muted);display:block;margin-top:8px}
+  .dot{width:9px;height:9px;border-radius:50%;flex:none}
+
+  /* pills for roles */
+  .pill{display:inline-block;font-size:11.5px;font-weight:700;padding:2px 9px;border-radius:100px;margin:2px 3px 2px 0;white-space:nowrap}
+  .pill.brand{background:var(--brand-soft);color:var(--brand-ink)}
+  .pill.green{background:var(--green-soft);color:var(--green)}
+  .pill.amber{background:var(--amber-soft);color:var(--amber)}
+  .pill.purple{background:var(--purple-soft);color:var(--purple)}
+  .pill.rose{background:var(--rose-soft);color:var(--rose)}
+  .pill.teal{background:var(--teal-soft);color:var(--teal)}
+  .pill.gray{background:var(--bg-soft);color:var(--muted);border:1px solid var(--line)}
+
+  .kbd{font-family:var(--mono);font-size:12px;background:#fff;border:1px solid #cfd4da;border-bottom-width:2px;border-radius:6px;padding:2px 7px;color:var(--ink)}
+
+  hr.soft{border:none;border-top:1px solid var(--line);margin:44px 0}
+  .foot{margin-top:80px;padding-top:26px;border-top:1px solid var(--line);color:var(--muted);font-size:13px}
+  .anchor{scroll-margin-top:20px}
+
+  @media(max-width:960px){
+    .wrap{grid-template-columns:1fr}
+    nav.toc{display:none}
+    .grid.c2,.grid.c3{grid-template-columns:1fr}
+    main{padding:0 20px 80px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<!-- ============ SIDEBAR ============ -->
+<nav class="toc">
+  <div class="brand">AI First 研发协同平台<small>phase0 tools · 架构与流程全解</small></div>
+  <div class="grp">总览</div>
+  <a href="#intro">平台定位与核心思想</a>
+  <a href="#cr">CR：贯穿全程的工作容器</a>
+  <div class="grp">一 · 整体架构</div>
+  <a href="#arch">四层能力模型</a>
+  <a href="#dirs" class="sub">目录结构</a>
+  <a href="#agents" class="sub">Agent 智能代理系统</a>
+  <a href="#skills" class="sub">Skill 技能系统</a>
+  <a href="#pipelines" class="sub">Pipeline 流水线</a>
+  <a href="#matrix" class="sub">权限矩阵</a>
+  <div class="grp">二 · IDE 使用</div>
+  <a href="#ide">Cursor / Claude Code 配置</a>
+  <a href="#trigger" class="sub">触发命令映射</a>
+  <a href="#collab" class="sub">代理协作与技能调用</a>
+  <div class="grp">三 · 完整流程</div>
+  <a href="#flow">端到端产品流程</a>
+  <a href="#state" class="sub">CR 状态机</a>
+  <a href="#stages" class="sub">各阶段详解</a>
+  <a href="#repair" class="sub">自修复审查闭环</a>
+  <a href="#dataflow" class="sub">数据与事实源流转</a>
+  <div class="grp">四 · 最佳实践</div>
+  <a href="#best">推荐工作流</a>
+  <a href="#config" class="sub">关键配置文件</a>
+  <a href="#scenarios" class="sub">常见场景</a>
+  <a href="#dont" class="sub">禁止事项清单</a>
+</nav>
+
+<!-- ============ MAIN ============ -->
+<main>
+
+<header class="hero" id="top">
+  <span class="eyebrow">Architecture Deep-Dive</span>
+  <h1>AI First 研发协同平台<br>phase0 Tools 包全解</h1>
+  <p class="lede">一套把「产品规划 → 需求 → 架构 → 编码 → 质量审查 → 回写归档」全链路结构化的预置能力包。它让 AI 参与一条<strong>可追踪、可恢复、可审计</strong>的研发流水线，核心是把每一次产品变更沉淀为一个 <strong>CR（Change Request）工作容器</strong>。</p>
+  <div class="hero-meta">
+    <span class="chip"><b>9</b> 个预置 Agent</span>
+    <span class="chip"><b>45+</b> 个 active Skill · 9 大 domain</span>
+    <span class="chip"><b>8</b> 条 active Pipeline</span>
+    <span class="chip"><b>13</b> 态 CR 状态机</span>
+    <span class="chip">事实源驱动 · <b>YAML/JSON</b> 声明式</span>
+  </div>
+</header>
+
+<!-- ===== INTRO ===== -->
+<section class="anchor" id="intro">
+  <h2><span class="num">§0</span>平台定位与核心思想</h2>
+  <p class="section-sub">这是一个<strong>预置到内部研发协同平台的可用版本 tools 包</strong>，而不是业务项目工作区。它维护的是「可安装到目标 workspace」的 Agent、Skill、Pipeline 模板与流程手册。</p>
+
+  <p>整套 tools 覆盖软件产品研发从<strong>产品规划</strong>到<strong>代码实现</strong>再到<strong>知识回写</strong>的完整流程，既可个人独立使用，也可团队协作推进；并且可以按 Skill / Agent / Pipeline 等不同颗粒度单独拆出来使用。</p>
+
+  <div class="note amber">
+    <span class="t">⚠ 一个关键前提</span>
+    这套 tools 单独放在 Codex / Claude / Cursor / Kimi 等工具上使用时容易出现「飘移」。作者自己是<strong>结合平台本身（渐进加载、pipeline 执行约束等执行层优化）+ 配套知识库</strong>一起使用的。官方建议不是照抄内容，而是把「核心思路」落地到团队：想清楚两件事 ——「①团队的所有信息/资产如何管理」「②团队基于什么协作、如何协作」。
+  </div>
+
+  <h3>唯一事实源与读取顺序</h3>
+  <p>平台采用严格的「单一事实源（Single Source of Truth）」设计。所有 AI Agent 在动手前<strong>必须按固定顺序读取</strong>入口文件，不同入口之间不允许维护互相冲突的规则：</p>
+
+  <figure>
+    <div class="cap"><span class="tag svg">SVG</span>四个权威入口 + 强制读取顺序</div>
+    <div class="body">
+      <svg viewBox="0 0 900 260" width="100%" style="max-width:880px" font-family="var(--sans)">
+        <defs>
+          <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#3b5bdb"/></marker>
+        </defs>
+        <!-- ordered chain -->
+        <g font-size="13">
+          <rect x="20" y="30" width="150" height="62" rx="10" fill="#eaefff" stroke="#3b5bdb"/>
+          <text x="95" y="55" text-anchor="middle" font-weight="800" fill="#26408b">① AGENTS.md</text>
+          <text x="95" y="74" text-anchor="middle" font-size="11" fill="#3a424e">行为约束入口</text>
+
+          <rect x="205" y="30" width="150" height="62" rx="10" fill="#e0f4f7" stroke="#0c8599"/>
+          <text x="280" y="55" text-anchor="middle" font-weight="800" fill="#0c8599">② dir-graph.yaml</text>
+          <text x="280" y="74" text-anchor="middle" font-size="11" fill="#3a424e">目录/事实源入口</text>
+
+          <rect x="390" y="30" width="185" height="62" rx="10" fill="#efeafe" stroke="#6741d9"/>
+          <text x="482" y="52" text-anchor="middle" font-weight="800" fill="#6741d9" font-size="12">③ agent-skill-matrix.yml</text>
+          <text x="482" y="74" text-anchor="middle" font-size="11" fill="#3a424e">权限/归属入口</text>
+
+          <rect x="610" y="30" width="150" height="62" rx="10" fill="#e5f4ec" stroke="#1c7a4a"/>
+          <text x="685" y="55" text-anchor="middle" font-weight="800" fill="#1c7a4a">④ README.md</text>
+          <text x="685" y="74" text-anchor="middle" font-size="11" fill="#3a424e">使用流程入口</text>
+
+          <rect x="795" y="30" width="85" height="62" rx="10" fill="#f6f7f9" stroke="#6b7684"/>
+          <text x="837" y="52" text-anchor="middle" font-weight="700" fill="#3a424e" font-size="11">⑤ 任务</text>
+          <text x="837" y="70" text-anchor="middle" font-size="10" fill="#6b7684">_index/JSON</text>
+
+          <line x1="170" y1="61" x2="203" y2="61" stroke="#3b5bdb" stroke-width="2" marker-end="url(#ar)"/>
+          <line x1="355" y1="61" x2="388" y2="61" stroke="#3b5bdb" stroke-width="2" marker-end="url(#ar)"/>
+          <line x1="575" y1="61" x2="608" y2="61" stroke="#3b5bdb" stroke-width="2" marker-end="url(#ar)"/>
+          <line x1="760" y1="61" x2="793" y2="61" stroke="#3b5bdb" stroke-width="2" marker-end="url(#ar)"/>
+        </g>
+        <!-- responsibilities -->
+        <g font-size="12" fill="#3a424e">
+          <rect x="20" y="140" width="860" height="96" rx="12" fill="#fcfcfd" stroke="#e5e8ec"/>
+          <text x="40" y="168" font-weight="800" fill="#14181f" font-size="13">单一事实源分工</text>
+          <text x="40" y="192">· tools 包目录结构 → <tspan font-weight="700" fill="#0c8599">dir-graph.yaml</tspan></text>
+          <text x="40" y="214">· 完整使用流程 → <tspan font-weight="700" fill="#1c7a4a">README.md</tspan></text>
+          <text x="470" y="192">· Agent/Skill 权限 → <tspan font-weight="700" fill="#6741d9">agent-skill-matrix.yml</tspan></text>
+          <text x="470" y="214">· Active 清单 → <tspan font-weight="700" fill="#3b5bdb">agents/skills/pipeline-templates 的 _index.yml</tspan></text>
+        </g>
+      </svg>
+    </div>
+    <div class="desc">修改任何能力定义时，必须<b>先改权威文件，再改解释性文档</b>；绝不允许只改说明文档而不改对应索引或模板。<code>CLAUDE.MD</code> 只是 Claude 专用转发入口，本身不另设规则，只指向 AGENTS.md。</div>
+  </figure>
+</section>
+
+<!-- ===== CR ===== -->
+<section class="anchor" id="cr">
+  <h2><span class="num">§1</span>CR：贯穿全程的工作容器</h2>
+  <p class="section-sub">整个平台最关键的设计不是某个 Skill 写得多完整，而是把一次产品变更变成一个可持续推进、可多人接手、可被 AI 稳定理解的 <strong>CR（Change Request）</strong>。</p>
+
+  <p>之所以选 CR 而不是传统 issue 模式，核心原因是要把<strong>所有执行过程完整沉淀下来</strong>，作为后续复盘的信息来源，并且能与代码保持强一致。每个 CR 都有自己的<strong>目录、分支、worktree、状态、owner 和过程产物</strong>。</p>
+
+  <div class="grid c3">
+    <div class="card"><h5><span class="dot" style="background:var(--brand)"></span>可恢复</h5><p>PRD、SDD、任务拆解、测试报告、评审意见、审批记录、traceability 全部沉淀在 <code>change-requests/{CR-ID}/</code>。换人、换机、换 Agent 都能从 CR 本身恢复上下文。</p></div>
+    <div class="card"><h5><span class="dot" style="background:var(--green)"></span>可追踪</h5><p>CR 通过状态机往前走。不是 prompt 说「通过了」就算通过，每个关键节点都要由明确的 Skill <strong>写入证据</strong>并推进状态。</p></div>
+    <div class="card"><h5><span class="dot" style="background:var(--purple)"></span>可审计</h5><p>三角色 owner（需求/开发/测试）显式化责任归属；Agent 之间通过权限矩阵限定边界，谁能做什么一目了然。</p></div>
+  </div>
+
+  <h3>三角色 Owner 模型</h3>
+  <p>CR 责任归属以 <code>cr.md</code> 与 <code>_backlog.yml</code> 的 <code>owners</code> 为准。顶层 <code>owner</code> 仅作旧视图兼容，默认等于 <code>owners.requirement.id</code>。</p>
+  <pre><code><span class="k">owners</span>:
+  <span class="k">requirement</span>:              <span class="c"># 需求负责人：PRD、需求评审、需求审批</span>
+    <span class="k">id</span>: <span class="s">product-owner</span>
+    <span class="k">assigned-at</span>: <span class="s">"2026-07-18T10:00:00+08:00"</span>
+  <span class="k">development</span>:              <span class="c"># 开发负责人：SDD、任务拆分、编码、代码审批</span>
+    <span class="k">id</span>: <span class="s">dev-owner</span>
+    <span class="k">assigned-at</span>: <span class="s">"2026-07-18T10:00:00+08:00"</span>
+  <span class="k">test</span>:                     <span class="c"># 测试负责人：验证证据、测试报告</span>
+    <span class="k">id</span>: <span class="s">test-owner</span>
+    <span class="k">assigned-at</span>: <span class="s">"2026-07-18T10:00:00+08:00"</span></code></pre>
+  <div class="note">角色变更<b>必须</b>通过 <code>handover-cr</code> 或 <code>resume-from-remote</code> 的移交逻辑更新 <code>owners.{role}.id</code> 与 <code>assigned-at</code>，并追加 <code>owner-history</code>。不得只改顶层 <code>owner</code>。</div>
+
+  <h3>过程工作台 → 团队知识库</h3>
+  <p>CR 的过程产物不会一直停留在临时目录。开发完成并通过审批后，<code>feature-writeback</code> 会把分支合回各仓 trunk，把产物写入 baseline。所以：<strong>CR 是过程工作台，<code>specs/</code> 和 <code>delivery/</code> 是回写后的团队知识库</strong>。</p>
+</section>
+
+<!-- ===== ARCH ===== -->
+<section class="anchor" id="arch">
+  <h2><span class="num">§2</span>整体架构：四层能力模型</h2>
+  <p class="section-sub">tools 包由四类核心资产构成，通过 <code>_index.yml</code> 台账注册、由 <code>agent-skill-matrix.yml</code> 约束边界、由 Pipeline JSON 编排执行。</p>
+
+  <figure>
+    <div class="cap"><span class="tag">Mermaid</span>四层能力模型与调用关系</div>
+    <div class="body">
+      <div class="mermaid">
+flowchart TB
+  subgraph L1["① 编排层 · Pipeline Templates（JSON）"]
+    P1["/planning · /insight-brief · /comp-radar"]
+    P2["/requirement · /architecture · /coding"]
+    P3["/writeback · /resume"]
+  end
+  subgraph L2["② 调度层 · Agents（路由/编排/质量判断）"]
+    A1["primary Agent<br/>规划·需求·开发·竞品·客服"]
+    A2["subagent<br/>spec·delivery·质量·知识"]
+    A3["system-orchestrator<br/>系统编排器（非可部署 Agent）"]
+  end
+  subgraph L3["③ 能力层 · Skills（9 大 domain）"]
+    S1["planning · requirement · develop"]
+    S2["writeback · sync · spec · cr"]
+    S3["competitive · review · shared"]
+  end
+  subgraph L4["④ 事实源层 · 目标 workspace"]
+    F1["change-requests/ · specs/"]
+    F2["delivery/ · docs/ · constraints/"]
+  end
+  L1 -->|"node.ref 指向 active Skill"| L2
+  L2 -->|"owns / can-call 边界内调用"| L3
+  L3 -->|"写入受控状态与产物"| L4
+  L2 -.->|"权限约束"| MX["agent-skill-matrix.yml"]
+  MX -.-> L3
+      </div>
+    </div>
+    <div class="desc">四层单向依赖：Pipeline 决定「跑哪些节点」，Agent 决定「谁来跑、质量是否达标」，Skill 决定「怎么写、写到哪」，事实源层是所有状态与产物的最终落点。<b>Agent 只做路由、编排与质量判断，不绕过 Skill 直接写受控状态文件。</b></div>
+  </figure>
+
+  <!-- dirs -->
+  <h3 class="anchor" id="dirs">目录结构</h3>
+  <p>所有相对路径默认以 <code>tools/</code> 为根。目录本身极简，全部能力通过台账文件登记：</p>
+  <pre><code>tools/
+├─ <span class="y">AGENTS.md</span>                 <span class="c"># ① 所有 AI 工具共享的行为约束入口</span>
+├─ <span class="y">CLAUDE.MD</span>                 <span class="c">#   Claude 专用入口，只转发到 AGENTS.md</span>
+├─ <span class="y">dir-graph.yaml</span>            <span class="c"># ② 目录图与事实源声明 + CR 状态机</span>
+├─ <span class="y">agent-skill-matrix.yml</span>    <span class="c"># ③ Agent/Skill 权限矩阵（机器可读）</span>
+├─ AGENT-SKILL-MATRIX.md      <span class="c">#   权限矩阵人读说明</span>
+├─ <span class="y">README.md</span>                 <span class="c"># ④ 完整使用流程、流程图、节点说明</span>
+├─ <span class="p">agents/</span>                   <span class="c"># 预置 Agent 定义 + _index.yml 台账</span>
+│   ├─ _index.yml
+│   └─ {agent-id}.md
+├─ <span class="p">skills/</span>                   <span class="c"># 预置 Skill 定义 + _index.yml 台账</span>
+│   ├─ _index.yml
+│   └─ {domain}/{skill-id}/SKILL.md
+└─ <span class="p">pipeline-templates/</span>       <span class="c"># Pipeline JSON 模板 + _index.yml 台账</span>
+    ├─ _index.yml
+    └─ {flow}.pipeline.json</code></pre>
+  <div class="note"><b>目标 workspace 与 tools 包的边界：</b>tools 包安装到目标 workspace 的 <code>tools/</code> 下后，Skill 运行时读取的是<strong>目标 workspace</strong> 的 <code>change-requests/</code>、<code>specs/</code>、<code>delivery/</code>、<code>docs/</code>、<code>constraints/</code> —— 这些不是 tools 包内目录。仓库/trunk/worktree 一律由目标 workspace 的 <code>dir-graph.yaml#repositories</code> 动态解析，禁止写死本机路径或固定仓库名。</div>
+
+  <!-- AGENTS -->
+  <h3 class="anchor" id="agents">Agent 智能代理系统</h3>
+  <p class="section-sub">Agent 是<strong>调度入口</strong>，只负责路由、编排和质量判断。设计上分三种模式：<span class="pill brand">primary</span> 可承接完整阶段、<span class="pill purple">subagent</span> 提供子能力、<span class="pill gray">system</span> 系统编排器（非可部署 Agent）。</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>Agent</th><th>模式</th><th>主责范围</th><th>承接的 Pipeline</th></tr></thead>
+    <tbody>
+      <tr><td><code>product-planning-agent</code></td><td><span class="pill brand">primary</span></td><td>规划、洞察、规划报告、roadmap、想法/ADR、产品上下文</td><td>product-planning · market-to-plan</td></tr>
+      <tr><td><code>requirement-writer</code></td><td><span class="pill brand">primary</span></td><td>CR 注册、PRD、需求评审、需求审批</td><td>requirement-authoring</td></tr>
+      <tr><td><code>dev-agent</code></td><td><span class="pill brand">primary</span></td><td>SDD、技术评审、开发计划、任务、编码、测试报告、代码评审、代码审批</td><td>architecture-design · code-implementation</td></tr>
+      <tr><td><code>competitive-analyst-agent</code></td><td><span class="pill brand">primary</span></td><td>竞品动态、竞品报告、报告转规划建议</td><td>competitive-radar</td></tr>
+      <tr><td><code>customer-support-agent</code></td><td><span class="pill brand">primary</span></td><td>基于 PRD/SDD 的客服问答，文档不足时记录反馈</td><td>customer-support</td></tr>
+      <tr><td><code>spec-agent</code></td><td><span class="pill purple">subagent</span></td><td>baseline spec 只读查询、看板、回写后核对</td><td>feature-writeback（只读核对）</td></tr>
+      <tr><td><code>delivery-agent</code></td><td><span class="pill purple">subagent</span></td><td>CR TASK 回写到 <code>delivery/task/</code></td><td>feature-writeback</td></tr>
+      <tr><td><code>quality-reviewer-agent</code></td><td><span class="pill purple">subagent</span></td><td>横向对齐与影响分析；协作调用质量门 Skill</td><td>全部含质量门的 pipeline</td></tr>
+      <tr><td><code>knowledge-agent</code></td><td><span class="pill purple">subagent</span></td><td>docs/ 下跨特性知识写入（<code>docs/references/</code> 只读）</td><td>orchestrator</td></tr>
+      <tr><td><code>system-orchestrator</code></td><td><span class="pill gray">system</span></td><td>回写合并、远端同步、CR 状态、收件箱、归档、通用校验、受控 shell</td><td>feature-writeback · resume-cr</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note amber"><b>设计缺口（官方已标注）：</b>① <code>knowledge-agent</code> 缺专属写入 Skill，目前复用 <code>engineering-docs</code>/<code>record-idea</code> 等；② <code>customer-support-agent</code> 反馈落盘缺 <code>record-feedback</code> Skill；③ 回写期无独立 primary Agent，由 <code>system-orchestrator</code> 编排、<code>spec-agent</code> 只读核对。</div>
+
+  <h4>Agent 设计理念：路由 ≠ 执行</h4>
+  <p>每个 Agent 文档都带 <code>constraints</code> 约束段，明确「不做什么」。以 <code>dev-agent</code> 为例，它的红线是：</p>
+  <ul>
+    <li>不得直接写入 <code>specs/</code>，正式回写仅由 <code>writeback-prd-sdd</code> 执行；</li>
+    <li>不得手动编辑 <code>_backlog.yml</code>，状态推进必须经 <code>develop/*</code> 封装 Skill 间接完成；</li>
+    <li>不得在主工作区代码目录直接编码，实现只写 CR worktree；</li>
+    <li>评审有 blocker 时必须回到对应修复节点自修复，完整通过后才可进入 <code>human_approval</code>。</li>
+  </ul>
+
+  <!-- SKILLS -->
+  <h3 class="anchor" id="skills">Skill 技能系统</h3>
+  <p class="section-sub">Skill 是平台的<strong>能力原子</strong>，每个对应一种文档、流程节点或工具能力，按 domain 组织为 <code>skills/{domain}/{skill-id}/SKILL.md</code>。每个 active Skill 在矩阵中<strong>必须且只能有一个 <code>owns</code> owner</strong>。</p>
+
+  <figure>
+    <div class="cap"><span class="tag svg">SVG</span>9 大 Skill Domain 分布</div>
+    <div class="body">
+      <svg viewBox="0 0 900 340" width="100%" style="max-width:880px">
+        <g font-family="var(--sans)" font-size="12">
+          <!-- row 1 -->
+          <g>
+            <rect x="10" y="20" width="285" height="92" rx="12" fill="#eaefff" stroke="#3b5bdb"/>
+            <text x="26" y="44" font-weight="800" fill="#26408b" font-size="14">planning ·调研规划</text>
+            <text x="26" y="66" fill="#3a424e" font-size="11">analyze-user-feedback / conduct-market-research</text>
+            <text x="26" y="82" fill="#3a424e" font-size="11">write-planning-report / review-planning-report</text>
+            <text x="26" y="98" fill="#6b7684" font-size="10.5">record-idea · record-adr · write-roadmap · 共 15 个</text>
+          </g>
+          <g>
+            <rect x="307" y="20" width="285" height="92" rx="12" fill="#e0f4f7" stroke="#0c8599"/>
+            <text x="323" y="44" font-weight="800" fill="#0c8599" font-size="14">requirement ·需求</text>
+            <text x="323" y="66" fill="#3a424e" font-size="11">requirement-register / write-requirement-prd</text>
+            <text x="323" y="82" fill="#3a424e" font-size="11">review-requirement / approve-requirement</text>
+            <text x="323" y="98" fill="#6b7684" font-size="10.5">CR 注册 → PRD → 评审 → 审批 · 共 4 个</text>
+          </g>
+          <g>
+            <rect x="604" y="20" width="285" height="92" rx="12" fill="#e5f4ec" stroke="#1c7a4a"/>
+            <text x="620" y="44" font-weight="800" fill="#1c7a4a" font-size="14">develop ·开发</text>
+            <text x="620" y="66" fill="#3a424e" font-size="11">write-tech-design / write-dev-tasks</text>
+            <text x="620" y="82" fill="#3a424e" font-size="11">implement-code / write-test-report / review-code</text>
+            <text x="620" y="98" fill="#6b7684" font-size="10.5">SDD→任务→编码→测试→审批 · 共 10 个</text>
+          </g>
+          <!-- row 2 -->
+          <g>
+            <rect x="10" y="124" width="285" height="92" rx="12" fill="#efeafe" stroke="#6741d9"/>
+            <text x="26" y="148" font-weight="800" fill="#6741d9" font-size="14">writeback ·回写</text>
+            <text x="26" y="170" fill="#3a424e" font-size="11">merge-feature-branch / writeback-prd-sdd</text>
+            <text x="26" y="186" fill="#3a424e" font-size="11">writeback-tasks / writeback-traceability</text>
+            <text x="26" y="202" fill="#6b7684" font-size="10.5">合并→回写 baseline→追溯链 · 共 4 个</text>
+          </g>
+          <g>
+            <rect x="307" y="124" width="285" height="92" rx="12" fill="#fff3dd" stroke="#b5730a"/>
+            <text x="323" y="148" font-weight="800" fill="#b5730a" font-size="14">sync ·远端同步</text>
+            <text x="323" y="170" fill="#3a424e" font-size="11">push-progress / pull-progress</text>
+            <text x="323" y="186" fill="#3a424e" font-size="11">resume-from-remote / list-remote-checkpoints</text>
+            <text x="323" y="202" fill="#6b7684" font-size="10.5">checkpoint · 恢复 · handover-cr · 共 5 个</text>
+          </g>
+          <g>
+            <rect x="604" y="124" width="285" height="92" rx="12" fill="#ffe9f1" stroke="#c2255c"/>
+            <text x="620" y="148" font-weight="800" fill="#c2255c" font-size="14">cr ·变更单管理</text>
+            <text x="620" y="170" fill="#3a424e" font-size="11">cr-status-set / cr-archive / cr-show</text>
+            <text x="620" y="186" fill="#3a424e" font-size="11">cr-query / cr-dashboard / cr-inbox</text>
+            <text x="620" y="202" fill="#6b7684" font-size="10.5">状态·收件箱·看板·归档·反馈回写 · 共 8 个</text>
+          </g>
+          <!-- row 3 -->
+          <g>
+            <rect x="10" y="228" width="285" height="92" rx="12" fill="#f6f7f9" stroke="#6b7684"/>
+            <text x="26" y="252" font-weight="800" fill="#3a424e" font-size="14">spec ·基线查询</text>
+            <text x="26" y="274" fill="#3a424e" font-size="11">spec-show / spec-query / spec-dashboard</text>
+            <text x="26" y="296" fill="#6b7684" font-size="10.5">baseline spec 只读视图 · 共 3 个</text>
+          </g>
+          <g>
+            <rect x="307" y="228" width="285" height="92" rx="12" fill="#eaefff" stroke="#3b5bdb"/>
+            <text x="323" y="252" font-weight="800" fill="#26408b" font-size="14">competitive ·竞品</text>
+            <text x="323" y="274" fill="#3a424e" font-size="11">fetch-competitor-updates / write-competitive-report</text>
+            <text x="323" y="296" fill="#6b7684" font-size="10.5">report-to-planning-suggestion · 共 3 个</text>
+          </g>
+          <g>
+            <rect x="604" y="228" width="285" height="92" rx="12" fill="#e0f4f7" stroke="#0c8599"/>
+            <text x="620" y="252" font-weight="800" fill="#0c8599" font-size="14">review + shared</text>
+            <text x="620" y="274" fill="#3a424e" font-size="11">review-alignment / change-impact-analysis</text>
+            <text x="620" y="296" fill="#6b7684" font-size="10.5">validate-doc · engineering-docs · controlled-shell</text>
+          </g>
+        </g>
+      </svg>
+    </div>
+    <div class="desc">写入型 Skill 都必须说明：读取来源、写入位置、状态推进、失败处理，并自动调用 <code>validate-doc</code> 校验；涉及 git/shell 的 Skill 必须通过 <code>controlled-shell</code> 白名单执行，禁止 Agent 在终端自由执行 git。</div>
+  </figure>
+
+  <h4>三个特殊的 shared Skill</h4>
+  <div class="grid c3">
+    <div class="card"><h5>🛡 controlled-shell</h5><p>受控 shell 执行规范：给 requirement/sync 组 Skill 提供白名单化 git 命令入口，禁止「手工指引文本」回退。所有 git 操作的唯一合法通道。</p></div>
+    <div class="card"><h5>📐 engineering-docs</h5><p>按模板生成/校验 PRD·SDD·MODULE·PLAN·TASK·FORM·RELEASE 的 frontmatter + 正文骨架，已去 MCP 化，Agent 按步骤执行。</p></div>
+    <div class="card"><h5>✅ validate-doc</h5><p>通用文档校验，所有写入型 Skill 自动调用，保证产物结构合规。</p></div>
+  </div>
+
+  <!-- PIPELINES -->
+  <h3 class="anchor" id="pipelines">Pipeline 流水线模板</h3>
+  <p class="section-sub">Pipeline 是<strong>机器可执行的流程编排</strong>（JSON），由 <code>_index.yml</code> 登记、workspace mount 时由 <code>loadWorkspaceTemplates()</code> 动态读取。每个 <code>node.ref</code> 必须指向 active Skill。共 8 条 active pipeline：</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>触发命令</th><th>Pipeline</th><th>节点数</th><th>Owner</th><th>作用 / 目标产物</th><th>必跑</th></tr></thead>
+    <tbody>
+      <tr><td><code>/planning</code></td><td>product-planning</td><td>8</td><td class="pill brand">planning-agent</td><td>调研规划主流程 → <code>roadmap.md</code></td><td><span class="pill gray">可选</span></td></tr>
+      <tr><td><code>/insight-brief</code></td><td>market-to-plan</td><td>5</td><td class="pill brand">planning-agent</td><td>市场/用户洞察 → 规划条目</td><td><span class="pill gray">可选</span></td></tr>
+      <tr><td><code>/comp-radar</code></td><td>competitive-radar</td><td>5</td><td class="pill brand">comp-analyst</td><td>竞品动态 → 竞品报告 → 规划建议</td><td><span class="pill gray">可选</span></td></tr>
+      <tr><td><code>/requirement</code></td><td>requirement-authoring</td><td>6</td><td class="pill teal">req-writer</td><td>注册 CR + worktree → PRD → <code>requirement-approved</code></td><td><span class="pill green">必跑</span></td></tr>
+      <tr><td><code>/architecture</code></td><td>architecture-design</td><td>5</td><td class="pill green">dev-agent</td><td>已审批 PRD → SDD → <code>tech-design-reviewed</code></td><td><span class="pill green">必跑</span></td></tr>
+      <tr><td><code>/coding</code></td><td>code-implementation</td><td>12</td><td class="pill green">dev-agent</td><td>计划→任务→编码→测试报告→代码评审→<code>code-approved</code></td><td><span class="pill green">必跑</span></td></tr>
+      <tr><td><code>/writeback</code></td><td>feature-writeback</td><td>5</td><td class="pill gray">orchestrator</td><td>合并→回写 baseline→追溯链→<code>archived</code></td><td><span class="pill green">必跑</span></td></tr>
+      <tr><td><code>/resume</code></td><td>resume-cr</td><td>3</td><td class="pill gray">orchestrator</td><td>从远端 checkpoint 恢复在途 CR</td><td><span class="pill purple">按需</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <!-- MATRIX -->
+  <h3 class="anchor" id="matrix">权限矩阵：谁能调用什么</h3>
+  <p class="section-sub"><code>agent-skill-matrix.yml</code> 用四种关系约束调用边界。执行时先按 Pipeline owner 选入口，再按矩阵判断该入口能否调用某 Skill。</p>
+  <div class="tw"><table>
+    <thead><tr><th>关系</th><th>含义</th><th>执行规则</th></tr></thead>
+    <tbody>
+      <tr><td><span class="pill green">owns</span></td><td>主责维护与默认执行</td><td>每个 active Skill 有且仅有一个 owner；新增 Skill 必须先补矩阵</td></tr>
+      <tr><td><span class="pill brand">can-call</span></td><td>职责边界内可协作调用</td><td>不得绕过 Skill 自身前置条件、状态机和质量门</td></tr>
+      <tr><td><span class="pill amber">external</span></td><td>目标运行时提供的外部方法论 Skill</td><td>phase0 不打包同名 SKILL.md，只声明依赖（如 brainstorming、executing-plans）</td></tr>
+      <tr><td><span class="pill rose">forbidden</span></td><td>明确禁止调用</td><td>手工演练与系统编排都不得调用；改边界需先修矩阵</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note green"><b>示例</b>：<code>quality-reviewer-agent</code> 可 <code>can-call</code> 所有 <code>review-*</code> 质量门，但 <code>forbidden</code> 所有 <code>approve-*</code> 与 <code>cr-status-set</code> —— 它能审，但<strong>不能批、不能推进状态</strong>。<code>dev-agent</code> <code>forbidden</code> <code>writeback-prd-sdd</code> 与 <code>merge-feature-branch</code> —— 开发不碰回写与合并，这些归 <code>system-orchestrator</code>。</div>
+</section>
+
+<!-- ===== IDE ===== -->
+<section class="anchor" id="ide">
+  <h2><span class="num">§3</span>在 Cursor / Claude Code 中的使用</h2>
+  <p class="section-sub">这套 tools 面向 Claude Code / Codex / Cursor / Cline 等外部 coding runtime。下面给出可落地的配置与运行方式。</p>
+
+  <div class="note amber"><b>使用前提</b>（README 明确要求）：① workspace 已初始化，至少含 <code>AGENTS.md</code>、<code>dir-graph.yaml</code>、<code>change-requests/</code>、<code>specs/</code>、<code>delivery/</code>、<code>docs/</code>；② <code>dir-graph.yaml#repositories</code> 已声明知识库 repo、代码 repo、trunk 及 active 状态；③ 受控 shell 可用（git 走 <code>controlled-shell</code> 白名单）；④ CR 三角色 owner 明确；⑤ 需求/架构/开发启动/代码审批的人工审批人明确。</div>
+
+  <h3>安装与挂载</h3>
+  <p>把整个 tools 包挂载到目标 workspace 的 <code>tools/</code> 目录下。让 IDE 的 AI 入口指向 <code>AGENTS.md</code>：</p>
+  <pre><code><span class="c"># 目标 workspace 结构</span>
+your-workspace/
+├─ AGENTS.md              <span class="c"># workspace 级入口，可 include tools/AGENTS.md</span>
+├─ dir-graph.yaml         <span class="c"># 声明 repositories / trunk / active（关键！）</span>
+├─ change-requests/       <span class="c"># 在途 CR 工作台</span>
+├─ specs/                 <span class="c"># baseline PRD/SDD/traceability</span>
+├─ delivery/              <span class="c"># 交付任务</span>
+├─ docs/                  <span class="c"># 市场洞察/竞品/规划/反馈/想法</span>
+└─ tools/                 <span class="c"># ← 本 tools 包挂载于此</span>
+    ├─ AGENTS.md  dir-graph.yaml  agent-skill-matrix.yml  README.md
+    ├─ agents/  skills/  pipeline-templates/</code></pre>
+
+  <div class="grid c2">
+    <div class="card"><h5>🟦 Claude Code</h5>
+      <p><code>CLAUDE.MD</code> 已作为 Claude 专用转发入口存在。把 <code>skills/{domain}/{skill-id}/SKILL.md</code> 暴露为可调用 Skill、把 <code>pipeline-templates/*.json</code> 的 trigger 暴露为 slash command。会话启动即按 §0 的读取顺序加载四大入口。</p>
+      <span class="k">入口：CLAUDE.MD → AGENTS.md</span>
+    </div>
+    <div class="card"><h5>🟪 Cursor</h5>
+      <p>把 <code>AGENTS.md</code> 配为 project rules（<code>.cursor/rules</code> 或 Rules for AI）。用 Composer/Agent 模式时，在 prompt 首行引用触发命令与目标 CR-ID，让模型按 pipeline 节点顺序推进。</p>
+      <span class="k">入口：.cursor/rules → AGENTS.md</span>
+    </div>
+  </div>
+
+  <div class="note rose"><b>防飘移建议</b>：README 明确指出，单独在这些 IDE 里用容易飘移。务必做到：①每轮明确当前 CR-ID 与 status；②只通过封装 Skill 推进状态，绝不让模型「口头宣布通过」；③git 只走 <code>controlled-shell</code>；④配套一个知识库 + pipeline 执行约束层效果最佳。</div>
+
+  <!-- TRIGGER -->
+  <h3 class="anchor" id="trigger">触发命令映射</h3>
+  <p>八个 slash command 对应八条 pipeline，构成主交付链路的操作面：</p>
+  <pre><code><span class="c"># 规划期（可选，已有明确需求可跳过）</span>
+<span class="g">/planning</span>       topic="Q3 协作能力增强"     <span class="c"># 产品规划主流程</span>
+<span class="g">/insight-brief</span>  insight_source=&lt;访谈/NPS 素材&gt;  <span class="c"># 洞察转规划</span>
+<span class="g">/comp-radar</span>     competitor_slug=xxx since_days=7 <span class="c"># 竞品雷达</span>
+
+<span class="c"># 主交付链路（必跑）</span>
+<span class="g">/requirement</span>    title=... summary=... target_version=v2.3 \
+                 requirement_owner=... dev_owner=... test_owner=...
+<span class="g">/architecture</span>   cr_id=CR-0042      <span class="c"># 前置 status=requirement-approved</span>
+<span class="g">/coding</span>         cr_id=CR-0042      <span class="c"># 前置 status=tech-design-reviewed</span>
+<span class="g">/writeback</span>      cr_id=CR-0042 spec_id=... target_version=v2.3
+
+<span class="c"># 恢复（换机/协作接手）</span>
+<span class="g">/resume</span>         cr_id=CR-0042 new_owner_role=development</code></pre>
+
+  <!-- COLLAB -->
+  <h3 class="anchor" id="collab">代理协作与技能调用</h3>
+  <p>不同阶段自动切换到对应 primary Agent，subagent 在质量门处被调用协作：</p>
+  <figure>
+    <div class="cap"><span class="tag">Mermaid</span>Agent 协作与 Skill 调用时序</div>
+    <div class="body">
+      <div class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as 用户(IDE)
+  participant RW as requirement-writer
+  participant QR as quality-reviewer-agent
+  participant DV as dev-agent
+  participant SO as system-orchestrator
+  U->>RW: /requirement（含三角色 owner）
+  RW->>RW: requirement-register → write-requirement-prd
+  RW->>QR: review-requirement（质量门）
+  QR-->>RW: blocker? → 回 write-requirement-prd 自修复
+  QR-->>RW: pass + blockers=[]
+  U->>RW: human_approval
+  RW->>RW: approve-requirement → status=requirement-approved
+  U->>DV: /architecture cr_id
+  DV->>QR: review-tech-design
+  DV->>DV: approve-tech-design → /coding → implement-code
+  DV->>QR: write-test-report + review-code
+  U->>DV: approve-code → status=code-approved
+  U->>SO: /writeback
+  SO->>SO: merge → writeback-prd-sdd → traceability → cr-archive
+      </div>
+    </div>
+    <div class="desc">Agent 之间不是谁都能做所有事：需求 Agent 负责 PRD 与需求审批，开发 Agent 负责 SDD/任务/编码/代码审批，<code>quality-reviewer-agent</code> 只审不批，<code>system-orchestrator</code> 负责跨仓合并、回写、归档这类事务型动作。</div>
+  </figure>
+</section>
+
+<!-- ===== FLOW ===== -->
+<section class="anchor" id="flow">
+  <h2><span class="num">§4</span>从需求调研到交付：完整流程</h2>
+  <p class="section-sub">主链路：规划（可选）→ 需求 → 架构 → 编码 → 回写归档。规划前置流程可在「已有明确需求」时跳过，主交付链路四步必跑。</p>
+
+  <figure>
+    <div class="cap"><span class="tag">Mermaid</span>端到端产品开发全景流程</div>
+    <div class="body">
+      <div class="mermaid">
+flowchart TD
+  A["规划输入（可选）"]:::opt --> B["/planning 产品规划"]:::plan
+  A --> C["/insight-brief 洞察转规划"]:::plan
+  A --> D["/comp-radar 竞品雷达"]:::plan
+  B --> E["规划报告 / roadmap"]:::plan
+  C --> E
+  D --> E
+  E --> F["/requirement 需求编写"]:::req
+  F --> G(["status: requirement-approved"]):::st
+  G --> H["/architecture 架构设计"]:::dev
+  H --> I(["status: tech-design-reviewed"]):::st
+  I --> J["/coding 代码编写"]:::dev
+  J --> K(["status: code-approved"]):::st
+  K --> L["/writeback 回写归档"]:::wb
+  L --> M(["status: archived"]):::st
+  F -. 换机/协作接手 .-> R["/resume 恢复在途 CR"]:::sync
+  H -. 换机/协作接手 .-> R
+  J -. 换机/协作接手 .-> R
+  R --> F
+  R --> H
+  R --> J
+  R --> L
+  classDef opt fill:#f6f7f9,stroke:#6b7684,color:#3a424e;
+  classDef plan fill:#eaefff,stroke:#3b5bdb,color:#26408b;
+  classDef req fill:#e0f4f7,stroke:#0c8599,color:#0c8599;
+  classDef dev fill:#e5f4ec,stroke:#1c7a4a,color:#1c7a4a;
+  classDef wb fill:#efeafe,stroke:#6741d9,color:#6741d9;
+  classDef sync fill:#fff3dd,stroke:#b5730a,color:#b5730a;
+  classDef st fill:#14181f,stroke:#14181f,color:#fff;
+      </div>
+    </div>
+    <div class="desc">规划期全程在 main 分支，产物落 <code>docs/product-planning/</code>，不创建 CR、不动 <code>specs/</code>。主交付链路从 <code>/requirement</code> 起为一个 CR 分配目录、分支、worktree，直到 <code>/writeback</code> 归档。任意在途阶段都可用 <code>/resume</code> 恢复。</div>
+  </figure>
+
+  <!-- STATE -->
+  <h3 class="anchor" id="state">CR 状态机（13 态）</h3>
+  <p>状态推进<strong>必须</strong>由显式 Skill 完成，<code>human_approval</code> 只表示人工确认、不直接改状态。</p>
+  <figure>
+    <div class="cap"><span class="tag">Mermaid</span>CR 四阶段状态链路</div>
+    <div class="body">
+      <div class="mermaid">
+stateDiagram-v2
+  [*] --> drafting
+  drafting --> requirement_reviewing: review-requirement
+  requirement_reviewing --> requirement_approved: approve-requirement
+  requirement_approved --> tech_designing: write-tech-design
+  tech_designing --> tech_design_review_pending: write-tech-design complete
+  tech_design_review_pending --> tech_designing: review-tech-design ❌block
+  tech_design_review_pending --> tech_design_reviewed: approve-tech-design
+  tech_design_reviewed --> task_breakdown: write-dev-tasks
+  task_breakdown --> developing: approve-dev-start
+  developing --> developing: write-test-report/review-code ❌block
+  developing --> code_reviewing: review-code ✅pass
+  code_reviewing --> code_approved: approve-code
+  code_approved --> merging: merge-feature-branch
+  merging --> writing_back: writeback-prd-sdd
+  writing_back --> archived: cr-archive
+  archived --> [*]
+      </div>
+    </div>
+    <div class="desc"><b>关键细节：</b><code>tech-design-review-pending</code> 同时覆盖「SDD 已写完待自动 Review」和「自动 Review 已通过待人工审批」两种情形，因此恢复/看板/接续时必须读 <code>review-annotations/sdd.yml</code>：只有 <code>verdict=pass</code> 且 <code>blockers=[]</code> 时，下一步才是 <code>approve-tech-design</code>。终态还包括 <code>rejected</code> 与 <code>withdrawn</code>。</div>
+  </figure>
+
+  <!-- STAGES -->
+  <h3 class="anchor" id="stages">各阶段详解：Agent × Skill × 产物</h3>
+
+  <h4>阶段 0 · 产品规划（可选）</h4>
+  <p>适用版本规划、季度规划、方向梳理。8 节点：用户反馈分析 → 市场调研 → 竞品分析 → 当前产品分析 → 生成规划报告 → AI 评审 → 人工审批 → 形成路标。前四类调研节点可通过 <code>skip_*</code> 跳过。</p>
+  <div class="tw"><table>
+    <thead><tr><th>阶段</th><th>Pipeline</th><th>主 Agent</th><th>核心 Skill</th><th>产物</th></tr></thead>
+    <tbody>
+      <tr><td>产品规划</td><td>product-planning</td><td class="pill brand">planning-agent</td><td>analyze-current-product · write-planning-report · review-planning-report · write-roadmap</td><td><code>docs/product-planning/*.md</code> · <code>roadmap.md</code></td></tr>
+      <tr><td>洞察转规划</td><td>market-to-plan</td><td class="pill brand">planning-agent</td><td>extract-market-insight · write-insight-brief · planning-draft · write-planning-entry</td><td><code>docs/market-insights/</code> · 规划条目</td></tr>
+      <tr><td>竞品雷达</td><td>competitive-radar</td><td class="pill brand">comp-analyst</td><td>fetch-competitor-updates · write-competitive-report · report-to-planning-suggestion</td><td><code>docs/competitive/reports/</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h4>阶段 1 · 需求编写（必跑，主链路入口）</h4>
+  <p>6 节点：注册 CR + 派生 worktree → 撰写 PRD → 推送 checkpoint → 需求评审 → 人工审批 → <code>approve-requirement</code>。</p>
+  <div class="tw"><table>
+    <thead><tr><th>节点</th><th>Skill</th><th>产物 / 状态</th></tr></thead>
+    <tbody>
+      <tr><td>注册 CR + worktree</td><td><code>requirement-register</code></td><td><code>cr.md</code> · <code>_backlog.yml</code> · 三角色 owner · <code>execution_context</code></td></tr>
+      <tr><td>撰写 PRD</td><td><code>write-requirement-prd</code></td><td><code>change-requests/{CR-ID}/prd.md</code></td></tr>
+      <tr><td>推送 checkpoint</td><td><code>push-progress</code></td><td><code>origin/requirement/{CR-ID}</code>（<code>auto_push_after_prd=false</code> 可跳过）</td></tr>
+      <tr><td>需求评审（质量门）</td><td><code>review-requirement</code></td><td><code>review-annotations/requirement.yml</code> · status=<code>requirement-reviewing</code></td></tr>
+      <tr><td>记录审批并推进</td><td><code>approve-requirement</code></td><td><code>approval.yml#requirement</code> · status=<code>requirement-approved</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h4>阶段 2 · 架构设计（必跑）</h4>
+  <p>5 节点：编写 SDD → 架构评审 → 人工审批 → <code>approve-tech-design</code> → 推送 checkpoint。前置 status=<code>requirement-approved</code>。</p>
+  <div class="tw"><table>
+    <thead><tr><th>节点</th><th>Skill</th><th>产物 / 状态</th></tr></thead>
+    <tbody>
+      <tr><td>编写 SDD</td><td><code>write-tech-design</code></td><td><code>sdd.md</code> · status <code>tech-designing</code>→<code>tech-design-review-pending</code></td></tr>
+      <tr><td>架构评审（质量门）</td><td><code>review-tech-design</code></td><td><code>review-annotations/sdd.yml</code> · traceability</td></tr>
+      <tr><td>记录审批并推进</td><td><code>approve-tech-design</code></td><td><code>approval.yml#tech-design</code> · status=<code>tech-design-reviewed</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h4>阶段 3 · 代码编写（必跑，12 节点）</h4>
+  <p>开发计划 → 拆任务 → checkpoint → 确认进入开发 → <code>approve-dev-start</code> → 编码 → 测试报告 → checkpoint → 代码评审 → 人工审批 → <code>approve-code</code> → 推送审批结果。前置 status=<code>tech-design-reviewed</code>。</p>
+  <div class="tw"><table>
+    <thead><tr><th>节点</th><th>Skill</th><th>关键点</th></tr></thead>
+    <tbody>
+      <tr><td>拆分开发任务</td><td><code>write-dev-tasks</code></td><td><code>tasks/TASK-NN.md</code> · status=<code>task-breakdown</code></td></tr>
+      <tr><td>记录开发启动</td><td><code>approve-dev-start</code></td><td>status=<code>developing</code>，解锁编码</td></tr>
+      <tr><td>代码编写</td><td><code>implement-code</code></td><td>只写 CR worktree，调用外部 coding runtime</td></tr>
+      <tr><td>生成测试报告（证据门）</td><td><code>write-test-report</code></td><td><code>test-report.md</code> · <code>traceability.yml#tests</code></td></tr>
+      <tr><td>代码评审（质量门）</td><td><code>review-code</code></td><td>必须读真实 diff + 验证输出 + test-report</td></tr>
+      <tr><td>记录代码审批</td><td><code>approve-code</code></td><td>校验 tester 与 <code>owners.test.id</code> 对齐 · status=<code>code-approved</code></td></tr>
+    </tbody>
+  </table></div>
+  <div class="note rose"><b>代码质量门硬约束：</b>代码评审必须读取<strong>实际代码 diff、changed files、验证输出与 <code>test-report.md</code></strong>。仅有 diff stat、commit log 或口头测试结论<strong>不足以通过质量门</strong>。代码审批要求 <code>verdict=pass</code>、<code>blockers=[]</code> 且 <code>test-report.status=pass</code> 三者同时满足。</div>
+
+  <h4>阶段 4 · 回写归档（必跑）</h4>
+  <p>5 节点，由 <code>system-orchestrator</code> 编排：合并 CR 分支 → 回写 PRD/SDD → 回写 TASK → 回写追溯链 → 归档 CR。</p>
+  <div class="tw"><table>
+    <thead><tr><th>节点</th><th>Skill</th><th>产物 / 状态</th></tr></thead>
+    <tbody>
+      <tr><td>合并 CR 分支</td><td><code>merge-feature-branch</code></td><td>两阶段合并避免多仓半成功 · status=<code>merging</code></td></tr>
+      <tr><td>回写 PRD/SDD</td><td><code>writeback-prd-sdd</code></td><td><code>specs/{id}/PRD.md · SDD.md</code> · status=<code>writing-back</code></td></tr>
+      <tr><td>回写 TASK</td><td><code>writeback-tasks</code></td><td><code>delivery/task/TASK-*.md</code></td></tr>
+      <tr><td>回写追溯链</td><td><code>writeback-traceability</code></td><td><code>specs/{id}/traceability.yml</code></td></tr>
+      <tr><td>归档 CR</td><td><code>cr-archive</code></td><td><code>_history.yml</code> · 清理 worktree/远端分支 · status=<code>archived</code></td></tr>
+    </tbody>
+  </table></div>
+  <div class="note amber"><b>归档顺序不可乱：</b>禁止让 <code>writeback-traceability</code> 触发 <code>cr-archive</code>；归档顺序由 pipeline 编排。禁止手工清理 CR worktree 或远端分支 —— 成功归档后的清理由 <code>cr-archive</code> 负责。</div>
+
+  <!-- REPAIR -->
+  <h3 class="anchor" id="repair">自动审查 → 自修复闭环</h3>
+  <p class="section-sub">所有自动审查节点都必须先完成自修复闭环、完整通过 Review 后才可进入下一环节（含人工审核）。发现 blocker 时<strong>不丢给人工兜底</strong>，而是带着 <code>review_feedback</code> 回到对应修复节点，最多 3 轮。</p>
+  <figure>
+    <div class="cap"><span class="tag">Mermaid</span>质量门自修复闭环（以代码评审为例）</div>
+    <div class="body">
+      <div class="mermaid">
+flowchart LR
+  IMP["implement-code"]:::dev --> TR["write-test-report"]:::gate
+  TR -->|"❌ block"| IMP
+  TR -->|"✅ pass"| PP["push-progress"]:::sync
+  PP --> RC["review-code"]:::gate
+  RC -->|"❌ block: replayNodes"| IMP
+  RC -->|"✅ pass + test=pass"| HA["human_approval"]:::human
+  HA --> AC["approve-code"]:::st
+  classDef dev fill:#e5f4ec,stroke:#1c7a4a,color:#1c7a4a;
+  classDef gate fill:#fff3dd,stroke:#b5730a,color:#b5730a;
+  classDef sync fill:#e0f4f7,stroke:#0c8599,color:#0c8599;
+  classDef human fill:#efeafe,stroke:#6741d9,color:#6741d9;
+  classDef st fill:#14181f,color:#fff,stroke:#14181f;
+      </div>
+    </div>
+    <div class="desc">每次自动审查必须把轮次写入 <code>review-loop.current-attempt</code> 与 <code>review-loop.attempts[]</code>；CR 类闭环还必须同步写入 <code>traceability.yml</code>，防止 <code>/resume</code> 后自修复轮次重置。代码评审若 block，按 <code>replayNodes=[implement-code, write-test-report, push-progress, review-code]</code> 顺序重放。</div>
+  </figure>
+  <div class="tw"><table>
+    <thead><tr><th>小闭环</th><th>检查节点</th><th>修复节点</th><th>通过条件</th><th>上限</th></tr></thead>
+    <tbody>
+      <tr><td>规划报告</td><td><code>review-planning-report</code></td><td><code>write-planning-report</code></td><td>approved==true & blockers=[]</td><td>3 次</td></tr>
+      <tr><td>需求 PRD</td><td><code>review-requirement</code></td><td><code>write-requirement-prd</code></td><td>verdict==pass & blockers=[]</td><td>3 次</td></tr>
+      <tr><td>技术设计</td><td><code>review-tech-design</code></td><td><code>write-tech-design</code></td><td>verdict==pass & blockers=[]</td><td>3 次</td></tr>
+      <tr><td>测试证据</td><td><code>write-test-report</code></td><td><code>implement-code</code></td><td>status==pass & blockers=[]</td><td>3 次</td></tr>
+      <tr><td>代码评审</td><td><code>review-code</code></td><td><code>implement-code</code></td><td>verdict==pass & blockers=[] & test-report==pass</td><td>3 次</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note">达到 <code>maxAttempts=3</code> 仍未通过时，pipeline <strong>停在当前闭环</strong>，输出剩余 blocker、最后一次修复记录和建议处理人，<strong>不得把未清空的问题带入 <code>human_approval</code></strong>。</div>
+
+  <!-- DATAFLOW -->
+  <h3 class="anchor" id="dataflow">数据与事实源流转</h3>
+  <p class="section-sub">每个阶段的工作区产物在回写后转为 baseline/归档产物。这是「过程工作台 → 团队知识库」的物理落点映射。</p>
+  <figure>
+    <div class="cap"><span class="tag svg">SVG</span>工作区产物 → baseline 回写映射</div>
+    <div class="body">
+      <svg viewBox="0 0 900 360" width="100%" style="max-width:880px" font-family="var(--sans)" font-size="12">
+        <defs><marker id="ar2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#6741d9"/></marker></defs>
+        <text x="150" y="24" text-anchor="middle" font-weight="800" fill="#0c8599" font-size="14">CR 工作台（在途）</text>
+        <text x="150" y="42" text-anchor="middle" fill="#6b7684" font-size="11">change-requests/{CR-ID}/</text>
+        <text x="750" y="24" text-anchor="middle" font-weight="800" fill="#6741d9" font-size="14">Baseline / 归档（发布态）</text>
+        <text x="750" y="42" text-anchor="middle" fill="#6b7684" font-size="11">specs/ · delivery/ · _history</text>
+
+        <g>
+          <!-- rows -->
+          <g transform="translate(0,60)">
+            <rect x="20" y="0" width="260" height="34" rx="8" fill="#e0f4f7" stroke="#0c8599"/><text x="32" y="22" fill="#0c8599" font-weight="700">prd.md</text>
+            <rect x="620" y="0" width="260" height="34" rx="8" fill="#efeafe" stroke="#6741d9"/><text x="632" y="22" fill="#6741d9" font-weight="700">specs/{id}/PRD.md</text>
+            <line x1="280" y1="17" x2="618" y2="17" stroke="#6741d9" stroke-width="1.5" marker-end="url(#ar2)"/>
+            <text x="450" y="12" text-anchor="middle" fill="#6b7684" font-size="10">writeback-prd-sdd</text>
+          </g>
+          <g transform="translate(0,104)">
+            <rect x="20" y="0" width="260" height="34" rx="8" fill="#e0f4f7" stroke="#0c8599"/><text x="32" y="22" fill="#0c8599" font-weight="700">sdd.md</text>
+            <rect x="620" y="0" width="260" height="34" rx="8" fill="#efeafe" stroke="#6741d9"/><text x="632" y="22" fill="#6741d9" font-weight="700">specs/{id}/SDD.md</text>
+            <line x1="280" y1="17" x2="618" y2="17" stroke="#6741d9" stroke-width="1.5" marker-end="url(#ar2)"/>
+          </g>
+          <g transform="translate(0,148)">
+            <rect x="20" y="0" width="260" height="34" rx="8" fill="#e0f4f7" stroke="#0c8599"/><text x="32" y="22" fill="#0c8599" font-weight="700">plan.md（开发计划）</text>
+            <rect x="620" y="0" width="260" height="34" rx="8" fill="#f6f7f9" stroke="#6b7684"/><text x="632" y="22" fill="#6b7684" font-weight="700">不回写为 specs 设计文档</text>
+            <line x1="280" y1="17" x2="618" y2="17" stroke="#cbd0d6" stroke-width="1.5" stroke-dasharray="4" marker-end="url(#ar2)"/>
+          </g>
+          <g transform="translate(0,192)">
+            <rect x="20" y="0" width="260" height="34" rx="8" fill="#e0f4f7" stroke="#0c8599"/><text x="32" y="22" fill="#0c8599" font-weight="700">tasks/TASK-NN.md</text>
+            <rect x="620" y="0" width="260" height="34" rx="8" fill="#efeafe" stroke="#6741d9"/><text x="632" y="22" fill="#6741d9" font-weight="700">delivery/task/TASK-*.md</text>
+            <line x1="280" y1="17" x2="618" y2="17" stroke="#6741d9" stroke-width="1.5" marker-end="url(#ar2)"/>
+            <text x="450" y="12" text-anchor="middle" fill="#6b7684" font-size="10">writeback-tasks</text>
+          </g>
+          <g transform="translate(0,236)">
+            <rect x="20" y="0" width="260" height="34" rx="8" fill="#e0f4f7" stroke="#0c8599"/><text x="32" y="22" fill="#0c8599" font-weight="700">test-report.md</text>
+            <rect x="620" y="0" width="260" height="34" rx="8" fill="#efeafe" stroke="#6741d9"/><text x="632" y="22" fill="#6741d9" font-weight="700">traceability.yml#tests</text>
+            <line x1="280" y1="17" x2="618" y2="17" stroke="#6741d9" stroke-width="1.5" marker-end="url(#ar2)"/>
+          </g>
+          <g transform="translate(0,280)">
+            <rect x="20" y="0" width="260" height="34" rx="8" fill="#e0f4f7" stroke="#0c8599"/><text x="32" y="22" fill="#0c8599" font-weight="700">traceability.yml（CR）</text>
+            <rect x="620" y="0" width="260" height="34" rx="8" fill="#efeafe" stroke="#6741d9"/><text x="632" y="22" fill="#6741d9" font-weight="700">specs/{id}/traceability.yml</text>
+            <line x1="280" y1="17" x2="618" y2="17" stroke="#6741d9" stroke-width="1.5" marker-end="url(#ar2)"/>
+            <text x="450" y="12" text-anchor="middle" fill="#6b7684" font-size="10">writeback-traceability</text>
+          </g>
+        </g>
+      </svg>
+    </div>
+    <div class="desc">CR 归档后，<code>change-requests/{CR-ID}/</code> 保留为历史痕迹，条目从 <code>_backlog.yml</code> 移至 <code>_history.yml</code>。<b>开发计划 plan.md 不回写为 specs 设计文档</b> —— 它是过程产物而非发布态设计。</div>
+  </figure>
+</section>
+
+<!-- ===== BEST ===== -->
+<section class="anchor" id="best">
+  <h2><span class="num">§5</span>最佳实践路径推荐</h2>
+
+  <h3>推荐工作流</h3>
+  <div class="grid c2">
+    <div class="card"><h5><span class="dot" style="background:var(--brand)"></span>已有明确需求（最常见）</h5>
+      <p>跳过规划期，直接进主链路：</p>
+      <p style="margin-top:8px"><span class="kbd">/requirement</span> → <span class="kbd">/architecture</span> → <span class="kbd">/coding</span> → <span class="kbd">/writeback</span></p>
+      <span class="k">source 可为空或指向手工输入</span>
+    </div>
+    <div class="card"><h5><span class="dot" style="background:var(--purple)"></span>从方向探索开始</h5>
+      <p>先跑规划得到 roadmap，再选条目进主链路：</p>
+      <p style="margin-top:8px"><span class="kbd">/planning</span> 或 <span class="kbd">/comp-radar</span> → roadmap → <span class="kbd">/requirement</span> → …</p>
+      <span class="k">规划产物落 docs/，不创建 CR</span>
+    </div>
+    <div class="card"><h5><span class="dot" style="background:var(--amber)"></span>换机 / 协作接手</h5>
+      <p>任意在途阶段可恢复：</p>
+      <p style="margin-top:8px"><span class="kbd">/resume cr_id=... new_owner_role=...</span></p>
+      <span class="k">核对 checkpoint → 恢复 worktree → 展示状态与下一步</span>
+    </div>
+    <div class="card"><h5><span class="dot" style="background:var(--green)"></span>随手记录</h5>
+      <p>无 gate 的轻量落盘：</p>
+      <p style="margin-top:8px"><code>record-idea</code>（想法）· <code>record-adr</code>（架构决策）</p>
+      <span class="k">原文落盘不扩写，随时可用</span>
+    </div>
+  </div>
+
+  <!-- CONFIG -->
+  <h3 class="anchor" id="config">关键配置文件</h3>
+  <div class="tw"><table>
+    <thead><tr><th>文件</th><th>作用</th><th>什么时候改</th></tr></thead>
+    <tbody>
+      <tr><td><code>目标 workspace/dir-graph.yaml</code></td><td>声明 <code>repositories</code>（知识库 repo、代码 repo、trunk、active 状态）—— 所有分支/worktree/合并的解析源</td><td>初始化 workspace、增删仓库时</td></tr>
+      <tr><td><code>change-requests/{CR-ID}/cr.md</code></td><td>CR frontmatter：三角色 owner、assigned-at、status（权威）</td><td>由 Skill 写入，<b>不手工编辑</b></td></tr>
+      <tr><td><code>agent-skill-matrix.yml</code></td><td>Agent/Skill 的 owns/can-call/external/forbidden 边界</td><td>新增 Skill/Agent 前先补此矩阵</td></tr>
+      <tr><td><code>*/_index.yml</code></td><td>agents / skills / pipeline-templates 的 active 台账</td><td>新增能力时同步登记</td></tr>
+      <tr><td><code>pipeline-templates/*.pipeline.json</code></td><td>节点编排；<code>node.ref</code> 必须指向 active Skill，声明 <code>reviewLoop</code></td><td>调整流程节点时，同步 _index 的 nodes 数</td></tr>
+    </tbody>
+  </table></div>
+  <pre><code><span class="c"># 自检：修改后在 tools 目录验证所有 pipeline JSON 可解析</span>
+node -e <span class="s">"const fs=require('fs'); for (const f of fs.readdirSync('pipeline-templates')</span>
+<span class="s">.filter(f=&gt;f.endsWith('.json'))) JSON.parse(fs.readFileSync('pipeline-templates/'+f,'utf8'));</span>
+<span class="s">console.log('json ok')"</span></code></pre>
+
+  <!-- SCENARIOS -->
+  <h3 class="anchor" id="scenarios">常见场景最佳操作模式</h3>
+  <div class="tw"><table>
+    <thead><tr><th>场景</th><th>推荐操作</th></tr></thead>
+    <tbody>
+      <tr><td>评审反复不过</td><td>让自修复闭环自动带 <code>review_feedback</code> 修复（≤3 轮）；达上限则读输出的剩余 blocker + 建议处理人，人工介入</td></tr>
+      <tr><td>多仓协同变更</td><td>依赖 <code>dir-graph.yaml#repositories</code> 的 active 仓解析；合并走 <code>merge-feature-branch</code> 两阶段合并，避免多仓半成功</td></tr>
+      <tr><td>竞品转规划失败</td><td><code>report-to-planning-suggestion</code> 失败可跳过，只保留竞品报告，人工只审报告</td></tr>
+      <tr><td>PRD 需临时保存</td><td>用 <code>push-progress</code> 推 checkpoint 到 <code>origin/requirement/{CR-ID}</code>，换机可 <code>/resume</code> 恢复</td></tr>
+      <tr><td>只想查基线状态</td><td>用 <code>spec-agent</code> 的 <code>spec-show</code>/<code>spec-query</code>/<code>spec-dashboard</code>（只读，不动状态）</td></tr>
+      <tr><td>查在途 CR</td><td>用 <code>cr-query</code>/<code>cr-show</code>/<code>cr-dashboard</code>/<code>cr-inbox</code>（按角色看待办）</td></tr>
+    </tbody>
+  </table></div>
+
+  <!-- DONT -->
+  <h3 class="anchor" id="dont">禁止事项清单（红线）</h3>
+  <div class="grid c2">
+    <div class="card" style="border-color:var(--rose)"><h5 style="color:var(--rose)">状态与推进</h5>
+      <p>✗ 通过 prompt 文案隐式推进状态<br>✗ 手工编辑 <code>_backlog.yml</code><br>✗ 跳过 <code>review-*</code> 与 <code>approve-*</code> 直推后续阶段<br>✗ blocker 未清空就进 <code>human_approval</code></p></div>
+    <div class="card" style="border-color:var(--rose)"><h5 style="color:var(--rose)">写入与回写</h5>
+      <p>✗ 直接写 <code>specs/{id}/PRD.md·SDD.md</code>（只能 <code>writeback-prd-sdd</code>）<br>✗ 把 plan.md 写进 specs baseline<br>✗ 让 <code>writeback-traceability</code> 触发 <code>cr-archive</code></p></div>
+    <div class="card" style="border-color:var(--rose)"><h5 style="color:var(--rose)">权限与调用</h5>
+      <p>✗ 调用未登记/inactive 的 Skill<br>✗ 调用当前 Actor 未 owns/can-call 的 Skill<br>✗ 调用 forbidden 列表中的 Skill</p></div>
+    <div class="card" style="border-color:var(--rose)"><h5 style="color:var(--rose)">代码与 shell</h5>
+      <p>✗ 在主工作区代码目录直接编码（只写 CR worktree）<br>✗ 让 Agent 在终端自由执行 git（必走 <code>controlled-shell</code>）<br>✗ 写死本机/固定仓库名路径</p></div>
+  </div>
+</section>
+
+<div class="foot">
+  <p><strong>AI First 研发协同平台 · phase0 Tools 包</strong> —— 本文档基于仓库权威事实源（<code>AGENTS.md</code>、<code>dir-graph.yaml</code>、<code>agent-skill-matrix.yml</code>、<code>README.md</code> 及各 <code>_index.yml</code>）生成。</p>
+  <p>核心价值：让 AI 参与一条<strong>可追踪、可恢复、可审计</strong>的研发链路，把过程中的每一步都变成结构化事实，让团队协作从「人脑记上下文」转为「CR 维护上下文」。</p>
+</div>
+
+</main>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad:true,
+    theme:'base',
+    themeVariables:{
+      fontFamily:'-apple-system,BlinkMacSystemFont,Segoe UI,PingFang SC,Microsoft YaHei,sans-serif',
+      primaryColor:'#eaefff', primaryTextColor:'#14181f', primaryBorderColor:'#3b5bdb',
+      lineColor:'#8b95a5', fontSize:'14px'
+    },
+    flowchart:{curve:'basis', useMaxWidth:true},
+    sequence:{useMaxWidth:true, actorMargin:60}
+  });
+</script>
+</body>
+</html>
+

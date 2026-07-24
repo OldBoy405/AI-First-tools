@@ -510,7 +510,7 @@ flowchart TD
 | 节点 | 输入是什么 | 作用是什么 | 产出是什么 | 可跳过 |
 |------|------------|------------|------------|--------|
 | 核对远端 checkpoint | `cr_id`、active repos、远端 requirement 分支 | 确认远端分支存在，并与 backlog checkpoint 比对 | 各 repo checkpoint SHA、告警信息 | 否 |
-| 恢复 worktree | `cr_id`、repo map、`new_owner`、`new_owner_role` | 从远端恢复本地 CR worktree，必要时更新指定角色 owner 与 assigned-at | `.xinyiai-worktrees/{bucket}/requirement/{CR-ID}` | 否 |
+| 恢复 worktree | `cr_id`、repo map、`new_owner`、`new_owner_role` | 从远端恢复本地 CR worktree，必要时更新指定角色 owner 与 assigned-at | `.rayai-worktrees/{bucket}/requirement/{CR-ID}` | 否 |
 | 展示当前状态 | `change-requests/{CR-ID}/`、`_backlog.yml`、`review-annotations/*.yml`、`test-report.md`、`traceability.yml` | 汇总 CR 元数据、已有产物、自修复轮次，并按 status + 评审/测试证据给出下一步 skill/pipeline | CR 状态摘要、明确下一步节点 | 否 |
 
 ## 质量门

@@ -2,13 +2,13 @@
 
 本目录存放可复用的 AI First 研发协同平台 Pipeline 模板，是默认模板的**权威来源**。
 
-`.xinyiai/pipelines/` 存放当前 workspace 已激活的 Pipeline 实例。模板在 workspace mount
-时通过 `seedAndSyncDefaults()` 首次复制到 `.xinyiai/pipelines/`；已存在的实例不会被覆盖，
+`.rayai/pipelines/` 存放当前 workspace 已激活的 Pipeline 实例。模板在 workspace mount
+时通过 `seedAndSyncDefaults()` 首次复制到 `.rayai/pipelines/`；已存在的实例不会被覆盖，
 后续模板更新需要用户显式重新导入或同步。
 
 ## 工作机制
 
-`tools/` 目录以独立形式部署到用户的 workspace 根目录下。当 workspace mount 时，平台运行时通过 `loadWorkspaceTemplates()` 读取本目录的 `_index.yml`，动态加载所有 `status: active` 的模板，并通过 `seedAndSyncDefaults()` 种子到 `.xinyiai/pipelines/`（已存在的激活实例不会被覆盖）。
+`tools/` 目录以独立形式部署到用户的 workspace 根目录下。当 workspace mount 时，平台运行时通过 `loadWorkspaceTemplates()` 读取本目录的 `_index.yml`，动态加载所有 `status: active` 的模板，并通过 `seedAndSyncDefaults()` 种子到 `.rayai/pipelines/`（已存在的激活实例不会被覆盖）。
 
 无需手动同步任何代码文件——修改或新增模板后，重新 mount workspace 即可生效。
 

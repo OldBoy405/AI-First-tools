@@ -28,7 +28,7 @@ references:
 读取工作区目录图，查找优先级：
 
 1. `<workspace-root>/dir-graph.yaml`
-2. `<workspace-root>/.xinyiai/dir-graph.yaml`
+2. `<workspace-root>/.rayai/dir-graph.yaml`
 
 在文件中按文档类型（`type` 字段）匹配对应的目录路径。
 

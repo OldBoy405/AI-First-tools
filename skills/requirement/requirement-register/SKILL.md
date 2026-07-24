@@ -128,7 +128,7 @@ const bucket = repo.role === "knowledge-base" ? "knowledge-base" : repo.id;
 await runGit({ subcommand: "fetch", args: ["origin"], cwd: repo.path });
 await runGit({ subcommand: "worktree",
   args: ["add", "-b", `requirement/${crId}`,
-         `${workspaceRoot}/.xinyiai-worktrees/${bucket}/requirement/${crId}`,
+         `${workspaceRoot}/.rayai-worktrees/${bucket}/requirement/${crId}`,
          repo.trunk],
   cwd: repo.path });
 ```
@@ -145,20 +145,20 @@ await runGit({ subcommand: "worktree",
    开发负责人  : {dev_owner} @ {timestamp}
    测试负责人  : {test_owner} @ {timestamp}
    注册提交    : knowledge-base trunk 已包含 cr.md / _backlog.yml
-   Worktree    : [{repo.id}: .xinyiai-worktrees/{bucket}/requirement/{CR-ID}, ...]
+   Worktree    : [{repo.id}: .rayai-worktrees/{bucket}/requirement/{CR-ID}, ...]
    cr.md       : change-requests/{CR-ID}/cr.md
-   下一步      : 在 .xinyiai-worktrees/knowledge-base/requirement/{CR-ID} 中执行 write-requirement-prd
+   下一步      : 在 .rayai-worktrees/knowledge-base/requirement/{CR-ID} 中执行 write-requirement-prd
 ```
 
 ```yaml
 execution_context:
   cr_id: {CR-ID}
   branch: requirement/{CR-ID}
-  knowledge_base_worktree: {workspaceRoot}/.xinyiai-worktrees/knowledge-base/requirement/{CR-ID}
+  knowledge_base_worktree: {workspaceRoot}/.rayai-worktrees/knowledge-base/requirement/{CR-ID}
   repo_worktrees:
     - repo: knowledge-base
       role: knowledge-base
-      path: {workspaceRoot}/.xinyiai-worktrees/knowledge-base/requirement/{CR-ID}
+      path: {workspaceRoot}/.rayai-worktrees/knowledge-base/requirement/{CR-ID}
 ```
 
 ---

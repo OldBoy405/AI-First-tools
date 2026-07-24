@@ -30,8 +30,8 @@ description: 在同一 CR workspace 内按 prd/sdd/tasks 执行代码编写，�
 ## CR Workspace Contract
 
 1. 先读取 `dir-graph.yaml#repositories`，解析 active repo，不得硬编码某个固定平台目录或 `code`。
-2. 文档根固定来自 knowledge-base CR worktree：`.xinyiai-worktrees/knowledge-base/requirement/{cr_id}`。
-3. 独立 git 代码仓写入 `.xinyiai-worktrees/{repo.id}/requirement/{cr_id}`。
+2. 文档根固定来自 knowledge-base CR worktree：`.rayai-worktrees/knowledge-base/requirement/{cr_id}`。
+3. 独立 git 代码仓写入 `.rayai-worktrees/{repo.id}/requirement/{cr_id}`。
 4. 非独立代码目录写入 knowledge-base CR worktree 内对应路径。
 5. 主工作区 `change-requests/`、平台运行时代码目录、主工作区 `code/` 不参与开发期读写。
 
