@@ -1,0 +1,26 @@
+name: check-skill-matrix
+
+on:
+  push:
+    paths:
+      - 'skills/_index.yml'
+      - 'agent-skill-matrix.yml'
+      - 'AGENT-SKILL-MATRIX.md'
+  pull_request:
+    paths:
+      - 'skills/_index.yml'
+      - 'agent-skill-matrix.yml'
+      - 'AGENT-SKILL-MATRIX.md'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Verify skill matrix consistency
+        run: node skills/shared/crctl/scripts/check-skill-matrix.mjs

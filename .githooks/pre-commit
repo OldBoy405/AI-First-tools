@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Skill 矩阵一致性校验（架构评审 §5.2）。
+# 安装（一次性）：git config core.hooksPath .githooks
+node "$(git rev-parse --show-toplevel)/skills/shared/crctl/scripts/check-skill-matrix.mjs" || exit 1
