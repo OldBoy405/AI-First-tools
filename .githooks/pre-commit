@@ -1,4 +1,5 @@
 #!/usr/bin/env sh
-# Skill 矩阵一致性校验（架构评审 §5.2）。
+# Skill 矩阵一致性校验（架构评审 §5.2）+ agents.contract 四不变式（CR-2026-001 TASK-05）。
 # 安装（一次性）：git config core.hooksPath .githooks
 node "$(git rev-parse --show-toplevel)/skills/shared/crctl/scripts/check-skill-matrix.mjs" || exit 1
+node "$(git rev-parse --show-toplevel)/skills/shared/crctl/scripts/check-agents-contract.mjs" || exit 1

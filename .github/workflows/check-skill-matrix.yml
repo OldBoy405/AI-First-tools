@@ -6,11 +6,13 @@ on:
       - 'skills/_index.yml'
       - 'agent-skill-matrix.yml'
       - 'AGENT-SKILL-MATRIX.md'
+      - 'agents/**'
   pull_request:
     paths:
       - 'skills/_index.yml'
       - 'agent-skill-matrix.yml'
       - 'AGENT-SKILL-MATRIX.md'
+      - 'agents/**'
 
 jobs:
   check:
@@ -24,3 +26,6 @@ jobs:
 
       - name: Verify skill matrix consistency
         run: node skills/shared/crctl/scripts/check-skill-matrix.mjs
+
+      - name: Verify agents.contract invariants
+        run: node skills/shared/crctl/scripts/check-agents-contract.mjs
