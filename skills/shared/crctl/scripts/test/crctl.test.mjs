@@ -18,7 +18,8 @@ import crypto from 'node:crypto';
 const CRCTL = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
 
 function sha16(text) {
-  return crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16);
+  // 与 crctl.mjs 的 evidenceSha16 同口径：行尾规范化后哈希（防 autocrlf 误报）
+  return crypto.createHash('sha256').update(text.replaceAll('\r\n', '\n'), 'utf8').digest('hex').slice(0, 16);
 }
 
 function runCrctl(args) {
@@ -135,6 +136,26 @@ test('gate：审批后证据文件被改动 -> approval 段报 EVIDENCE_DRIFT（
     assert.equal(approvalCheck.code, 'EVIDENCE_DRIFT');
     assert.match(approvalCheck.why, /EVIDENCE_DRIFT/);
     assert.equal(r.status, 1, 'gate 命令在任一 check 不通过时应以非零退出');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('gate：证据文件仅行尾从 LF 变为 CRLF（autocrlf 检出）-> 不误报 EVIDENCE_DRIFT（CR-2026-001 回写期实测回归）', () => {
+  const ws = makeWorkspace();
+  const cr = 'CR-TEST-1';
+  try {
+    const lfText = 'verdict: pass\nblockers: []\n';
+    // 审批时证据是 LF（worktree 内），记录的哈希按 LF 计算
+    writeApprovalYml(ws, cr, 'requirement', {
+      approver: 'alice', 'approved-at': '2026-07-28T10:00:00+08:00', via: 'crctl-approve',
+      'evidence-sha256-16': sha16(lfText), 'target-status': 'requirement-approved',
+    });
+    // 合并后 Windows autocrlf 把同一内容检出为 CRLF —— 内容未被篡改
+    writeEvidence(ws, cr, 'review-annotations/requirement.yml', lfText.replaceAll('\n', '\r\n'));
+
+    const r = runCrctl(['gate', cr, '--for', 'requirement-approved', '--workspace', ws]);
+    const approvalCheck = r.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(approvalCheck.ok, true, `行尾差异不是篡改，不应报 EVIDENCE_DRIFT（why=${approvalCheck.why}）`);
+    assert.equal(approvalCheck.code, undefined);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 

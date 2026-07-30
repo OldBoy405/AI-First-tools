@@ -53,6 +53,14 @@ function sha256(text) {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
+// 证据摘要专用：行尾规范化后再哈希。同一份证据在 LF 的 worktree 里审批、
+// 合并后被 Windows autocrlf 检出为 CRLF，字节级哈希会产生 EVIDENCE_DRIFT
+// 误报（CR-2026-001 回写期实测触发）。证据漂移关心的是内容篡改，不是
+// 行尾差异。写入（approve）与复核（gate/status）必须走同一个函数。
+function evidenceSha16(text) {
+  return sha256(text.replaceAll('\r\n', '\n')).slice(0, 16);
+}
+
 /* ────────────────────────── YAML 子集解析器 ──────────────────────────
  * 支持：块映射、块序列、flow 映射 {k: v}、flow 序列 [a, b]、引号字符串、
  * 注释、多行块标量 | 与 >（保守处理为拼接文本）。
@@ -456,7 +464,7 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
       if (okv && section['evidence-sha256-16']) {
         const stageCfg = Object.values(gates.approvalStages || {}).find((s) => s.approvalSection === check.section);
         const evDoc = stageCfg?.evidence?.$default ? readEvidenceDoc(ws, cr, stageCfg.evidence.$default) : { exists: false };
-        const currentHash = evDoc.exists ? sha256(fs.readFileSync(evDoc.path, 'utf8')).slice(0, 16) : null;
+        const currentHash = evDoc.exists ? evidenceSha16(fs.readFileSync(evDoc.path, 'utf8')) : null;
         if (currentHash && currentHash !== section['evidence-sha256-16']) {
           drift = 'EVIDENCE_DRIFT';
           why = `EVIDENCE_DRIFT：approval.yml#${check.section} 记录的证据哈希 ${section['evidence-sha256-16']} 与 ${evDoc.path} 当前哈希 ${currentHash} 不一致，证据在审批后被改动`;
@@ -681,7 +689,7 @@ function cmdApprove(ws, cr, gates, flags) {
       fail('GATE_BLOCKED', '自动评审证据未达标，禁止进入人工审批（blocker 未清空不得 human_approval）');
     }
     const defaultDoc = readEvidenceDoc(ws, cr, stageCfg.evidence.$default);
-    evidenceHash = defaultDoc.exists ? sha256(fs.readFileSync(defaultDoc.path, 'utf8')).slice(0, 16) : null;
+    evidenceHash = defaultDoc.exists ? evidenceSha16(fs.readFileSync(defaultDoc.path, 'utf8')) : null;
   }
   if (stageCfg.requireFiles) {
     for (const rel of stageCfg.requireFiles) {
