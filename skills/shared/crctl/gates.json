@@ -1,0 +1,101 @@
+{
+  "$comment": "crctl 声明式门禁映射（漂移治理 v2 §5.2）。本文件只声明『证据文件在哪里、哪个 pipeline 节点的 passCondition 适用、审批段名』这类运行时适配信息；passCondition 条件本身与状态机转换始终从 pipeline JSON 与 dir-graph.yaml 运行时解析，本文件不复刻规则副本。",
+
+  "approvalStages": {
+    "requirement": {
+      "to": "requirement-approved",
+      "trigger": "approve-requirement",
+      "expect": ["requirement-reviewing"],
+      "approvalSection": "requirement",
+      "evidence": { "$default": "change-requests/{cr}/review-annotations/requirement.yml" },
+      "passCondition": { "pipeline": "requirement-authoring", "nodeRef": "review-requirement" }
+    },
+    "tech-design": {
+      "to": "tech-design-reviewed",
+      "trigger": "approve-tech-design",
+      "expect": ["tech-design-review-pending"],
+      "approvalSection": "tech-design",
+      "evidence": { "$default": "change-requests/{cr}/review-annotations/sdd.yml" },
+      "passCondition": { "pipeline": "architecture-design", "nodeRef": "review-tech-design" }
+    },
+    "dev-start": {
+      "to": "developing",
+      "trigger": "approve-dev-start",
+      "expect": ["task-breakdown"],
+      "approvalSection": "development-start",
+      "requireFiles": [
+        "change-requests/{cr}/plan.md",
+        "change-requests/{cr}/tasks/_index.yml"
+      ]
+    },
+    "code": {
+      "to": "code-approved",
+      "trigger": "approve-code",
+      "expect": ["code-reviewing"],
+      "approvalSection": "code",
+      "evidence": {
+        "$default": "change-requests/{cr}/review-annotations/code.yml",
+        "test-report": "change-requests/{cr}/test-report.md"
+      },
+      "passCondition": { "pipeline": "code-implementation", "nodeRef": "review-code" }
+    }
+  },
+
+  "statusGates": {
+    "requirement-reviewing": [
+      { "type": "fileExists", "path": "change-requests/{cr}/prd.md" },
+      { "type": "passCondition", "stage": "requirement" }
+    ],
+    "requirement-approved": [
+      { "type": "passCondition", "stage": "requirement" },
+      { "type": "approval", "section": "requirement" }
+    ],
+    "tech-designing": [
+      { "type": "approval", "section": "requirement" }
+    ],
+    "tech-design-review-pending": [
+      { "type": "fileExists", "path": "change-requests/{cr}/sdd.md" }
+    ],
+    "tech-design-reviewed": [
+      { "type": "passCondition", "stage": "tech-design" },
+      { "type": "approval", "section": "tech-design" }
+    ],
+    "task-breakdown": [
+      { "type": "fileExists", "path": "change-requests/{cr}/plan.md" },
+      { "type": "globNonEmpty", "dir": "change-requests/{cr}/tasks", "pattern": "^TASK-\\d+.*\\.md$" }
+    ],
+    "developing": [
+      { "type": "approval", "section": "development-start" }
+    ],
+    "code-reviewing": [
+      { "type": "passCondition", "stage": "code" },
+      { "type": "attemptsWithinLimit", "loop": "review-code" }
+    ],
+    "code-approved": [
+      { "type": "passCondition", "stage": "code" },
+      { "type": "approval", "section": "code" }
+    ],
+    "merging": [
+      { "type": "approval", "section": "code" }
+    ],
+    "writing-back": [
+      { "type": "fileExists", "path": "specs/{spec}/PRD.md" },
+      { "type": "fileExists", "path": "specs/{spec}/SDD.md" }
+    ],
+    "archived": [
+      { "type": "fileExists", "path": "change-requests/{cr}/traceability.yml" },
+      { "type": "fileExists", "path": "specs/{spec}/PRD.md" },
+      { "type": "fileExists", "path": "specs/{spec}/SDD.md" },
+      { "type": "fileExists", "path": "specs/{spec}/traceability.yml" },
+      { "type": "fileExists", "path": "delivery/task" }
+    ]
+  },
+
+  "reviewLoops": {
+    "review-requirement": { "pipeline": "requirement-authoring" },
+    "review-tech-design": { "pipeline": "architecture-design" },
+    "write-test-report": { "pipeline": "code-implementation" },
+    "review-code": { "pipeline": "code-implementation" },
+    "review-planning-report": { "pipeline": "product-planning" }
+  }
+}

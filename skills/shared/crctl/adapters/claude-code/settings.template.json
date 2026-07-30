@@ -1,0 +1,45 @@
+{
+  "$comment": "漂移治理 v2 组件 B — Claude Code hooks 模板。把 hooks 段合并进目标 workspace 的 .claude/settings.json（团队共享）或 settings.local.json（个人）。$CLAUDE_PROJECT_DIR 假设 tools 包安装在 workspace 的 tools/ 下，路径不同请同步调整。",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/tools/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs\""
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/tools/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/tools/skills/shared/crctl/adapters/claude-code/hooks/inject-cr-status.mjs\""
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/tools/skills/shared/crctl/adapters/claude-code/hooks/inject-cr-status.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}
