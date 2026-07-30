@@ -1,4 +1,5 @@
 ---
+name: product-planning-agent
 description: 交互式产品规划 Agent，聚合 workspace 全量产品知识，给出规划建议并生成符合 DESIGN-DOC 规范的产品规划文档草稿。
 mode: primary
 permission:

@@ -1,4 +1,5 @@
 ---
+name: competitive-analyst-agent
 description: 竞品分析 Agent，抓取竞品官网与互联网最新动态，结合 workspace 产品规划生成分析报告，并可一键转换为产品规划建议草稿。
 mode: primary
 permission:
