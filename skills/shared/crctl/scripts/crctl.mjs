@@ -390,7 +390,8 @@ function emitOutboxEvent(ws, ev) {
       occurred_at: nowIso(),
     };
     const ts = new Date().toISOString().replace(/[-:.]/g, '');
-    const name = `${ts}-${event.cr_id}-${event.event_kind}-${(event.commit_sha || 'nosha').slice(0, 8)}.json`;
+    const name = ev.dedup_name || `${ts}-${event.cr_id}-${event.event_kind}-${(event.commit_sha || 'nosha').slice(0, 8)}.json`;
+    if (ev.dedup_name && fs.existsSync(path.join(dir, name))) return name; // 同一事实待采集期间只留一份
     const tmp = path.join(dir, `.tmp-${process.pid}-${name}`);
     fs.writeFileSync(tmp, JSON.stringify(event, null, 2) + '\n', 'utf8');
     fs.renameSync(tmp, path.join(dir, name)); // 原子可见：先写临时名再 rename，防半写
@@ -399,6 +400,23 @@ function emitOutboxEvent(ws, ev) {
     try { auditLog(ws, { kind: 'outbox', result: 'EMIT_FAILED', why: String(e && e.message || e) }); } catch { /* 双重失败只能放弃 */ }
     return null;
   }
+}
+
+/* EVIDENCE_DRIFT 留证（TASK-10，P1 §B.4）：gate/validate 每次检出漂移都发一条 audit
+ * 事件（daemon 采集 → 服务端 activity_log）。payload 只有摘要与阶段名，不含证据内容。
+ * 文件名确定性（cr+stage+两侧摘要前 8 位）：同一份漂移在被采集走之前只留一份；
+ * 采集后若漂移仍在，下一次 gate/validate 观测会再留一条——按观测窗口计数，符合审计语义。 */
+function emitDriftAudit(ws, cr, stage, expected, actual) {
+  const id8 = (s) => String(s || 'none').replace(/[^A-Za-z0-9]/g, '').slice(0, 8);
+  return emitOutboxEvent(ws, {
+    event_kind: 'audit', cr_id: cr, trigger: 'evidence-drift',
+    payload: {
+      action: 'aifirst.evidence_drift', stage: stage || '',
+      expected_digest: String(expected || ''), actual_digest: String(actual || ''),
+      detected_at: nowIso(),
+    },
+    dedup_name: `audit-drift-${cr}-${id8(stage)}-${id8(expected)}${id8(actual)}.json`,
+  });
 }
 
 function gitHeadSha(ws, cwd) {
@@ -555,6 +573,7 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
         if (currentDigest && currentDigest !== section['evidence-digest']) {
           drift = 'EVIDENCE_DRIFT';
           why = `EVIDENCE_DRIFT：approval.yml#${check.section} 记录的证据摘要 ${section['evidence-digest'].slice(0, 16)}… 与当前重算 ${currentDigest.slice(0, 16)}… 不一致，证据在审批后被改动`;
+          emitDriftAudit(ws, cr, stageKey || check.section, section['evidence-digest'], currentDigest);
         }
       } else if (okv && section['evidence-sha256-16']) {
         // 废弃字段兼容：历史审批（M0 口径）继续按单文件短哈希复核，不报错不阻塞（AC-7②）
@@ -563,6 +582,7 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
         if (currentHash && currentHash !== section['evidence-sha256-16']) {
           drift = 'EVIDENCE_DRIFT';
           why = `EVIDENCE_DRIFT：approval.yml#${check.section} 记录的证据哈希 ${section['evidence-sha256-16']} 与 ${evDoc.path} 当前哈希 ${currentHash} 不一致，证据在审批后被改动`;
+          emitDriftAudit(ws, cr, stageKey || check.section, section['evidence-sha256-16'], currentHash);
         }
       }
       if (okv && !drift && section.via === 'server-approve') {
@@ -988,7 +1008,10 @@ function cmdValidate(ws, target, gates) {
       const stageEntry = Object.entries(gates.approvalStages || {}).find(([, s]) => s.approvalSection === k);
       if (crFromPath && stageEntry && v['evidence-digest']) {
         const current = canonicalEvidenceDigest(ws, crFromPath, stageEntry[1]);
-        pushIf(current && current !== v['evidence-digest'], `approval.yml#${k}: EVIDENCE_DRIFT — 记录摘要与当前证据重算不一致`);
+        if (current && current !== v['evidence-digest']) {
+          pushIf(true, `approval.yml#${k}: EVIDENCE_DRIFT — 记录摘要与当前证据重算不一致`);
+          emitDriftAudit(ws, crFromPath, stageEntry[0], v['evidence-digest'], current);
+        }
       }
       if (crFromPath && stageEntry && v.via === 'server-approve') {
         const sig = verifyGrantSignature(ws, {

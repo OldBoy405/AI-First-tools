@@ -423,3 +423,34 @@ test('approve --grant：签名伪造 -> SIGNATURE_INVALID；digest 不符 -> EVI
     assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-2026-001', 'approval.yml')), false);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── TASK-10：漂移检出发 audit outbox 事件（activity_log 留证半边，AC-7③）──────
+test('gate：检出 EVIDENCE_DRIFT -> outbox 出现 audit 事件（payload 只有摘要，无证据内容）；重复 gate 不重复堆积', () => {
+  const ws = makeWorkspace();
+  const cr = 'CR-TEST-1';
+  try {
+    const originalText = 'verdict: pass\nblockers: []\n';
+    writeEvidence(ws, cr, 'review-annotations/requirement.yml', originalText);
+    writeApprovalYml(ws, cr, 'requirement', {
+      approver: 'alice', 'approved-at': '2026-07-28T10:00:00+08:00', via: 'crctl-approve',
+      'evidence-sha256-16': sha16(originalText), 'target-status': 'requirement-approved',
+    });
+    writeEvidence(ws, cr, 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n# tampered\n');
+
+    runCrctl(['gate', cr, '--for', 'requirement-approved', '--workspace', ws]);
+    runCrctl(['gate', cr, '--for', 'requirement-approved', '--workspace', ws]); // 第二次观测
+
+    const outbox = path.join(ws, '.crctl', 'outbox');
+    const files = readdirSync(outbox).filter((f) => f.startsWith('audit-drift-'));
+    assert.equal(files.length, 1, '同一份漂移在待采集期间只留一份（确定性文件名去重）');
+    const ev = JSON.parse(readFileSync(path.join(outbox, files[0]), 'utf8'));
+    assert.equal(ev.v, 1);
+    assert.equal(ev.event_kind, 'audit');
+    assert.equal(ev.cr_id, cr);
+    assert.equal(ev.payload.action, 'aifirst.evidence_drift');
+    assert.equal(ev.payload.stage, 'requirement');
+    assert.notEqual(ev.payload.expected_digest, ev.payload.actual_digest);
+    assert.ok(ev.payload.detected_at);
+    assert.ok(!JSON.stringify(ev.payload).includes('tampered'), 'payload 不得包含证据内容');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
