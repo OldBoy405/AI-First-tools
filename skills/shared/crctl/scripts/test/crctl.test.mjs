@@ -226,7 +226,7 @@ function readOutbox(ws) {
   } catch { return []; }
 }
 
-test('outbox：advance 成功（--no-commit，即 embedded 半边）-> 写入合 schema 的 status 事件且 commit_sha 为空', () => {
+test('outbox：advance 成功（--no-commit，即 embedded 半边）-> 写入合 schema 的 status 事件且 commit_sha 为 pending: 占位符（CR-2026-003 契约更新，旧契约为空串）', () => {
   const ws = makeWorkspace();
   try {
     writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
@@ -241,9 +241,10 @@ test('outbox：advance 成功（--no-commit，即 embedded 半边）-> 写入合
     assert.equal(ev.from_status, 'drafting');
     assert.equal(ev.to_status, 'rejected');
     assert.equal(ev.trigger, 'cr-review-record:reject');
-    assert.equal(ev.commit_sha, '');
+    assert.match(ev.commit_sha, /^pending:\d+:\d+:\d+$/, 'embedded 占位 sha（与 multica projectableSha 的契约字面量）');
     assert.ok(ev.occurred_at && ev.actor !== undefined && typeof ev.payload === 'object');
-    assert.match(events[0].file, /^\d{8}T\d{9}Z-CR-TEST-1-status-nosha\.json$/);
+    // 文件名片段消毒后不含冒号（Windows 文件名合法性）
+    assert.match(events[0].file, /^\d{8}T\d{9}Z-CR-TEST-1-status-[A-Za-z0-9]{1,8}\.json$/);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -452,5 +453,49 @@ test('gate：检出 EVIDENCE_DRIFT -> outbox 出现 audit 事件（payload 只�
     assert.notEqual(ev.payload.expected_digest, ev.payload.actual_digest);
     assert.ok(ev.payload.detected_at);
     assert.ok(!JSON.stringify(ev.payload).includes('tampered'), 'payload 不得包含证据内容');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-003 T01：embedded 占位 sha（幂等键碰撞修复，"pending:" 为跨语言契约字面量）──
+test('advance --embedded：连续两次 embedded 的 outbox 事件 commit_sha 均以 pending: 开头且互不相同；非 embedded 仍为真实 HEAD sha', () => {
+  const ws = makeWorkspace();
+  try {
+    // 初始化 git 仓（非 embedded 路径需要真实 commit）
+    const run = (args) => spawnSync('git', ['-C', ws, ...args], { encoding: 'utf8' });
+    run(['init', '-b', 'master']); run(['config', 'user.email', 't@t']); run(['config', 'user.name', 't']);
+    writeFileSync(path.join(ws, 'change-requests', '_backlog.yml'),
+      'change-requests:\n  - id: CR-TEST-1\n    status: drafting\n  - id: CR-TEST-2\n    status: requirement-approved\n');
+    // CR-TEST-1：非 embedded（drafting -> requirement-reviewing，需评审证据）
+    writeEvidence(ws, 'CR-TEST-1', 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n');
+    writeFileSync(path.join(ws, 'change-requests', 'CR-TEST-1', 'prd.md'), '# prd\n');
+    run(['add', '-A']); run(['commit', '-m', 'wip: seed']);
+    const r1 = runCrctl(['advance', 'CR-TEST-1', '--to', 'requirement-reviewing', '--trigger', 'review-requirement', '--workspace', ws]);
+    assert.ok(r1.stdout && r1.stdout.advanced === true, `r1 failed: ${(r1.rawStdout||'').slice(0,200)} STDERR: ${(r1.rawStderr||'').slice(0,300)}`);
+    // CR-TEST-2：连续两次 embedded（requirement-approved -> tech-designing -> tech-design-review-pending）
+    // tech-designing 门禁校验 requirement 审批段，补齐审批记录与匹配证据
+    const ev2 = 'verdict: pass\nblockers: []\n';
+    writeEvidence(ws, 'CR-TEST-2', 'review-annotations/requirement.yml', ev2);
+    writeApprovalYml(ws, 'CR-TEST-2', 'requirement', {
+      approver: 'alice', 'approved-at': '2026-07-31T10:00:00+08:00', via: 'crctl-approve',
+      'evidence-sha256-16': sha16(ev2), 'target-status': 'requirement-approved',
+    });
+    writeFileSync(path.join(ws, 'change-requests', 'CR-TEST-2', 'prd.md'), '# prd\n');
+    writeFileSync(path.join(ws, 'change-requests', 'CR-TEST-2', 'sdd.md'), '# sdd\n');
+    const r2 = runCrctl(['advance', 'CR-TEST-2', '--to', 'tech-designing', '--trigger', 'write-tech-design', '--embedded', '--workspace', ws]);
+    assert.equal(r2.stdout.advanced, true, JSON.stringify(r2.stdout || r2.stderr).slice(0, 300));
+    const r3 = runCrctl(['advance', 'CR-TEST-2', '--to', 'tech-design-review-pending', '--trigger', 'write-tech-design-complete', '--embedded', '--workspace', ws]);
+    assert.equal(r3.stdout.advanced, true, JSON.stringify(r3.stdout || r3.stderr).slice(0, 300));
+
+    const outbox = path.join(ws, '.crctl', 'outbox');
+    const events = readdirSync(outbox).filter((f) => f.includes('-status-'))
+      .map((f) => JSON.parse(readFileSync(path.join(outbox, f), 'utf8')));
+    const nonEmbedded = events.find((e) => e.cr_id === 'CR-TEST-1');
+    const embedded = events.filter((e) => e.cr_id === 'CR-TEST-2');
+    // 非 embedded：真实 40 位 hex sha（不受本修复影响）
+    assert.match(nonEmbedded.commit_sha, /^[0-9a-f]{40}$/, `非 embedded 应为真实 sha：${nonEmbedded.commit_sha}`);
+    // embedded：pending: 前缀（与 multica projectableSha 的跨语言契约字面量）且互不相同
+    assert.equal(embedded.length, 2);
+    for (const e of embedded) assert.match(e.commit_sha, /^pending:\d+:\d+:\d+$/, `占位符格式：${e.commit_sha}`);
+    assert.notEqual(embedded[0].commit_sha, embedded[1].commit_sha, '两次 embedded 的占位符必须不同（幂等键不再碰撞）');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });

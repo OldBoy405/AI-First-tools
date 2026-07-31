@@ -390,7 +390,9 @@ function emitOutboxEvent(ws, ev) {
       occurred_at: nowIso(),
     };
     const ts = new Date().toISOString().replace(/[-:.]/g, '');
-    const name = ev.dedup_name || `${ts}-${event.cr_id}-${event.event_kind}-${(event.commit_sha || 'nosha').slice(0, 8)}.json`;
+    // 文件名片段消毒：pending: 占位 sha（CR-2026-003）含冒号，Windows 文件名非法；只影响文件名，事件内容不动
+    const shaSlug = (event.commit_sha || 'nosha').replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'nosha';
+    const name = ev.dedup_name || `${ts}-${event.cr_id}-${event.event_kind}-${shaSlug}.json`;
     if (ev.dedup_name && fs.existsSync(path.join(dir, name))) return name; // 同一事实待采集期间只留一份
     const tmp = path.join(dir, `.tmp-${process.pid}-${name}`);
     fs.writeFileSync(tmp, JSON.stringify(event, null, 2) + '\n', 'utf8');
@@ -417,6 +419,17 @@ function emitDriftAudit(ws, cr, stage, expected, actual) {
     },
     dedup_name: `audit-drift-${cr}-${id8(stage)}-${id8(expected)}${id8(actual)}.json`,
   });
+}
+
+/* embedded 占位 sha（CR-2026-003 FR-1）：--embedded/--no-commit 模式没有真实 commit，
+ * 但 commit_sha 是服务端 cr_sync_event 幂等键 (cr_id, commit_sha, event_kind) 的一部分——
+ * 恒定空串会让同一 CR 的第二次 embedded status 事件被 ON CONFLICT 静默吞掉（CR-2026-002
+ * 归档期实测）。改为进程内唯一占位符；"pending:" 前缀是与 multica projectableSha() 的
+ * 跨语言契约（服务端据此把它排除在投影指针之外），两侧测试各锁同一字面量。 */
+let embeddedSeq = 0;
+function pendingCommitSha() {
+  embeddedSeq += 1;
+  return `pending:${Date.now()}:${process.pid}:${embeddedSeq}`;
 }
 
 function gitHeadSha(ws, cwd) {
@@ -796,7 +809,7 @@ function cmdAdvance(ws, cr, gates, flags) {
   }
   result.outbox = emitOutboxEvent(ws, {
     event_kind: 'status', cr_id: cr, from_status: current, to_status: flags.to,
-    trigger: flags.trigger, commit_sha: committed ? gitHeadSha(ws) : '',
+    trigger: flags.trigger, commit_sha: committed ? gitHeadSha(ws) : pendingCommitSha(),
     actor: identity(ws), evidence: outboxEvidence,
   });
   ok(result);
