@@ -61,6 +61,43 @@ function evidenceSha16(text) {
   return sha256(text.replaceAll('\r\n', '\n')).slice(0, 16);
 }
 
+/* canonical evidence digest（P1 签名审批 §B.2，CR-2026-002 TASK-03）
+ * 对 approvalStages[stage].evidence 声明的全部文件：按解析后路径字典序，
+ * 逐文件 sha256(行尾规范化内容) 得 hex，拼接后再整体 sha256。
+ * ⚠️ 这是 crctl 内摘要计算的唯一实现（AC-7⑤）：TTY approve 写入、--grant 验证、
+ * gate/validate 复核全部调用本函数，不得各自维护哈希逻辑。
+ * Go 侧（multica governance/approval.go）为等价实现，一致性由共享测试向量
+ * test/fixtures/digest-vectors/ 固定。任一证据文件缺失返回 null（无法计算 ≠ 漂移）。
+ * evidenceSha16 自本任务起仅用于历史 approval.yml 的 evidence-sha256-16 兼容复核（已废弃字段）。 */
+function canonicalEvidenceDigest(ws, cr, stageCfg) {
+  if (!stageCfg || !stageCfg.evidence) return null;
+  const rels = Object.values(stageCfg.evidence).map((rel) => rel.replaceAll('{cr}', cr)).sort();
+  const parts = [];
+  for (const rel of rels) {
+    const text = readFileChecked(path.join(ws, rel));
+    if (text == null) return null;
+    parts.push(sha256(text.replaceAll('\r\n', '\n')));
+  }
+  return sha256(parts.join(''));
+}
+
+function grantCanonicalString(g) {
+  return `v1|${g.cr_id}|${g.stage}|${g.decision}|${g.approver}|${g.approved_at}|${g.evidence_digest}`;
+}
+
+function verifyGrantSignature(ws, grant) {
+  const keyPath = path.join(ws, '.crctl', 'keys', `${grant.key_id}.pub`);
+  const pem = readFileChecked(keyPath);
+  if (pem == null) return { ok: false, code: 'KEY_NOT_FOUND', why: `公钥不存在: ${keyPath}（公钥应提交进 knowledge-base 仓的 .crctl/keys/）` };
+  try {
+    const pub = crypto.createPublicKey(pem);
+    const okv = crypto.verify(null, Buffer.from(grantCanonicalString(grant), 'utf8'), pub, Buffer.from(grant.signature, 'base64'));
+    return okv ? { ok: true } : { ok: false, code: 'SIGNATURE_INVALID', why: 'Ed25519 验签失败：签名与 canonical 串不匹配（grant 被篡改或挪用）' };
+  } catch (e) {
+    return { ok: false, code: 'SIGNATURE_INVALID', why: `验签异常: ${String(e && e.message || e)}` };
+  }
+}
+
 /* ────────────────────────── YAML 子集解析器 ──────────────────────────
  * 支持：块映射、块序列、flow 映射 {k: v}、flow 序列 [a, b]、引号字符串、
  * 注释、多行块标量 | 与 >（保守处理为拼接文本）。
@@ -505,17 +542,37 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
     } else if (check.type === 'approval') {
       const doc = readEvidenceDoc(ws, cr, 'change-requests/{cr}/approval.yml');
       const section = doc.exists ? doc.data?.[check.section] : null;
-      const okv = !!(section && section.approver && section['approved-at'] && section.via === 'crctl-approve');
-      let why = okv ? null : `approval.yml#${check.section} 缺失或非 crctl approve 写入（via 必须为 crctl-approve）`;
+      // 两轨审批（TASK-03）：TTY 的 crctl-approve 与 grant 的 server-approve 都被门禁承认
+      const okv = !!(section && section.approver && section['approved-at'] && ['crctl-approve', 'server-approve'].includes(section.via));
+      let why = okv ? null : `approval.yml#${check.section} 缺失或非 crctl approve 写入（via 必须为 crctl-approve 或 server-approve）`;
       let drift = null;
-      if (okv && section['evidence-sha256-16']) {
-        const stageCfg = Object.values(gates.approvalStages || {}).find((s) => s.approvalSection === check.section);
+      const stageEntry = Object.entries(gates.approvalStages || {}).find(([, s]) => s.approvalSection === check.section);
+      const stageKey = stageEntry ? stageEntry[0] : null;
+      const stageCfg = stageEntry ? stageEntry[1] : null;
+      if (okv && section['evidence-digest']) {
+        // 摘要漂移检测：两轨统一，只要统一字段存在就重算比对（canonical 唯一实现）
+        const currentDigest = canonicalEvidenceDigest(ws, cr, stageCfg);
+        if (currentDigest && currentDigest !== section['evidence-digest']) {
+          drift = 'EVIDENCE_DRIFT';
+          why = `EVIDENCE_DRIFT：approval.yml#${check.section} 记录的证据摘要 ${section['evidence-digest'].slice(0, 16)}… 与当前重算 ${currentDigest.slice(0, 16)}… 不一致，证据在审批后被改动`;
+        }
+      } else if (okv && section['evidence-sha256-16']) {
+        // 废弃字段兼容：历史审批（M0 口径）继续按单文件短哈希复核，不报错不阻塞（AC-7②）
         const evDoc = stageCfg?.evidence?.$default ? readEvidenceDoc(ws, cr, stageCfg.evidence.$default) : { exists: false };
         const currentHash = evDoc.exists ? evidenceSha16(fs.readFileSync(evDoc.path, 'utf8')) : null;
         if (currentHash && currentHash !== section['evidence-sha256-16']) {
           drift = 'EVIDENCE_DRIFT';
           why = `EVIDENCE_DRIFT：approval.yml#${check.section} 记录的证据哈希 ${section['evidence-sha256-16']} 与 ${evDoc.path} 当前哈希 ${currentHash} 不一致，证据在审批后被改动`;
         }
+      }
+      if (okv && !drift && section.via === 'server-approve') {
+        // 签名重验证（仅新轨）：从存档字段重建 canonical 并验签——摘要漂移与签名有效性分开判断
+        const sig = verifyGrantSignature(ws, {
+          cr_id: cr, stage: stageKey, decision: 'approve', approver: section.approver,
+          approved_at: section['grant-approved-at'], evidence_digest: section['evidence-digest'] || '',
+          key_id: section['key-id'], signature: section.signature,
+        });
+        if (!sig.ok) { drift = sig.code; why = `approval.yml#${check.section} server-approve 签名重验证失败：${sig.why}`; }
       }
       out.checks.push({ type: check.type, section: check.section, ok: okv && !drift, why, code: drift || undefined });
     } else if (check.type === 'attemptsWithinLimit') {
@@ -721,9 +778,12 @@ function cmdApprove(ws, cr, gates, flags) {
   const stage = flags.stage;
   const stageCfg = gates.approvalStages[stage];
   if (!stageCfg) fail('BAD_ARGS', `--stage 必须是 ${Object.keys(gates.approvalStages).join(' | ')}`);
-  // 人类在环的硬检查：非交互式会话一律拒绝，无任何旁路（治理⑤）
+  // grant 模式（P1 签名审批 §B，CR-2026-002 TASK-03）：服务端已完成人类身份校验并签名，
+  // crctl 本地验签 + 重算证据摘要后非 TTY 放行——强度不降级，只是"人在环"发生在服务端。
+  if (flags.grant) return approveWithGrant(ws, cr, gates, flags, stage, stageCfg);
+  // TTY 路径：人类在环的硬检查，非交互式会话一律拒绝，无任何旁路（治理⑤）
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    fail('APPROVAL_REQUIRES_HUMAN', 'crctl approve 仅接受交互式终端会话。请由审批人在终端直接运行本命令；模型/管道/脚本调用一律拒绝。');
+    fail('APPROVAL_REQUIRES_HUMAN', 'crctl approve 仅接受交互式终端会话（或 --grant 携带服务端签名审批）。模型/管道/脚本直接调用一律拒绝。');
   }
   const snap = loadBacklogEntry(ws, cr);
   const current = snap.entry.status;
@@ -742,8 +802,8 @@ function cmdApprove(ws, cr, gates, flags) {
       process.stderr.write(summaryLines.join('\n') + '\n');
       fail('GATE_BLOCKED', '自动评审证据未达标，禁止进入人工审批（blocker 未清空不得 human_approval）');
     }
-    const defaultDoc = readEvidenceDoc(ws, cr, stageCfg.evidence.$default);
-    evidenceHash = defaultDoc.exists ? evidenceSha16(fs.readFileSync(defaultDoc.path, 'utf8')) : null;
+    // 统一字段 evidence-digest：canonical 摘要覆盖 stage 声明的全部证据文件（替代废弃的 evidence-sha256-16 单文件短哈希）
+    evidenceHash = canonicalEvidenceDigest(ws, cr, stageCfg);
   }
   if (stageCfg.requireFiles) {
     for (const rel of stageCfg.requireFiles) {
@@ -764,29 +824,80 @@ function cmdApprove(ws, cr, gates, flags) {
     writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash);
     auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'approved' });
     // 证据摘要随级联 advance 的 status 事件进 outbox（一个 approve 只发一条事件，避免与去重键冲突）
-    const outboxEvidence = {};
-    if (stageCfg.evidence) {
-      for (const rel of Object.values(stageCfg.evidence)) {
-        const p = path.join(ws, rel.replaceAll('{cr}', cr));
-        const text = readFileChecked(p);
-        if (text != null) outboxEvidence[rel.replaceAll('{cr}', cr)] = 'sha256:' + sha256(text.replaceAll('\r\n', '\n'));
-      }
-    }
+    const outboxEvidence = collectOutboxEvidence(ws, cr, stageCfg);
     // 级联推进状态（同一 gate 再校验一遍，包含 approval 检查）
     cmdAdvance(ws, cr, gates, { to: stageCfg.to, trigger: stageCfg.trigger, expect: current, specId: flags['spec-id'], outboxEvidence });
   });
 }
 
-function writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash) {
+function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
+  const gp = path.isAbsolute(flags.grant) ? flags.grant : path.join(ws, flags.grant);
+  const text = readFileChecked(gp);
+  if (text == null) fail('GRANT_UNREADABLE', `grant 文件不存在或不可读: ${gp}`);
+  let grant;
+  try { grant = JSON.parse(text); } catch { fail('GRANT_UNREADABLE', `grant 不是合法 JSON: ${gp}`); }
+  if (grant.v !== 1) fail('GRANT_UNSUPPORTED', `grant schema v=${grant.v}，当前仅支持 v1`);
+  if (grant.decision === 'reject') {
+    fail('GRANT_DECISION_REJECT', '驳回 grant 不走 approve：由编排方按状态机既有回退转移执行 advance，并把 reject_reason 作为 review_feedback 注入修复节点');
+  }
+  if (grant.decision !== 'approve') fail('GRANT_UNSUPPORTED', `decision=${grant.decision} 不在 [approve, reject]`);
+  if (grant.cr_id !== cr || grant.stage !== stage) {
+    fail('GRANT_MISMATCH', `grant 归属 (${grant.cr_id}, ${grant.stage})，当前审批 (${cr}, ${stage}) —— 签名绑定 cr_id+stage，禁止挪用`);
+  }
+  const snap = loadBacklogEntry(ws, cr);
+  const current = snap.entry.status;
+  if (stageCfg.expect && !stageCfg.expect.includes(current)) {
+    fail('CR_STATUS_CURRENT_MISMATCH', `审批阶段 ${stage} 要求当前状态 ∈ [${stageCfg.expect.join(', ')}]，实际 ${current}`);
+  }
+  if (stageCfg.passCondition) {
+    const r = evaluatePassCondition(ws, cr, stageCfg, gates);
+    if (!r.pass) fail('GATE_BLOCKED', '自动评审证据未达标，禁止审批（grant 不豁免 blocker 检查）');
+  }
+  if (stageCfg.requireFiles) {
+    for (const rel of stageCfg.requireFiles) {
+      const p = path.join(ws, rel.replaceAll('{cr}', cr));
+      if (!fs.existsSync(p)) fail('GATE_BLOCKED', `审批前置产物缺失: ${p}`);
+    }
+  }
+  // 本地重算证据摘要：grant 签发的是"这一版证据"的批准，证据变了 grant 即失效
+  const digest = canonicalEvidenceDigest(ws, cr, stageCfg) || '';
+  if (digest !== (grant.evidence_digest || '')) {
+    fail('EVIDENCE_DRIFT', `grant 签发时证据摘要 ${grant.evidence_digest || '(空)'}，当前重算 ${digest || '(空)'} —— 证据在签发后被改动或缺失`);
+  }
+  const sig = verifyGrantSignature(ws, grant);
+  if (!sig.ok) fail(sig.code, sig.why);
+  writeApprovalSection(ws, cr, stage, stageCfg, grant.approver, digest || null, { via: 'server-approve', grant });
+  auditLog(ws, { kind: 'approve', cr, stage, approver: grant.approver, via: 'server-approve', keyId: grant.key_id, result: 'approved' });
+  const outboxEvidence = collectOutboxEvidence(ws, cr, stageCfg);
+  cmdAdvance(ws, cr, gates, { to: stageCfg.to, trigger: stageCfg.trigger, expect: current, specId: flags['spec-id'], outboxEvidence });
+}
+
+function collectOutboxEvidence(ws, cr, stageCfg) {
+  const out = {};
+  if (stageCfg.evidence) {
+    for (const rel of Object.values(stageCfg.evidence)) {
+      const p = path.join(ws, rel.replaceAll('{cr}', cr));
+      const text = readFileChecked(p);
+      if (text != null) out[rel.replaceAll('{cr}', cr)] = 'sha256:' + sha256(text.replaceAll('\r\n', '\n'));
+    }
+  }
+  return out;
+}
+
+function writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash, opts = {}) {
   const p = path.join(crDir(ws, cr), 'approval.yml');
   const section = stageCfg.approvalSection;
   const existing = readFileChecked(p);
+  const g = opts.grant || null;
   const block = [
     `${section}:`,
     `  approver: "${approver}"`,
     `  approved-at: "${nowIso()}"`,
-    `  via: crctl-approve`,
-    evidenceHash ? `  evidence-sha256-16: "${evidenceHash}"` : null,
+    `  via: ${opts.via || 'crctl-approve'}`,
+    evidenceHash ? `  evidence-digest: "${evidenceHash}"` : null,
+    g ? `  key-id: "${g.key_id}"` : null,
+    g ? `  signature: "${g.signature}"` : null,
+    g ? `  grant-approved-at: "${g.approved_at}"` : null,
     `  target-status: ${stageCfg.to}`,
   ].filter(Boolean).join('\n');
   if (existing == null) {
@@ -858,11 +969,26 @@ function cmdValidate(ws, target, gates) {
     pushIf(!doc.tester, 'test-report.md: 缺少 tester 字段');
   } else if (base === 'approval.yml') {
     const doc = parseYaml(text) || {};
+    const crFromPath = (p.replaceAll('\\', '/').match(/change-requests\/([^/]+)\/approval\.yml$/) || [])[1] || null;
     for (const [k, v] of Object.entries(doc)) {
       if (typeof v !== 'object' || v == null) continue;
       pushIf(!v.approver, `approval.yml#${k}: 缺少 approver`);
       pushIf(!v['approved-at'], `approval.yml#${k}: 缺少 approved-at`);
-      pushIf(v.via !== 'crctl-approve', `approval.yml#${k}: via 必须为 crctl-approve（当前 ${v.via || '缺失'}），否则不被门禁承认`);
+      pushIf(!['crctl-approve', 'server-approve'].includes(v.via), `approval.yml#${k}: via 必须为 crctl-approve 或 server-approve（当前 ${v.via || '缺失'}），否则不被门禁承认`);
+      // 两轨统一摘要复核 + server-approve 额外验签（与 gate 同口径，供 CI cr-guard 远端复核）
+      const stageEntry = Object.entries(gates.approvalStages || {}).find(([, s]) => s.approvalSection === k);
+      if (crFromPath && stageEntry && v['evidence-digest']) {
+        const current = canonicalEvidenceDigest(ws, crFromPath, stageEntry[1]);
+        pushIf(current && current !== v['evidence-digest'], `approval.yml#${k}: EVIDENCE_DRIFT — 记录摘要与当前证据重算不一致`);
+      }
+      if (crFromPath && stageEntry && v.via === 'server-approve') {
+        const sig = verifyGrantSignature(ws, {
+          cr_id: crFromPath, stage: stageEntry[0], decision: 'approve', approver: v.approver,
+          approved_at: v['grant-approved-at'], evidence_digest: v['evidence-digest'] || '',
+          key_id: v['key-id'], signature: v.signature,
+        });
+        pushIf(!sig.ok, `approval.yml#${k}: server-approve 签名重验证失败（${sig.code}）`);
+      }
     }
   } else if (base === 'traceability.yml') {
     const doc = parseYaml(text) || {};

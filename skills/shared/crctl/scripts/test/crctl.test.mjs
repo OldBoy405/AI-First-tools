@@ -287,3 +287,139 @@ test('outbox：git push 成功 -> checkpoint 事件携带 HEAD sha 与从提交�
     rmSync(bare, { recursive: true, force: true });
   }
 });
+
+// ── evidence-digest 统一 + grant 验签（CR-2026-002 TASK-03）──────────────
+import { generateKeyPairSync, sign as cryptoSign, createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+
+const VECTORS_DIR = path.resolve(import.meta.dirname, 'fixtures', 'digest-vectors');
+
+function canonicalDigestOf(texts) {
+  // 按 §B.2 公式独立实现（测试侧对照，不 import crctl 内部函数）
+  const sha = (t) => createHash('sha256').update(t, 'utf8').digest('hex');
+  return sha(texts.map((t) => sha(t.replaceAll('\r\n', '\n'))).join(''));
+}
+
+test('digest-vectors：共享测试向量自洽（expected.json 与 §B.2 公式一致），供 Go 侧对照', () => {
+  const expected = JSON.parse(readFileSync(path.join(VECTORS_DIR, 'expected.json'), 'utf8'));
+  const texts = expected.files.map((f) => readFileSync(path.join(VECTORS_DIR, f), 'utf8'));
+  assert.equal(canonicalDigestOf(texts), expected.digest);
+});
+
+test('gate：evidence-digest（统一字段，多文件 canonical）一致 -> 通过；篡改任一文件 -> EVIDENCE_DRIFT', () => {
+  const ws = makeWorkspace();
+  const cr = 'CR-TEST-1';
+  try {
+    const codeYml = readFileSync(path.join(VECTORS_DIR, 'review-annotations-code.yml'), 'utf8');
+    const report = readFileSync(path.join(VECTORS_DIR, 'test-report.md'), 'utf8');
+    writeEvidence(ws, cr, 'review-annotations/code.yml', codeYml);
+    writeEvidence(ws, cr, 'test-report.md', report);
+    const expected = JSON.parse(readFileSync(path.join(VECTORS_DIR, 'expected.json'), 'utf8'));
+    writeApprovalYml(ws, cr, 'code', {
+      approver: 'alice', 'approved-at': '2026-07-31T10:00:00+08:00', via: 'crctl-approve',
+      'evidence-digest': expected.digest, 'target-status': 'code-approved',
+    });
+    // merging 门禁只查 approval#code —— crctl 的 canonical 实现必须与共享向量口径一致（conformance）
+    let r = runCrctl(['gate', cr, '--for', 'merging', '--workspace', ws]);
+    let check = r.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(check.ok, true, `crctl canonical 实现应与共享向量一致（why=${check.why}）`);
+    // 篡改第二个证据文件 → 漂移
+    writeEvidence(ws, cr, 'test-report.md', report + '# tampered\n');
+    r = runCrctl(['gate', cr, '--for', 'merging', '--workspace', ws]);
+    check = r.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(check.ok, false);
+    assert.equal(check.code, 'EVIDENCE_DRIFT');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('gate：历史 evidence-sha256-16 字段（废弃）仍被兼容复核，不报错不阻塞（AC-7②）', () => {
+  const ws = makeWorkspace();
+  const cr = 'CR-TEST-1';
+  try {
+    const text = 'verdict: pass\nblockers: []\n';
+    writeEvidence(ws, cr, 'review-annotations/requirement.yml', text);
+    writeApprovalYml(ws, cr, 'requirement', {
+      approver: 'alice', 'approved-at': '2026-07-28T10:00:00+08:00', via: 'crctl-approve',
+      'evidence-sha256-16': sha16(text), 'target-status': 'requirement-approved',
+    });
+    const r = runCrctl(['gate', cr, '--for', 'requirement-approved', '--workspace', ws]);
+    const check = r.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(check.ok, true);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// grant 测试基建：真实 Ed25519 密钥对 + 可级联 advance 的 workspace
+function makeGrantWorkspace() {
+  const ws = makeWorkspace();
+  const g = (args) => {
+    const r = spawnSync('git', args, { cwd: ws, encoding: 'utf8', shell: false });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  };
+  g(['init', '-b', 'master']);
+  g(['config', 'user.email', 't@t']);
+  g(['config', 'user.name', 'tester']);
+  writeBacklog(ws, [{ id: 'CR-2026-001', status: 'requirement-reviewing' }]);
+  writeEvidence(ws, 'CR-2026-001', 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n');
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  mkdirSync(path.join(ws, '.crctl', 'keys'), { recursive: true });
+  writeFileSync(path.join(ws, '.crctl', 'keys', 'approval-test.pub'), publicKey.export({ type: 'spki', format: 'pem' }));
+  return { ws, privateKey };
+}
+
+function makeGrant(ws, privateKey, overrides = {}) {
+  const evidenceText = readFileSync(path.join(ws, 'change-requests', 'CR-2026-001', 'review-annotations', 'requirement.yml'), 'utf8');
+  const grant = {
+    v: 1, cr_id: 'CR-2026-001', stage: 'requirement', decision: 'approve',
+    approver: 'alice@corp', approved_at: '2026-07-31T10:30:00+08:00',
+    evidence_digest: canonicalDigestOf([evidenceText]),
+    key_id: 'approval-test',
+    ...overrides,
+  };
+  const canonical = `v1|${grant.cr_id}|${grant.stage}|${grant.decision}|${grant.approver}|${grant.approved_at}|${grant.evidence_digest}`;
+  grant.signature = overrides.signature ?? cryptoSign(null, Buffer.from(canonical, 'utf8'), privateKey).toString('base64');
+  const gp = path.join(ws, 'grant.json');
+  writeFileSync(gp, JSON.stringify(grant, null, 2));
+  return gp;
+}
+
+test('approve --grant：验签通过 -> 非 TTY 放行，写 server-approve 段并级联 advance（AC-4⑥ 通过路径）', () => {
+  const { ws, privateKey } = makeGrantWorkspace();
+  try {
+    const gp = makeGrant(ws, privateKey);
+    const r = runCrctl(['approve', 'CR-2026-001', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.advanced, true);
+    assert.equal(r.stdout.to, 'requirement-approved');
+    const approval = readFileSync(path.join(ws, 'change-requests', 'CR-2026-001', 'approval.yml'), 'utf8');
+    assert.match(approval, /via: server-approve/);
+    assert.match(approval, /evidence-digest: /);
+    assert.match(approval, /key-id: "approval-test"/);
+    // gate 复核：server-approve 段被承认，且签名重验证通过
+    const g2 = runCrctl(['gate', 'CR-2026-001', '--for', 'requirement-approved', '--workspace', ws]);
+    const check = g2.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(check.ok, true, `server-approve 应被 gate 承认且验签通过（why=${check.why}）`);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('approve --grant：签名伪造 -> SIGNATURE_INVALID；digest 不符 -> EVIDENCE_DRIFT；挪用他 CR -> GRANT_MISMATCH', () => {
+  const { ws, privateKey } = makeGrantWorkspace();
+  try {
+    // 伪造签名（长度合法的 base64，但不是有效 Ed25519 签名）
+    let gp = makeGrant(ws, privateKey, { signature: Buffer.alloc(64, 7).toString('base64') });
+    let r = runCrctl(['approve', 'CR-2026-001', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'SIGNATURE_INVALID');
+    // digest 不符：对"错的 digest"给出有效签名，证明 digest 比对独立于验签生效
+    gp = makeGrant(ws, privateKey, { evidence_digest: canonicalDigestOf(['verdict: pass\nblockers: []\n# other version\n']) });
+    r = runCrctl(['approve', 'CR-2026-001', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'EVIDENCE_DRIFT');
+    // 挪用：grant 归属另一个 CR
+    gp = makeGrant(ws, privateKey, { cr_id: 'CR-2026-999' });
+    r = runCrctl(['approve', 'CR-2026-001', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'GRANT_MISMATCH');
+    // 三次拒绝全程未写 approval.yml
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-2026-001', 'approval.yml')), false);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
