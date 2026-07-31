@@ -8,7 +8,7 @@
     { "sub": "fetch", "shapes": ["^origin( \\S+)?$"], "callers": ["*"] },
     { "sub": "pull", "shapes": ["^--ff-only( origin( \\S+)?)?$"], "callers": ["*"] },
     { "sub": "push", "shapes": ["^-u origin \\S+$", "^origin \\S+$", "^origin --delete \\S+$"], "callers": ["*"] },
-    { "sub": "add", "shapes": ["^-A$", "^(?!-).+$"], "callers": ["*"] },
+    { "sub": "add", "shapes": ["^-A$", "^[^-].*$"], "callers": ["*"] },
     { "sub": "commit", "shapes": [{ "re": "^-m (wip: |\\[cr\\] |merge\\().*$", "flags": "s" }], "callers": ["*"] },
     { "sub": "status", "shapes": ["^--short$"], "callers": ["*"] },
     { "sub": "diff", "shapes": ["^--cached --quiet$", "^--stat( .+)?$", "^--name-only .+$", "^--unified=\\d+ .+$"], "callers": ["*"] },
