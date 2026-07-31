@@ -765,10 +765,19 @@ function cmdAdvance(ws, cr, gates, flags) {
   }
   // outbox：状态事件。--embedded/--no-commit 时 commit_sha 留空，由 push 的 checkpoint 事件补全（§A.5）
   const committed = result.commit && result.commit.message;
+  // 证据快照：进入某审批阶段的 expect 状态（待审批）时附带该阶段证据摘要——
+  // 服务端签发 grant 前靠它确定"批的是哪一版证据"（P1 §B.1 ①，TASK-08 补挂）。
+  // approve 级联传入的 flags.outboxEvidence 优先（同一份数据，来源不同时点）。
+  let outboxEvidence = flags.outboxEvidence || {};
+  if (!Object.keys(outboxEvidence).length) {
+    const pendingStage = Object.values(gates.approvalStages || {}).find(
+      (s) => Array.isArray(s.expect) && s.expect.includes(flags.to) && s.evidence);
+    if (pendingStage) outboxEvidence = collectOutboxEvidence(ws, cr, pendingStage);
+  }
   result.outbox = emitOutboxEvent(ws, {
     event_kind: 'status', cr_id: cr, from_status: current, to_status: flags.to,
     trigger: flags.trigger, commit_sha: committed ? gitHeadSha(ws) : '',
-    actor: identity(ws), evidence: flags.outboxEvidence || {},
+    actor: identity(ws), evidence: outboxEvidence,
   });
   ok(result);
   if (result.commit && result.commit.failed) process.exit(1);
