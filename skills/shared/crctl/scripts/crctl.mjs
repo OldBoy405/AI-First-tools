@@ -327,39 +327,43 @@ function auditLog(ws, record) {
 }
 
 /* ────────────────────────── 受控 git（组件 A 的 gitwrap） ──────────────────────────
- * 三元白名单：子命令 + 形态（正则）+ 调用者。对齐 skills/shared/controlled-shell/SKILL.md:25-45。
+ * 三元白名单：子命令 + 形态（正则）+ 调用者。
+ * 单一事实源：skills/shared/controlled-shell/rules.json（CR-2026-002 TASK-01）。
+ * 本文件不再内联规则表；rules.json 缺失/损坏时返回 SHELL_UNAVAILABLE，不静默放行。
  */
 
-const GIT_FORBIDDEN_FLAGS = ['-c', '--exec', '--upload-pack', '--receive-pack', '--config-env', '-C'];
+const RULES_PATH = process.env.CRCTL_RULES_PATH
+  || path.resolve(__dirname, '..', '..', 'controlled-shell', 'rules.json');
 
-const GIT_WHITELIST = {
-  worktree: [/^add -b \S+ .+$/, /^add --track .+$/, /^add .+$/, /^remove( --force)? .+$/, /^list$/],
-  branch: [/^(-d|-D) \S+$/, /^--show-current$/],
-  checkout: [/^[^-]\S*$/],
-  fetch: [/^origin( \S+)?$/],
-  pull: [/^--ff-only( origin( \S+)?)?$/],
-  push: [/^-u origin \S+$/, /^origin \S+$/, /^origin --delete \S+$/],
-  add: [/^-A$/, /^(?!-).+$/],
-  commit: [/^-m (wip: |\[cr\] |merge\().*$/s],
-  status: [/^--short$/],
-  diff: [/^--cached --quiet$/, /^--stat( .+)?$/, /^--name-only .+$/, /^--unified=\d+ .+$/],
-  log: [/^--oneline .+$/],
-  'ls-remote': [/^--heads origin$/],
-  'rev-parse': [/^(HEAD|origin\/\S+)$/],
-  'merge-base': [/^origin\/\S+ HEAD$/, /^--is-ancestor \S+ origin\/\S+$/],
-  'merge-tree': [/^--write-tree origin\/\S+ origin\/\S+$/],
-  merge: [/^--no-commit --no-ff \S+$/, /^--abort$/, /^--no-ff \S+ -m .+$/s],
-  revert: [/^--no-edit (-m 1 )?\S+$/],
-  config: [/^--get user\.(name|email)$/],
-  remote: [/^-v$/],
-};
+let _shellRules; // undefined=未加载, null=加载失败, object=已加载
+function loadShellRules() {
+  if (_shellRules !== undefined) return _shellRules;
+  try {
+    const j = JSON.parse(fs.readFileSync(RULES_PATH, 'utf8'));
+    const whitelist = {};
+    for (const entry of j.git) {
+      whitelist[entry.sub] = entry.shapes.map((s) =>
+        typeof s === 'string' ? new RegExp(s) : new RegExp(s.re, s.flags || ''));
+    }
+    if (!Array.isArray(j.forbiddenFlags)) throw new Error('forbiddenFlags 缺失');
+    _shellRules = { whitelist, forbiddenFlags: j.forbiddenFlags };
+  } catch {
+    _shellRules = null;
+  }
+  return _shellRules;
+}
 
 function controlledGit(ws, sub, args, cwd, caller) {
-  const patterns = GIT_WHITELIST[sub];
   const joined = args.join(' ');
   const record = { kind: 'git', caller: caller || null, sub, args: joined, cwd };
+  const rules = loadShellRules();
+  if (!rules) {
+    auditLog(ws, { ...record, result: 'SHELL_UNAVAILABLE' });
+    return { ok: false, code: 'SHELL_UNAVAILABLE', message: `controlled-shell 规则文件缺失或损坏，拒绝执行任何 git: ${RULES_PATH}` };
+  }
+  const patterns = rules.whitelist[sub];
   for (const a of args) {
-    if (GIT_FORBIDDEN_FLAGS.includes(a) || GIT_FORBIDDEN_FLAGS.some((f) => a.startsWith(f + '='))) {
+    if (rules.forbiddenFlags.includes(a) || rules.forbiddenFlags.some((f) => a.startsWith(f + '='))) {
       auditLog(ws, { ...record, result: 'FORBIDDEN_FLAG' });
       return { ok: false, code: 'FORBIDDEN_SUBCOMMAND', message: `参数 ${a} 属于配置注入类，禁止透传` };
     }
@@ -939,6 +943,7 @@ function cmdGit(ws, argv, flags) {
   const args = argv.slice(1);
   const r = controlledGit(ws, sub, args, flags.cwd ? path.resolve(flags.cwd) : ws, flags.caller);
   if (r.code === 'FORBIDDEN_SUBCOMMAND') fail('FORBIDDEN_SUBCOMMAND', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
+  if (r.code === 'SHELL_UNAVAILABLE') fail('SHELL_UNAVAILABLE', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   process.stdout.write(r.stdout || '');
   process.stderr.write(r.stderr || '');
   ok({ ok: r.ok, exit: r.exit });

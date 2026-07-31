@@ -22,8 +22,8 @@ function sha16(text) {
   return crypto.createHash('sha256').update(text.replaceAll('\r\n', '\n'), 'utf8').digest('hex').slice(0, 16);
 }
 
-function runCrctl(args) {
-  const r = spawnSync(process.execPath, [CRCTL, ...args], { encoding: 'utf8' });
+function runCrctl(args, env) {
+  const r = spawnSync(process.execPath, [CRCTL, ...args], { encoding: 'utf8', env: env ? { ...process.env, ...env } : process.env });
   let stdout = null;
   try { stdout = JSON.parse(r.stdout); } catch { /* 非 JSON 输出（如 help）忽略 */ }
   let stderr = null;
@@ -170,5 +170,47 @@ test('gate：approval 段缺失字段（未经 crctl approve 写入）-> 拒绝�
     assert.equal(approvalCheck.ok, false);
     assert.equal(approvalCheck.code, undefined);
     assert.match(approvalCheck.why, /缺失或非 crctl approve 写入/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── controlled-shell rules.json 单一事实源（CR-2026-002 TASK-01）──────────
+test('git：rules.json 缺失 -> SHELL_UNAVAILABLE 结构化错误，不崩溃不放行', () => {
+  const ws = makeWorkspace();
+  try {
+    const r = runCrctl(['git', 'status', '--short', '--workspace', ws],
+      { CRCTL_RULES_PATH: path.join(ws, 'no-such-rules.json') });
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'SHELL_UNAVAILABLE');
+    assert.match(r.stderr.error.message, /缺失或损坏/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('git：rules.json 损坏（非法 JSON）-> SHELL_UNAVAILABLE 结构化错误', () => {
+  const ws = makeWorkspace();
+  try {
+    const bad = path.join(ws, 'rules-broken.json');
+    writeFileSync(bad, '{ this is not json');
+    const r = runCrctl(['git', 'status', '--short', '--workspace', ws], { CRCTL_RULES_PATH: bad });
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'SHELL_UNAVAILABLE');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('git：rules.json 正常加载后语义与原硬编码表一致（禁子命令/禁旗标仍拦截）', () => {
+  const ws = makeWorkspace();
+  try {
+    // 不在白名单的子命令
+    let r = runCrctl(['git', 'rebase', 'main', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'FORBIDDEN_SUBCOMMAND');
+    // 白名单子命令 + 配置注入旗标
+    r = runCrctl(['git', 'status', '--short', '-c', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'FORBIDDEN_SUBCOMMAND');
+    assert.match(r.stderr.error.message, /配置注入/);
+    // 白名单形态不匹配
+    r = runCrctl(['git', 'push', '--force', 'origin', 'main', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'FORBIDDEN_SUBCOMMAND');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });

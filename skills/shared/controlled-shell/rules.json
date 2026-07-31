@@ -1,0 +1,42 @@
+{
+  "v": 1,
+  "$comment": "controlled-shell 白名单单一事实源（CR-2026-002 TASK-01）。消费方：crctl.mjs（git 三元组+forbiddenFlags）、pretooluse-guard.mjs（protectedPaths）、multica pkg/gitguard（全部）。规则语义与 crctl.mjs 原硬编码表逐条一致，本文件不引入语义变更。shape 为 JS RegExp source 字符串，或 {re, flags} 对象（需要 s 等旗标时）。callers 字段预留给 gitguard 的调用者维度校验，当前消费方仅记录不校验。",
+  "git": [
+    { "sub": "worktree", "shapes": ["^add -b \\S+ .+$", "^add --track .+$", "^add .+$", "^remove( --force)? .+$", "^list$"], "callers": ["*"] },
+    { "sub": "branch", "shapes": ["^(-d|-D) \\S+$", "^--show-current$"], "callers": ["*"] },
+    { "sub": "checkout", "shapes": ["^[^-]\\S*$"], "callers": ["*"] },
+    { "sub": "fetch", "shapes": ["^origin( \\S+)?$"], "callers": ["*"] },
+    { "sub": "pull", "shapes": ["^--ff-only( origin( \\S+)?)?$"], "callers": ["*"] },
+    { "sub": "push", "shapes": ["^-u origin \\S+$", "^origin \\S+$", "^origin --delete \\S+$"], "callers": ["*"] },
+    { "sub": "add", "shapes": ["^-A$", "^(?!-).+$"], "callers": ["*"] },
+    { "sub": "commit", "shapes": [{ "re": "^-m (wip: |\\[cr\\] |merge\\().*$", "flags": "s" }], "callers": ["*"] },
+    { "sub": "status", "shapes": ["^--short$"], "callers": ["*"] },
+    { "sub": "diff", "shapes": ["^--cached --quiet$", "^--stat( .+)?$", "^--name-only .+$", "^--unified=\\d+ .+$"], "callers": ["*"] },
+    { "sub": "log", "shapes": ["^--oneline .+$"], "callers": ["*"] },
+    { "sub": "ls-remote", "shapes": ["^--heads origin$"], "callers": ["*"] },
+    { "sub": "rev-parse", "shapes": ["^(HEAD|origin/\\S+)$"], "callers": ["*"] },
+    { "sub": "merge-base", "shapes": ["^origin/\\S+ HEAD$", "^--is-ancestor \\S+ origin/\\S+$"], "callers": ["*"] },
+    { "sub": "merge-tree", "shapes": ["^--write-tree origin/\\S+ origin/\\S+$"], "callers": ["*"] },
+    { "sub": "merge", "shapes": ["^--no-commit --no-ff \\S+$", "^--abort$", { "re": "^--no-ff \\S+ -m .+$", "flags": "s" }], "callers": ["*"] },
+    { "sub": "revert", "shapes": ["^--no-edit (-m 1 )?\\S+$"], "callers": ["*"] },
+    { "sub": "config", "shapes": ["^--get user\\.(name|email)$"], "callers": ["*"] },
+    { "sub": "remote", "shapes": ["^-v$"], "callers": ["*"] }
+  ],
+  "forbiddenFlags": ["-c", "-C", "--exec", "--upload-pack", "--receive-pack", "--config-env"],
+  "protectedPaths": {
+    "$comment": "正则 source，消费方以 i 旗标编译。deny=crctl 独占写入的权威状态文件；ask=需人工点头的门禁路径。",
+    "deny": [
+      "change-requests/_backlog\\.ya?ml$",
+      "change-requests/_history\\.ya?ml$",
+      "change-requests/[^/]+/cr\\.md$",
+      "change-requests/[^/]+/approval\\.ya?ml$",
+      "change-requests/[^/]+/review-loop\\.ya?ml$",
+      "review-annotations/[^/]+\\.ya?ml$"
+    ],
+    "ask": [
+      "(^|/)specs/[^/]+/(PRD|SDD|traceability)\\.(md|ya?ml)$",
+      "(^|/)delivery/",
+      "change-requests/[^/]+/test-report\\.md$"
+    ]
+  }
+}

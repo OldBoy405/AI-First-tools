@@ -20,6 +20,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function readStdin() {
   try { return fs.readFileSync(0, 'utf8'); } catch { return ''; }
@@ -36,20 +39,20 @@ function out(decision, reason) {
   process.exit(0);
 }
 
-const DENY_PATTERNS = [
-  /change-requests\/_backlog\.ya?ml$/i,
-  /change-requests\/_history\.ya?ml$/i,
-  /change-requests\/[^/]+\/cr\.md$/i,
-  /change-requests\/[^/]+\/approval\.ya?ml$/i,
-  /change-requests\/[^/]+\/review-loop\.ya?ml$/i,
-  /review-annotations\/[^/]+\.ya?ml$/i,
-];
+// 受控路径单一事实源：skills/shared/controlled-shell/rules.json#protectedPaths（CR-2026-002 TASK-01）。
+// 加载失败时 PATTERNS=null，写类操作一律降级为 ask（既不静默放开、也不误伤只读操作）。
+const RULES_PATH = process.env.CRCTL_RULES_PATH
+  || path.resolve(__dirname, '..', '..', '..', '..', 'controlled-shell', 'rules.json');
 
-const ASK_PATTERNS = [
-  /(^|\/)specs\/[^/]+\/(PRD|SDD|traceability)\.(md|ya?ml)$/i,
-  /(^|\/)delivery\//i,
-  /change-requests\/[^/]+\/test-report\.md$/i,
-];
+const PATTERNS = (() => {
+  try {
+    const j = JSON.parse(fs.readFileSync(RULES_PATH, 'utf8'));
+    return {
+      deny: j.protectedPaths.deny.map((s) => new RegExp(s, 'i')),
+      ask: j.protectedPaths.ask.map((s) => new RegExp(s, 'i')),
+    };
+  } catch { return null; }
+})();
 
 function loadExtra(cwd) {
   try {
@@ -63,9 +66,10 @@ function loadExtra(cwd) {
 }
 
 function classifyPath(p, extra) {
+  if (!PATTERNS) return 'ask'; // rules.json 不可用：写类操作交人工确认
   const norm = String(p).replaceAll('\\', '/');
-  if (DENY_PATTERNS.some((re) => re.test(norm)) || extra.deny.some((re) => re.test(norm))) return 'deny';
-  if (ASK_PATTERNS.some((re) => re.test(norm)) || extra.ask.some((re) => re.test(norm))) return 'ask';
+  if (PATTERNS.deny.some((re) => re.test(norm)) || extra.deny.some((re) => re.test(norm))) return 'deny';
+  if (PATTERNS.ask.some((re) => re.test(norm)) || extra.ask.some((re) => re.test(norm))) return 'ask';
   return null;
 }
 

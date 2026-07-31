@@ -22,6 +22,10 @@ description: 受控 shell 执行规范（方案 a）。所有 sync/requirement �
 
 ## 命令白名单
 
+> ⚠️ **单一事实源**：白名单的权威定义在同目录 [`rules.json`](rules.json)（git 三元组 19 条 + forbiddenFlags + protectedPaths），由 crctl.mjs、Claude Code hooks（pretooluse-guard.mjs）、multica `pkg/gitguard` 三方共同消费（CR-2026-002 TASK-01）。**本节表格只是解说，与 rules.json 不一致时以 rules.json 为准**；扩展白名单 = 修改 rules.json（连带三方消费者自动生效），不再改代码内联表。
+>
+> 诚实边界：rules.json 约束的是"经受控入口的调用"（crctl git / gitguard / hooks）。PATH shim 可被绝对路径绕过、hooks 依赖 IDE 配合——兜底靠权威文件的 CAS+gate（第 4 层）与 CI 远端复核（第 5 层），详见 P1 设计 §C.4。
+
 | git 子命令 | 用途 | 调用者 |
 |---|---|---|
 | `worktree` | `add -b` / `add --track` / `remove` / `remove --force` / `list` | requirement-register, resume-from-remote, cr-archive |
@@ -56,7 +60,7 @@ description: 受控 shell 执行规范（方案 a）。所有 sync/requirement �
 |---|---|---|
 | Tauri 桌面壳（`__TAURI_INTERNALS__` 存在） | 平台注入的 `runGit()` 受控适配器 | — |
 | opencode session | 平台注入的 session shell 受控适配器 | `runGit()`（若 webview 可达） |
-| 纯 Qoder IDE（agent 仅 markdown） | agent 直接调用 IDE 提供的 shell 工具（如 `run_in_terminal`） | 返回 `SHELL_UNAVAILABLE` |
+| 纯 IDE（Codex / Claude Code / Cursor / Kimi / Qoder，agent 有 shell 工具） | `crctl git`（`skills/shared/crctl/`，本白名单的官方 IDE 运行时适配器，按子命令+形态+调用者三元放行并写审计日志） | 返回 `SHELL_UNAVAILABLE` |
 | 以上均不可用 | **停止执行，返回结构化错误**，不得输出手工指引 | — |
 
 ### 2. 结构化错误格式
@@ -116,4 +120,5 @@ description: 受控 shell 执行规范（方案 a）。所有 sync/requirement �
 
 | 版本 | 日期 | 变更 |
 |---|---|---|
+| v0.2.0 | 2026-07-31T09:50:00+08:00 | 白名单抽取为 rules.json 单一事实源（实际 19 条子命令，修正 v0.1.0 自称 15 条与实现的漂移）；SKILL.md 降级为解说；新增诚实边界声明（CR-2026-002 TASK-01）。 |
 | v0.1.0 | 2026-05-08T10:00:00+08:00 | 首版。白名单 15 条 git 子命令；要求 skill 返回结构化错误，禁止手工指引。 |
