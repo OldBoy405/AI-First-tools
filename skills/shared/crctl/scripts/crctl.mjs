@@ -326,6 +326,49 @@ function auditLog(ws, record) {
   fs.appendFileSync(path.join(dir, 'audit.log'), JSON.stringify({ at: nowIso(), ...record }) + '\n');
 }
 
+/* ────────────────────────── outbox 事件（P1 同步协议，CR-2026-002 TASK-02） ──────────
+ * crctl 只写本地文件，网络交给 daemon（零依赖/离线优先）。
+ * advance 成功 → status 事件（approve 级联的 advance 附带证据摘要）；
+ * git push 成功 → checkpoint 事件（携带 HEAD sha，用于补全 --embedded 的空 commit_sha）。
+ * 事件写入失败不阻塞主操作，只记 audit——outbox 是投影通道，git 才是权威。
+ */
+
+function emitOutboxEvent(ws, ev) {
+  try {
+    const dir = path.join(ws, '.crctl', 'outbox');
+    fs.mkdirSync(dir, { recursive: true });
+    const gi = path.join(ws, '.crctl', '.gitignore');
+    if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n');
+    const event = {
+      v: 1,
+      event_kind: ev.event_kind,
+      cr_id: ev.cr_id,
+      from_status: ev.from_status ?? '',
+      to_status: ev.to_status ?? '',
+      trigger: ev.trigger ?? '',
+      commit_sha: ev.commit_sha ?? '',
+      actor: ev.actor ?? '',
+      evidence: ev.evidence ?? {},
+      payload: ev.payload ?? {},
+      occurred_at: nowIso(),
+    };
+    const ts = new Date().toISOString().replace(/[-:.]/g, '');
+    const name = `${ts}-${event.cr_id}-${event.event_kind}-${(event.commit_sha || 'nosha').slice(0, 8)}.json`;
+    const tmp = path.join(dir, `.tmp-${process.pid}-${name}`);
+    fs.writeFileSync(tmp, JSON.stringify(event, null, 2) + '\n', 'utf8');
+    fs.renameSync(tmp, path.join(dir, name)); // 原子可见：先写临时名再 rename，防半写
+    return name;
+  } catch (e) {
+    try { auditLog(ws, { kind: 'outbox', result: 'EMIT_FAILED', why: String(e && e.message || e) }); } catch { /* 双重失败只能放弃 */ }
+    return null;
+  }
+}
+
+function gitHeadSha(ws, cwd) {
+  const r = controlledGit(ws, 'rev-parse', ['HEAD'], cwd || ws, 'crctl-outbox');
+  return r.ok ? (r.stdout || '').trim() : '';
+}
+
 /* ────────────────────────── 受控 git（组件 A 的 gitwrap） ──────────────────────────
  * 三元白名单：子命令 + 形态（正则）+ 调用者。
  * 单一事实源：skills/shared/controlled-shell/rules.json（CR-2026-002 TASK-01）。
@@ -663,6 +706,13 @@ function cmdAdvance(ws, cr, gates, flags) {
     const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-advance') : addR;
     result.commit = commitR.ok ? { message: msg } : { failed: true, detail: commitR, note: '状态文件已写入但 commit 失败，请修复后手工经 crctl git 提交' };
   }
+  // outbox：状态事件。--embedded/--no-commit 时 commit_sha 留空，由 push 的 checkpoint 事件补全（§A.5）
+  const committed = result.commit && result.commit.message;
+  result.outbox = emitOutboxEvent(ws, {
+    event_kind: 'status', cr_id: cr, from_status: current, to_status: flags.to,
+    trigger: flags.trigger, commit_sha: committed ? gitHeadSha(ws) : '',
+    actor: identity(ws), evidence: flags.outboxEvidence || {},
+  });
   ok(result);
   if (result.commit && result.commit.failed) process.exit(1);
 }
@@ -713,8 +763,17 @@ function cmdApprove(ws, cr, gates, flags) {
     }
     writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash);
     auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'approved' });
+    // 证据摘要随级联 advance 的 status 事件进 outbox（一个 approve 只发一条事件，避免与去重键冲突）
+    const outboxEvidence = {};
+    if (stageCfg.evidence) {
+      for (const rel of Object.values(stageCfg.evidence)) {
+        const p = path.join(ws, rel.replaceAll('{cr}', cr));
+        const text = readFileChecked(p);
+        if (text != null) outboxEvidence[rel.replaceAll('{cr}', cr)] = 'sha256:' + sha256(text.replaceAll('\r\n', '\n'));
+      }
+    }
     // 级联推进状态（同一 gate 再校验一遍，包含 approval 检查）
-    cmdAdvance(ws, cr, gates, { to: stageCfg.to, trigger: stageCfg.trigger, expect: current, specId: flags['spec-id'] });
+    cmdAdvance(ws, cr, gates, { to: stageCfg.to, trigger: stageCfg.trigger, expect: current, specId: flags['spec-id'], outboxEvidence });
   });
 }
 
@@ -944,9 +1003,25 @@ function cmdGit(ws, argv, flags) {
   const r = controlledGit(ws, sub, args, flags.cwd ? path.resolve(flags.cwd) : ws, flags.caller);
   if (r.code === 'FORBIDDEN_SUBCOMMAND') fail('FORBIDDEN_SUBCOMMAND', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   if (r.code === 'SHELL_UNAVAILABLE') fail('SHELL_UNAVAILABLE', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
+  let outbox = null;
+  if (r.ok && sub === 'push' && !args.includes('--delete')) {
+    // checkpoint 事件：携带被推送仓的 HEAD sha，供 worker 补全 --embedded 状态事件的空 commit_sha（§A.5）。
+    // CR 上下文从 HEAD 提交信息或分支参数提取；提不到（非 CR 相关推送）则不发。
+    const cwd = flags.cwd ? path.resolve(flags.cwd) : ws;
+    const sha = gitHeadSha(ws, cwd);
+    const headMsgR = controlledGit(ws, 'log', ['--oneline', '-1'], cwd, 'crctl-outbox');
+    const headMsg = headMsgR.ok ? (headMsgR.stdout || '').trim() : '';
+    const crMatch = (headMsg.match(/CR-\d{4}-\d{3}/) || args.join(' ').match(/CR-\d{4}-\d{3}/));
+    if (crMatch) {
+      outbox = emitOutboxEvent(ws, {
+        event_kind: 'checkpoint', cr_id: crMatch[0], commit_sha: sha,
+        actor: identity(ws), payload: { pushed: args.join(' '), cwd, headMessage: headMsg },
+      });
+    }
+  }
   process.stdout.write(r.stdout || '');
   process.stderr.write(r.stderr || '');
-  ok({ ok: r.ok, exit: r.exit });
+  ok(outbox ? { ok: r.ok, exit: r.exit, outbox } : { ok: r.ok, exit: r.exit });
   if (!r.ok) process.exit(r.exit || 1);
 }
 

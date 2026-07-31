@@ -214,3 +214,76 @@ test('git：rules.json 正常加载后语义与原硬编码表一致（禁子命
     assert.equal(r.stderr.error.code, 'FORBIDDEN_SUBCOMMAND');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── outbox 事件通道（CR-2026-002 TASK-02）────────────────────────────────
+import { readdirSync, readFileSync } from 'node:fs';
+
+function readOutbox(ws) {
+  const dir = path.join(ws, '.crctl', 'outbox');
+  try {
+    return readdirSync(dir).filter((f) => f.endsWith('.json'))
+      .map((f) => ({ file: f, ev: JSON.parse(readFileSync(path.join(dir, f), 'utf8')) }));
+  } catch { return []; }
+}
+
+test('outbox：advance 成功（--no-commit，即 embedded 半边）-> 写入合 schema 的 status 事件且 commit_sha 为空', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    const r = runCrctl(['advance', 'CR-TEST-1', '--to', 'rejected', '--trigger', 'cr-review-record:reject', '--workspace', ws, '--no-commit']);
+    assert.equal(r.status, 0);
+    const events = readOutbox(ws);
+    assert.equal(events.length, 1);
+    const { ev } = events[0];
+    assert.equal(ev.v, 1);
+    assert.equal(ev.event_kind, 'status');
+    assert.equal(ev.cr_id, 'CR-TEST-1');
+    assert.equal(ev.from_status, 'drafting');
+    assert.equal(ev.to_status, 'rejected');
+    assert.equal(ev.trigger, 'cr-review-record:reject');
+    assert.equal(ev.commit_sha, '');
+    assert.ok(ev.occurred_at && ev.actor !== undefined && typeof ev.payload === 'object');
+    assert.match(events[0].file, /^\d{8}T\d{9}Z-CR-TEST-1-status-nosha\.json$/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('outbox：advance 被拒（非法转换）-> 不写任何事件', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    const r = runCrctl(['advance', 'CR-TEST-1', '--to', 'code-approved', '--trigger', 'made-up-trigger', '--workspace', ws, '--no-commit']);
+    assert.equal(r.status, 1);
+    assert.equal(readOutbox(ws).length, 0);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('outbox：git push 成功 -> checkpoint 事件携带 HEAD sha 与从提交信息提取的 CR-ID（embedded 补全通道）', () => {
+  const ws = makeWorkspace();
+  const bare = mkdtempSync(path.join(os.tmpdir(), 'crctl-test-bare-'));
+  try {
+    const g = (args, cwd) => {
+      const r = spawnSync('git', args, { cwd, encoding: 'utf8', shell: false });
+      assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+    };
+    g(['init', '--bare'], bare);
+    g(['init', '-b', 'master'], ws);
+    g(['config', 'user.email', 'test@test'], ws);
+    g(['config', 'user.name', 'tester'], ws);
+    writeBacklog(ws, [{ id: 'CR-2026-001', status: 'drafting' }]); // 保证有可提交内容；CR-ID 用生产格式（提取正则为 CR-\d{4}-\d{3}）
+    g(['add', '-A'], ws);
+    g(['commit', '-m', '[cr] status CR-2026-001 drafting -> requirement-reviewing'], ws);
+    g(['remote', 'add', 'origin', bare], ws);
+
+    const r = runCrctl(['git', 'push', '-u', 'origin', 'master', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const events = readOutbox(ws).filter((e) => e.ev.event_kind === 'checkpoint');
+    assert.equal(events.length, 1);
+    const { ev } = events[0];
+    assert.equal(ev.cr_id, 'CR-2026-001');
+    assert.match(ev.commit_sha, /^[0-9a-f]{40}$/);
+    assert.match(ev.payload.headMessage, /CR-2026-001/);
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+    rmSync(bare, { recursive: true, force: true });
+  }
+});
