@@ -860,7 +860,9 @@ function cmdApprove(ws, cr, gates, flags) {
 }
 
 function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
-  const gp = path.isAbsolute(flags.grant) ? flags.grant : path.join(ws, flags.grant);
+  // 裸 --grant（无值）= 用 daemon 投递的标准落点 .crctl/grants/{cr}-{stage}.grant.json
+  const grantArg = typeof flags.grant === 'string' ? flags.grant : path.join('.crctl', 'grants', `${cr}-${stage}.grant.json`);
+  const gp = path.isAbsolute(grantArg) ? grantArg : path.join(ws, grantArg);
   const text = readFileChecked(gp);
   if (text == null) fail('GRANT_UNREADABLE', `grant 文件不存在或不可读: ${gp}`);
   let grant;
