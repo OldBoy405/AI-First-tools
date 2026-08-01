@@ -549,6 +549,25 @@ function evaluatePassCondition(ws, cr, stageCfg, gates) {
   return { pass: results.length > 0 && results.every((r) => r.ok), results, source };
 }
 
+// CR-2026-005 FR-1: delivery/task 回写一致性检查。tasks/_index.yml 中每条
+// status=done 的任务，必须能在全局 delivery/task/_index.yaml 里按 id 找到
+// 对应条目——两份索引的 id 字段已核实同名同值（如 CR-2026-004-TASK-01），
+// 简单集合差即可，不需要映射表。doneIds 为空或全局索引文件不存在时视为
+// 该维度暂无待核对项，不误报（PRD FR-3 边界）。
+function checkDeliveryIndexComplete(ws, cr) {
+  const tasksIdx = readEvidenceDoc(ws, cr, 'change-requests/{cr}/tasks/_index.yml');
+  const doneIds = tasksIdx.exists
+    ? (tasksIdx.data?.tasks || []).filter((t) => t.status === 'done').map((t) => t.id)
+    : [];
+  if (doneIds.length === 0) return { ok: true, missing: [] };
+  const globalPath = path.join(ws, 'delivery/task/_index.yaml');
+  const globalIds = fs.existsSync(globalPath)
+    ? (parseYaml(fs.readFileSync(globalPath, 'utf8'))?.tasks || []).map((e) => e.id)
+    : [];
+  const missing = doneIds.filter((id) => !globalIds.includes(id));
+  return { ok: missing.length === 0, missing };
+}
+
 function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
   const checks = gates.statusGates[targetStatus];
   const out = { target: targetStatus, checks: [], pass: true };
@@ -608,6 +627,12 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
         if (!sig.ok) { drift = sig.code; why = `approval.yml#${check.section} server-approve 签名重验证失败：${sig.why}`; }
       }
       out.checks.push({ type: check.type, section: check.section, ok: okv && !drift, why, code: drift || undefined });
+    } else if (check.type === 'deliveryIndexComplete') {
+      const r = checkDeliveryIndexComplete(ws, cr);
+      out.checks.push({
+        type: check.type, ok: r.ok, missing: r.missing,
+        why: r.ok ? null : `delivery/task 索引缺失 ${r.missing.length} 项: ${r.missing.join(', ')}`,
+      });
     } else if (check.type === 'attemptsWithinLimit') {
       const r = readAttempts(ws, cr, check.loop, gates);
       const okv = !r.exhausted;

@@ -87,7 +87,8 @@
       { "type": "fileExists", "path": "specs/{spec}/PRD.md" },
       { "type": "fileExists", "path": "specs/{spec}/SDD.md" },
       { "type": "fileExists", "path": "specs/{spec}/traceability.yml" },
-      { "type": "fileExists", "path": "delivery/task" }
+      { "type": "fileExists", "path": "delivery/task" },
+      { "type": "deliveryIndexComplete" }
     ]
   },
 

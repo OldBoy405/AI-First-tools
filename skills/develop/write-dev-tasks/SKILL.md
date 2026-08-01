@@ -52,6 +52,7 @@ cr-ref: {cr_id}
 plan-ref: "change-requests/{cr_id}/plan.md"
 sdd-ref: "change-requests/{cr_id}/sdd.md"
 title: {任务标题}
+slug: {任务标题提炼的英文 kebab-case，建议填写但非强制}
 status: pending
 estimate: {N}h
 depends-on: []
@@ -59,6 +60,8 @@ assignee: ""
 created: {YYYY-MM-DDTHH:mm:ss+08:00}
 ---
 ```
+
+> `slug` 供回写期 `writeback-tasks` skill 生成 `delivery/task/` 文件名用；建议填写（英文 kebab-case，从标题提炼，控制在 40 字符内），未填时回退为 `task-{NN}`（可读性差但确定性强）。CR-2026-005 起补充此字段。
 
 正文：
 1. **任务描述** — 目标、背景、输入条件
