@@ -552,8 +552,10 @@ function evaluatePassCondition(ws, cr, stageCfg, gates) {
 // CR-2026-005 FR-1: delivery/task 回写一致性检查。tasks/_index.yml 中每条
 // status=done 的任务，必须能在全局 delivery/task/_index.yaml 里按 id 找到
 // 对应条目——两份索引的 id 字段已核实同名同值（如 CR-2026-004-TASK-01），
-// 简单集合差即可，不需要映射表。doneIds 为空或全局索引文件不存在时视为
-// 该维度暂无待核对项，不误报（PRD FR-3 边界）。
+// 简单集合差即可，不需要映射表。两个边界（PRD FR-3）处理不同：doneIds 为
+// 空时直接放行（没有待核对项）；全局索引文件不存在但 doneIds 非空时视为
+// 全局集合为空集，正常计算 missing（此时应报告缺失，因为回写确实没做，
+// 不是"视为通过"）。
 function checkDeliveryIndexComplete(ws, cr) {
   const tasksIdx = readEvidenceDoc(ws, cr, 'change-requests/{cr}/tasks/_index.yml');
   const doneIds = tasksIdx.exists
