@@ -487,7 +487,7 @@ function controlledGit(ws, sub, args, cwd, caller) {
     auditLog(ws, { ...record, result: 'FORBIDDEN_FORM' });
     return { ok: false, code: 'FORBIDDEN_SUBCOMMAND', message: `git ${sub} ${joined} 不匹配白名单允许的任何形态` };
   }
-  const r = spawnSync('git', [sub, ...args], { cwd: cwd || ws, encoding: 'utf8', shell: false });
+  const r = spawnSync('git', [sub, ...args], { cwd: cwd || ws, encoding: 'utf8', shell: false, env: { ...process.env, GIT_EDITOR: 'true', EDITOR: 'true', GIT_TERMINAL_PROMPT: '0' } });
   const out = { ok: r.status === 0, exit: r.status, stdout: (r.stdout || '').slice(0, 20000), stderr: (r.stderr || '').slice(0, 20000) };
   auditLog(ws, { ...record, result: out.ok ? 'ok' : `exit=${r.status}` });
   return out;

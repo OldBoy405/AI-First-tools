@@ -25,6 +25,16 @@ description: 按 dir-graph.yaml repositories 动态解析参与仓，通过 dry-
 
 ---
 
+## 非 TTY 执行约定（Agent 直跑裸 git 场景）
+
+本 Skill 的所有 git 命令必须能在非交互（非 TTY）环境下完成，禁止任何会打开编辑器或等待stdin 的形态：
+
+- 所有 `git commit` 必须带 `-m`（本 Skill 步骤中已强制）；`git merge` 若需直接完成提交必须带 `--no-edit` 或先 `--no-commit` 再 `commit -m`。
+- `git rebase --continue` / `git rebase` 在非 TTY 下会挂起等编辑器——**本 Skill 不使用 rebase**（见下文"_backlog.yml / cr.md 冲突的确定性解法"），若执行者自行改用 rebase 导致挂起，责任在执行者。
+- 经 crctl `git` 子命令执行的 git 已由 crctl 强制注入 `GIT_EDITOR=true` / `GIT_TERMINAL_PROMPT=0`（代码级保证）；Agent 绕过 crctl 直跑裸 git 时，必须自行在环境变量中设置 `GIT_EDITOR=true`、`GIT_TERMINAL_PROMPT=0`，或确保所有命令形态本身不触发编辑器。
+
+---
+
 ## 参数
 
 | 参数 | 类型 | 必填 | 说明 |
@@ -168,6 +178,23 @@ merge-commits:
    Worktree            : 保留，等待 cr-archive 统一清理
    下一步              : 执行 writeback-prd-sdd
 ```
+
+---
+
+## _backlog.yml / cr.md 冲突的确定性解法
+
+CR 状态是线性状态机，`change-requests/_backlog.yml` 条目与 `change-requests/{cr_id}/cr.md` frontmatter 的 `status` 字段在每次 `crctl advance` 时被双写。CR 分支与 trunk 各自推进时，这两个文件必然在合并时冲突。
+
+**解法（前提：crctl advance 是这两个文件 status 字段的唯一写入者，由工作区纪律保障）：**
+
+冲突双方必然一新一旧，**固定取状态机位置更靠后的一侧**：
+
+1. 对 `_backlog.yml` 与 `cr.md` 的冲突块，分别解析两侧的 `status` 值。
+2. 查状态机声明（`dir-graph.yaml` 或 tools 包 `change-request-track.state_machine`），取在状态序列中位置更靠后的那个 status 所在的一侧，整侧采用。
+3. 其余字段（owners / merge-commits / 时间戳等）若也冲突，与 status 同侧一并采用——它们由同一次 advance 写入，天然一致。
+4. **禁止**用 `git rebase` 把 CR 分支的一串状态提交逐条重放到 trunk——那会让每一个状态提交都在 `_backlog.yml` 同一区域与 trunk 冲突，形成"冲突 → 解决 → 下一个提交又冲突"的连环。本 Skill 规定的两阶段 merge 流（dry-run + 单次 merge commit）就是为了把冲突压缩到一次解决。
+
+若冲突两侧的 status 相同但其他字段不一致（说明有 crctl 之外的写入者违反纪律），停止执行并报告，不得套用本解法。
 
 ---
 

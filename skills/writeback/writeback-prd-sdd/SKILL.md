@@ -50,14 +50,25 @@ cp specs/{spec_id}/SDD.md change-requests/{cr_id}/writeback-backups/{spec_id}/{T
 
 ### Step 3 — 创建或更新 specs/{spec_id}/
 
+**specs/ 基线是累积文档，不是最近一次 CR 的副本。** 禁止用 `cp` 直接以本 CR 的 prd.md / sdd.md 整份覆盖 specs 基线——那会用一个阶段的文档覆掉之前所有里程碑的内容。
+
+- **首次回写**（`specs/{spec_id}/PRD.md` / `SDD.md` 不存在）：
+
 ```bash
 mkdir -p specs/{spec_id}
 cp change-requests/{cr_id}/prd.md specs/{spec_id}/PRD.md
 cp change-requests/{cr_id}/sdd.md specs/{spec_id}/SDD.md
 ```
 
+- **增量回写**（基线已存在）：按里程碑分节累积——
+  1. 在基线文档末尾新增一个以本次里程碑（target_version + cr_id）命名的章节，节内保留本 CR 文档原文，各标题层级（H 级）整体下沉一级，使里程碑节成为该文档下的平级分节。
+  2. 既有里程碑章节保持原样，不得改写、删除或重排。
+  3. 跨节引用 FR/AC 等编号时加里程碑前缀（如 `M0-FR-3` / `P1-AC-5`），避免不同里程碑的同名编号互相指向。
+  4. 若基线顶部有跨里程碑的全局 frontmatter / 总述 / 目录，仅追加本次里程碑条目，不覆盖既有内容。
+
 通过 `engineering-docs` skill 校验 frontmatter 合规性（type: PRD / type: SDD），若 frontmatter 缺失则补全：
 - `spec_id`、`version`（= target_version）、`status: ga`、`cr_ref: {cr_id}`
+- 增量回写时 `version` / `cr_ref` 更新为本次值，其余 frontmatter 字段保留。
 
 ### Step 4 — 维护 specs/_index.yml
 
