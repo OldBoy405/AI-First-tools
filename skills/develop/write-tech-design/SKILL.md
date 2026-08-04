@@ -35,9 +35,13 @@ description: 读取 change-requests/{CR-ID}/prd.md，在同目录编写 sdd.md �
 ### Step 1 — 前置校验
 
 1. 确认 `change-requests/{cr_id}/prd.md` 存在。
-2. 读取本 CR 涉及的目标代码仓根目录 `ARCHITECTURE.md`（依 `dir-graph.yaml#repositories` 解析；多仓 CR 逐仓检查）了解整体架构约束：
+2. 读取本 CR **目标代码仓**根目录的 `ARCHITECTURE.md` 了解整体架构约束。目标代码仓路径解析**必须**沿用 `code-implementation` pipeline `implement-code` 节点已定的同一套约定，禁止另行发挥：
+   - 独立代码仓：`.rayai-worktrees/{repo.id}/requirement/{cr_id}`
+   - 非独立代码目录：knowledge-base CR worktree（`.rayai-worktrees/knowledge-base/requirement/{cr_id}`）内对应代码路径
+   - 多仓 CR：按 `dir-graph.yaml#repositories` 逐仓检查，**不得**因为找不到就退而查找会话中最近读过的其他仓（尤其是本方法论包 `tools` 仓自身）的 `ARCHITECTURE.md` 顶替
+   - **仅当本 CR 的目标代码仓就是 `tools` 仓自身**（即本 CR 改的是 `tools/skills`、`crctl.mjs` 等方法论包代码）时，`tools/ARCHITECTURE.md` 才是正确的读取对象；否则它与目标仓无关，绝不可当作参考基线
    - **已存在**：直接读取，继续下一项（读取 CR 当前 status）。
-   - **不存在**（该仓首次走到技术设计评审，按需懒加载起草，成本只付一次）：本 Agent 花一轮读该仓代码（入口文件、目录结构、依赖方向、已有约定），套用 `skills/shared/engineering-docs/templates/ARCHITECTURE-template.md` 填成实际内容（禁止留占位符），落盘到该仓根目录 `ARCHITECTURE.md`，与 `sdd.md` 同一 commit 提交。在 Step 5 输出摘要中标注"新起草 ARCHITECTURE.md（{repo}）"，随本轮 `review-tech-design`/`approve-tech-design` 人工过一眼确认，不另开审批节点。
+   - **不存在**（该仓首次走到技术设计评审，按需懒加载起草，成本只付一次）：本 Agent 花一轮读**目标仓自己的**代码（入口文件、目录结构、依赖方向、已有约定），套用 `skills/shared/engineering-docs/templates/ARCHITECTURE-template.md` 填成实际内容（禁止留占位符），落盘到目标仓根目录 `ARCHITECTURE.md`，与 `sdd.md` 同一 commit 提交。**禁止参考 `tools/ARCHITECTURE.md` 的内容**（其不变量如"零依赖""crctl 单一状态写者"是方法论包自身治理事实，不是通用事实）——只能把它当"8 节骨架长什么样"的结构范例，绝不能抄条款。在 Step 5 输出摘要中标注"新起草 ARCHITECTURE.md（{repo}）"，随本轮 `review-tech-design`/`approve-tech-design` 人工过一眼确认，不另开审批节点。
    - 仅在文件缺失时起草；已存在则只读不改——普通 CR 不得借道修订它（架构级变更需求见该文档自身"维护规则"一节）。
 3. 读取 CR 当前 status：
    - 初次生成：必须为 `requirement-approved`，随后调用 `cr-status-set`（`next_status=tech-designing`，`trigger=write-tech-design`，`expected_current_status=requirement-approved`）将 status 推进到 `tech-designing`。
