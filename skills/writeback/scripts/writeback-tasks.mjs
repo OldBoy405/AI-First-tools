@@ -1,6 +1,7 @@
 // writeback-tasks.mjs — TASK 回写脚本（CR-2026-020，SDD §4.2 / FR-2）
 // 职责：done 任务拷贝到 delivery/task/（命名 TASK-{version}-{cr}-{NN}-{slug}）+ frontmatter 注入
-//       spec-id/version + delivery/task/_index.yaml 全量重建（七字段投影，既有序 + 新增排序追加）。
+//       spec-id/version + delivery/task/_index.yaml 维护（既有条目逐字保留 + 新增从源数据构造追加，
+//       不做扫描重投影——真实交付文件 frontmatter 不含可信 status/target-version，投影必然失真）。
 // 幂等判据（SDD-BLOCK-001 修复版）：扫描 delivery/task/*.md frontmatter 的 id 集合，不看目标文件名。
 // 边界：change-requests/{cr}/tasks/_index.yml 只读（账本）；只写 delivery/ 内容文件（NFR-5）。
 // 用法：node writeback-tasks.mjs --workspace <ws> --cr <CR-ID> --spec <spec_id> --version <ver> [--dry-run]
@@ -95,52 +96,38 @@ if (toWrite.length === 0) {
   process.exit(0);
 }
 
-/* ── delivery/task/_index.yaml 全量重建：七字段投影，既有序 + 新增按 id 排序追加 ── */
-function rebuildIndex() {
+/* ── delivery/task/_index.yaml 维护：既有条目逐字保留 + 新增条目从源数据构造追加 ──
+   不做"扫描文件重投影"式全量重建（CODE-BLOCK-001 修复版）：真实交付文件 frontmatter 是
+   status: pending 且无 target-version 字段（实测 TASK-0.20.1-CR-2026-019-01），投影必然失真
+   （done 翻 pending、target-version 清空）。既有条目原文保留天然保真，新增条目全部字段在
+   写入时刻已知（源 frontmatter + 入参），无需回读投影。幂等仍由 id 集合保证。 */
+function buildIndex() {
   const oldIdxPath = path.join(deliveryDir, '_index.yaml');
-  const oldText = readFile(oldIdxPath) ?? '';
-  const oldIds = [];
-  for (const m of oldText.matchAll(/^\s*- id: (\S+)/gm)) oldIds.push(m[1]);
-  const entries = [];
-  const byId = new Map();
-  for (const f of fs.readdirSync(deliveryDir).filter((x) => x.endsWith('.md'))) {
-    const doc = readFile(path.join(deliveryDir, f));
-    const fld = readFrontmatter(doc);
-    if (!fld.id) continue;
-    byId.set(fld.id, {
-      id: fld.id,
-      file: f,
-      title: fld.title ?? '',
-      status: fld.status ?? '',
-      crRef: fld['cr-ref'] ?? '',
-      targetVersion: fld['target-version'] ?? '',
-      estimate: fld.estimate ?? '',
-    });
-  }
-  const ordered = [...oldIds.filter((i) => byId.has(i))];
-  const added = [...byId.keys()].filter((i) => !oldIds.includes(i)).sort();
-  for (const id of [...ordered, ...added]) {
-    const e = byId.get(id);
-    entries.push(
-      `  - id: ${e.id}`,
-      `    file: ${e.file}`,
-      `    title: ${e.title}`,
-      `    status: ${e.status}`,
-      `    cr-ref: ${e.crRef}`,
-      `    target-version: ${JSON.stringify(e.targetVersion)}`,
-      `    estimate: ${e.estimate}`,
+  const oldText = readFile(oldIdxPath);
+  const lines = oldText !== null ? oldText.replace(/\n+$/, '').split('\n') : ['tasks:'];
+  const oldIds = new Set([...(oldText ?? '').matchAll(/^\s*- id: (\S+)/gm)].map((m) => m[1]));
+  for (const t of toWrite) {
+    if (oldIds.has(t.id)) continue; // 幂等：索引已登记则不重复追加
+    const srcFields = readFrontmatter(srcById.get(t.id).doc);
+    lines.push(
+      `  - id: ${t.id}`,
+      `    file: ${t.fileName}`,
+      `    title: ${(srcFields.title ?? '').replace(/^"|"$/g, '')}`,
+      `    status: done`,
+      `    cr-ref: ${cr}`,
+      `    target-version: ${JSON.stringify(verNoV)}`,
+      `    estimate: ${(srcFields.estimate ?? '').replace(/^"|"$/g, '')}`,
     );
   }
-  return `tasks:\n${entries.join('\n')}\n`;
+  return lines.join('\n') + '\n';
 }
 
-const newIndex = rebuildIndex();
 const oldIdxPath = path.join(deliveryDir, '_index.yaml');
+const newIndex = buildIndex();
 const oldIdx = readFile(oldIdxPath) ?? '';
 if (oldIdx !== newIndex) {
   if (dryRun) {
-    // 简化 diff：直接打印索引重建摘要（文件级操作，避免大段输出）
-    process.stdout.write(`~ delivery/task/_index.yaml（全量重建，${(newIndex.match(/- id:/g) || []).length} 条）\n`);
+    process.stdout.write(`~ delivery/task/_index.yaml（既有条目保留，追加 ${toWrite.length} 条）\n`);
   } else {
     planWrite(oldIdxPath, newIndex, { dryRun: false });
   }

@@ -38,9 +38,12 @@ if (prdSrc === null || sddSrc === null) {
   fail('BAD_ARGS', `change-requests/${cr}/prd.md 或 sdd.md 不存在`, { prd: prdSrc !== null, sdd: sddSrc !== null });
 }
 
+// 版本入参归一（CODE-BLOCK-002）：裸值用于标题/_index（对齐 current: "0.20.1" 惯例），
+// v 前缀形式仅用于 PRD/SDD frontmatter version 字段（对齐真实 PRD.md 的 version: v0.10.0 惯例）
+const verNoV = version.startsWith('v') ? version.slice(1) : version;
 const srcTitle = readFrontmatter(prdSrc).title || cr;
-const heading = `## ${milestoneName ?? srcTitle}（v${version} · ${cr}）`; // cr 为完整 ID（如 CR-2026-020），不加前缀
-const versionLabel = version.startsWith('v') ? version : `v${version}`;
+const heading = `## ${milestoneName ?? srcTitle}（v${verNoV} · ${cr}）`; // cr 为完整 ID（如 CR-2026-020），不加前缀
+const versionLabel = `v${verNoV}`;
 
 /* ── 里程碑节构造：去 frontmatter、正文 H 级 +1、冠以标题行 ── */
 function buildMilestoneSection(srcDoc) {
@@ -63,7 +66,7 @@ function buildFirstWrite(srcDoc) {
     ['status', 'ga'],
     ['cr-ref', cr],
     ['cr-history', `[${cr}]`],
-    ['target-version', version],
+    ['target-version', verNoV],
   ];
   for (const [f, v] of patches) fmText = patchFrontmatterField(fmText, f, v);
   return `${fmText}${buildMilestoneSection(srcDoc)}\n`;
@@ -71,7 +74,7 @@ function buildFirstWrite(srcDoc) {
 
 /* ── 幂等判据：里程碑标题行已存在（（v{version} · CR-{cr} 唯一标识）── */
 function hasMilestone(doc) {
-  const probe = `（v${version} · ${cr}`;
+  const probe = `（v${verNoV} · ${cr}`;
   return doc.includes(probe);
 }
 
@@ -91,8 +94,8 @@ function buildIndex(indexPath, now) {
       `    name: ${title}`,
       '    scope: product',
       '    status: ga',
-      `    since: ${version}`,
-      `    current: ${version}`,
+      `    since: ${verNoV}`,
+      `    current: ${verNoV}`,
       '    brief: ""',
       `    cr-ref: ${cr}`,
       `    cr-history: [${cr}]`,
@@ -107,7 +110,7 @@ function buildIndex(indexPath, now) {
   for (const line of blkLines) {
     const indent = (line.match(/^ */) || [''])[0]; // 保留条目缩进
     const t = line.trimStart();
-    if (/^current:/.test(t)) { out.push(`${indent}current: ${JSON.stringify(version)}`); continue; }
+    if (/^current:/.test(t)) { out.push(`${indent}current: ${JSON.stringify(verNoV)}`); continue; }
     if (/^cr-ref:/.test(t)) { out.push(`${indent}cr-ref: ${cr}`); continue; }
     if (/^updated:/.test(t)) { out.push(`${indent}updated: ${JSON.stringify(now)}`); continue; }
     if (/^cr-history:/.test(t)) {

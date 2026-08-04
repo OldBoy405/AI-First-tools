@@ -21,6 +21,8 @@ if (!ws || !cr || !spec || !version || !milestoneFile) {
   fail('BAD_ARGS', '缺少必填参数 --workspace / --cr / --spec / --version / --milestone-file');
 }
 const dryRun = !!args['dry-run'];
+// 版本入参归一（CODE-BLOCK-002）：对齐既有基线 target-version: "0.20.1" 裸值惯例
+const verNoV = version.startsWith('v') ? version.slice(1) : version;
 const crDir = path.join(ws, 'change-requests', cr);
 const tracePath = path.join(ws, 'specs', spec, 'traceability.yml');
 
@@ -97,7 +99,7 @@ function patchHeader(text) {
   for (const line of lines) {
     const t = line.trimStart();
     if (/^cr-ref:/.test(t)) { out.push(`cr-ref: ${cr}`); continue; }
-    if (/^target-version:/.test(t)) { out.push(`target-version: ${JSON.stringify(version)}`); continue; }
+    if (/^target-version:/.test(t)) { out.push(`target-version: ${JSON.stringify(verNoV)}`); continue; }
     if (/^generated-at:/.test(t)) { out.push(`generated-at: ${JSON.stringify(now)}`); continue; }
     if (/^cr-history:/.test(t)) {
       const m = /\[([^\]]*)\]/.exec(line);
@@ -119,8 +121,8 @@ function buildFirstHeader() {
     'spec-id: ' + spec,
     `cr-ref: ${cr}`,
     `cr-history: [${cr}]`,
-    `target-version: ${JSON.stringify(version)}`,
-    'baseline-since: "' + version + '"',
+    `target-version: ${JSON.stringify(verNoV)}`,
+    'baseline-since: "' + verNoV + '"',
     `generated-at: ${JSON.stringify(nowIso())}`,
     '',
     'milestones:',

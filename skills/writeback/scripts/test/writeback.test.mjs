@@ -80,16 +80,20 @@ function makePrdWs() {
   return ws;
 }
 
-test('prd-sdd: 首次回写 + frontmatter 补全', () => {
+test('prd-sdd: 首次回写 + frontmatter 补全 + v 前缀入参归一（CODE-BLOCK-002）', () => {
   const ws = makePrdWs();
-  const r = run(PRD_SDD, ws, ['--cr', 'CR-2099-001', '--spec', 'test-spec', '--version', '0.2']);
+  // 故意传 v 前缀（pipeline 输入占位符形态 "v0.16.0"），断言输出全部归一为裸值惯例
+  const r = run(PRD_SDD, ws, ['--cr', 'CR-2099-001', '--spec', 'test-spec', '--version', 'v0.2']);
   assert.equal(r.code, 0, r.stderr);
   const prd = fs.readFileSync(path.join(ws, 'specs', 'test-spec', 'PRD.md'), 'utf8');
   assert.ok(prd.includes('spec-id: test-spec'));
   assert.ok(prd.includes('status: ga'));
-  assert.ok(prd.includes('version: v0.2'));
+  assert.ok(prd.includes('version: v0.2'));       // frontmatter 用 v 前缀（PRD.md 惯例 version: v0.10.0）
+  assert.ok(!prd.includes('vv0.2'), 'v 前缀重复叠加');
+  assert.ok(prd.includes('（v0.2 · CR-2099-001）'));
   const idx = fs.readFileSync(path.join(ws, 'specs', '_index.yml'), 'utf8');
   assert.ok(idx.includes('cr-history: [CR-2000-001, CR-2099-001]') || idx.includes('cr-history: [CR-2099-001, CR-2000-001]'));
+  assert.ok(idx.includes('current: "0.2"'), '_index current 应为裸值（惯例 "0.20.1"）');
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
@@ -122,10 +126,12 @@ function makeTasksWs() {
   fs.mkdirSync(path.join(ws, 'delivery', 'task'), { recursive: true });
   fs.writeFileSync(path.join(crDir, 'cr.md'), '---\nid: CR-2099-002\nstatus: writing-back\n---\n');
   fs.writeFileSync(path.join(crDir, 'tasks', '_index.yml'), 'tasks:\n  - id: CR-2099-002-TASK-01\n    title: 有 slug\n    status: done\n    estimate: 4h\n  - id: CR-2099-002-TASK-02\n    title: 无 slug\n    status: done\n    estimate: 2h\n');
-  const mk = (nn, extra) => '---\nid: CR-2099-002-TASK-' + nn + '\ntype: TASK\ncr-ref: CR-2099-002\ntitle: t' + nn + extra + '\nstatus: done\nestimate: 1h\n---\n# TASK-' + nn + '\n';
+  // 真实形态（CODE-BLOCK-001 教训）：任务文件 frontmatter 是 status: pending（done 只记在
+  // tasks/_index.yml 账本），交付文件 frontmatter 无 target-version 字段——索引不得从文件投影
+  const mk = (nn, extra) => '---\nid: CR-2099-002-TASK-' + nn + '\ntype: TASK\ncr-ref: CR-2099-002\ntitle: t' + nn + extra + '\nstatus: pending\nestimate: 1h\n---\n# TASK-' + nn + '\n';
   fs.writeFileSync(path.join(crDir, 'tasks', 'TASK-01.md'), mk('01', '\nslug: with-slug'));
   fs.writeFileSync(path.join(crDir, 'tasks', 'TASK-02.md'), mk('02', ''));
-  fs.writeFileSync(path.join(ws, 'delivery', 'task', 'TASK-0.1-CR-2000-001-01-old.md'), '---\nid: CR-2000-001-TASK-01\ntype: TASK\ncr-ref: CR-2000-001\ntitle: old\nstatus: done\nestimate: 3h\n---\n');
+  fs.writeFileSync(path.join(ws, 'delivery', 'task', 'TASK-0.1-CR-2000-001-01-old.md'), '---\nspec-id: test-spec\nversion: "0.1"\nid: CR-2000-001-TASK-01\ntype: TASK\ncr-ref: CR-2000-001\ntitle: old\nstatus: pending\nestimate: 3h\n---\n');
   fs.writeFileSync(path.join(ws, 'delivery', 'task', '_index.yaml'), 'tasks:\n  - id: CR-2000-001-TASK-01\n    file: TASK-0.1-CR-2000-001-01-old.md\n    title: old\n    status: done\n    cr-ref: CR-2000-001\n    target-version: "0.1"\n    estimate: 3h\n');
   return ws;
 }
@@ -149,6 +155,12 @@ test('tasks: slug 命名 + 注入 + SDD-BLOCK-001 幂等 + 索引顺序 + noop',
   // 索引顺序：既有序 + 新增排后
   const idx = fs.readFileSync(path.join(ws, 'delivery', 'task', '_index.yaml'), 'utf8');
   assert.ok(idx.indexOf('CR-2000-001-TASK-01') < idx.indexOf('CR-2099-002-TASK-01'));
+  // CODE-BLOCK-001：既有条目逐字保留（status: done 与 target-version 不被文件 frontmatter 的
+  // pending/缺字段污染）；新增条目 status 固定 done、target-version 取入参
+  assert.ok(idx.includes('  - id: CR-2000-001-TASK-01\n    file: TASK-0.1-CR-2000-001-01-old.md\n    title: old\n    status: done\n    cr-ref: CR-2000-001\n    target-version: "0.1"\n    estimate: 3h'), '既有条目被改写');
+  assert.ok(!idx.includes('status: pending'), '索引出现 pending（文件 frontmatter 投影污染）');
+  const newSeg = idx.slice(idx.indexOf('CR-2099-002-TASK-01'));
+  assert.ok(newSeg.includes('status: done') && newSeg.includes('target-version: "0.2"'));
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
@@ -171,12 +183,15 @@ test('traceability: 追加保留 + 幂等 + 校验硬失败 + MERGE_COMMITS_MISS
   const { ws, msFile } = makeTraceWs(true);
   const old = fs.readFileSync(path.join(ws, 'specs', 'test-spec', 'traceability.yml'), 'utf8');
   const oldSeg = old.slice(old.indexOf('milestones:'));
-  const r = run(TRACE, ws, ['--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', '0.2', '--milestone-file', msFile]);
+  // v 前缀入参（CODE-BLOCK-002）：头部 target-version 应归一为裸值
+  const r = run(TRACE, ws, ['--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', 'v0.2', '--milestone-file', msFile]);
   assert.equal(r.code, 0, r.stderr);
   const after = fs.readFileSync(path.join(ws, 'specs', 'test-spec', 'traceability.yml'), 'utf8');
   assert.ok(after.includes(oldSeg), '既有段被改写');
   assert.ok(after.includes('- cr: CR-2099-003'));
   assert.ok(after.includes('sha: aaa111'));
+  assert.ok(/^target-version: "0\.2"$/m.test(after), '头部 target-version 应为裸值 "0.2"');
+  assert.ok(!after.includes('"v0.2"'), 'v 前缀泄漏进 traceability');
   // 重跑 noop
   const r2 = run(TRACE, ws, ['--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', '0.2', '--milestone-file', msFile]);
   assert.ok(r2.stdout.includes('"noop": true'));
