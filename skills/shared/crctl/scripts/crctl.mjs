@@ -733,7 +733,8 @@ function editTaskDone(text, taskId) {
     return `${indent}status: done\n${indent}done-at: "${nowIso()}"`;
   });
   if (!hit) fail('TASK_INDEX_SHAPE', `${taskId} 块内无 status 行（tasks/_index.yml 结构异常）`);
-  return norm.slice(0, block.start) + nb + norm.slice(block.end);
+  // 块替换后补尾部换行：紧凑格式（块间无空行）下 block.text 无尾随换行，直接拼接会把下一块粘连（T04 教训延伸）
+  return norm.slice(0, block.start) + nb + '\n' + norm.slice(block.end);
 }
 
 /** merge-metadata：条目 merge-commits[] 追加 {repo,trunk,sha}，无则创建键（SDD §4.2）。 */

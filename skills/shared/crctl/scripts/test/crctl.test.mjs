@@ -789,6 +789,23 @@ test('task done：已 done 的任务非零退出且文件无变更（AC-1）', (
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('task done：紧凑多块 _index.yml 中标记中间任务不粘连相邻块（T04 教训延伸）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeTaskIndex(ws, 'CR-T1', [
+      { id: 'CR-T1-TASK-01', title: 'a', status: 'pending' },
+      { id: 'CR-T1-TASK-02', title: 'b', status: 'pending' },
+      { id: 'CR-T1-TASK-03', title: 'c', status: 'pending' },
+    ]);
+    const r = runCrctl(['task', 'done', 'CR-T1', '--task', 'CR-T1-TASK-02', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const idx = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml'), 'utf8');
+    assert.match(idx, /- id: CR-T1-TASK-02\n    title: b\n    status: done/);
+    assert.ok(idx.includes('- id: CR-T1-TASK-03'), 'TASK-03 块必须保持独立（不得与 TASK-02 尾行粘连）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
 test('task done：非 developing 态非零退出（ILLEGAL_LEDGER_STATE）且无写（AC-5）', () => {
   const ws = makeWorkspace();
   try {
