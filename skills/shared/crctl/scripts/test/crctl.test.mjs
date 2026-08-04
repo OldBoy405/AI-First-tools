@@ -44,6 +44,12 @@ function writeBacklog(ws, entries) {
   writeFileSync(path.join(ws, 'change-requests', '_backlog.yml'), lines.join('\n') + '\n');
 }
 
+function writeCrMd(ws, cr, status) {
+  const dir = path.join(ws, 'change-requests', cr);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, 'cr.md'), `---\nid: ${cr}\nstatus: ${status}\n---\n`);
+}
+
 function writeApprovalYml(ws, cr, section, fields) {
   const dir = path.join(ws, 'change-requests', cr);
   mkdirSync(dir, { recursive: true });
@@ -82,6 +88,7 @@ test('advance：合法转换（drafting -> rejected，无门禁声明的终态�
   const ws = makeWorkspace();
   try {
     writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-TEST-1', 'drafting');
     const r = runCrctl(['advance', 'CR-TEST-1', '--to', 'rejected', '--trigger', 'cr-review-record:reject', '--workspace', ws, '--no-commit']);
     assert.equal(r.status, 0);
     assert.equal(r.stdout.advanced, true);
@@ -230,6 +237,7 @@ test('outbox：advance 成功（--no-commit，即 embedded 半边）-> 写入合
   const ws = makeWorkspace();
   try {
     writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-TEST-1', 'drafting');
     const r = runCrctl(['advance', 'CR-TEST-1', '--to', 'rejected', '--trigger', 'cr-review-record:reject', '--workspace', ws, '--no-commit']);
     assert.equal(r.status, 0);
     const events = readOutbox(ws);
@@ -360,6 +368,7 @@ function makeGrantWorkspace() {
   g(['config', 'user.email', 't@t']);
   g(['config', 'user.name', 'tester']);
   writeBacklog(ws, [{ id: 'CR-2026-001', status: 'requirement-reviewing' }]);
+  writeCrMd(ws, 'CR-2026-001', 'requirement-reviewing');
   writeEvidence(ws, 'CR-2026-001', 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n');
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   mkdirSync(path.join(ws, '.crctl', 'keys'), { recursive: true });
@@ -465,6 +474,8 @@ test('advance --embedded：连续两次 embedded 的 outbox 事件 commit_sha �
     run(['init', '-b', 'master']); run(['config', 'user.email', 't@t']); run(['config', 'user.name', 't']);
     writeFileSync(path.join(ws, 'change-requests', '_backlog.yml'),
       'change-requests:\n  - id: CR-TEST-1\n    status: drafting\n  - id: CR-TEST-2\n    status: requirement-approved\n');
+    writeCrMd(ws, 'CR-TEST-1', 'drafting');
+    writeCrMd(ws, 'CR-TEST-2', 'requirement-approved');
     // CR-TEST-1：非 embedded（drafting -> requirement-reviewing，需评审证据）
     writeEvidence(ws, 'CR-TEST-1', 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n');
     writeFileSync(path.join(ws, 'change-requests', 'CR-TEST-1', 'prd.md'), '# prd\n');
