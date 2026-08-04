@@ -38,4 +38,4 @@ node tools/skills/shared/crctl/scripts/crctl.mjs status <CR-ID>
 ## 边界说明
 
 - hooks 是尽力而为的事前拦截，不是安全边界；配合 `crctl` gate 的事后否决与 `adapters/ci/` 的远端侧校验共同工作（v2 §5.4–5.6）。
-- 其余 IDE（Codex/Kimi/Cursor/Qoder）若提供等价 hook 机制可参照移植；没有则依赖「crctl 唯一合法路径 + CI 远端否决」。
+- 其余 IDE 适配器已提供：Qoder CN（dapters/qoder/，格式与 Claude Code 完全一致，无 SessionStart）、Cursor（dapters/cursor/，原生扁平格式或 Claude Code 兼容模式二选一）、Codex（dapters/codex/，格式一致 + /hooks 信任机制 + apply_patch）。Kimi/Cline 等未提供适配器的 IDE 依赖「crctl 唯一合法路径 + CI 远端否决」。
