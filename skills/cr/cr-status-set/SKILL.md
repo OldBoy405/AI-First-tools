@@ -77,8 +77,7 @@ CR 状态机的**中心校验与写入点**：读取 `dir-graph.yaml#change-requ
 
 ## 输出
 
-- `_backlog.yml` 中目标 CR 条目 status 更新
-- `cr.md` frontmatter status 更新
+- `cr.md` frontmatter status 更新（权威状态源，CR-2026-018；`_backlog.yml` 退化为注册索引，不再含 status 字段）
 
 ## 错误码
 
