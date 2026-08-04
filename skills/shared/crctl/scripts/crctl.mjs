@@ -1151,6 +1151,124 @@ function cmdTest(ws, cr, gates, flags) {
   if (!allPass) process.exit(1);
 }
 
+/* ────────────────────────── migrate-backlog（CR-2026-018 FR-5） ──────────────────────────
+ * 一次性迁移命令：_backlog.yml 从 v1（含 status/updated-at）升为 v2（注册索引）。
+ * 预检逐条目比对 backlog status 与 cr.md status，不一致则硬失败不写文件（纪律#1）。
+ * 幂等：v2 + 无 status 行时输出 already-migrated，退出码 0。
+ */
+
+function cmdMigrateBacklog(ws, gates, flags) {
+  const p = backlogPath(ws);
+  const text = readFileChecked(p);
+  if (!text) fail('BACKLOG_NOT_FOUND', `缺少 ${p}`);
+  const hash = sha256(text);
+  const doc = parseYaml(text);
+  const list = Array.isArray(doc) ? doc : doc['change-requests'] || doc.backlog || doc.items || [];
+  const schemaVer = (doc && !Array.isArray(doc) && doc.schema) || '';
+  const isV2 = schemaVer === 'cr-backlog/v2';
+
+  // 幂等检查：v2 且所有条目无 status/updated-at
+  if (isV2) {
+    const hasLegacy = list.some((e) => e && (e.status !== undefined || e['updated-at'] !== undefined));
+    if (!hasLegacy) {
+      ok({ migrated: false, reason: 'already-migrated', entries: list.length });
+      return;
+    }
+  }
+
+  // 预检：逐条目比对 backlog status 与 cr.md status
+  const diffs = [];
+  const toMigrate = [];
+  for (const e of list) {
+    if (!e || !e.id) continue;
+    if (e.status === undefined && e['updated-at'] === undefined) continue; // 已迁移
+    const md = readCrMdFrontmatter(ws, e.id);
+    if (!md || !md.status) {
+      diffs.push({ id: e.id, backlogStatus: e.status, crMdStatus: null, why: 'cr.md 缺失或无 status' });
+      continue;
+    }
+    if (e.status !== undefined && e.status !== md.status) {
+      diffs.push({ id: e.id, backlogStatus: e.status, crMdStatus: md.status, why: 'backlog 与 cr.md status 不一致' });
+      continue;
+    }
+    toMigrate.push(e.id);
+  }
+  if (diffs.length) {
+    fail('MIGRATE_STATUS_MISMATCH', `迁移预检发现 ${diffs.length} 个条目 backlog 与 cr.md 状态不一致，拒绝写入`, { diffs });
+  }
+  if (!toMigrate.length) {
+    ok({ migrated: false, reason: 'already-migrated', entries: list.length });
+    return;
+  }
+
+  // 行级定点删除各条目 status:/updated-at: 行
+  const lines = text.split(/\r?\n/);
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const removed = [];
+  for (const crId of toMigrate) {
+    let entryStart = -1, entryIndent = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^(\s*)-\s+id:\s*["']?([^"'\s]+)["']?\s*$/);
+      if (m && m[2] === crId) { entryStart = i; entryIndent = m[1].length; break; }
+    }
+    if (entryStart < 0) continue;
+    let entryEnd = lines.length;
+    for (let i = entryStart + 1; i < lines.length; i++) {
+      const m = lines[i].match(/^(\s*)-\s+id:\s*/);
+      if (m && m[1].length <= entryIndent) { entryEnd = i; break; }
+    }
+    // 从尾到头删，避免行号偏移
+    for (let i = entryEnd - 1; i >= entryStart; i--) {
+      if (/^\s*status:\s*/.test(lines[i]) || /^\s*updated-at:\s*/.test(lines[i])) {
+        removed.push(lines[i].trim());
+        lines.splice(i, 1);
+      }
+    }
+  }
+
+  // 顶层 schema 升 v2
+  let finalText = lines.join(eol);
+  if (!isV2) {
+    if (/^schema:\s*.+$/m.test(finalText)) {
+      finalText = finalText.replace(/^schema:\s*.+$/m, 'schema: cr-backlog/v2');
+    } else {
+      finalText = 'schema: cr-backlog/v2\n' + finalText;
+    }
+  }
+
+  casWrite(p, hash, finalText);
+
+  // 迁移报告（gitignored）
+  const reportDir = path.join(ws, '.crctl');
+  fs.mkdirSync(reportDir, { recursive: true });
+  const gi = path.join(reportDir, '.gitignore');
+  if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n');
+  const report = {
+    'migrated-at': nowIso(),
+    entries: toMigrate.map((id) => ({ id, 'status-at-migration': 'consistent', consistent: true })),
+    'removed-lines': removed.length,
+    schema: 'cr-backlog/v1 -> cr-backlog/v2',
+  };
+  fs.writeFileSync(path.join(reportDir, 'migrate-backlog-report.yml'),
+    Object.entries(report).map(([k, v]) => {
+      if (Array.isArray(v)) return `${k}:\n${v.map((e) => `  - { id: ${e.id}, status-at-migration: ${e['status-at-migration']}, consistent: ${e.consistent} }`).join('\n')}`;
+      return `${k}: ${v}`;
+    }).join('\n') + '\n', 'utf8');
+
+  auditLog(ws, { kind: 'migrate-backlog', entries: toMigrate.length, removedLines: removed.length, by: identity(ws) });
+
+  // standalone commit
+  const msg = `[cr] migrate backlog to v2: ${toMigrate.length} entries, status->cr.md`;
+  if (flags.embedded || flags['no-commit']) {
+    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, commit: 'embedded：由调用方在同一事务中提交' });
+  } else {
+    const addR = controlledGit(ws, 'add', ['change-requests/_backlog.yml'], ws, 'crctl-migrate');
+    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-migrate') : addR;
+    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR } });
+    if (commitR && !commitR.ok) process.exit(1);
+  }
+}
+
 function cmdNext(ws, cr, gates, flags) {
   const state = resolveCrState(ws, cr);
   const status = state.status;
@@ -1248,7 +1366,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
 用法:
   crctl status  <cr_id>                          输出权威指针：status / 合法下一步 / 门禁缺口
   crctl gate    <cr_id> --for <status>           只校验不写；非零退出表示 block
-  crctl advance <cr_id> --to <s> --trigger <t>   校验转换+门禁后写入 _backlog.yml 与 cr.md 并 commit
+  crctl advance <cr_id> --to <s> --trigger <t>   校验转换+门禁后写入 cr.md 并 commit
                         [--expect <cur>] [--embedded] [--spec-id <id>]
   crctl approve <cr_id> --stage <requirement|tech-design|dev-start|code>
                         [--approver <id>] [--spec-id <id>]   仅限交互式终端（人类在环）
@@ -1257,6 +1375,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
+  crctl migrate-backlog                          _backlog.yml v1->v2 迁移（撤出 status/updated-at，升 schema）
   crctl git     <sub> [args...] [--cwd <p>] [--caller <skill>]   controlled-shell 白名单执行
 
 全局: --workspace <path> 指定目标 workspace（默认从 cwd 向上探测 change-requests/_backlog.yml）
@@ -1308,6 +1427,7 @@ function main() {
     case 'attempt': return cmdAttempt(ws, requireCr(positional), gates, flags);
     case 'test': return cmdTest(ws, requireCr(positional), gates, flags);
     case 'next': return cmdNext(ws, requireCr(positional), gates, flags);
+    case 'migrate-backlog': return cmdMigrateBacklog(ws, gates, flags);
     case 'git': return cmdGit(ws, positional, flags);
     default: fail('BAD_ARGS', `未知子命令 ${cmd}。运行 crctl help 查看用法`);
   }
