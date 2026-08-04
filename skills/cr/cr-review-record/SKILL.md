@@ -65,4 +65,4 @@ scope: change-request-lifecycle
 ## 输出
 
 - `change-requests/{CR-ID}/approval.yml`
-- 如 decision 为 reject / withdraw，则 `_backlog.yml` 与 `cr.md` status 更新
+- 如 decision 为 reject / withdraw，则 `cr.md` frontmatter status 更新

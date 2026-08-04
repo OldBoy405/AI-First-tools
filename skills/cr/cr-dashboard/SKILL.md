@@ -29,13 +29,13 @@ description: "CR 全局看板，展示 SLA 风险与阻塞项"
 
 ### Step 1 — 读取数据
 
-1. 读取 `change-requests/_backlog.yml` → `backlog[]`（在途 CR）
+1. 扫描 `change-requests/{CR-ID}/cr.md` frontmatter → 在途 CR 列表与 status
 2. 读取 `change-requests/_history.yml` → `history[]`（已归档 CR，按 `period` 过滤）
 3. 读取 `change-requests/_config.yml`（获取 SLA 阈值）
 
 ### Step 2 — 计算指标
 
-**在途 CR 状态分布**（按 `backlog[].status` 分组计数，状态枚举来自 `dir-graph.yaml#change-request-track.state_machine`）：
+**在途 CR 状态分布**（按 `change-requests/{CR-ID}/cr.md` frontmatter `status` 分组计数，状态枚举来自 `dir-graph.yaml#change-request-track.state_machine`）：
 
 | 状态 | 数量 |
 |------|------|
@@ -103,5 +103,5 @@ description: "CR 全局看板，展示 SLA 风险与阻塞项"
 
 - 只读操作，不修改任何文件
 - SLA 计算基于文件中记录的时间戳，非实时，精度为文件最后更新时间
-- 若 _backlog.yml 为空，显示"当前无在途 CR"
+- 若扫描不到任何 cr.md，显示"当前无在途 CR"
 - `focus=sla` 模式只显示 SLA 风险区块；`focus=blocked` 只显示阻塞项区块

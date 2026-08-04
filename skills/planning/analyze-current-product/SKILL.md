@@ -36,7 +36,7 @@ description: 读取 specs baseline 索引、change-requests/_backlog.yml、metri
 并行读取（只读）：
 - `specs/_index.yml` — 已回写 baseline spec（status / since / owner / cr-ref）
 - `specs/_history.yml` — 历史 baseline / GA 记录（版本归属）
-- `change-requests/_backlog.yml` — 在途需求 CR（status / cr_id）
+- `change-requests/{CR-ID}/cr.md` frontmatter — 在途需求 CR（status / cr_id）
 - `metrics.yml` — 产品关键指标（若存在）
 - `focus.yml` — 当前焦点版本声明
 
