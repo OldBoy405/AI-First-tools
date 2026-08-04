@@ -109,10 +109,12 @@ export function patchFrontmatterField(text, field, value) {
 
 function serializeFieldValue(originalLine, value) {
   const str = String(value);
-  // 原行值带引号则保留引号风格；新增行统一带引号（时间戳/版本/列表均如此）
-  const quoted = originalLine !== undefined && /:\s*"/.test(originalLine);
-  if (quoted || originalLine === undefined) return JSON.stringify(str);
-  return str;
+  // 原行值带引号则保留引号风格；新增行：纯标识符（spec-id/cr-ref/version/status 类）裸值，
+  //   含时间戳/冒号/空格等则带引号（与真实 frontmatter 风格一致）
+  const quoted = originalLine !== undefined
+    ? /:\s*"/.test(originalLine)
+    : !/^[A-Za-z0-9_.\-]+$/.test(str);
+  return quoted ? JSON.stringify(str) : str;
 }
 
 /* ────────────────────────── 缩进敏感 YAML 块提取（只读解析）────────────────────────── */
