@@ -495,13 +495,23 @@ function controlledGit(ws, sub, args, cwd, caller) {
 
 /* ────────────────────────── 证据读取与 passCondition 求值 ────────────────────────── */
 
+/** 抽取 Markdown frontmatter 块。命中返回 {match, body}（match=完整 `---…---` 串供替换重写，
+ * body=内部 YAML 原文供 parseYaml 解析或行级正则改写）；无 frontmatter 返回 null。
+ * 唯一收敛点：此正则此前在 5 处逐字复制（readEvidenceDoc / updateCrMdStatus /
+ * readCrMdFrontmatter / detectStatusDivergence / validate）。刻意只收敛正则、不代解析——
+ * updateCrMdStatus 只做字符串改写不 parse，代解析会引入无谓 parseYaml 调用。 */
+function matchFrontmatter(text) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  return m ? { match: m[0], body: m[1] } : null;
+}
+
 function readEvidenceDoc(ws, cr, rel) {
   const p = path.join(ws, rel.replaceAll('{cr}', cr));
   const text = readFileChecked(p);
   if (text == null) return { path: p, exists: false, data: null };
   if (p.endsWith('.md')) {
-    const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-    let data = m ? parseYaml(m[1]) : {};
+    const m = matchFrontmatter(text);
+    let data = m ? parseYaml(m.body) : {};
     if (!m) {
       // 无 frontmatter 时退化扫描前 60 行的顶层 key: value
       data = {};
@@ -805,13 +815,13 @@ function updateCrMdStatus(ws, cr, newStatus) {
   const text = readFileChecked(p);
   if (text == null) return { updated: false, why: `cr.md 不存在: ${p}` };
   const hash = sha256(text);
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const m = matchFrontmatter(text);
   if (!m) return { updated: false, why: 'cr.md 无 frontmatter' };
-  let fm = m[1];
+  let fm = m.body;
   if (/^status:\s*.*$/m.test(fm)) fm = fm.replace(/^status:\s*.*$/m, `status: ${newStatus}`);
   else fm = fm + `\nstatus: ${newStatus}`;
   if (/^updated-at:\s*.*$/m.test(fm)) fm = fm.replace(/^updated-at:\s*.*$/m, `updated-at: "${nowIso()}"`);
-  casWrite(p, hash, text.replace(m[0], `---\n${fm}\n---`));
+  casWrite(p, hash, text.replace(m.match, `---\n${fm}\n---`));
   return { updated: true, path: p };
 }
 
@@ -825,9 +835,9 @@ function readCrMdFrontmatter(ws, cr) {
   const p = path.join(crDir(ws, cr), 'cr.md');
   const text = readFileChecked(p);
   if (text == null) return null;
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const m = matchFrontmatter(text);
   if (!m) return null;
-  return parseYaml(m[1]);
+  return parseYaml(m.body);
 }
 
 function resolveCrState(ws, cr) {
@@ -906,8 +916,8 @@ function detectStatusDivergence(ws, cr, currentStatus) {
   if (!wtPath || path.resolve(wtPath) === path.resolve(ws)) return null; // 无 worktree 或正在 worktree 内读（即事实源本身）
   const md = readFileChecked(path.join(wtPath, 'change-requests', cr, 'cr.md'));
   if (md == null) return null;
-  const m = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  const fm = m ? parseYaml(m[1]) : null;
+  const m = matchFrontmatter(md);
+  const fm = m ? parseYaml(m.body) : null;
   const wtStatus = fm && fm.status;
   if (!wtStatus || wtStatus === currentStatus) return null;
   return {
@@ -1181,10 +1191,10 @@ function cmdValidate(ws, target, gates) {
   };
 
   if (base === 'cr.md') {
-    const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    const m = matchFrontmatter(text);
     if (!m) errors.push('cr.md: 缺少 YAML frontmatter');
     else {
-      const fm = parseYaml(m[1]);
+      const fm = parseYaml(m.body);
       pushIf(!fm.id, 'cr.md: frontmatter 缺少 id');
       pushIf(!fm.status, 'cr.md: frontmatter 缺少 status');
       const { sm } = loadStateMachine(ws);
