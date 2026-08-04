@@ -35,7 +35,10 @@ description: 读取 change-requests/{CR-ID}/prd.md，在同目录编写 sdd.md �
 ### Step 1 — 前置校验
 
 1. 确认 `change-requests/{cr_id}/prd.md` 存在。
-2. 读取 `ARCHITECTURE.md` 了解整体架构约束。
+2. 读取本 CR 涉及的目标代码仓根目录 `ARCHITECTURE.md`（依 `dir-graph.yaml#repositories` 解析；多仓 CR 逐仓检查）了解整体架构约束：
+   - **已存在**：直接读取，继续下一项（读取 CR 当前 status）。
+   - **不存在**（该仓首次走到技术设计评审，按需懒加载起草，成本只付一次）：本 Agent 花一轮读该仓代码（入口文件、目录结构、依赖方向、已有约定），套用 `skills/shared/engineering-docs/templates/ARCHITECTURE-template.md` 填成实际内容（禁止留占位符），落盘到该仓根目录 `ARCHITECTURE.md`，与 `sdd.md` 同一 commit 提交。在 Step 5 输出摘要中标注"新起草 ARCHITECTURE.md（{repo}）"，随本轮 `review-tech-design`/`approve-tech-design` 人工过一眼确认，不另开审批节点。
+   - 仅在文件缺失时起草；已存在则只读不改——普通 CR 不得借道修订它（架构级变更需求见该文档自身"维护规则"一节）。
 3. 读取 CR 当前 status：
    - 初次生成：必须为 `requirement-approved`，随后调用 `cr-status-set`（`next_status=tech-designing`，`trigger=write-tech-design`，`expected_current_status=requirement-approved`）将 status 推进到 `tech-designing`。
    - reviewLoop 回修：若存在 `review_feedback`，或 `change-requests/{cr_id}/review-annotations/sdd.yml` 的 `verdict=block`，允许当前 status 为 `tech-designing`，不得因非 `requirement-approved` abort。
@@ -86,6 +89,7 @@ sdd.md 完整落盘后，调用 `cr-status-set`（`cr_id={cr_id}`，`next_status
 ✅ SDD 已生成
    文件       : change-requests/{cr_id}/sdd.md
    FR 覆盖率  : {N}/{总数}
+   ARCHITECTURE.md : {已存在，直接引用 | 新起草（{repo}），随本次评审一并确认}
    当前状态   : tech-design-review-pending
    下一步     : 执行 review-tech-design
 ```

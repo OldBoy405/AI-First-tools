@@ -34,7 +34,7 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 读取：
 - `change-requests/{cr_id}/prd.md` — 获取 FR 列表
 - `change-requests/{cr_id}/sdd.md` — 待评审文档
-- `ARCHITECTURE.md` — 架构约束参考
+- `ARCHITECTURE.md` — 架构约束参考（若 `write-tech-design` 本轮标注"新起草"，一并快速核查内容是否贴合仓库实际，视为本轮"架构合理性"维度的一部分，不单独加审批节点）
 
 ### Step 2 — 评审维度
 
