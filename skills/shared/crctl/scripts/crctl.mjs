@@ -670,6 +670,132 @@ function casWrite(p, expectedHash, newText) {
   if (sha256(cur) !== expectedHash) fail('CAS_CONFLICT', `${p} 在读取后被其他进程修改，本次写入中止。请重新执行。`);
   fs.writeFileSync(p, newText, 'utf8');
 }
+/* casWriteMulti — 多文件全有或全无 CAS 写（CR-2026-019 TASK-01，archive-move 双文件原子）
+ * 三阶段：全校验 → 全写 temp → 连续 rename。任一侧读后被改则整体 CAS_CONFLICT 中止，
+ * 不落任何一侧（NFR-2：绝不产生 backlog 已删而 history 未写的半状态）。
+ * expectedHash 为 null 表示"期望目标文件不存在"（首次归档时 _history.yml 可缺省）：
+ * 文件实际不存在则放行（新建），文件实际存在则 CAS_CONFLICT（创建冲突）。
+ * 残余窗口（ponytail 天花板）：两次 rename 间进程崩溃留半状态，SDD §4.3 判定为可接受：
+ * rename 微秒级窗口 + 账本随 --embedded 进同一 git 提交可整体回滚 + 单写者不变量下无并发。
+ */
+function casWriteMulti(writes) {
+  for (const w of writes) {
+    const cur = readFileChecked(w.path);
+    if (cur == null && w.expectedHash == null) continue;
+    if (cur == null) fail('CAS_FILE_MISSING', `写入前文件消失: ${w.path}`);
+    if (w.expectedHash == null || sha256(cur) !== w.expectedHash)
+      fail('CAS_CONFLICT', `${w.path} 在读取后被其他进程修改（或与预期存在状态不符），本次写入中止，两侧均未落盘。请重新执行。`);
+  }
+  const staged = writes.map((w) => {
+    const tmp = w.path + `.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, w.newText, 'utf8');
+    return { tmp, dst: w.path };
+  });
+  for (const s of staged) fs.renameSync(s.tmp, s.dst);
+}
+/* ────────────────────────── 账本编辑纯函数（CR-2026-019） ──────────────────────────
+ * 行级正则改写，纯 string→string（SDD §1.1）；匹配不到一律 fail 硬失败（纪律 #1），
+ * 禁止静默返回原文（T04 教训）。三个子命令只做账本编辑、不发 status 事件（纪律 #5：
+ * 状态唯一写者仍是 advance）。
+ */
+
+/** 锚定 "- id: <id>" 条目块（该行到下一个同缩进 "- id:" 或 EOF）。返回 {start,end,text,indent}（start/end 为字符偏移）。 */
+function matchEntryBlock(text, id) {
+  const lines = text.split('\n');
+  let startLine = -1, indent = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
+    if (m && m[2] === id) { startLine = i; indent = m[1].length; break; }
+  }
+  if (startLine === -1) return null;
+  let endLine = lines.length;
+  for (let i = startLine + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
+    if (m && m[1].length <= indent) { endLine = i; break; }
+  }
+  let start = 0;
+  for (let i = 0; i < startLine; i++) start += lines[i].length + 1;
+  let end = start;
+  for (let i = startLine; i < endLine; i++) end += lines[i].length + 1;
+  if (endLine === lines.length && text.endsWith('\n')) end -= 1;
+  return { start, end, text: lines.slice(startLine, endLine).join('\n'), indent };
+}
+
+/** task done：块内 status 行替换 + done-at 插入，一次完成（SDD §4.1）。 */
+function editTaskDone(text, taskId) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, taskId);
+  if (!block) fail('TASK_NOT_FOUND', `${taskId} 不在 tasks/_index.yml`);
+  if (/^\s*status:\s*done\b/m.test(block.text)) fail('TASK_ALREADY_DONE', `${taskId} 已是 done 状态`);
+  let hit = false;
+  const nb = block.text.replace(/^(\s*)status:\s*\S.*$/m, (_, indent) => {
+    hit = true;
+    return `${indent}status: done\n${indent}done-at: "${nowIso()}"`;
+  });
+  if (!hit) fail('TASK_INDEX_SHAPE', `${taskId} 块内无 status 行（tasks/_index.yml 结构异常）`);
+  return norm.slice(0, block.start) + nb + norm.slice(block.end);
+}
+
+/** merge-metadata：条目 merge-commits[] 追加 {repo,trunk,sha}，无则创建键（SDD §4.2）。 */
+function editMergeMetadata(text, cr, commit) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, cr);
+  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
+  const lines = block.text.split('\n');
+  const mcIdx = lines.findIndex((l) => /^[ \t]*merge-commits:/.test(l));
+  const itemIndent = ' '.repeat(block.indent + 4);
+  const fieldIndent = ' '.repeat(block.indent + 6);
+  const item = `${itemIndent}- repo: ${commit.repo}\n${fieldIndent}trunk: ${commit.trunk}\n${fieldIndent}sha: ${commit.sha}`;
+  if (mcIdx === -1) {
+    const fieldIndent2 = ' '.repeat(block.indent + 2);
+    lines.push(`${fieldIndent2}merge-commits:`, item);
+  } else {
+    if (/^[ \t]*merge-commits:\s*\[\]\s*$/.test(lines[mcIdx])) lines[mcIdx] = lines[mcIdx].replace(/:\s*\[\]\s*$/, ':');
+    // 段边界：merge-commits 键行之后第一个缩进不深于键的行（含块尾）
+    const mcIndent = lines[mcIdx].match(/^[ \t]*/)[0].length;
+    let segEnd = lines.length;
+    for (let i = mcIdx + 1; i < lines.length; i++) {
+      if (lines[i].match(/^[ \t]*/)[0].length <= mcIndent) { segEnd = i; break; }
+    }
+    // 段内最后一个列表项行
+    let lastItem = -1;
+    for (let i = segEnd - 1; i > mcIdx; i--) {
+      if (/^[ \t]*- /.test(lines[i])) { lastItem = i; break; }
+    }
+    // 插入点 = 最后一项行 + 其嵌套字段行之后（段尾前）；无项则紧跟键行
+    let insAt = lastItem === -1 ? mcIdx + 1 : lastItem + 1;
+    if (lastItem !== -1) {
+      const itemInd = lines[lastItem].match(/^[ \t]*/)[0].length;
+      while (insAt < segEnd && lines[insAt].match(/^[ \t]*/)[0].length > itemInd) insAt++;
+    }
+    lines.splice(insAt, 0, item);
+  }
+  return norm.slice(0, block.start) + lines.join('\n') + norm.slice(block.end);
+}
+
+/** archive-move：生成 newBacklog（删块）+ newHistory（history 追加富化块）（SDD §4.3）。 */
+function editArchiveMove(textB, textH, cr, meta) {
+  const normB = textB.replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(normB, cr);
+  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
+  const newBacklog = normB.slice(0, block.start) + normB.slice(block.end);
+  const normH = textH == null ? '' : textH.replaceAll('\r\n', '\n');
+  if (normH && matchEntryBlock(normH, cr)) fail('ENTRY_ALREADY_IN_HISTORY', `${cr} 已在 _history.yml，禁止重复归档`);
+  const minIndent = Math.min(...block.text.split('\n').map((l) => (l.match(/^[ \t]*/) || [''])[0].length));
+  const entry = block.text.split('\n').map((l) => '  ' + l.slice(minIndent)).join('\n');
+  const reason = String(meta.archiveReason || '').replaceAll('"', '\\"');
+  const enrich = [
+    `    final-status: ${meta.finalStatus}`,
+    `    archive-reason: "${reason}"`,
+    meta.specId ? `    writeback-spec-id: ${meta.specId}` : null,
+    `    archived-at: "${nowIso()}"`,
+  ].filter(Boolean).join('\n');
+  const record = entry + '\n' + enrich + '\n';
+  const newHistory = (normH.trim() === '' ? 'history:' : normH.trimEnd()) + '\n' + record;
+  return { newBacklog, newHistory };
+}
+
+
 
 function updateCrMdStatus(ws, cr, newStatus) {
   const p = path.join(crDir(ws, cr), 'cr.md');
@@ -1094,6 +1220,61 @@ function cmdValidate(ws, target, gates) {
   ok({ file: p, valid: true, ...(warnings.length ? { warnings } : {}) });
 }
 
+
+function cmdTaskDone(ws, cr, gates, flags) {
+  if (!flags.task) fail('BAD_ARGS', 'task done 需要 --task <TASK-ID>');
+  const state = resolveCrState(ws, cr);
+  const LEGAL = ['developing'];
+  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `task done 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
+  const p = path.join(crDir(ws, cr), 'tasks', '_index.yml');
+  const text = readFileChecked(p);
+  if (text == null) fail('TASK_INDEX_NOT_FOUND', `缺少 ${p}`);
+  const newText = editTaskDone(text, flags.task);
+  casWrite(p, sha256(text), newText);
+  auditLog(ws, { kind: 'ledger', op: 'task-done', cr, actor: identity(ws), before: { taskId: flags.task, from: 'pending' }, after: { taskId: flags.task, to: 'done' } });
+  ok({ op: 'task-done', cr, task: flags.task, status: 'done', file: p });
+}
+
+function cmdMergeMetadata(ws, cr, gates, flags) {
+  if (!flags.repo || !flags.trunk || !flags.sha) fail('BAD_ARGS', 'merge-metadata 需要 --repo <r> --trunk <t> --sha <sha>');
+  const state = resolveCrState(ws, cr);
+  const LEGAL = ['merging', 'writing-back'];
+  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `merge-metadata 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
+  const snap = loadBacklogEntry(ws, cr);
+  const before = (snap.entry['merge-commits'] || []).length;
+  const dup = (snap.entry['merge-commits'] || []).some((c) => c && String(c.sha) === String(flags.sha));
+  if (dup) {
+    auditLog(ws, { kind: 'ledger', op: 'merge-metadata', cr, actor: identity(ws), result: 'dup-idempotent', sha: flags.sha });
+    return ok({ op: 'merge-metadata', cr, sha: flags.sha, result: 'dup-idempotent', note: '同 sha 已存在，未重复写入' });
+  }
+  const newText = editMergeMetadata(snap.text, cr, { repo: flags.repo, trunk: flags.trunk, sha: flags.sha });
+  casWrite(snap.path, snap.hash, newText);
+  auditLog(ws, { kind: 'ledger', op: 'merge-metadata', cr, actor: identity(ws), before: { count: before }, after: { sha: flags.sha, count: before + 1 } });
+  ok({ op: 'merge-metadata', cr, repo: flags.repo, trunk: flags.trunk, sha: flags.sha, result: 'appended' });
+}
+
+function cmdArchiveMove(ws, cr, gates, flags) {
+  if (!flags['final-status']) fail('BAD_ARGS', 'archive-move 需要 --final-status <status>');
+  const state = resolveCrState(ws, cr);
+  if (state.status !== 'archived') fail('ILLEGAL_LEDGER_STATE', `archive-move 仅允许在前置态 archived 执行，当前 ${state.status}`, { current: state.status, expect: ['archived'] });
+  const bp = backlogPath(ws);
+  const hp = path.join(ws, 'change-requests', '_history.yml');
+  const textB = readFileChecked(bp);
+  if (textB == null) fail('BACKLOG_NOT_FOUND', `缺少 ${bp}`);
+  const textH = readFileChecked(hp);
+  const parts = editArchiveMove(textB, textH, cr, {
+    finalStatus: flags['final-status'],
+    archiveReason: flags['archive-reason'] || '',
+    specId: flags['spec-id'] || null,
+  });
+  casWriteMulti([
+    { path: bp, expectedHash: sha256(textB), newText: parts.newBacklog },
+    { path: hp, expectedHash: textH == null ? null : sha256(textH), newText: parts.newHistory },
+  ]);
+  auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), before: { inBacklog: true }, after: { inBacklog: false, inHistory: true, finalStatus: flags['final-status'] } });
+  ok({ op: 'archive-move', cr, finalStatus: flags['final-status'], backlog: bp, history: hp });
+}
+
 function cmdAttempt(ws, cr, gates, flags) {
   if (!flags.loop) fail('BAD_ARGS', 'attempt 需要 --loop <review ref>（如 review-code / write-test-report）');
   const r = bumpAttempt(ws, cr, flags.loop, gates);
@@ -1377,6 +1558,12 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
   crctl migrate-backlog                          _backlog.yml v1->v2 迁移（撤出 status/updated-at，升 schema）
   crctl git     <sub> [args...] [--cwd <p>] [--caller <skill>]   controlled-shell 白名单执行
+  crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
+  crctl merge-metadata <cr_id> --repo <r> --trunk <t> --sha <sha>
+                                                _backlog.yml merge-commits[] 追加（merging/writing-back 态）
+  crctl archive-move <cr_id> --final-status <s> [--archive-reason <r>] [--spec-id <id>]
+                                                backlog→history 原子移动（archived 态，双文件 CAS）
+
 
 全局: --workspace <path> 指定目标 workspace（默认从 cwd 向上探测 change-requests/_backlog.yml）
 `;
@@ -1425,6 +1612,13 @@ function main() {
       return cmdValidate(ws, positional[0], gates);
     }
     case 'attempt': return cmdAttempt(ws, requireCr(positional), gates, flags);
+    case 'task': {
+      if (positional[0] !== 'done') fail('BAD_ARGS', 'task 仅支持子命令 done：crctl task done <CR-ID> --task <TASK-ID>');
+      return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
+    }
+    case 'merge-metadata': return cmdMergeMetadata(ws, requireCr(positional), gates, flags);
+    case 'archive-move': return cmdArchiveMove(ws, requireCr(positional), gates, flags);
+
     case 'test': return cmdTest(ws, requireCr(positional), gates, flags);
     case 'next': return cmdNext(ws, requireCr(positional), gates, flags);
     case 'migrate-backlog': return cmdMigrateBacklog(ws, gates, flags);
