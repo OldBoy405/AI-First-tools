@@ -22,7 +22,7 @@ description: 记录架构设计人工审批结论，校验 change-requests/{CR-I
 
 ## 执行步骤
 
-1. 读取 `change-requests/{cr_id}/cr.md` 与 `_backlog.yml` 条目，确认当前 status 为 `tech-design-review-pending`。
+1. 读取 `change-requests/{cr_id}/cr.md` frontmatter，确认当前 status 为 `tech-design-review-pending`。
 2. 确认 `cr.md owners.development.id` 与 `owners.development.assigned-at` 均存在；若 `approver` 为空，使用该负责人。
 3. 读取 `change-requests/{cr_id}/review-annotations/sdd.yml`，确认 `verdict=pass` 且 blockers 为空。
 4. 写入或更新 `change-requests/{cr_id}/approval.yml` 的 `tech-design` 段：

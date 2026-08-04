@@ -34,7 +34,7 @@ Pipeline 所有关键节点的 inbox 写入**单一入口**：
 ## 读取契约（启动序）
 
 1. 读 `AGENTS.md`、`dir-graph.yaml`
-2. 读 `change-requests/_backlog.yml` — 定位目标 CR 条目
+2. 读 `change-requests/{CR-ID}/cr.md` frontmatter — 获取当前 status
 3. 读 `change-requests/_config.yml` — 取 SLA 阈值（仅 event=overdue 时需要）
 
 ## 输入参数

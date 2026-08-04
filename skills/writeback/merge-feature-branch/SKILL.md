@@ -153,7 +153,7 @@ merge-commits:
     merged-at: {YYYY-MM-DDTHH:mm:ss+08:00}
 ```
 
-3. 同步更新 `change-requests/{cr_id}/cr.md` frontmatter status=`merging`。
+3. 同步更新 `change-requests/{cr_id}/cr.md` frontmatter status=`merging`（权威写入点，embedded patch 只落 cr.md）。
 4. 在 knowledge-base trunk 提交并推送，并记录本次 metadata commit SHA：
    ```yaml
    - runGit: { subcommand: "add", args: ["change-requests/_backlog.yml", "change-requests/{cr_id}/cr.md"], cwd: "{knowledgeBaseRepo.path}" }
@@ -181,18 +181,18 @@ merge-commits:
 
 ---
 
-## _backlog.yml / cr.md 冲突的确定性解法
+## cr.md 冲突的确定性解法
 
-CR 状态是线性状态机，`change-requests/_backlog.yml` 条目与 `change-requests/{cr_id}/cr.md` frontmatter 的 `status` 字段在每次 `crctl advance` 时被双写。CR 分支与 trunk 各自推进时，这两个文件必然在合并时冲突。
+CR 状态是线性状态机，`change-requests/{cr_id}/cr.md` frontmatter 的 `status` 字段在每次 `crctl advance` 时被更新。CR 分支与 trunk 各自推进时，cr.md 可能在合并时冲突。`_backlog.yml` 不再包含 status 字段，冲突面已消除。
 
-**解法（前提：crctl advance 是这两个文件 status 字段的唯一写入者，由工作区纪律保障）：**
+**解法（前提：crctl advance 是 cr.md status 字段的唯一写入者，由工作区纪律保障）：**
 
 冲突双方必然一新一旧，**固定取状态机位置更靠后的一侧**：
 
-1. 对 `_backlog.yml` 与 `cr.md` 的冲突块，分别解析两侧的 `status` 值。
+1. 对 `cr.md` 的冲突块，分别解析两侧的 `status` 值。
 2. 查状态机声明（`dir-graph.yaml` 或 tools 包 `change-request-track.state_machine`），取在状态序列中位置更靠后的那个 status 所在的一侧，整侧采用。
-3. 其余字段（owners / merge-commits / 时间戳等）若也冲突，与 status 同侧一并采用——它们由同一次 advance 写入，天然一致。
-4. **禁止**用 `git rebase` 把 CR 分支的一串状态提交逐条重放到 trunk——那会让每一个状态提交都在 `_backlog.yml` 同一区域与 trunk 冲突，形成"冲突 → 解决 → 下一个提交又冲突"的连环。本 Skill 规定的两阶段 merge 流（dry-run + 单次 merge commit）就是为了把冲突压缩到一次解决。
+3. 其余字段（owners / 时间戳等）若也冲突，与 status 同侧一并采用——它们由同一次 advance 写入，天然一致。
+4. **禁止**用 `git rebase` 把 CR 分支的一串状态提交逐条重放到 trunk——那会让每一个状态提交都在 `cr.md` 同一区域与 trunk 冲突，形成"冲突 → 解决 → 下一个提交又冲突"的连环。本 Skill 规定的两阶段 merge 流（dry-run + 单次 merge commit）就是为了把冲突压缩到一次解决。
 
 若冲突两侧的 status 相同但其他字段不一致（说明有 crctl 之外的写入者违反纪律），停止执行并报告，不得套用本解法。
 

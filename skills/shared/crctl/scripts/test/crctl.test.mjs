@@ -38,10 +38,72 @@ function makeWorkspace() {
   return dir;
 }
 
-function writeBacklog(ws, entries) {
-  const lines = ['change-requests:'];
-  for (const e of entries) lines.push(`  - id: ${e.id}`, `    status: ${e.status}`);
+/**
+ * 写 _backlog.yml fixture。默认含 owners 三角色（完整合规模板），
+ * 通过 opts.owners=false 可关闭（如测试非法 owners 校验场景）。
+ * 通过 opts.schema 可指定 schema 版本（如 'cr-backlog/v2'）。
+ */
+function writeBacklog(ws, entries, opts = {}) {
+  const lines = [];
+  if (opts.schema) lines.push(`schema: ${opts.schema}`);
+  lines.push('change-requests:');
+  for (const e of entries) {
+    lines.push(`  - id: ${e.id}`);
+    if (e.status !== undefined) lines.push(`    status: ${e.status}`);
+    if (e.title) lines.push(`    title: ${e.title}`);
+    if (opts.owners !== false) {
+      lines.push(
+        '    owners:',
+        '      requirement:',
+        '        id: Ray',
+        '        assigned-at: "2026-08-04T12:00:00+08:00"',
+        '      development:',
+        '        id: Ray',
+        '        assigned-at: "2026-08-04T12:00:00+08:00"',
+        '      test:',
+        '        id: Ray',
+        '        assigned-at: "2026-08-04T12:00:00+08:00"',
+      );
+    }
+  }
   writeFileSync(path.join(ws, 'change-requests', '_backlog.yml'), lines.join('\n') + '\n');
+}
+
+/**
+ * 写 cr.md fixture。默认含 owners 三角色（完整合规模板），
+ * 通过 opts.owners=false 可关闭。extra 可追加额外 frontmatter 行。
+ */
+function writeCrMd(ws, cr, status, opts = {}) {
+  const dir = path.join(ws, 'change-requests', cr);
+  mkdirSync(dir, { recursive: true });
+  const lines = ['---', `id: ${cr}`, `status: ${status}`];
+  if (opts.owners !== false) {
+    lines.push(
+      'owners:',
+      '  requirement:',
+      '    id: Ray',
+      '    assigned-at: "2026-08-04T12:00:00+08:00"',
+      '  development:',
+      '    id: Ray',
+      '    assigned-at: "2026-08-04T12:00:00+08:00"',
+      '  test:',
+      '    id: Ray',
+      '    assigned-at: "2026-08-04T12:00:00+08:00"',
+    );
+  }
+  if (opts.extra) lines.push(...opts.extra);
+  lines.push('---', '');
+  writeFileSync(path.join(dir, 'cr.md'), lines.join('\n'));
+}
+
+/**
+ * 一键建 CR fixture：同时写 _backlog.yml 条目 + cr.md（状态一致）。
+ * 这是大多数测试的推荐入口——避免分别调 writeBacklog/writeCrMd 时漏掉一边。
+ * opts 透传给 writeBacklog/writeCrMd。
+ */
+function writeCrEntry(ws, cr, status, opts = {}) {
+  writeBacklog(ws, [{ id: cr, status }], opts);
+  writeCrMd(ws, cr, status, opts);
 }
 
 function writeApprovalYml(ws, cr, section, fields) {
@@ -81,7 +143,7 @@ test('approve 对未知 --stage 直接拒绝（在 TTY 检查之前）', () => {
 test('advance：合法转换（drafting -> rejected，无门禁声明的终态）成功', () => {
   const ws = makeWorkspace();
   try {
-    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    writeCrEntry(ws, 'CR-TEST-1', 'drafting');
     const r = runCrctl(['advance', 'CR-TEST-1', '--to', 'rejected', '--trigger', 'cr-review-record:reject', '--workspace', ws, '--no-commit']);
     assert.equal(r.status, 0);
     assert.equal(r.stdout.advanced, true);
@@ -93,6 +155,7 @@ test('advance：非法转换（状态机中不存在的 trigger）被拒绝，�
   const ws = makeWorkspace();
   try {
     writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-TEST-1', 'drafting');
     const r = runCrctl(['advance', 'CR-TEST-1', '--to', 'code-approved', '--trigger', 'made-up-trigger', '--workspace', ws, '--no-commit']);
     assert.equal(r.status, 1);
     assert.equal(r.stderr.error.code, 'CR_STATUS_TRANSITION_NOT_ALLOWED');
@@ -229,7 +292,7 @@ function readOutbox(ws) {
 test('outbox：advance 成功（--no-commit，即 embedded 半边）-> 写入合 schema 的 status 事件且 commit_sha 为 pending: 占位符（CR-2026-003 契约更新，旧契约为空串）', () => {
   const ws = makeWorkspace();
   try {
-    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    writeCrEntry(ws, 'CR-TEST-1', 'drafting');
     const r = runCrctl(['advance', 'CR-TEST-1', '--to', 'rejected', '--trigger', 'cr-review-record:reject', '--workspace', ws, '--no-commit']);
     assert.equal(r.status, 0);
     const events = readOutbox(ws);
@@ -252,6 +315,7 @@ test('outbox：advance 被拒（非法转换）-> 不写任何事件', () => {
   const ws = makeWorkspace();
   try {
     writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-TEST-1', 'drafting');
     const r = runCrctl(['advance', 'CR-TEST-1', '--to', 'code-approved', '--trigger', 'made-up-trigger', '--workspace', ws, '--no-commit']);
     assert.equal(r.status, 1);
     assert.equal(readOutbox(ws).length, 0);
@@ -270,7 +334,7 @@ test('outbox：git push 成功 -> checkpoint 事件携带 HEAD sha 与从提交�
     g(['init', '-b', 'master'], ws);
     g(['config', 'user.email', 'test@test'], ws);
     g(['config', 'user.name', 'tester'], ws);
-    writeBacklog(ws, [{ id: 'CR-2026-001', status: 'drafting' }]); // 保证有可提交内容；CR-ID 用生产格式（提取正则为 CR-\d{4}-\d{3}）
+    writeCrEntry(ws, 'CR-2026-001', 'drafting'); // 保证有可提交内容；CR-ID 用生产格式（提取正则为 CR-\d{4}-\d{3}）
     g(['add', '-A'], ws);
     g(['commit', '-m', '[cr] status CR-2026-001 drafting -> requirement-reviewing'], ws);
     g(['remote', 'add', 'origin', bare], ws);
@@ -359,7 +423,7 @@ function makeGrantWorkspace() {
   g(['init', '-b', 'master']);
   g(['config', 'user.email', 't@t']);
   g(['config', 'user.name', 'tester']);
-  writeBacklog(ws, [{ id: 'CR-2026-001', status: 'requirement-reviewing' }]);
+  writeCrEntry(ws, 'CR-2026-001', 'requirement-reviewing');
   writeEvidence(ws, 'CR-2026-001', 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n');
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   mkdirSync(path.join(ws, '.crctl', 'keys'), { recursive: true });
@@ -463,8 +527,9 @@ test('advance --embedded：连续两次 embedded 的 outbox 事件 commit_sha �
     // 初始化 git 仓（非 embedded 路径需要真实 commit）
     const run = (args) => spawnSync('git', ['-C', ws, ...args], { encoding: 'utf8' });
     run(['init', '-b', 'master']); run(['config', 'user.email', 't@t']); run(['config', 'user.name', 't']);
-    writeFileSync(path.join(ws, 'change-requests', '_backlog.yml'),
-      'change-requests:\n  - id: CR-TEST-1\n    status: drafting\n  - id: CR-TEST-2\n    status: requirement-approved\n');
+    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }, { id: 'CR-TEST-2', status: 'requirement-approved' }]);
+    writeCrMd(ws, 'CR-TEST-1', 'drafting');
+    writeCrMd(ws, 'CR-TEST-2', 'requirement-approved');
     // CR-TEST-1：非 embedded（drafting -> requirement-reviewing，需评审证据）
     writeEvidence(ws, 'CR-TEST-1', 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n');
     writeFileSync(path.join(ws, 'change-requests', 'CR-TEST-1', 'prd.md'), '# prd\n');
@@ -497,5 +562,165 @@ test('advance --embedded：连续两次 embedded 的 outbox 事件 commit_sha �
     assert.equal(embedded.length, 2);
     for (const e of embedded) assert.match(e.commit_sha, /^pending:\d+:\d+:\d+$/, `占位符格式：${e.commit_sha}`);
     assert.notEqual(embedded[0].commit_sha, embedded[1].commit_sha, '两次 embedded 的占位符必须不同（幂等键不再碰撞）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+
+// ── CR-2026-018：状态单写 cr.md + _backlog.yml 注册索引化 ─────────────────────
+
+// AC-1：advance 只写 cr.md，_backlog.yml 不变
+test('CR-2026-018 AC-1：advance 后 _backlog.yml 内容不变（单写 cr.md）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-TEST-1', 'drafting');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r = runCrctl(['advance', 'CR-TEST-1', '--to', 'rejected', '--trigger', 'cr-review-record:reject', '--workspace', ws, '--no-commit']);
+    assert.equal(r.status, 0);
+    const after = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.equal(after, before, '_backlog.yml 不应被 advance 修改');
+    // cr.md 被更新
+    const crmd = readFileSync(path.join(ws, 'change-requests', 'CR-TEST-1', 'cr.md'), 'utf8');
+    assert.match(crmd, /status: rejected/);
+    // result.files 只含 cr.md
+    assert.equal(r.stdout.files.length, 1);
+    assert.match(r.stdout.files[0], /cr\.md$/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// AC-2a：v1 布局（backlog 有 status，cr.md 无）→ 回退读 + legacySource 标记
+test('CR-2026-018 AC-2a：v1 布局回退读（backlog 有 status，cr.md 无）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    // 不写 cr.md
+    const r = runCrctl(['status', 'CR-TEST-1', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.status, 'drafting');
+    assert.equal(r.stdout.legacySource, '_backlog.yml');
+    assert.ok(r.stdout.warnings && r.stdout.warnings.some((w) => w.code === 'MIXED_LAYOUT_WARN'));
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// AC-2b：v2 布局（backlog 无 status，cr.md 有）→ 权威读，无 legacySource
+test('CR-2026-018 AC-2b：v2 布局权威读（backlog 无 status，cr.md 有）', () => {
+  const ws = makeWorkspace();
+  try {
+    // v2 backlog：无 status 行
+    writeBacklog(ws, [{ id: 'CR-TEST-1', title: 'test' }], { schema: 'cr-backlog/v2' });
+    writeCrMd(ws, 'CR-TEST-1', 'developing');
+    const r = runCrctl(['status', 'CR-TEST-1', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.status, 'developing');
+    assert.equal(r.stdout.legacySource, undefined);
+    assert.ok(!r.stdout.warnings || !r.stdout.warnings.some((w) => w.code === 'MIXED_LAYOUT_WARN'));
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// AC-3a：validate v1 正常（backlog 有 status，cr.md 一致）→ 无告警
+test('CR-2026-018 AC-3a：validate v1 布局一致，无告警', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-TEST-1', 'drafting');
+    const r = runCrctl(['validate', 'change-requests/_backlog.yml', '--workspace', ws]);
+    assert.equal(r.status, 0, JSON.stringify(r.stderr || r.stdout).slice(0, 300));
+    assert.equal(r.stdout.valid, true);
+    assert.ok(!r.stdout.warnings || r.stdout.warnings.length === 0);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// AC-3b：validate v1 漂移（backlog 与 cr.md 不一致）→ warning，退出码 0
+test('CR-2026-018 AC-3b：validate v1 漂移告警（backlog 与 cr.md 不一致）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-TEST-1', 'developing');
+    const r = runCrctl(['validate', 'change-requests/_backlog.yml', '--workspace', ws]);
+    assert.equal(r.status, 0, JSON.stringify(r.stderr || r.stdout).slice(0, 300));
+    assert.equal(r.stdout.valid, true);
+    assert.ok(r.stdout.warnings && r.stdout.warnings.some((w) => w.includes('漂移')));
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// AC-3c：validate v2 LEGACY_STATUS_FIELD（v2 schema 但条目仍含 status）→ warning
+test('CR-2026-018 AC-3c：validate v2 LEGACY_STATUS_FIELD 告警', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }], { schema: 'cr-backlog/v2' });
+    const r = runCrctl(['validate', 'change-requests/_backlog.yml', '--workspace', ws]);
+    assert.equal(r.status, 0, JSON.stringify(r.stderr || r.stdout).slice(0, 300));
+    assert.equal(r.stdout.valid, true);
+    assert.ok(r.stdout.warnings && r.stdout.warnings.some((w) => w.includes('LEGACY_STATUS_FIELD')));
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// AC-5a：migrate-backlog 成功（v1 → v2）
+test('CR-2026-018 AC-5a：migrate-backlog 成功迁移 v1 → v2', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }, { id: 'CR-TEST-2', status: 'developing' }]);
+    writeCrMd(ws, 'CR-TEST-1', 'drafting');
+    writeCrMd(ws, 'CR-TEST-2', 'developing');
+    // 注：两条目共享一个 backlog 文件，不能用 writeCrEntry（会互相覆盖 backlog）
+    const r = runCrctl(['migrate-backlog', '--workspace', ws, '--no-commit']);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.migrated, true);
+    assert.equal(r.stdout.entries, 2);
+    const after = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.match(after, /^schema: cr-backlog\/v2/m);
+    assert.ok(!after.includes('status:'), '迁移后不应含 status 行');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// AC-5b：migrate-backlog 失败（backlog 与 cr.md 不一致）→ MIGRATE_STATUS_MISMATCH
+test('CR-2026-018 AC-5b：migrate-backlog 不一致硬失败', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-TEST-1', 'developing');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    // 注：backlog 与 cr.md status 故意不一致，不能用 writeCrEntry
+    const r = runCrctl(['migrate-backlog', '--workspace', ws, '--no-commit']);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'MIGRATE_STATUS_MISMATCH');
+    const after = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.equal(after, before, '失败时不应写入任何文件');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// AC-5c：migrate-backlog 幂等（v2 无 status 行 → already-migrated）
+test('CR-2026-018 AC-5c：migrate-backlog 幂等（already-migrated）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-TEST-1', title: 'test' }], { schema: 'cr-backlog/v2' });
+    const r = runCrctl(['migrate-backlog', '--workspace', ws, '--no-commit']);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.migrated, false);
+    assert.equal(r.stdout.reason, 'already-migrated');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// CR_MD_WRITE_FAILED：advance 时 cr.md 缺失 → 硬失败
+test('CR-2026-018：advance 时 cr.md 缺失 → CR_MD_WRITE_FAILED', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    // 不写 cr.md
+    const r = runCrctl(['advance', 'CR-TEST-1', '--to', 'rejected', '--trigger', 'cr-review-record:reject', '--workspace', ws, '--no-commit']);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'CR_MD_WRITE_FAILED');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// AC-11：混版布局告警（cr.md 与 backlog 双写且不一致 → cr.md 胜 + MIXED_LAYOUT_WARN）
+test('CR-2026-018 AC-11：混版布局告警（cr.md 与 backlog 不一致）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-TEST-1', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-TEST-1', 'developing');
+    // 注：backlog 与 cr.md status 故意不一致，不能用 writeCrEntry
+    const r = runCrctl(['status', 'CR-TEST-1', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.status, 'developing', 'cr.md 为准');
+    assert.ok(r.stdout.warnings && r.stdout.warnings.some((w) => w.code === 'MIXED_LAYOUT_WARN'));
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });

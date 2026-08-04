@@ -27,7 +27,7 @@ readonly: true
 ## 读取契约（启动序）
 
 1. 读 `dir-graph.yaml#agent_hints.skill_context.review-alignment`
-2. 读 `change-requests/_backlog.yml` — 取目标 CR 的 `status` / `checkpoints[]` / `merge-commits[]`
+2. 读 `change-requests/{cr_id}/cr.md` frontmatter — 取目标 CR 的 `status`；读 `change-requests/_backlog.yml` — 取 `checkpoints[]` / `merge-commits[]`
 3. 对 in-flight CR：读 knowledge-base CR worktree 中 `change-requests/{cr_id}/{prd.md,sdd.md,plan.md,tasks/,traceability.yml}`
 4. 对已 writeback 的 CR：读 `specs/{spec_id}/{PRD.md,SDD.md,traceability.yml}` 与 `delivery/task/_index.yaml`
 5. 代码证据仅来自 `review-code` 写入的 `review-annotations/code.yml`、`traceability.yml` 和 `_backlog.yml.merge-commits[]`；不得直接读取主工作区代码目录或旧 `feature/*` 分支

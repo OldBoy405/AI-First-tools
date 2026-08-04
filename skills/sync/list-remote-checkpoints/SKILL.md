@@ -13,7 +13,7 @@ description: 按 dir-graph.yaml repositories 查询所有 active repo 的 origin
 
 ## 用途
 
-查询所有 active repo 的 origin 上 `requirement/*` 分支（即所有已推送到远端的在途 CR），结合 `change-requests/_backlog.yml` 展示每个 CR 的元数据（状态、需求/开发/测试 owner、最后推送时间）与各 repo checkpoint SHA，帮助用户快速识别可接手的工作项。
+查询所有 active repo 的 origin 上 `requirement/*` 分支（即所有已推送到远端的在途 CR），结合 `change-requests/{cr_id}/cr.md`（状态）与 `change-requests/_backlog.yml`（owner / 最后推送时间等注册字段）展示每个 CR 的元数据与各 repo checkpoint SHA，帮助用户快速识别可接手的工作项。
 
 ---
 
@@ -45,11 +45,11 @@ await runGit({ subcommand: "ls-remote", args: ["--heads", "origin", "requirement
 ### Step 2 — 收集 CR 元数据
 
 对每个远端分支中的 `requirement/{cr_id}`：
-1. 从 `change-requests/_backlog.yml` 查找对应条目
-2. 获取字段：`status`、`owners`、兼容 `owner`、`last-push-at`、`last-push-by`、`title`、`checkpoints[]`
+1. 从 `change-requests/{cr_id}/cr.md` frontmatter 读取 `status`（权威状态源，CR-2026-018）；cr.md 缺失时回退 `_backlog.yml` 条目 `status`（旧布局兼容）
+2. 从 `change-requests/_backlog.yml` 查找对应条目，获取注册字段：`owners`、兼容 `owner`、`last-push-at`、`last-push-by`、`title`、`checkpoints[]`
 3. 对比远端 SHA 与 `checkpoints[]` 中对应 repo 的 SHA，标记 `synced | drift | unknown`
 
-> 若 `_backlog.yml` 中没有对应条目（已 archived 或未登记），从分支名推断 cr_id，其余字段标为 `unknown`。
+> 若 `_backlog.yml` 中没有对应条目（已 archived 或未登记），从分支名推断 cr_id，status 仍尝试读 cr.md，其余字段标为 `unknown`。
 
 ### Step 3 — 应用筛选条件
 
@@ -78,5 +78,5 @@ await runGit({ subcommand: "ls-remote", args: ["--heads", "origin", "requirement
 | 错误 | 处理 |
 |------|------|
 | 所有 active repo origin 均无 `requirement/*` 分支 | 输出"暂无远端在途 CR checkpoint" |
-| `_backlog.yml` 读取失败 | 仅展示远端分支列表，不附加元数据，输出警告 |
+| `_backlog.yml` 或 cr.md 读取失败 | 仅展示远端分支列表，不附加元数据，输出警告 |
 | 单个 repo git fetch 失败 | 标记该 repo 为 `unavailable`；其他 repo 继续展示，但 resume 前必须修复 |

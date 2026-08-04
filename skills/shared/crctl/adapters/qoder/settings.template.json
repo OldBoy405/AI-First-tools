@@ -1,0 +1,35 @@
+{
+  "$comment": "漂移治理 v2 组件 B — Qoder CN（Lingma 系列）hooks 模板。把 hooks 段合并进目标 workspace 的 .lingma/settings.json（项目级，可提交 Git 团队共享）或 .lingma/settings.local.json（个人）。Qoder 支持的事件：UserPromptSubmit / PreToolUse / PostToolUse / PostToolUseFailure / Stop（无 SessionStart，状态注入挂在 UserPromptSubmit 上）。配置修改后需重启 IDE 生效。{WORKSPACE} 替换为 tools 包所在 workspace 的绝对路径（建议用正斜杠）。",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{WORKSPACE}/tools/skills/shared/crctl/adapters/claude-code/hooks/inject-cr-status.mjs\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{WORKSPACE}/tools/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs\""
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{WORKSPACE}/tools/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}

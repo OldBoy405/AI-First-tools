@@ -19,8 +19,8 @@ scope: drift-governance
 
 | 子命令 | 作用 | 是现有哪个契约的代码化 |
 |---|---|---|
-| `status` | 确定性读 `_backlog.yml` + `dir-graph.yaml#state_machine`，输出当前 status、合法下一步与门禁缺口。模型不得自报 status | `cr-status-set` 读取契约 |
-| `advance` | 校验 `(current, next, trigger)` 合法转换 + 目标状态门禁，全过才写 `_backlog.yml` 与 `cr.md` frontmatter 并 commit；否则非零退出且**不写文件**。支持 `--embedded`（对应 `cr-status-set` 的 `commit_mode=embedded`） | `cr-status-set` |
+| `status` | 确定性读 `change-requests/{CR-ID}/cr.md` frontmatter + `dir-graph.yaml#state_machine`，输出当前 status、合法下一步与门禁缺口。模型不得自报 status | `cr-status-set` 读取契约 |
+| `advance` | 校验 `(current, next, trigger)` 合法转换 + 目标状态门禁，全过才写 `cr.md` frontmatter 并 commit；否则非零退出且**不写文件**。支持 `--embedded`（对应 `cr-status-set` 的 `commit_mode=embedded`） | `cr-status-set` |
 | `gate` | 只校验不写，供预检与 CI 复用 | pipeline JSON `passCondition` |
 | `approve` | **仅限交互式终端**的人工审批：展示证据摘要 → 人类确认 → 写 `approval.yml`（`via: crctl-approve`）→ 级联 advance。非 TTY 调用一律返回 `APPROVAL_REQUIRES_HUMAN`，无任何旁路参数或环境变量 | `human_approval` + `approve-*` |
 | `validate` | 受控产物 schema 校验：cr.md / _backlog.yml 的 owners 三角色（id + assigned-at）、review-annotations 的 verdict 枚举与 blockers 结构、test-report / approval / traceability | `validate-doc` |
@@ -50,8 +50,8 @@ node tools/skills/shared/crctl/scripts/crctl.mjs git status --short --cwd <workt
 
 ## 读取 / 写入 / 状态推进 / 失败处理
 
-- **读取**：`change-requests/_backlog.yml`、`change-requests/{CR-ID}/`（cr.md、review-annotations/、test-report.md、approval.yml）、目标 workspace `dir-graph.yaml`、`tools/pipeline-templates/*.pipeline.json`、同目录 `gates.json`。
-- **写入**：`_backlog.yml` 与 `cr.md` 的 status/updated-at（行级定点编辑，写前 sha256 CAS 复核，防并发覆盖）；`approval.yml`（仅 approve）；`review-loop.yml`（仅 attempt）；`test-report.md` 与 `test-evidence/`（仅 test）；`.crctl/audit.log`（审计，自动 gitignore）。时间戳与执行者身份一律由本工具生成，**拒绝调用方传入**。
+- **读取**：`change-requests/{CR-ID}/cr.md` frontmatter（status 权威源）、`change-requests/_backlog.yml`（注册索引）、`change-requests/{CR-ID}/`（review-annotations/、test-report.md、approval.yml）、目标 workspace `dir-graph.yaml`、`tools/pipeline-templates/*.pipeline.json`、同目录 `gates.json`。
+- **写入**：`cr.md` frontmatter 的 status/updated（行级定点编辑，写前 sha256 CAS 复核，防并发覆盖）；`approval.yml`（仅 approve）；`review-loop.yml`（仅 attempt）；`test-report.md` 与 `test-evidence/`（仅 test）；`.crctl/audit.log`（审计，自动 gitignore）。时间戳与执行者身份一律由本工具生成，**拒绝调用方传入**。
 - **状态推进**：只经 `advance`；`standalone` 模式自动 commit `[cr] status {CR-ID} {from} -> {to}`（经自身 git 白名单执行），`--embedded` 只写文件由调用方同事务提交。
 - **失败处理**：结构化 JSON 错误到 stderr + 非零退出。错误码：`CR_STATUS_NOT_FOUND` / `CR_STATUS_CURRENT_MISMATCH` / `CR_STATUS_TRANSITION_NOT_ALLOWED` / `GATE_BLOCKED` / `APPROVAL_REQUIRES_HUMAN` / `APPROVAL_DECLINED` / `LOOP_EXHAUSTED` / `FORBIDDEN_SUBCOMMAND` / `CAS_CONFLICT` 等。任何校验失败都不写文件。
 

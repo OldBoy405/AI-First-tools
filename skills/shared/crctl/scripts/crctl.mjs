@@ -671,39 +671,6 @@ function casWrite(p, expectedHash, newText) {
   fs.writeFileSync(p, newText, 'utf8');
 }
 
-function updateBacklogStatus(ws, cr, newStatus, snapshot) {
-  const p = backlogPath(ws);
-  const lines = snapshot.text.split(/\r?\n/);
-  const eol = snapshot.text.includes('\r\n') ? '\r\n' : '\n';
-  let entryStart = -1, entryIndent = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s*)-\s+id:\s*["']?([^"'\s]+)["']?\s*$/);
-    if (m && m[2] === cr) { entryStart = i; entryIndent = m[1].length; break; }
-  }
-  if (entryStart < 0) fail('CR_STATUS_NOT_FOUND', `_backlog.yml 定位不到条目 - id: ${cr}`);
-  let entryEnd = lines.length;
-  for (let i = entryStart + 1; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s*)-\s+id:\s*/);
-    if (m && m[1].length <= entryIndent) { entryEnd = i; break; }
-  }
-  let statusLine = -1, updatedLine = -1, fieldIndent = null;
-  for (let i = entryStart; i < entryEnd; i++) {
-    const sm2 = lines[i].match(/^(\s*)status:\s*/);
-    if (sm2 && statusLine < 0 && (i === entryStart || lines[i].search(/\S/) > entryIndent)) { statusLine = i; fieldIndent = sm2[1]; }
-    if (/^\s*updated-at:\s*/.test(lines[i]) && updatedLine < 0) updatedLine = i;
-  }
-  if (statusLine < 0) fail('BACKLOG_SHAPE', `条目 ${cr} 内找不到 status 字段`);
-  lines[statusLine] = `${fieldIndent}status: ${newStatus}`;
-  const stamp = `updated-at: "${nowIso()}"`;
-  if (updatedLine >= 0) {
-    const ind = lines[updatedLine].match(/^(\s*)/)[1];
-    lines[updatedLine] = `${ind}${stamp}`;
-  } else {
-    lines.splice(statusLine + 1, 0, `${fieldIndent}${stamp}`);
-  }
-  casWrite(p, snapshot.hash, lines.join(eol));
-}
-
 function updateCrMdStatus(ws, cr, newStatus) {
   const p = path.join(crDir(ws, cr), 'cr.md');
   const text = readFileChecked(p);
@@ -717,6 +684,33 @@ function updateCrMdStatus(ws, cr, newStatus) {
   if (/^updated-at:\s*.*$/m.test(fm)) fm = fm.replace(/^updated-at:\s*.*$/m, `updated-at: "${nowIso()}"`);
   casWrite(p, hash, text.replace(m[0], `---\n${fm}\n---`));
   return { updated: true, path: p };
+}
+
+/* ────────────────────────── 状态读取收敛（CR-2026-018 FR-2） ──────────────────────────
+ * 状态权威源 = cr.md frontmatter；_backlog.yml 退化为注册索引（owners/merge-commits 等低频字段）。
+ * 迁移期兼容读：cr.md 无 status 时回退 backlog 条目 status（deprecated since v0.2.0，计划 v0.3.0 移除）。
+ * 冲突裁决：cr.md 与 backlog 都有 status 且不一致时 cr.md 胜（权威），不报错——漂移检测归 validate。
+ */
+
+function readCrMdFrontmatter(ws, cr) {
+  const p = path.join(crDir(ws, cr), 'cr.md');
+  const text = readFileChecked(p);
+  if (text == null) return null;
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return null;
+  return parseYaml(m[1]);
+}
+
+function resolveCrState(ws, cr) {
+  const snap = loadBacklogEntry(ws, cr);            // 注册字段 + CAS snapshot（保留原样）
+  const md = readCrMdFrontmatter(ws, cr);
+  if (md && md.status) {
+    const mixed = snap.entry.status && snap.entry.status !== md.status;
+    return { snap, status: md.status, statusSource: 'cr.md', mixedLayout: mixed };
+  }
+  if (snap.entry.status)                             // 迁移期兼容读（FR-2，deprecated）
+    return { snap, status: snap.entry.status, statusSource: '_backlog.yml', legacySource: true, mixedLayout: false };
+  fail('CR_MD_STATUS_MISSING', `${cr} 在 cr.md 与 _backlog.yml 中均无 status`);
 }
 
 /* ────────────────────────── attempts（review-loop 轮次记账） ────────────────────────── */
@@ -762,8 +756,9 @@ function bumpAttempt(ws, cr, loopRef, gates) {
 
 function cmdStatus(ws, cr, gates, flags) {
   const { sm, source } = loadStateMachine(ws);
-  const snap = loadBacklogEntry(ws, cr);
-  const current = snap.entry.status;
+  const state = resolveCrState(ws, cr);
+  const snap = state.snap;
+  const current = state.status;
   const nexts = legalTransitions(sm, current).map((t) => ({ to: t.to, trigger: t.trigger }));
   const loops = {};
   for (const loopRef of Object.keys(gates.reviewLoops)) {
@@ -776,13 +771,18 @@ function cmdStatus(ws, cr, gates, flags) {
       if (!g.pass) missing[n.to] = g.checks.filter((c) => !c.ok).map((c) => c.why || c.path || c.stage || c.section);
     }
   }
+  const warnings = [];
+  if (state.mixedLayout) warnings.push({ code: 'MIXED_LAYOUT_WARN', message: `cr.md status=${current} 与 _backlog.yml status=${snap.entry.status} 不一致，以 cr.md 为准；workspace 可能被新旧 crctl 混用，建议统一版本后执行 migrate-backlog` });
+  if (state.legacySource) warnings.push({ code: 'MIXED_LAYOUT_WARN', message: `状态从 _backlog.yml 回退读取（cr.md 无 status），workspace 布局为旧版；建议执行 migrate-backlog 升级到 v2` });
   ok({
     cr, status: current,
-    source: { backlog: snap.path, backlogSha256: snap.hash.slice(0, 12), stateMachine: source },
+    source: { backlog: snap.path, backlogSha256: snap.hash.slice(0, 12), crMd: path.join(crDir(ws, cr), 'cr.md'), stateMachine: source },
+    ...(state.legacySource ? { legacySource: '_backlog.yml' } : {}),
     owners: snap.entry.owners || null,
     legalNext: nexts,
     reviewLoops: loops,
     gateBlockers: missing,
+    ...(warnings.length ? { warnings } : {}),
   });
 }
 
@@ -796,8 +796,9 @@ function cmdGate(ws, cr, gates, flags) {
 function cmdAdvance(ws, cr, gates, flags) {
   if (!flags.to || !flags.trigger) fail('BAD_ARGS', 'advance 需要 --to <status> --trigger <trigger>');
   const { sm } = loadStateMachine(ws);
-  const snap = loadBacklogEntry(ws, cr);
-  const current = snap.entry.status;
+  const state = resolveCrState(ws, cr);
+  const snap = state.snap;
+  const current = state.status;
   if (flags.expect && flags.expect !== current) {
     fail('CR_STATUS_CURRENT_MISMATCH', `期望当前状态 ${flags.expect}，实际 ${current}`);
   }
@@ -811,15 +812,15 @@ function cmdAdvance(ws, cr, gates, flags) {
   if (!gate.pass) {
     fail('GATE_BLOCKED', `目标状态 ${flags.to} 的门禁未通过，拒绝写入`, { gate });
   }
-  updateBacklogStatus(ws, cr, flags.to, snap);
   const crmd = updateCrMdStatus(ws, cr, flags.to);
+  if (!crmd.updated) fail('CR_MD_WRITE_FAILED', `advance 写入 cr.md 失败: ${crmd.why}`);
   auditLog(ws, { kind: 'advance', cr, from: current, to: flags.to, trigger: flags.trigger, by: identity(ws) });
-  const result = { advanced: true, cr, from: current, to: flags.to, trigger: flags.trigger, files: [backlogPath(ws), crmd.path].filter(Boolean), crMd: crmd };
+  const result = { advanced: true, cr, from: current, to: flags.to, trigger: flags.trigger, files: [crmd.path], crMd: crmd };
   if (flags.embedded || flags['no-commit']) {
     result.commit = 'embedded：由调用方在同一事务中提交上述文件';
   } else {
     const msg = `[cr] status ${cr} ${current} -> ${flags.to}`;
-    const addR = controlledGit(ws, 'add', ['change-requests'], ws, 'crctl-advance');
+    const addR = controlledGit(ws, 'add', [`change-requests/${cr}/cr.md`], ws, 'crctl-advance');
     const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-advance') : addR;
     result.commit = commitR.ok ? { message: msg } : { failed: true, detail: commitR, note: '状态文件已写入但 commit 失败，请修复后手工经 crctl git 提交' };
   }
@@ -854,8 +855,8 @@ function cmdApprove(ws, cr, gates, flags) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     fail('APPROVAL_REQUIRES_HUMAN', 'crctl approve 仅接受交互式终端会话（或 --grant 携带服务端签名审批）。模型/管道/脚本直接调用一律拒绝。');
   }
-  const snap = loadBacklogEntry(ws, cr);
-  const current = snap.entry.status;
+  const state = resolveCrState(ws, cr);
+  const current = state.status;
   if (stageCfg.expect && !stageCfg.expect.includes(current)) {
     fail('CR_STATUS_CURRENT_MISMATCH', `审批阶段 ${stage} 要求当前状态 ∈ [${stageCfg.expect.join(', ')}]，实际 ${current}`);
   }
@@ -915,8 +916,8 @@ function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
   if (grant.cr_id !== cr || grant.stage !== stage) {
     fail('GRANT_MISMATCH', `grant 归属 (${grant.cr_id}, ${grant.stage})，当前审批 (${cr}, ${stage}) —— 签名绑定 cr_id+stage，禁止挪用`);
   }
-  const snap = loadBacklogEntry(ws, cr);
-  const current = snap.entry.status;
+  const state = resolveCrState(ws, cr);
+  const current = state.status;
   if (stageCfg.expect && !stageCfg.expect.includes(current)) {
     fail('CR_STATUS_CURRENT_MISMATCH', `审批阶段 ${stage} 要求当前状态 ∈ [${stageCfg.expect.join(', ')}]，实际 ${current}`);
   }
@@ -989,7 +990,9 @@ function cmdValidate(ws, target, gates) {
   if (text == null) fail('FILE_NOT_FOUND', `文件不存在: ${p}`);
   const base = path.basename(p);
   const errors = [];
+  const warnings = [];
   const pushIf = (cond, msg) => { if (cond) errors.push(msg); };
+  const warnIf = (cond, msg) => { if (cond) warnings.push(msg); };
 
   const isoRe = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([+-]\d{2}:\d{2}|Z)$/;
   const validateOwners = (owners, where) => {
@@ -1018,13 +1021,26 @@ function cmdValidate(ws, target, gates) {
   } else if (base === '_backlog.yml') {
     const doc = parseYaml(text);
     const list = Array.isArray(doc) ? doc : doc['change-requests'] || doc.backlog || doc.items || [];
+    const schemaVer = (doc && !Array.isArray(doc) && doc.schema) || '';
+    const isV2 = schemaVer === 'cr-backlog/v2';
     const { sm } = loadStateMachine(ws);
     const allStatuses = new Set([...(sm.transitions || []).flatMap((t) => [t.from, t.to]), ...(sm.terminal || [])]);
     for (const e of list) {
       const where = `_backlog.yml#${e?.id || '?'}`;
       pushIf(!e.id, `${where}: 缺少 id`);
-      pushIf(!e.status, `${where}: 缺少 status`);
-      pushIf(e.status && !allStatuses.has(e.status), `${where}: status=${e.status} 不在状态机枚举内`);
+      if (isV2) {
+        // v2 布局：status/updated-at 已撤出，不应再出现
+        warnIf(e.status !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 status 行（值=${e.status}），应执行 migrate-backlog 清除`);
+        warnIf(e['updated-at'] !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 updated-at 行，应执行 migrate-backlog 清除`);
+      } else {
+        // v1 布局（迁移期）：status 必填，但与 cr.md 不一致时告警
+        pushIf(!e.status, `${where}: 缺少 status`);
+        pushIf(e.status && !allStatuses.has(e.status), `${where}: status=${e.status} 不在状态机枚举内`);
+        if (e.id && e.status) {
+          const md = readCrMdFrontmatter(ws, e.id);
+          warnIf(md && md.status && md.status !== e.status, `${where}: 漂移 — backlog status=${e.status} 与 cr.md status=${md.status} 不一致，以 cr.md 为准；建议执行 migrate-backlog`);
+        }
+      }
       validateOwners(e.owners, where);
     }
   } else if (/review-annotations[\\/].+\.yml$/.test(p) || ['requirement.yml', 'sdd.yml', 'code.yml'].includes(base)) {
@@ -1072,10 +1088,10 @@ function cmdValidate(ws, target, gates) {
   }
 
   if (errors.length) {
-    process.stderr.write(JSON.stringify({ file: p, valid: false, errors }, null, 2) + '\n');
+    process.stderr.write(JSON.stringify({ file: p, valid: false, errors, ...(warnings.length ? { warnings } : {}) }, null, 2) + '\n');
     process.exit(1);
   }
-  ok({ file: p, valid: true });
+  ok({ file: p, valid: true, ...(warnings.length ? { warnings } : {}) });
 }
 
 function cmdAttempt(ws, cr, gates, flags) {
@@ -1135,9 +1151,127 @@ function cmdTest(ws, cr, gates, flags) {
   if (!allPass) process.exit(1);
 }
 
+/* ────────────────────────── migrate-backlog（CR-2026-018 FR-5） ──────────────────────────
+ * 一次性迁移命令：_backlog.yml 从 v1（含 status/updated-at）升为 v2（注册索引）。
+ * 预检逐条目比对 backlog status 与 cr.md status，不一致则硬失败不写文件（纪律#1）。
+ * 幂等：v2 + 无 status 行时输出 already-migrated，退出码 0。
+ */
+
+function cmdMigrateBacklog(ws, gates, flags) {
+  const p = backlogPath(ws);
+  const text = readFileChecked(p);
+  if (!text) fail('BACKLOG_NOT_FOUND', `缺少 ${p}`);
+  const hash = sha256(text);
+  const doc = parseYaml(text);
+  const list = Array.isArray(doc) ? doc : doc['change-requests'] || doc.backlog || doc.items || [];
+  const schemaVer = (doc && !Array.isArray(doc) && doc.schema) || '';
+  const isV2 = schemaVer === 'cr-backlog/v2';
+
+  // 幂等检查：v2 且所有条目无 status/updated-at
+  if (isV2) {
+    const hasLegacy = list.some((e) => e && (e.status !== undefined || e['updated-at'] !== undefined));
+    if (!hasLegacy) {
+      ok({ migrated: false, reason: 'already-migrated', entries: list.length });
+      return;
+    }
+  }
+
+  // 预检：逐条目比对 backlog status 与 cr.md status
+  const diffs = [];
+  const toMigrate = [];
+  for (const e of list) {
+    if (!e || !e.id) continue;
+    if (e.status === undefined && e['updated-at'] === undefined) continue; // 已迁移
+    const md = readCrMdFrontmatter(ws, e.id);
+    if (!md || !md.status) {
+      diffs.push({ id: e.id, backlogStatus: e.status, crMdStatus: null, why: 'cr.md 缺失或无 status' });
+      continue;
+    }
+    if (e.status !== undefined && e.status !== md.status) {
+      diffs.push({ id: e.id, backlogStatus: e.status, crMdStatus: md.status, why: 'backlog 与 cr.md status 不一致' });
+      continue;
+    }
+    toMigrate.push(e.id);
+  }
+  if (diffs.length) {
+    fail('MIGRATE_STATUS_MISMATCH', `迁移预检发现 ${diffs.length} 个条目 backlog 与 cr.md 状态不一致，拒绝写入`, { diffs });
+  }
+  if (!toMigrate.length) {
+    ok({ migrated: false, reason: 'already-migrated', entries: list.length });
+    return;
+  }
+
+  // 行级定点删除各条目 status:/updated-at: 行
+  const lines = text.split(/\r?\n/);
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const removed = [];
+  for (const crId of toMigrate) {
+    let entryStart = -1, entryIndent = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^(\s*)-\s+id:\s*["']?([^"'\s]+)["']?\s*$/);
+      if (m && m[2] === crId) { entryStart = i; entryIndent = m[1].length; break; }
+    }
+    if (entryStart < 0) continue;
+    let entryEnd = lines.length;
+    for (let i = entryStart + 1; i < lines.length; i++) {
+      const m = lines[i].match(/^(\s*)-\s+id:\s*/);
+      if (m && m[1].length <= entryIndent) { entryEnd = i; break; }
+    }
+    // 从尾到头删，避免行号偏移
+    for (let i = entryEnd - 1; i >= entryStart; i--) {
+      if (/^\s*status:\s*/.test(lines[i]) || /^\s*updated-at:\s*/.test(lines[i])) {
+        removed.push(lines[i].trim());
+        lines.splice(i, 1);
+      }
+    }
+  }
+
+  // 顶层 schema 升 v2
+  let finalText = lines.join(eol);
+  if (!isV2) {
+    if (/^schema:\s*.+$/m.test(finalText)) {
+      finalText = finalText.replace(/^schema:\s*.+$/m, 'schema: cr-backlog/v2');
+    } else {
+      finalText = 'schema: cr-backlog/v2\n' + finalText;
+    }
+  }
+
+  casWrite(p, hash, finalText);
+
+  // 迁移报告（gitignored）
+  const reportDir = path.join(ws, '.crctl');
+  fs.mkdirSync(reportDir, { recursive: true });
+  const gi = path.join(reportDir, '.gitignore');
+  if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n');
+  const report = {
+    'migrated-at': nowIso(),
+    entries: toMigrate.map((id) => ({ id, 'status-at-migration': 'consistent', consistent: true })),
+    'removed-lines': removed.length,
+    schema: 'cr-backlog/v1 -> cr-backlog/v2',
+  };
+  fs.writeFileSync(path.join(reportDir, 'migrate-backlog-report.yml'),
+    Object.entries(report).map(([k, v]) => {
+      if (Array.isArray(v)) return `${k}:\n${v.map((e) => `  - { id: ${e.id}, status-at-migration: ${e['status-at-migration']}, consistent: ${e.consistent} }`).join('\n')}`;
+      return `${k}: ${v}`;
+    }).join('\n') + '\n', 'utf8');
+
+  auditLog(ws, { kind: 'migrate-backlog', entries: toMigrate.length, removedLines: removed.length, by: identity(ws) });
+
+  // standalone commit
+  const msg = `[cr] migrate backlog to v2: ${toMigrate.length} entries, status->cr.md`;
+  if (flags.embedded || flags['no-commit']) {
+    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, commit: 'embedded：由调用方在同一事务中提交' });
+  } else {
+    const addR = controlledGit(ws, 'add', ['change-requests/_backlog.yml'], ws, 'crctl-migrate');
+    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-migrate') : addR;
+    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR } });
+    if (commitR && !commitR.ok) process.exit(1);
+  }
+}
+
 function cmdNext(ws, cr, gates, flags) {
-  const snap = loadBacklogEntry(ws, cr);
-  const status = snap.entry.status;
+  const state = resolveCrState(ws, cr);
+  const status = state.status;
   const ev = (rel) => readEvidenceDoc(ws, cr, rel);
   const passAndClean = (doc) => doc.exists && doc.data && doc.data.verdict === 'pass' && Array.isArray(doc.data.blockers) && doc.data.blockers.length === 0;
   const suggest = (node, why, human = false) => ok({ cr, status, next: node, humanApproval: human, why });
@@ -1232,7 +1366,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
 用法:
   crctl status  <cr_id>                          输出权威指针：status / 合法下一步 / 门禁缺口
   crctl gate    <cr_id> --for <status>           只校验不写；非零退出表示 block
-  crctl advance <cr_id> --to <s> --trigger <t>   校验转换+门禁后写入 _backlog.yml 与 cr.md 并 commit
+  crctl advance <cr_id> --to <s> --trigger <t>   校验转换+门禁后写入 cr.md 并 commit
                         [--expect <cur>] [--embedded] [--spec-id <id>]
   crctl approve <cr_id> --stage <requirement|tech-design|dev-start|code>
                         [--approver <id>] [--spec-id <id>]   仅限交互式终端（人类在环）
@@ -1241,6 +1375,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
+  crctl migrate-backlog                          _backlog.yml v1->v2 迁移（撤出 status/updated-at，升 schema）
   crctl git     <sub> [args...] [--cwd <p>] [--caller <skill>]   controlled-shell 白名单执行
 
 全局: --workspace <path> 指定目标 workspace（默认从 cwd 向上探测 change-requests/_backlog.yml）
@@ -1292,6 +1427,7 @@ function main() {
     case 'attempt': return cmdAttempt(ws, requireCr(positional), gates, flags);
     case 'test': return cmdTest(ws, requireCr(positional), gates, flags);
     case 'next': return cmdNext(ws, requireCr(positional), gates, flags);
+    case 'migrate-backlog': return cmdMigrateBacklog(ws, gates, flags);
     case 'git': return cmdGit(ws, positional, flags);
     default: fail('BAD_ARGS', `未知子命令 ${cmd}。运行 crctl help 查看用法`);
   }

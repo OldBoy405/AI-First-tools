@@ -207,7 +207,7 @@ target_workspace_contract:
 change-request-track:
   state_machine:
     field: "status"
-    scope: "目标 workspace/change-requests/_backlog.yml"
+    scope: "目标 workspace/change-requests/{CR-ID}/cr.md"
     transitions:
       - { from: "(new)", to: drafting, trigger: "requirement-register" }
       - { from: drafting, to: requirement-reviewing, trigger: "review-requirement" }

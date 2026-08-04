@@ -60,7 +60,7 @@ trigger: approve-requirement
 expected_current_status: requirement-reviewing
 ```
 
-同步更新 `change-requests/_backlog.yml` 中该条目的 `status` 字段。
+同步更新 `change-requests/{cr_id}/cr.md` frontmatter 的 `status` 字段。
 
 ### Step 4 — 输出摘要
 

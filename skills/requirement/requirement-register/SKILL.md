@@ -14,7 +14,7 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
 
 需求编写的起点。完成以下三件事：
 1. 生成唯一 CR-ID（格式 `CR-YYYY-NNN`，NNN 自增）
-2. 在 `change-requests/_backlog.yml` 注册 CR 条目（`status: drafting`），并在 `change-requests/_index.yml` 追加条目
+2. 在 `change-requests/_backlog.yml` 注册 CR 条目（不含 status/updated-at，status 只落 cr.md），并在 `change-requests/_index.yml` 追加条目
 3. 将注册记录提交到 knowledge-base trunk，保证 main 可感知在途 CR
 4. 按 `dir-graph.yaml#repositories` 为所有 `active != false` 的 repo 创建同名 worktree 分支 `requirement/CR-YYYY-NNN`（不切换当前 HEAD）
 
@@ -98,7 +98,7 @@ handover-history: []
 
 ### Step 3 — 登记 _backlog.yml 和 _index.yml
 
-- 在 `change-requests/_backlog.yml` 的 `backlog[]` 中追加条目（包含所有 cr.md frontmatter 字段）
+- 在 `change-requests/_backlog.yml` 的 `backlog[]` 中追加条目（包含 id/owners/merge-commits 等低频字段，**不含** status/updated-at；status 只落 cr.md）
 - 在 `change-requests/_index.yml` 的 `change-requests[]` 中追加摘要条目（id / title / status / created）
 
 ### Step 4 — 提交注册记录到 knowledge-base trunk

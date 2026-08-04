@@ -49,7 +49,7 @@ tools/
 | workspace 已初始化 | 至少包含 `AGENTS.md`、`dir-graph.yaml`、`change-requests/`、`specs/`、`delivery/`、`docs/` |
 | repositories 已声明 | `dir-graph.yaml#repositories` 需要声明 knowledge-base repo、代码 repo、trunk、active 状态 |
 | 受控 shell 可用 | git 操作必须走 `controlled-shell` 约束的白名单适配器；在 Codex / Claude Code / Cursor / Kimi / Qoder 等 IDE 单独使用时，官方适配器为 `crctl git`（`skills/shared/crctl/`） |
-| IDE 单独使用时的执行强制层 | 脱离平台使用时，状态推进、门禁校验、人工审批、review-loop 轮次一律经 `crctl`（`skills/shared/crctl/SKILL.md`），并按 `docs/漂移治理_v2.md` 安装 hooks 与 CI 校验 |
+| IDE 单独使用时的执行强制层 | 脱离平台使用时，状态推进、门禁校验、人工审批、review-loop 轮次一律经 `crctl`（`skills/shared/crctl/SKILL.md`），并按 `docs/漂移治理_v2.md` 安装 hooks 与 CI 校验；hooks 适配器见 `skills/shared/crctl/adapters/`（claude-code / qoder / cursor / codex） |
 | Agent runtime 可用 | 代码实现阶段需要 Claude Code / Codex / Cursor / Cline 等外部 coding runtime |
 | Agent/Skill 矩阵已加载 | `agent-skill-matrix.yml` 定义每个 Skill 的唯一 owner、可调用边界、外部依赖和禁止调用项 |
 | CR 角色 owner 明确 | 每个 CR 必须有需求 owner、开发 owner、测试 owner，并记录各自 assigned-at 时间戳 |

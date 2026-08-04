@@ -20,7 +20,7 @@ description: "生成今日焦点 AI 简报，聚合多源数据写入 focus.yml"
 | # | 数据源文件 | 提取逻辑 |
 |---|-----------|----------|
 | 1 | `delivery/task/_index.yaml` | 过滤 status=pending\|in-progress 且 priority=urgent\|important，按优先级排序取前 5 条 |
-| 2 | `change-requests/_backlog.yml` | status=developing/code-reviewing/writing-back 的 CR，提醒当前主攻方向 |
+| 2 | `change-requests/{CR-ID}/cr.md` frontmatter | status=developing/code-reviewing/writing-back 的 CR，提醒当前主攻方向 |
 | 3 | `docs/competitive/reports/_index.yml` | status=new 的最新报告，生成关注提醒 |
 | 4 | `delivery/task/_index.yaml`（进行中任务） | in-progress 任务，防止遗漏 |
 | 5 | `.rayai/pipelines/_index.yml` | 已激活 pipeline 列表与默认入口（可选） |
@@ -36,7 +36,7 @@ description: "生成今日焦点 AI 简报，聚合多源数据写入 focus.yml"
 
 ```
 read_file: delivery/task/_index.yaml
-read_file: change-requests/_backlog.yml
+read_file: change-requests/{CR-ID}/cr.md（扫描各 CR frontmatter status）
 read_file: docs/competitive/reports/_index.yml（可选）
 read_file: .rayai/pipelines/_index.yml（可选）
 ```

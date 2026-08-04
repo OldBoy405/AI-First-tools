@@ -1,6 +1,6 @@
 ---
 name: cr-archive
-description: "归档新四阶段 CR：用 cr-status-set embedded 校验 final status，将 archived/rejected/withdrawn CR 从 backlog 原子移入 history，并统一清理 requirement worktree 与远端分支。"
+description: "归档新四阶段 CR：以 cr.md frontmatter status 为 final-status 权威源，将 archived/rejected/withdrawn CR 从 backlog 原子移入 history，并统一清理 requirement worktree 与远端分支。"
 ---
 
 # Skill: cr-archive
@@ -47,7 +47,7 @@ description: "归档新四阶段 CR：用 cr-status-set embedded 校验 final st
    - 若工作区仍有归档账本相关未提交变更，或本地 trunk 含归档提交但 `origin/{knowledgeBaseRepo.trunk}` 尚未包含，进入 `publish-retry` 模式，跳过 Step 2-5，只执行 Step 6；Step 6 成功后再进入 Step 7。
    - 若 `cleanup-report.yml cleanup-status=pending`，进入 `cleanup-retry` 模式，跳过 Step 2-6，只执行 Step 7。
    - 若归档账本已发布且 cleanup 已完成或无需 cleanup，返回幂等结果：CR 已归档，无需重复移动 backlog/history。
-3. 若 `_backlog.yml` 中存在该 CR，读取对应 `change-requests/{cr_id}/cr.md` 的 frontmatter `status` 字段。
+3. 若 `_backlog.yml` 中存在该 CR，读取 `change-requests/{cr_id}/cr.md` frontmatter 的 `status` 字段作为权威当前状态。
 4. 若 status=`writing-back`：
    - 确认 `spec_id` 存在
    - 确认 `specs/{spec_id}/traceability.yml` 存在
@@ -78,7 +78,7 @@ payload:
 
 1. 读取 `change-requests/_backlog.yml`
 2. 在顶级字段 `backlog[]` 中找到 `id: {cr_id}` 的条目，完整复制其内容（记为 `entry`）
-3. 将 `entry.status` 更新为 `{final-status}`，并记录 `archived-at` 与 `writeback_spec_id`
+3. 将 `entry.status` 更新为 `{final-status}`（以 cr.md frontmatter status 为准），并记录 `archived-at` 与 `writeback_spec_id`
 4. 从 `backlog[]` 列表中删除该条目
 5. 写回 `_backlog.yml`（保留顶级 `schema` / `updated` / `summary` 字段）
 
@@ -120,7 +120,7 @@ payload:
    - `status` → `{final-status}`
    - `archived-at` → 当前时间（格式 YYYY-MM-DDTHH:mm:ss+HH:mm）
    - `writeback_spec_id` → `{spec_id 或 N/A}`
-4. 同步更新 `change-requests/{cr_id}/cr.md` frontmatter 的 `status` 为 `{final-status}`；若为成功回写归档，同时写入 `archived-at` 与 `writeback_spec_id`
+4. 同步更新 `change-requests/{cr_id}/cr.md` frontmatter 的 `status` 为 `{final-status}`（权威写入点）；若为成功回写归档，同时写入 `archived-at` 与 `writeback_spec_id`
 5. 写回 `_index.yml`
 
 ### Step 6 — 提交并推送归档记录
@@ -189,7 +189,7 @@ payload:
 | `CR_ARCHIVE_NOT_FOUND` | _backlog.yml 中无该 CR | 检查 cr_id 是否正确；若已归档则无需重复操作 |
 | `CR_ARCHIVE_STATUS_NOT_ALLOWED` | CR 当前状态不可归档 | 先完成对应 pipeline gate |
 | `CR_ARCHIVE_TRACEABILITY_MISSING` | 成功回写场景缺少 traceability.yml | 先运行 `writeback-traceability` |
-| `CR_ARCHIVE_STATUS_SYNC_FAILED` | embedded status patch 写入 `_backlog.yml` 与 `cr.md` 后不一致 | 停止归档，修复状态后重试 |
+| `CR_ARCHIVE_STATUS_SYNC_FAILED` | embedded status patch 写入 `cr.md` 后与预期不一致 | 停止归档，修复状态后重试 |
 | `CR_ARCHIVE_HISTORY_WRITE_FAIL` | _history.yml 写入失败 | 修复文件权限或格式问题后重试，不进入清理阶段 |
 | `CR_ARCHIVE_RECORD_PUBLISH_FAILED` | 归档账本 commit/push 失败 | 不执行清理，保留 worktree 与远端分支，重试归档发布 |
 | `CR_ARCHIVE_CLEANUP_PENDING` | 归档已发布但清理未全部完成 | 保留 cleanup-report.yml，后续重试 cleanup |
