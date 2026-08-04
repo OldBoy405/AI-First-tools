@@ -80,9 +80,9 @@ description: 在同一 CR workspace 内按 prd/sdd/tasks 执行代码编写，�
 
 按 TASK 验收条件运行 lint/test/build 或对应验证命令。任何失败都必须记录到节点输出并停止推进；在自修复模式下至少重新运行与 blockers 相关的验证命令，并说明未运行全量验证的原因。
 
-### Step 4.5 - 任务状态即时登记
+### Step 4.5 - 任务状态即时登记（经 crctl task done，禁止手写 YAML）
 
-每完成一个 TASK，立即在 `delivery/task/_index.yml`（或本 CR 对应的任务索引文件）中把该任务标记为 `done`，**做完一个标一个，不得积压到回写期补标**。任务全部完成但索引仍为 `pending` 的，视为本节点未完成——回写期补账既打断流程又容易漏标。
+每完成一个 TASK，立即调用 `crctl task done <CR-ID> --task <TASK-ID> --workspace <CR worktree>` 把该任务在 `tasks/_index.yml` 标记为 `done`（sha256 CAS + 审计日志 + developing 态守卫），**做完一个标一个，不得积压到回写期补标**。任务全部完成但索引仍为 `pending` 的，视为本节点未完成——回写期补账既打断流程又容易漏标。**禁止会话内手写/现写脚本编辑 `tasks/_index.yml`**（纪律 #7）：该账本唯一写入通道是 `crctl task done`。
 
 ### Step 5 - Output
 

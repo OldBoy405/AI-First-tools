@@ -141,17 +141,7 @@ push 前再次对每个 repo 执行：
 全部 repo push 成功后，必须将每个 repo 的 merge SHA 与 CR status 在同一知识库 commit 中发布，避免 trunk 已合并但 CR 元数据缺失：
 
 1. 调用 `cr-status-set`，参数为 `next_status=merging`、`trigger=merge-feature-branch`、`expected_current_status=code-approved`、`commit_mode=embedded`，只获取已校验的 status patch，不单独 commit。
-2. 将每个 repo 的 merge SHA 写入 `change-requests/_backlog.yml` 对应条目的 `merge-commits` 字段：
-
-```yaml
-merge-commits:
-  - repo: {repo.id}
-    trunk: {repo.trunk}
-    sha: {merge-sha}
-    branch: requirement/{cr_id}
-    source-sha: {source-branch-sha}
-    merged-at: {YYYY-MM-DDTHH:mm:ss+08:00}
-```
+2. 对每个 repo 调用 `crctl merge-metadata <CR-ID> --repo {repo.id} --trunk {repo.trunk} --sha {merge-sha} --workspace {knowledgeBaseRepo.path}`，把 merge SHA 追加进 `_backlog.yml` 对应条目的 `merge-commits` 字段（幂等去重、保序，CAS + 审计）。条目最小字段集为 `{repo, trunk, sha}`（SDD §0 修订：结构化条目而非裸 sha）；如需分支/时间信息由后续字段按需扩展。**禁止会话内手写/现写脚本编辑 `_backlog.yml` 的 `merge-commits`**（纪律 #7）：该字段唯一写入通道是 `crctl merge-metadata`。
 
 3. 同步更新 `change-requests/{cr_id}/cr.md` frontmatter status=`merging`（权威写入点，embedded patch 只落 cr.md）。
 4. 在 knowledge-base trunk 提交并推送，并记录本次 metadata commit SHA：

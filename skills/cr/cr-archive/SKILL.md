@@ -74,43 +74,12 @@ payload:
   writeback_spec_id: "{spec_id 或 N/A}"
 ```
 
-### Step 3 — 从 _backlog.yml 移除条目
+### Step 3 — 原子移动 backlog → history（经 crctl archive-move，禁止手写 YAML）
 
-1. 读取 `change-requests/_backlog.yml`
-2. 在顶级字段 `backlog[]` 中找到 `id: {cr_id}` 的条目，完整复制其内容（记为 `entry`）
-3. 将 `entry.status` 更新为 `{final-status}`（以 cr.md frontmatter status 为准），并记录 `archived-at` 与 `writeback_spec_id`
-4. 从 `backlog[]` 列表中删除该条目
-5. 写回 `_backlog.yml`（保留顶级 `schema` / `updated` / `summary` 字段）
-
-### Step 4 — 追加到 _history.yml
-
-1. 读取 `change-requests/_history.yml`
-2. 构造 history 记录（字段名与 cr.md frontmatter 一致）：
-   ```yaml
-   - id: {cr_id}
-     title: {cr.md frontmatter.title}
-     type: {cr.md frontmatter.type}
-     affects-feature: {cr.md frontmatter.affects-feature}
-     origin:
-       type: {cr.md frontmatter.origin.type}
-       ref: {cr.md frontmatter.origin.ref}
-     target:
-       kind: {cr.md frontmatter.target.kind}
-       refs: {cr.md frontmatter.target.refs}
-     final-status: {final-status}
-     archive_reason: "{archive_reason 或系统推导}"
-     owners: {cr.md frontmatter.owners}
-     owner-history: {cr.md frontmatter.owner-history 或 []}
-     submitter: {cr.md frontmatter.submitter}
-     reviewer: "{cr.md frontmatter.reviewer 或 N/A}"
-     opened: {cr.md frontmatter.opened 或 created-at}
-     archived-at: "YYYY-MM-DDTHH:mm:ss+HH:mm"
-     target-version: "{cr.md frontmatter.target-version 或 N/A}"
-     writeback_spec_id: "{spec_id 或 N/A}"
-     merge-commits: {backlog.merge-commits 或 []}
-   ```
-3. 追加到 `_history.yml` 的 `history[]` 列表末尾
-4. 写回 `_history.yml`
+1. 调用 `crctl archive-move <CR-ID> --final-status {final-status} [--archive-reason "{archive_reason 或系统推导}"] [--spec-id {spec_id}] --workspace {knowledgeBaseRepo.path}`
+2. archive-move 原子完成：`_backlog.yml` 删除该条目 + `_history.yml` 追加富化条目（原条目字段 + `final-status` / `archive-reason` / `writeback-spec-id` / `archived-at`），双文件 CAS 快照（任一侧读后被改则整体 `CAS_CONFLICT` 中止、两侧均不落盘），并写 `.crctl/audit.log`
+3. 前置守卫：CR status 必须为 `archived`（由 Step 1 的 cr-status-set embedded patch 推进）；重复归档（history 已含该 CR）返回 `ENTRY_ALREADY_IN_HISTORY`
+4. **禁止会话内手写/现写脚本编辑 `_backlog.yml` / `_history.yml`**（纪律 #7）：归档账本唯一写入通道是 `crctl archive-move`
 
 ### Step 5 — 更新 _index.yml
 
