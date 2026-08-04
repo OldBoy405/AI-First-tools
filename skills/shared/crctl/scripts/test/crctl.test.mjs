@@ -999,3 +999,88 @@ test('AC-9：merge-tree 对 _backlog.yml 零冲突（分支推进只写 cr.md，
     assert.ok(!(output.includes('_backlog.yml') && output.includes('CONFLICT')), `_backlog.yml 不应有冲突:\n${output.slice(0, 800)}`);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-020 复盘落地：漂移治理轻量修复（FR-2 分叉检测 / FR-4 spec-id fail-fast / FR-5 修复指引 / FR-8 branch 契约） ──
+
+test('FR-4：advance 到需 specs 落点的目标态却缺 --spec-id → 命令入口 BAD_ARGS fail-fast，cr.md 未推进', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'merging');
+    // merging -> writing-back（trigger writeback-prd-sdd）门禁需 specs/{spec}/PRD.md 等
+    const r = runCrctl(['advance', 'CR-T1', '--to', 'writing-back', '--trigger', 'writeback-prd-sdd', '--workspace', ws, '--no-commit']);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'BAD_ARGS');
+    assert.match(r.stderr.error.message, /--spec-id/);
+    // fail-fast 在写入前：cr.md 仍为 merging
+    assert.match(readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'cr.md'), 'utf8'), /status: merging/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('FR-5：merge-metadata 非法前置态错误信息含「请先 crctl advance」修复指引', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r = runCrctl(['merge-metadata', 'CR-T1', '--repo', 'r', '--trunk', 't', '--sha', 'abc123', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.match(r.stderr.error.message, /请先 crctl advance/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('FR-8：merge-metadata 追加条目自动补 branch: requirement/{cr}，必填集 {repo,trunk,sha} 不变', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'merging');
+    const r = runCrctl(['merge-metadata', 'CR-T1', '--repo', 'tools', '--trunk', 'custom/main', '--sha', 'deadbeef01', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.branch, 'requirement/CR-T1');
+    const backlog = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.match(backlog, /- repo: tools/);
+    assert.match(backlog, /trunk: custom\/main/);
+    assert.match(backlog, /sha: deadbeef01/);
+    assert.match(backlog, /branch: requirement\/CR-T1/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('FR-2：主 workspace 视图陈旧、CR worktree 分支已推进 → status 报 STATUS_DIVERGED 指向 worktree', () => {
+  const ws = makeWorkspace();
+  const wt = ws + '-wt';
+  const git = (args) => spawnSync('git', ['-C', ws, ...args], { encoding: 'utf8' });
+  try {
+    assert.equal(git(['init', '-b', 'master']).status, 0);
+    git(['config', 'user.email', 't@t']);
+    git(['config', 'user.name', 'tester']);
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    git(['add', '-A']);
+    git(['commit', '-m', 'init: register CR-T1 drafting']);
+    // 建 CR worktree（分支 requirement/CR-T1），把其 cr.md 推进到 developing（模拟并行会话进度）
+    const wr = git(['worktree', 'add', '-b', 'requirement/CR-T1', wt]);
+    assert.equal(wr.status, 0, `worktree add 失败: ${wr.stderr}`);
+    const wtCrMd = path.join(wt, 'change-requests', 'CR-T1', 'cr.md');
+    writeFileSync(wtCrMd, readFileSync(wtCrMd, 'utf8').replace('status: drafting', 'status: developing'));
+    // 从主 workspace 读 status：视图 drafting，但应告警 worktree 已 developing
+    const r = runCrctl(['status', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.status, 'drafting');
+    const div = (r.stdout.warnings || []).find((w) => w.code === 'STATUS_DIVERGED');
+    assert.ok(div, `期望 STATUS_DIVERGED，实际 warnings=${JSON.stringify(r.stdout.warnings)}`);
+    assert.match(div.message, /requirement\/CR-T1/);
+    assert.match(div.message, /developing/);
+  } finally {
+    spawnSync('git', ['-C', ws, 'worktree', 'remove', '--force', wt], { encoding: 'utf8' });
+    rmSync(ws, { recursive: true, force: true });
+    rmSync(wt, { recursive: true, force: true });
+  }
+});
+
+test('FR-2 回退：非 git workspace 的 status 不触发 STATUS_DIVERGED、不产生副作用（保持纯读）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const r = runCrctl(['status', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const codes = (r.stdout.warnings || []).map((w) => w.code);
+    assert.ok(!codes.includes('STATUS_DIVERGED'), '非 git 工作区不应有分叉告警');
+    assert.ok(!existsSync(path.join(ws, '.crctl', 'audit.log')), 'status 在非 git 工作区不应写 audit.log（.git 门控命中，未触达 controlledGit）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

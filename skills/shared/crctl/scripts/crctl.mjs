@@ -737,7 +737,9 @@ function editTaskDone(text, taskId) {
   return norm.slice(0, block.start) + nb + '\n' + norm.slice(block.end);
 }
 
-/** merge-metadata：条目 merge-commits[] 追加 {repo,trunk,sha}，无则创建键（SDD §4.2）。 */
+/** merge-metadata：条目 merge-commits[] 追加 {repo,trunk,sha,branch}，无则创建键（SDD §4.2）。
+ * branch 由 CR id 按硬约定（分支恒为 requirement/{cr}）自动补全——必填集仍为 {repo,trunk,sha}
+ * （唯一生产者保证输出的集合），branch 是可推导的富化字段（CR-2026-020 复盘 FR-8：字段契约收敛）。 */
 function editMergeMetadata(text, cr, commit) {
   const norm = text.replaceAll('\r\n', '\n');
   const block = matchEntryBlock(norm, cr);
@@ -746,7 +748,7 @@ function editMergeMetadata(text, cr, commit) {
   const mcIdx = lines.findIndex((l) => /^[ \t]*merge-commits:/.test(l));
   const itemIndent = ' '.repeat(block.indent + 4);
   const fieldIndent = ' '.repeat(block.indent + 6);
-  const item = `${itemIndent}- repo: ${commit.repo}\n${fieldIndent}trunk: ${commit.trunk}\n${fieldIndent}sha: ${commit.sha}`;
+  const item = `${itemIndent}- repo: ${commit.repo}\n${fieldIndent}trunk: ${commit.trunk}\n${fieldIndent}sha: ${commit.sha}\n${fieldIndent}branch: requirement/${cr}`;
   if (mcIdx === -1) {
     const fieldIndent2 = ' '.repeat(block.indent + 2);
     lines.push(`${fieldIndent2}merge-commits:`, item);
@@ -879,6 +881,41 @@ function bumpAttempt(ws, cr, loopRef, gates) {
   return { loop: loopRef, current: next, max: state.max, file: p };
 }
 
+/* ────────────────────────── 工作区漂移检测（CR-2026-020 复盘 FR-2） ──────────────────────────
+ * 根因：CR 全部状态推进发生在 worktree 分支 requirement/{cr}，主工作区 cr.md 停在注册快照，
+ * 二者静默分叉时承接会话据陈旧视图重写产物（会话工作区漂移复盘）。
+ * 修复：status 检出该 CR 是否存在 worktree（分支恒为 requirement/{cr}，纯约定、无需存指针），
+ * 若其 cr.md 状态与当前 workspace 视图不一致，附 STATUS_DIVERGED 告警（warn-only，只读）。
+ * git worktree list 走 controlled-shell（白名单形态仅 `list`，不能带 --porcelain），解析纯文本。 */
+
+function parseWorktreeList(stdout, branch) {
+  for (const line of stdout.split(/\r?\n/)) {
+    // 形如：<path>  <sha7-40> [<branch>]；bare/detached 行无 [branch] 括号，正则不匹配自然跳过
+    const m = line.match(/^(.*\S)\s+[0-9a-f]{7,40}\s+\[([^\]]+)\]\s*$/);
+    if (m && m[2].trim() === branch) return m[1].trim();
+  }
+  return null;
+}
+
+function detectStatusDivergence(ws, cr, currentStatus) {
+  // 非 git 工作区无 worktree 概念，直接跳过——保证 status 在非 git 目录下零副作用（纯读）
+  if (!fs.existsSync(path.join(ws, '.git'))) return null;
+  const r = controlledGit(ws, 'worktree', ['list'], ws, 'crctl-status');
+  if (!r.ok || !r.stdout) return null;
+  const wtPath = parseWorktreeList(r.stdout, `requirement/${cr}`);
+  if (!wtPath || path.resolve(wtPath) === path.resolve(ws)) return null; // 无 worktree 或正在 worktree 内读（即事实源本身）
+  const md = readFileChecked(path.join(wtPath, 'change-requests', cr, 'cr.md'));
+  if (md == null) return null;
+  const m = md.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const fm = m ? parseYaml(m[1]) : null;
+  const wtStatus = fm && fm.status;
+  if (!wtStatus || wtStatus === currentStatus) return null;
+  return {
+    code: 'STATUS_DIVERGED',
+    message: `当前 workspace 视图 status=${currentStatus}，但该 CR 的 worktree 分支 requirement/${cr}（${wtPath}）cr.md status=${wtStatus}。worktree 分支为 CR 事实源——请改用 \`crctl status --workspace ${wtPath}\` 为准，勿据当前陈旧视图动手。`,
+  };
+}
+
 /* ────────────────────────── 子命令实现 ────────────────────────── */
 
 function cmdStatus(ws, cr, gates, flags) {
@@ -901,6 +938,8 @@ function cmdStatus(ws, cr, gates, flags) {
   const warnings = [];
   if (state.mixedLayout) warnings.push({ code: 'MIXED_LAYOUT_WARN', message: `cr.md status=${current} 与 _backlog.yml status=${snap.entry.status} 不一致，以 cr.md 为准；workspace 可能被新旧 crctl 混用，建议统一版本后执行 migrate-backlog` });
   if (state.legacySource) warnings.push({ code: 'MIXED_LAYOUT_WARN', message: `状态从 _backlog.yml 回退读取（cr.md 无 status），workspace 布局为旧版；建议执行 migrate-backlog 升级到 v2` });
+  const diverged = detectStatusDivergence(ws, cr, current);
+  if (diverged) warnings.push(diverged);
   ok({
     cr, status: current,
     source: { backlog: snap.path, backlogSha256: snap.hash.slice(0, 12), crMd: path.join(crDir(ws, cr), 'cr.md'), stateMachine: source },
@@ -935,9 +974,17 @@ function cmdAdvance(ws, cr, gates, flags) {
       legalNext: legalTransitions(sm, current).map((x) => ({ to: x.to, trigger: x.trigger })),
     });
   }
+  // FR-4（CR-2026-020 复盘）：目标态门禁需校验 specs 落点（path 含 {spec}）却缺 --spec-id 时，
+  // 命令入口即 fail-fast，不埋进 GATE_BLOCKED.checks[].why（--spec-id 曾同坑犯两次）。
+  const targetChecks = gates.statusGates[flags.to] || [];
+  if (!flags.specId && targetChecks.some((c) => typeof c.path === 'string' && c.path.includes('{spec}'))) {
+    fail('BAD_ARGS', `advance --to ${flags.to} 需要 --spec-id <specId>：该目标态门禁需校验 specs 落点（specs/{spec}/...）。请补 --spec-id 后重试。`);
+  }
   const gate = runGateChecks(ws, cr, flags.to, gates, flags);
   if (!gate.pass) {
-    fail('GATE_BLOCKED', `目标状态 ${flags.to} 的门禁未通过，拒绝写入`, { gate });
+    // FR-5：把未过门禁的具体原因提升进错误摘要，避免调用方漏读 checks[].why
+    const why = gate.checks.filter((c) => !c.ok).map((c) => c.why).filter(Boolean).join('；');
+    fail('GATE_BLOCKED', `目标状态 ${flags.to} 的门禁未通过，拒绝写入${why ? '：' + why : ''}`, { gate });
   }
   const crmd = updateCrMdStatus(ws, cr, flags.to);
   if (!crmd.updated) fail('CR_MD_WRITE_FAILED', `advance 写入 cr.md 失败: ${crmd.why}`);
@@ -1240,7 +1287,7 @@ function cmdMergeMetadata(ws, cr, gates, flags) {
   if (!flags.repo || !flags.trunk || !flags.sha) fail('BAD_ARGS', 'merge-metadata 需要 --repo <r> --trunk <t> --sha <sha>');
   const state = resolveCrState(ws, cr);
   const LEGAL = ['merging', 'writing-back'];
-  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `merge-metadata 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
+  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `merge-metadata 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}。请先 crctl advance 到 ${LEGAL[0]} 再写 merge 元数据（状态前置强制：先推进状态，后写账本）`, { current: state.status, expect: LEGAL });
   const snap = loadBacklogEntry(ws, cr);
   const before = (snap.entry['merge-commits'] || []).length;
   const dup = (snap.entry['merge-commits'] || []).some((c) => c && String(c.sha) === String(flags.sha));
@@ -1251,13 +1298,13 @@ function cmdMergeMetadata(ws, cr, gates, flags) {
   const newText = editMergeMetadata(snap.text, cr, { repo: flags.repo, trunk: flags.trunk, sha: flags.sha });
   casWrite(snap.path, snap.hash, newText);
   auditLog(ws, { kind: 'ledger', op: 'merge-metadata', cr, actor: identity(ws), before: { count: before }, after: { sha: flags.sha, count: before + 1 } });
-  ok({ op: 'merge-metadata', cr, repo: flags.repo, trunk: flags.trunk, sha: flags.sha, result: 'appended' });
+  ok({ op: 'merge-metadata', cr, repo: flags.repo, trunk: flags.trunk, sha: flags.sha, branch: `requirement/${cr}`, result: 'appended' });
 }
 
 function cmdArchiveMove(ws, cr, gates, flags) {
   if (!flags['final-status']) fail('BAD_ARGS', 'archive-move 需要 --final-status <status>');
   const state = resolveCrState(ws, cr);
-  if (state.status !== 'archived') fail('ILLEGAL_LEDGER_STATE', `archive-move 仅允许在前置态 archived 执行，当前 ${state.status}`, { current: state.status, expect: ['archived'] });
+  if (state.status !== 'archived') fail('ILLEGAL_LEDGER_STATE', `archive-move 仅允许在前置态 archived 执行，当前 ${state.status}。请先 crctl advance 到 archived（带 --spec-id）再 archive-move（状态前置强制）`, { current: state.status, expect: ['archived'] });
   const bp = backlogPath(ws);
   const hp = path.join(ws, 'change-requests', '_history.yml');
   const textB = readFileChecked(bp);
