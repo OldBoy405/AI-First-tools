@@ -28,7 +28,7 @@
       "type": "text",
       "required": true,
       "placeholder": "v0.16.0",
-      "description": "用于 delivery/task 文件命名 TASK-{ver}-{NNN}-{NN}-*.md；必须显式提供并传递给所有 writeback 节点"
+      "description": "用于 delivery/task 文件命名 TASK-{target_version}-{cr_id}-{NN}-{slug}；必须显式提供并传递给所有 writeback 节点（CR-2026-020 统一格式）"
     }
   ],
   "nodes": [
@@ -46,7 +46,7 @@
       "kind": "skill",
       "label": "回写 PRD / SDD 到 specs/",
       "ref": "writeback-prd-sdd",
-      "prompt": "将 change-requests/{{inputs.cr_id}}/{prd.md,sdd.md} 回写到 specs/{{inputs.spec_id}}/{PRD.md,SDD.md}：\n- 若 specs/{{inputs.spec_id}} 不存在则新建目录并登记 specs/_index.yml\n- 若已存在，执行全量覆盖，并将旧版本备份到 change-requests/{{inputs.cr_id}}/writeback-backups/{{inputs.spec_id}}/{timestamp}/；不得写 _archived/**\n- 通过 engineering-docs skill 保证 frontmatter 合规\n- 维护 specs/_index.yml 的 status / last-updated-at / cr-ref 字段\n\n在 node-2.md 输出目标 spec_id 与新建/更新标记、变更文件清单。",
+      "prompt": "将 change-requests/{{inputs.cr_id}}/{prd.md,sdd.md} 增量回写到 specs/{{inputs.spec_id}}/{PRD.md,SDD.md} 并维护 specs/_index.yml：\n- 调用 tools/skills/writeback/scripts/writeback-prd-sdd.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}}）：先 --dry-run 核对里程碑节追加 diff（标题 ## {名}（v{version} · CR-{id}）、原文 H 级 +1、既有章节原样保留），无误后实跑（脚本末尾自检，失败 SELF_CHECK_FAILED 非零退出）\n- specs/ 是跨 CR 累积基线（纪律 #6）：只做末尾追加里程碑节 + frontmatter 行级更新，禁止全量覆盖；不做旧版本备份（回写即 git commit，历史由 git 承载）\n- 使用必填输入 target_version={{inputs.target_version}}，不得在本节点重新推导版本\n\n在 node-2.md 输出目标 spec_id 与新建/更新标记、变更文件清单。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },
@@ -55,7 +55,7 @@
       "kind": "skill",
       "label": "回写 TASK 到 delivery/",
       "ref": "writeback-tasks",
-      "prompt": "将 change-requests/{{inputs.cr_id}}/tasks/TASK-NN.md 映射为 delivery/task/TASK-{{inputs.target_version}}-{NNN}-{NN}-*.md：\n- NNN 取 CR 在 backlog 中的序号，NN 保留原任务编号\n- 每个 TASK 的 frontmatter 记录 cr-ref、spec-ref、commit-range\n- 维护 delivery/task/_index.yaml\n- 使用必填输入 target_version={{inputs.target_version}}，不得在本节点重新推导版本\n\n在 node-3.md 输出生成的 TASK 文件清单。",
+      "prompt": "将 change-requests/{{inputs.cr_id}}/tasks/ 下 status=done 任务回写到 delivery/task/ 并全量重建 delivery/task/_index.yaml：\n- 调用 tools/skills/writeback/scripts/writeback-tasks.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}}）：先 --dry-run 核对将新建的文件清单，无误后实跑（脚本末尾自检）\n- 目标命名 TASK-{{inputs.target_version}}-{{inputs.cr_id}}-{NN}-{slug}（slug 取源任务 frontmatter，缺失回退 task-{NN}）；幂等判据为 delivery/task/*.md frontmatter 的 id 集合\n- 使用必填输入 target_version={{inputs.target_version}}，不得在本节点重新推导版本\n\n在 node-3.md 输出生成的 TASK 文件清单。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -64,7 +64,7 @@
       "kind": "skill",
       "label": "回写追溯链",
       "ref": "writeback-traceability",
-      "prompt": "生成或更新 specs/{{inputs.spec_id}}/traceability.yml：\n- PRD FR-* ↔ SDD 章节 ↔ delivery/task/TASK-* ↔ merge-commits[] repo/SHA ↔ CR-ID\n- 从 change-requests/_backlog.yml 的 merge-commits[] 动态生成 code evidence，不使用固定仓字段\n- 标记每条链路的 verified-at 时间戳\n- 与 change-requests/{{inputs.cr_id}}/traceability.yml 保持一致（本条为权威版本）\n\n在 node-4.md 输出链路条目数与未对齐项。",
+      "prompt": "在 specs/{{inputs.spec_id}}/traceability.yml（跨 CR 累积的唯一权威文件）追加本 CR 的 milestone 段：\n- 按证据源起草 milestone-file（fr-chain 的 title/sdd/code/evidence 为编辑性内容），merge-commits 由脚本从 change-requests/_backlog.yml 定向提取注入（六字段齐全校验，缺失 MERGE_COMMITS_MISSING 硬失败，不猜测）\n- 调用 tools/skills/writeback/scripts/writeback-traceability.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --milestone-file <path>）：先 --dry-run 核对（既有 milestones 段不得出现在 diff 中），无误后实跑（脚本末尾自检）\n- 不做\"与 change-requests/{{inputs.cr_id}}/traceability.yml 保持一致\"校验——specs 侧为唯一权威文件，change-requests 侧为开发期工作稿，归档后不再同步\n\n在 node-4.md 输出链路条目数与未对齐项。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },

@@ -25,6 +25,17 @@ description: 按 dir-graph.yaml repositories 动态解析参与仓，通过 dry-
 
 ---
 
+## 已核实事实基线（纪律 #4，2026-08-04 核实）
+
+| 事实 | 值 |
+|---|---|
+| 参与仓解析 | 仅 `dir-graph.yaml#repositories` 声明的 active 仓有 worktree；**tools 仓（`../tools`，phase0-tools）不在声明范围内**，但按 CR-2026-002/003/005/018/019 先例参与合并，trunk=**custom/main**（非 main），无 worktree、合并产物直接提交 custom/main |
+| 空分支跳过 | 某仓无该 CR 提交时（如纯文档 CR 的 multica），该分支自动跳过合并与 merge-commits 记录（Step 1.6）；其 worktree/远端分支仍由 cr-archive 统一清理 |
+| 分支补齐 | 合并前需确认 `origin/requirement/{cr_id}` 存在（Step 1.4）；开发期未 push 时先补齐 |
+| merge-commits 写入 | 唯一通道 `crctl merge-metadata`（CR-2026-019 起），禁止会话内手写/现写脚本编辑 `_backlog.yml`（纪律 #7） |
+
+---
+
 ## 非 TTY 执行约定（Agent 直跑裸 git 场景）
 
 本 Skill 的所有 git 命令必须能在非交互（非 TTY）环境下完成，禁止任何会打开编辑器或等待stdin 的形态：
