@@ -53,7 +53,10 @@ const mergeCommits = [];
     }
   }
 }
-const REQUIRED = ['repo', 'trunk', 'sha', 'branch', 'source-sha', 'merged-at'];
+// 必填字段按 019 merge-metadata 定型的账本最小字段集 {repo,trunk,sha}（SDD §0 六字段为早期手工形态；
+// 实测 merge-metadata 输出仅三字段，branch/source-sha/merged-at 为可选，有则提取、无则段内省略——
+// 本 CR 回写自举发现，按真实账本形态适配）
+const REQUIRED = ['repo', 'trunk', 'sha'];
 const missing = mergeCommits.flatMap((mc) => REQUIRED.filter((f) => !mc[f]).map((f) => `${mc.repo}.${f}`));
 if (missing.length) {
   fail('MERGE_COMMITS_MISSING', `merge-commits[] 字段不齐全：${missing.join(', ')}（不猜测、不取 trunk 最新提交）`, { cr });
@@ -142,7 +145,7 @@ function buildSegment() {
     lines.push(`      - repo: ${mc.repo}`);
     lines.push(`        trunk: ${mc.trunk}`);
     lines.push(`        sha: ${mc.sha}`);
-    lines.push(`        branch: ${mc.branch}`);
+    if (mc.branch) lines.push(`        branch: ${mc.branch}`); // 可选字段：有则写，无则省略（对齐既有段格式）
   }
   lines.push('    frs:');
   for (const f of ms['fr-chain']) {

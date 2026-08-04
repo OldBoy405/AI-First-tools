@@ -209,6 +209,18 @@ test('traceability: 追加保留 + 幂等 + 校验硬失败 + MERGE_COMMITS_MISS
   assert.notEqual(r4.code, 0);
   assert.ok(r4.stderr.includes('MERGE_COMMITS_MISSING'));
   fs.rmSync(ws3, { recursive: true, force: true });
+  // 三字段最小形态（crctl merge-metadata 实际输出，回写自举发现）：branch 可选、段内省略
+  const { ws: ws4, msFile: ms4 } = makeTraceWs(true);
+  const bp = path.join(ws4, 'change-requests', '_backlog.yml');
+  const btxt = fs.readFileSync(bp, 'utf8').replace(/\n        branch: requirement\/CR-2099-003\n        source-sha: bbb222\n        merged-at: "2026-08-04T22:00:00\+08:00"/, '');
+  fs.writeFileSync(bp, btxt);
+  const r5 = run(TRACE, ws4, ['--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', '0.2', '--milestone-file', ms4]);
+  assert.equal(r5.code, 0, 'MIN3 RUN FAIL: ' + r5.stderr);
+  const after5 = fs.readFileSync(path.join(ws4, 'specs', 'test-spec', 'traceability.yml'), 'utf8');
+  assert.ok(after5.includes('- cr: CR-2099-003'), 'MIN3 SEG MISS');
+  assert.ok(after5.includes('sha: aaa111'), 'MIN3 SHA MISS');
+  assert.ok(!after5.includes('branch: requirement/CR-2099-003'), 'MIN3 BRANCH SHOULD BE OMITTED');
+  fs.rmSync(ws4, { recursive: true, force: true });
 });
 
 /* ─────────── AC-4：三脚本源码无账本写路径 ─────────── */
