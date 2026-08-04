@@ -54,6 +54,10 @@ CR 状态机（15 具名状态 + 注册前 `(new)`，23 条声明转移、wildca
 
 8 个 Pipeline 的 JSON 编排定义（节点顺序、reviewLoop 配置、触发的 Skill），是 Skill 调用顺序的权威声明。
 
+### `skills/writeback/scripts/`
+
+回写机械步骤的版本化执行脚本（CR-2026-020 起）：`writeback-prd-sdd.mjs` / `writeback-tasks.mjs` / `writeback-traceability.mjs` + 公共库 `lib.mjs` + 回归套件 `test/writeback.test.mjs`。**硬边界：只写 specs/ 与 delivery/ 内容文件，账本四类文件（`_backlog.yml` / `_history.yml` / `cr.md` / CR `tasks/_index.yml`）只读**——账本写入仍唯一经 crctl；与 crctl 平行、互不依赖。
+
 ### `crctl/adapters/`
 
 claude-code（SessionStart/PreCompact 注入）与 CI 两类适配器，只经 crctl 子命令读取状态/门禁结果，不直接解析账本文件。
@@ -88,7 +92,7 @@ crctl（scripts/crctl.mjs）          # 状态与账本的唯一写入执行器�
 
 | 不做什么 | 为什么（否决记录） | 何时重新考虑 |
 |---|---|---|
-| 独立账本操作脚本库（如 `tools/skills/shared/scripts/`） | CR-2026-012 复盘明确否决：会在 crctl 之外开第二条账本写入通道，绕开 CAS 复核/审计日志/门禁校验，长期必然漂移 | 若 crctl 子命令模式被证明无法覆盖某类账本操作（如需要跨仓事务），重新评估 |
+| 独立账本操作脚本库（如 `tools/skills/shared/scripts/`） | CR-2026-012 复盘明确否决：会在 crctl 之外开第二条账本写入通道，绕开 CAS 复核/审计日志/门禁校验，长期必然漂移。（范围澄清，CR-2026-020：否决对象是**账本操作**脚本库；specs/delivery 内容文件回写脚本落点收窄为 `skills/writeback/scripts/`，不是 `skills/shared/scripts/`——防后续 CR 误以为本否决已推翻而把账本脚本堆入该目录） | 若 crctl 子命令模式被证明无法覆盖某类账本操作（如需要跨仓事务），重新评估 |
 | 双文件/多文件写入的 WAL 或两阶段提交 | 单写者不变量（不变量 7）下，`casWriteMulti` 的"全校验→全 temp→连续 rename"窗口足够小，过度设计（YAGNI） | 若出现并发 crctl 写者场景，改为文件锁或事务日志 |
 | 引入通用 YAML 序列化库 | 全量重排会打乱既有文件的注释与字段序，扩大 diff 面；且违反零依赖不变量（不变量 3） | 若行级正则改写的维护成本显著超过引入依赖的成本，重新评估 |
 
