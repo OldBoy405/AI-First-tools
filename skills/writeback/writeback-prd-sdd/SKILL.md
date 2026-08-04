@@ -15,6 +15,8 @@ description: 将 change-requests/{CR-ID}/prd.md 和 sdd.md 回写到 specs/{spec
 
 将需求期与开发期在 `change-requests/` 目录下生产的 PRD 和 SDD 文档正式回写到 `specs/{spec_id}/` 知识库，若该 spec 目录不存在则新建，同时维护 `specs/_index.yml` 元数据。回写完成后推进 CR status 到 `writing-back`。
 
+**机械步骤由入库脚本执行（CR-2026-020 起）**：本 skill 不再描述逐文件手工操作；执行者只做「调脚本 → 核对 dry-run diff → 实跑 → 提交」。脚本位于 `tools/skills/writeback/scripts/writeback-prd-sdd.mjs`（版本化、可测试，回归套件 `tools/skills/writeback/scripts/test/writeback.test.mjs`）。脚本不再执行回写前旧版备份步骤——回写本身是一次 git commit，旧版本由 git 历史承载（CR-2026-020 FR-6）。
+
 ---
 
 ## 参数
@@ -22,8 +24,10 @@ description: 将 change-requests/{CR-ID}/prd.md 和 sdd.md 回写到 specs/{spec
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `cr_id` | string | ✅ | 目标 CR-ID（如 CR-2026-001） |
-| `spec_id` | string | ✅ | 目标 spec 目录 ID（如 collaboration-dashboard） |
-| `target_version` | string | ✅ | 本次发版目标（如 v0.16.0），写入 spec frontmatter |
+| `spec_id` | string | ✅ | 目标 spec 目录 ID（如 ai-first-platform） |
+| `target_version` | string | ✅ | 本次发版目标（如 0.21），写入 spec frontmatter 与文件名 |
+| `milestone_name` | string | ❌ | 里程碑节标题名（如 `治理工具链 P2`）；不传时回退 CR prd.md frontmatter 的 title |
+| `brief` | string | ❌ | `specs/_index.yml` 条目 `brief` 的新一句话描述；仅显式传入时替换，不传不动 |
 
 ---
 
@@ -31,86 +35,37 @@ description: 将 change-requests/{CR-ID}/prd.md 和 sdd.md 回写到 specs/{spec
 
 ### Step 1 — 前置校验
 
-1. 读取 `change-requests/{cr_id}/cr.md`，确认 status=`merging`
+1. 读取 `change-requests/{cr_id}/cr.md`，确认 status=`merging`（脚本同样校验，不满足即 `CR_STATUS_MISMATCH` 硬失败）
 2. 确认 `change-requests/{cr_id}/prd.md` 与 `change-requests/{cr_id}/sdd.md` 均存在
-3. 读取 `specs/_index.yml`，判断 `specs/{spec_id}/` 目录是否已存在
 
-### Step 2 — 备份旧版本（若存在）
-
-若 `specs/{spec_id}/PRD.md` 或 `SDD.md` 已存在，将旧版本备份到当前 CR 目录，不写 `_archived/**`：
+### Step 2 — 调用脚本，dry-run 核对 diff
 
 ```bash
-TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-mkdir -p change-requests/{cr_id}/writeback-backups/{spec_id}/{TIMESTAMP}/
-cp specs/{spec_id}/PRD.md change-requests/{cr_id}/writeback-backups/{spec_id}/{TIMESTAMP}/PRD.md
-cp specs/{spec_id}/SDD.md change-requests/{cr_id}/writeback-backups/{spec_id}/{TIMESTAMP}/SDD.md
+node tools/skills/writeback/scripts/writeback-prd-sdd.mjs \
+  --workspace . --cr {cr_id} --spec {spec_id} --version {target_version} \
+  [--milestone-name "{milestone_name}"] [--brief "{brief}"] --dry-run
 ```
 
-在备份目录中写入 `metadata.yml`，记录 `archived-by: writeback-prd-sdd`、`cr: {cr_id}`、`spec_id`、`timestamp` 与原文件 SHA。
+核对输出：
+- `specs/{spec_id}/PRD.md` / `SDD.md` 的里程碑节追加 diff——标题 `## {名}（v{version} · CR-{id}）`、节内原文 H 级整体 +1、既有里程碑章节原样保留；
+- `specs/_index.yml` 字段更新——`current`/`cr-ref`/`updated` 更新、`cr-history[]` 按 id 追加去重、`brief` 仅 `--brief` 传入时替换。
 
-### Step 3 — 创建或更新 specs/{spec_id}/
+**specs/ 基线是累积文档，不是最近一次 CR 的副本（纪律 #6）**：脚本只做「末尾追加里程碑节 + 头部 frontmatter 行级更新」。dry-run diff 中若出现对既有内容的改写，停止并报告，不得继续。
 
-**specs/ 基线是累积文档，不是最近一次 CR 的副本。** 禁止用 `cp` 直接以本 CR 的 prd.md / sdd.md 整份覆盖 specs 基线——那会用一个阶段的文档覆掉之前所有里程碑的内容。
+### Step 3 — 实跑 + 自检 + 提交
 
-- **首次回写**（`specs/{spec_id}/PRD.md` / `SDD.md` 不存在）：
+去掉 `--dry-run` 重跑。脚本末尾自检（里程碑标题恰 1 次、_index 条目字段齐全、全文件无 CRLF），失败输出 `SELF_CHECK_FAILED` 非零退出（已写入内容留在 git 工作区，`git checkout --` 可复原）。成功后提交：
 
 ```bash
-mkdir -p specs/{spec_id}
-cp change-requests/{cr_id}/prd.md specs/{spec_id}/PRD.md
-cp change-requests/{cr_id}/sdd.md specs/{spec_id}/SDD.md
+git add specs/{spec_id}/PRD.md specs/{spec_id}/SDD.md specs/_index.yml
+git commit -m "writeback({cr_id}): PRD/SDD 增量回写 specs/{spec_id} v{target_version}"
 ```
 
-- **增量回写**（基线已存在）：按里程碑分节累积——
-  1. 在基线文档末尾新增一个以本次里程碑（target_version + cr_id）命名的章节，节内保留本 CR 文档原文，各标题层级（H 级）整体下沉一级，使里程碑节成为该文档下的平级分节。
-  2. 既有里程碑章节保持原样，不得改写、删除或重排。
-  3. 跨节引用 FR/AC 等编号时加里程碑前缀（如 `M0-FR-3` / `P1-AC-5`），避免不同里程碑的同名编号互相指向。
-  4. 若基线顶部有跨里程碑的全局 frontmatter / 总述 / 目录，仅追加本次里程碑条目，不覆盖既有内容。
-
-通过 `engineering-docs` skill 校验 frontmatter 合规性（type: PRD / type: SDD），若 frontmatter 缺失则补全：
-- `spec_id`、`version`（= target_version）、`status: ga`、`cr_ref: {cr_id}`
-- 增量回写时 `version` / `cr_ref` 更新为本次值，其余 frontmatter 字段保留。
-
-### Step 4 — 维护 specs/_index.yml
-
-- 若 spec_id **不存在**：在 `specs/_index.yml` 新增条目，填入 id / title / version / status=ga / created_at / cr_ref
-- 若 spec_id **已存在**：更新 version / updated_at / cr_ref 字段
-
-**`specs/_index.yml` 条目格式（严格遵守，不得偏离）：**
-
-列表键名**必须**为 `features:`，不得使用 `specs:`、`items:` 或其他键名。字段名也须严格对齐，错误示例附后。
-
-```yaml
-# 文件顶层结构（新建时）
-schema: specs-index/v1
-updated: {ISO-8601 时间戳}
-
-features:          # ← 必须是 features，不能是 specs / items 等
-  - id: {spec_id}
-    name: {PRD frontmatter 的 title 字段}  # ← 必须用 name，不能用 title
-    scope: product
-    status: ga
-    since: {target_version}               # ← 必须用 since，不能用 version
-    brief: {PRD frontmatter 的 brief/summary 字段，一句话描述}
-    cr-ref: {cr_id}
-    updated: {ISO-8601 时间戳}             # ← 必须用 updated，不能用 updated_at
-```
-
-**字段映射速查（常见错误对比）：**
-
-| 正确字段 | 来源 | 禁止写法 |
-|---------|------|----------|
-| `features:` | 固定顶层列表键 | ~~`specs:`~~ ~~`items:`~~ ~~`data:`~~ |
-| `name:` | PRD frontmatter title | ~~`title:`~~ ~~`label:`~~ |
-| `since:` | target_version 参数 | ~~`version:`~~ ~~`target-version:`~~ |
-| `updated:` | 当前 ISO-8601 时间 | ~~`updated_at:`~~ ~~`updatedAt:`~~ |
-
-若文件已存在且顶层为 `features:` 列表，则追加或更新对应 id 条目；**不得替换顶层键名**。
-
-### Step 5 — 更新 CR status
+### Step 4 — 更新 CR status
 
 调用 `cr-status-set`：`next_status=writing-back`，`trigger=writeback-prd-sdd`，`expected_current_status=merging`
 
-### Step 6 — 输出摘要
+### Step 5 — 输出摘要
 
 ```
 ✅ PRD/SDD 回写完成
@@ -118,17 +73,29 @@ features:          # ← 必须是 features，不能是 specs / items 等
    spec_id     : {spec_id}
    版本        : {target_version}
    回写文件    : specs/{spec_id}/PRD.md, SDD.md
-   备份位置    : change-requests/{cr_id}/writeback-backups/{spec_id}/{TIMESTAMP}/（如有旧版本）
    下一步      : 执行 writeback-tasks
 ```
 
 ---
 
+## 已核实事实基线（纪律 #4，2026-08-04 核实）
+
+| 事实 | 值 |
+|---|---|
+| 里程碑节标题格式 | `## {里程碑名}（v{version} · CR-{id}）`（历史段带 `· archived` 后缀；脚本生成段不带状态后缀） |
+| 幂等判据 | 文档内已含 `（v{version} · CR-{cr}` 唯一标识 → noop，重跑不重复追加 |
+| 增量回写 frontmatter 更新字段 | `cr-ref` / `cr-history`（按 id 追加去重）/ `target-version` / `version`（v 前缀）；首次回写另补 `spec-id` / `status: ga` |
+| specs/_index.yml 结构 | 顶层 `schema: specs-index/v1` + `updated` + `features:` 列表；条目字段 `id/name/scope/status/since/current/brief/cr-ref/cr-history/updated`（字段名严禁写成 specs/items/title/version/updated_at） |
+| 脚本落点 | `tools/skills/writeback/scripts/`（非 `skills/shared/scripts/`，范围澄清见 ARCHITECTURE.md §6，CR-2026-020） |
+
+---
+
 ## 错误处理
 
-| 错误 | 处理 |
+| 错误码 | 处理 |
 |------|------|
-| `prd.md` 或 `sdd.md` 不存在 | 停止执行，提示缺失文件路径 |
-| `cr.md` status 非 `merging` | 停止执行，提示当前状态 |
-| frontmatter 校验失败 | 展示具体缺失字段，要求补全后重试 |
-| `_index.yml` 写入失败 | 回滚已复制文件，停止执行 |
+| `BAD_ARGS` | 缺 `--workspace/--cr/--spec/--version`，补参重跑 |
+| `CR_STATUS_MISMATCH` | cr.md status 非 `merging`，先完成 merge-feature-branch 再回写 |
+| `STRUCTURE_MISMATCH` | specs/_index.yml 缺 `features:` 列表或条目缺 `cr-history` 等结构异常，报告后停止 |
+| `ANCHOR_NOT_UNIQUE` | frontmatter 字段命中 ≥2 次（纪律 #1 硬失败），人工核对文件后修复再跑 |
+| `SELF_CHECK_FAILED` | 回写后自检断言失败，检查输出文件后重跑 |
