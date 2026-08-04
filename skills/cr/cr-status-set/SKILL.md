@@ -83,7 +83,9 @@ CR 状态机的**中心校验与写入点**：读取 `dir-graph.yaml#change-requ
 
 | 错误码 | 含义 |
 |---|---|
-| `CR_STATUS_NOT_FOUND` | `cr.md` 中不存在指定 CR |
+| `CR_STATUS_NOT_FOUND` | `_backlog.yml`（注册索引）中不存在指定 CR 条目 |
+| `CR_MD_STATUS_MISSING` | `cr.md` 与 `_backlog.yml` 中均无 status（无法确定当前状态） |
+| `CR_MD_WRITE_FAILED` | 推进时写入 `cr.md` 失败（cr.md 缺失或无 frontmatter），硬失败不留半状态 |
 | `CR_STATUS_CURRENT_MISMATCH` | 实际 status 与 `expected_current_status` 不一致 |
 | `CR_STATUS_TRANSITION_NOT_ALLOWED` | 状态机中不存在 `(current_status, next_status, trigger)` 合法转换 |
 | `CR_STATUS_EMBEDDED_PATCH_ONLY` | `commit_mode=embedded` 时返回给调用方的非错误结果，表示已校验并生成 patch |
