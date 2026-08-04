@@ -118,14 +118,18 @@ payload:
 若 `cleanup_branch=true`（默认）：
 
 1. 若处于 `cleanup-retry` 模式，从 `cleanup-report.yml` 与 `_history.yml` 读取 `spec_id`、`final-status`、`merge-commits[]` 和待清理 repo；否则读取当前归档上下文。
-2. 读取 `dir-graph.yaml#repositories`，解析所有 active repo 与对应 CR worktree。
-3. 对所有 active repo 先做删除预检：确认当前 trunk 已包含 `merge-commits[]` 中对应 SHA；任一 repo 预检失败则跳过所有远端分支删除，只写 `cleanup-pending` 报告并保留本地 worktree。
+2. 读取 `dir-graph.yaml#repositories`，解析所有 active repo 与对应 CR worktree。**待清理 repo = 全部 active repo，含无 `merge-commits[]` 条目的"无改动仓"**（该 CR 在其无代码改动、merge-feature-branch 跳过合并的仓）：其 `requirement/{cr_id}` worktree 自注册派生起即存在，即使未合并也必须清理，不得因"未参与合并"而跳过（CR-2026-019 曾因此残留 multica 空 worktree）。
+3. 对所有待清理 repo 做**分级删除预检**：
+   - 有 `merge-commits[]` 条目的仓：确认当前 trunk 已包含对应 SHA；任一此类 repo 预检失败则跳过所有远端分支删除，只写 `cleanup-pending` 报告并保留本地 worktree。
+   - 无 `merge-commits[]` 条目的无改动仓：跳过预检（无 merge 可验证），直接进入 worktree 清理。
 4. 通过 `controlled-shell` 清理本地 worktree：
    - knowledge-base: `.rayai-worktrees/knowledge-base/requirement/{cr_id}`
    - 独立代码仓: `.rayai-worktrees/{repo.id}/requirement/{cr_id}`
    - **Windows 环境**：`git worktree remove` 可能因 `Filename too long` 失败。兜底清理链按顺序执行，三步缺一不可：`git worktree remove --force` → `Remove-Item -Recurse -Force` → `git worktree prune`（漏掉最后一步会残留 `.git/worktrees/<name>` 元数据，挡下一个同名 CR 的 `worktree add`）。根治方式是一次性配置 `git config --global core.longpaths true`。详见 `docs/Windows-已知问题清单.md`。
 5. worktree 不存在时视为已清理，记录为 `skipped-missing`，不得让归档失败。
 6. 预检通过后删除远端 `requirement/{cr_id}` 分支：
+   - 有 `merge-commits[]` 的仓：预检通过后按下方 runGit 序列删除。
+   - 无改动仓：远端分支**存在才删**（可能从未推送，如无代码改动仓），不存在则记录 `skipped-no-remote-branch`，不报错、不阻塞清理完成。
    ```yaml
    - runGit: { subcommand: "worktree", args: ["remove", "{worktreePath}"], cwd: "{repo.path}" }
    - runGit: { subcommand: "push", args: ["origin", "--delete", "requirement/{cr_id}"], cwd: "{repo.path}" }

@@ -57,6 +57,7 @@ description: 按 dir-graph.yaml repositories 动态解析参与仓，通过 dry-
    - CR worktree：`.rayai-worktrees/{bucket}/requirement/{cr_id}`，其中 knowledge-base 使用 `knowledge-base`，独立代码仓使用 `repo.id`
 4. 确认每个参与仓 CR worktree 无未提交变更，且 `origin/requirement/{cr_id}` 存在。
 5. 任一仓校验失败则 abort，不得单仓提前合并。
+6. 无提交分支的仓（该 CR 在其无代码改动）跳过合并与 merge-commits 记录，**但其 `requirement/{cr_id}` worktree 与本地/远端分支仍由 cr-archive Step 7 统一清理**（"跳过合并 ≠ 跳过清理"，见 cr-archive Step 7.2 无改动仓规则）。
 
 ### Step 2 — 全仓预检（不得修改 trunk）
 
@@ -165,6 +166,7 @@ push 前再次对每个 repo 执行：
 ✅ 分支合并完成
    CR                  : {cr_id}
    merge commits       : [{repo.id}:{sha8}, ...]
+   skipped repos       : [{repo.id}, ...]（无改动仓：未合并，worktree/分支交由 cr-archive Step 7 清理）
    Worktree            : 保留，等待 cr-archive 统一清理
    下一步              : 执行 writeback-prd-sdd
 ```
