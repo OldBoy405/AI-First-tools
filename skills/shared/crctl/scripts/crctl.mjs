@@ -990,7 +990,9 @@ function cmdValidate(ws, target, gates) {
   if (text == null) fail('FILE_NOT_FOUND', `文件不存在: ${p}`);
   const base = path.basename(p);
   const errors = [];
+  const warnings = [];
   const pushIf = (cond, msg) => { if (cond) errors.push(msg); };
+  const warnIf = (cond, msg) => { if (cond) warnings.push(msg); };
 
   const isoRe = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}([+-]\d{2}:\d{2}|Z)$/;
   const validateOwners = (owners, where) => {
@@ -1019,13 +1021,26 @@ function cmdValidate(ws, target, gates) {
   } else if (base === '_backlog.yml') {
     const doc = parseYaml(text);
     const list = Array.isArray(doc) ? doc : doc['change-requests'] || doc.backlog || doc.items || [];
+    const schemaVer = (doc && !Array.isArray(doc) && doc.schema) || '';
+    const isV2 = schemaVer === 'cr-backlog/v2';
     const { sm } = loadStateMachine(ws);
     const allStatuses = new Set([...(sm.transitions || []).flatMap((t) => [t.from, t.to]), ...(sm.terminal || [])]);
     for (const e of list) {
       const where = `_backlog.yml#${e?.id || '?'}`;
       pushIf(!e.id, `${where}: 缺少 id`);
-      pushIf(!e.status, `${where}: 缺少 status`);
-      pushIf(e.status && !allStatuses.has(e.status), `${where}: status=${e.status} 不在状态机枚举内`);
+      if (isV2) {
+        // v2 布局：status/updated-at 已撤出，不应再出现
+        warnIf(e.status !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 status 行（值=${e.status}），应执行 migrate-backlog 清除`);
+        warnIf(e['updated-at'] !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 updated-at 行，应执行 migrate-backlog 清除`);
+      } else {
+        // v1 布局（迁移期）：status 必填，但与 cr.md 不一致时告警
+        pushIf(!e.status, `${where}: 缺少 status`);
+        pushIf(e.status && !allStatuses.has(e.status), `${where}: status=${e.status} 不在状态机枚举内`);
+        if (e.id && e.status) {
+          const md = readCrMdFrontmatter(ws, e.id);
+          warnIf(md && md.status && md.status !== e.status, `${where}: 漂移 — backlog status=${e.status} 与 cr.md status=${md.status} 不一致，以 cr.md 为准；建议执行 migrate-backlog`);
+        }
+      }
       validateOwners(e.owners, where);
     }
   } else if (/review-annotations[\\/].+\.yml$/.test(p) || ['requirement.yml', 'sdd.yml', 'code.yml'].includes(base)) {
@@ -1073,10 +1088,10 @@ function cmdValidate(ws, target, gates) {
   }
 
   if (errors.length) {
-    process.stderr.write(JSON.stringify({ file: p, valid: false, errors }, null, 2) + '\n');
+    process.stderr.write(JSON.stringify({ file: p, valid: false, errors, ...(warnings.length ? { warnings } : {}) }, null, 2) + '\n');
     process.exit(1);
   }
-  ok({ file: p, valid: true });
+  ok({ file: p, valid: true, ...(warnings.length ? { warnings } : {}) });
 }
 
 function cmdAttempt(ws, cr, gates, flags) {
