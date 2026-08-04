@@ -1,6 +1,6 @@
 # agent-skill-matrix.yml — Agent / Skill 权限与归属矩阵
 schema: "ai-first.tools.agent-skill-matrix/v1"
-updated-at: "2026-06-17"
+updated-at: "2026-07-26"
 
 relation-types:
   owns: "主责维护与默认执行；每个 active skill 必须且只能有一个 owns owner"
@@ -65,6 +65,7 @@ actors:
       - cr-query
       - handover-cr
       - inbox-emit
+      - crctl
     external: []
     forbidden:
       - writeback-prd-sdd
@@ -91,6 +92,7 @@ actors:
       - pull-progress
       - cr-show
       - controlled-shell
+      - crctl
     external:
       - executing-plans
       - subagent-driven-development
@@ -214,6 +216,7 @@ actors:
       - validate-doc
       - engineering-docs
       - controlled-shell
+      - crctl
       - cr-review-record
       - cr-status-set
       - inbox-emit

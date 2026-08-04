@@ -217,12 +217,15 @@ change-request-track:
       - { from: requirement-approved, to: tech-designing, trigger: "write-tech-design" }
       - { from: tech-designing, to: tech-design-review-pending, trigger: "write-tech-design-complete" }
       - { from: tech-design-review-pending, to: tech-designing, trigger: "review-tech-design:block -> write-tech-design" }
+      - { from: tech-design-review-pending, to: tech-designing, trigger: "approve-tech-design:reject -> write-tech-design" }
       - { from: tech-design-review-pending, to: tech-design-reviewed, trigger: "approve-tech-design" }
       - { from: tech-design-reviewed, to: task-breakdown, trigger: "write-dev-tasks" }
+      - { from: task-breakdown, to: task-breakdown, trigger: "write-dev-tasks" }
       - { from: task-breakdown, to: developing, trigger: "approve-dev-start" }
       - { from: developing, to: developing, trigger: "write-test-report:block -> implement-code" }
       - { from: developing, to: developing, trigger: "review-code:block -> implement-code" }
       - { from: developing, to: code-reviewing, trigger: "review-code" }
+      - { from: code-reviewing, to: developing, trigger: "approve-code:reject -> implement-code" }
       - { from: code-reviewing, to: code-approved, trigger: "approve-code" }
       - { from: code-approved, to: merging, trigger: "merge-feature-branch" }
       - { from: merging, to: writing-back, trigger: "writeback-prd-sdd" }

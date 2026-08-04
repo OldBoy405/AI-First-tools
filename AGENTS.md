@@ -106,6 +106,8 @@ drafting
 
 终态还包括 `rejected` 与 `withdrawn`。
 
+人工审批节点的驳回必须走显式回退转换，不得停留在原状态硬改产物：架构审批驳回走 `approve-tech-design:reject -> write-tech-design`（回到 `tech-designing`）；开发启动暂缓走 `write-dev-tasks` 自环重拆（保持 `task-breakdown`）；代码审批驳回走 `approve-code:reject -> implement-code`（回到 `developing`）。需求审批驳回在 `requirement-reviewing` 内修订 PRD 后重跑 `review-requirement` 自环，无需额外转换。
+
 状态推进必须通过对应 Skill 或 Pipeline 节点完成，不得手工编辑目标 workspace 的 `_backlog.yml`。涉及人工确认的节点，后续必须有明确的 `approve-*` 或写入型 Skill 记录结论。
 
 CR 角色 owner 变更必须通过 `handover-cr` 或 `resume-from-remote` 的角色移交逻辑完成，更新 `owners.{role}.id`、`owners.{role}.assigned-at` 并追加 `owner-history`。不得只修改顶层 `owner`。
@@ -187,3 +189,13 @@ node -e "const fs=require('fs'); for (const f of fs.readdirSync('pipeline-templa
 | `计划产出` | 将新增/修改什么文件，以及会运行哪些自检 |
 
 若用户已经给出明确修改目标，可以直接实施，但仍要在动手前说明将编辑哪些文件。
+
+<!-- OPENWIKI:START -->
+
+## OpenWiki
+
+This repository uses OpenWiki for recurring code documentation. Start with `openwiki/quickstart.md`, then follow its links to architecture, workflows, domain concepts, operations, integrations, testing guidance, and source maps.
+
+The scheduled OpenWiki GitHub Actions workflow refreshes the repository wiki. Do not hand-edit generated OpenWiki pages unless explicitly asked; prefer updating source code/docs and letting OpenWiki regenerate.
+
+<!-- OPENWIKI:END -->

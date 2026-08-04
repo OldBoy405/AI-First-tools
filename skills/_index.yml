@@ -269,6 +269,11 @@ skills:
     brief: "受控 shell 执行规范（方案 a）：给 requirement/sync 组 skill 提供白名单化 git 命令执行入口，禁止手工指引文本回退"
     status: active
 
+  - id: crctl
+    path: ./shared/crctl/SKILL.md
+    brief: "CR 状态机 gate CLI（漂移治理 v2 组件 A）：IDE 单独使用时 cr-status-set / controlled-shell / validate-doc 的代码化执行器；status/advance/gate/approve/validate/attempt/test/next/git"
+    status: active
+
   # ─── Change Request (CR) 通用 Skill（cr/ 子目录，保留部分）─────────────
 
   - id: cr-review-record

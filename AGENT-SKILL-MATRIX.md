@@ -13,6 +13,8 @@
 
 `system-orchestrator` 不是可部署 Agent，而是系统编排器/运行时组件，用来承接同步、回写、CR 状态、受控 shell 等跨 Agent 基础能力。
 
+> IDE 单独使用（无平台执行层）时，`crctl`（`skills/shared/crctl/`）是 `cr-status-set` / `controlled-shell` / `validate-doc` 的代码化执行器。`requirement-writer` 与 `dev-agent` 通过 `can-call: crctl` 执行受控 git、状态查询与经门禁的状态推进；`crctl` 自身即状态机与门禁，因此该 can-call 不构成对 `cr-status-set` forbidden 边界的绕过。
+
 ## 主责矩阵
 
 | Actor | 主责 Skill |
@@ -24,7 +26,7 @@
 | `delivery-agent` | `writeback-tasks` |
 | `quality-reviewer-agent` | `review-alignment`, `change-impact-analysis` |
 | `competitive-analyst-agent` | `fetch-competitor-updates`, `write-competitive-report`, `report-to-planning-suggestion` |
-| `system-orchestrator` | `merge-feature-branch`, `writeback-prd-sdd`, `writeback-traceability`, `push-progress`, `pull-progress`, `resume-from-remote`, `list-remote-checkpoints`, `handover-cr`, `validate-doc`, `engineering-docs`, `controlled-shell`, `cr-review-record`, `cr-status-set`, `inbox-emit`, `cr-archive`, `feedback-writeback`, `cr-inbox`, `cr-query`, `cr-show`, `cr-dashboard` |
+| `system-orchestrator` | `merge-feature-branch`, `writeback-prd-sdd`, `writeback-traceability`, `push-progress`, `pull-progress`, `resume-from-remote`, `list-remote-checkpoints`, `handover-cr`, `validate-doc`, `engineering-docs`, `controlled-shell`, `crctl`, `cr-review-record`, `cr-status-set`, `inbox-emit`, `cr-archive`, `feedback-writeback`, `cr-inbox`, `cr-query`, `cr-show`, `cr-dashboard` |
 
 ## Pipeline Owner
 

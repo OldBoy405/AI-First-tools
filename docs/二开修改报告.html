@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI First Tools 二开修改报告 — 上游对比分析</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --primary: #2563eb;
+    --primary-dark: #1e40af;
+    --success: #16a34a;
+    --warning: #d97706;
+    --danger: #dc2626;
+    --info: #0891b2;
+    --bg: #f8fafc;
+    --card: #ffffff;
+    --border: #e2e8f0;
+    --text: #1e293b;
+    --text-light: #64748b;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+  }
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+  /* Header */
+  header {
+    background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 50%, #3b82f6 100%);
+    color: #fff;
+    padding: 48px 24px;
+    text-align: center;
+  }
+  header h1 { font-size: 2rem; font-weight: 700; margin-bottom: 8px; }
+  header p { opacity: 0.9; font-size: 1rem; }
+  .badge-row { margin-top: 16px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .badge {
+    background: rgba(255,255,255,0.15);
+    border: 1px solid rgba(255,255,255,0.3);
+    padding: 4px 14px; border-radius: 20px; font-size: 0.85rem;
+  }
+
+  /* Sections */
+  section { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 28px; margin: 24px 0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+  h2 {
+    font-size: 1.4rem; margin-bottom: 20px; padding-bottom: 12px;
+    border-bottom: 3px solid var(--primary); display: flex; align-items: center; gap: 10px;
+  }
+  h2 .sec-num {
+    background: var(--primary); color: #fff; width: 30px; height: 30px;
+    border-radius: 8px; display: inline-flex; align-items: center; justify-content: center;
+    font-size: 0.95rem; flex-shrink: 0;
+  }
+  h3 { font-size: 1.1rem; margin: 20px 0 12px; color: var(--primary-dark); }
+  h4 { font-size: 1rem; margin: 14px 0 8px; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 0.88rem; }
+  th { background: #eff6ff; color: var(--primary-dark); text-align: left; padding: 10px 12px; border: 1px solid var(--border); font-weight: 600; white-space: nowrap; }
+  td { padding: 9px 12px; border: 1px solid var(--border); vertical-align: top; }
+  tr:nth-child(even) td { background: #fafbfc; }
+  code {
+    background: #f1f5f9; border: 1px solid var(--border); padding: 1px 6px;
+    border-radius: 4px; font-size: 0.82em; font-family: "JetBrains Mono", Consolas, monospace;
+  }
+
+  /* Tags */
+  .tag { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; margin-right: 4px; }
+  .tag-new { background: #dcfce7; color: #166534; }
+  .tag-mod { background: #fef3c7; color: #92400e; }
+  .tag-del { background: #fee2e2; color: #991b1b; }
+  .tag-fix { background: #e0f2fe; color: #075985; }
+  .tag-doc { background: #ede9fe; color: #5b21b6; }
+  .tag-feat { background: #dcfce7; color: #166534; }
+
+  /* KPI cards */
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin: 16px 0; }
+  .kpi {
+    background: #fff; border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  .kpi .num { font-size: 2rem; font-weight: 700; color: var(--primary); }
+  .kpi .label { font-size: 0.85rem; color: var(--text-light); margin-top: 4px; }
+  .kpi.green .num { color: var(--success); }
+  .kpi.red .num { color: var(--danger); }
+  .kpi.amber .num { color: var(--warning); }
+
+  /* Callout */
+  .callout { padding: 14px 18px; border-radius: 8px; margin: 14px 0; font-size: 0.9rem; }
+  .callout.info { background: #ecfeff; border-left: 4px solid var(--info); }
+  .callout.warn { background: #fffbeb; border-left: 4px solid var(--warning); }
+  .callout.risk { background: #fef2f2; border-left: 4px solid var(--danger); }
+
+  /* Charts */
+  .chart-bar { margin: 8px 0; }
+  .chart-bar .bar-label { font-size: 0.85rem; margin-bottom: 4px; display: flex; justify-content: space-between; }
+  .chart-bar .bar-track { background: #f1f5f9; border-radius: 6px; height: 22px; overflow: hidden; }
+  .chart-bar .bar-fill { height: 100%; border-radius: 6px; display: flex; align-items: center; justify-content: flex-end; padding-right: 8px; color: #fff; font-size: 0.75rem; font-weight: 600; }
+
+  /* SVG donut */
+  .donut-wrap { display: flex; align-items: center; gap: 32px; flex-wrap: wrap; justify-content: center; margin: 16px 0; }
+  .donut-legend { font-size: 0.88rem; }
+  .donut-legend li { list-style: none; margin: 6px 0; display: flex; align-items: center; gap: 8px; }
+  .donut-legend .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+
+  /* Commit list */
+  .commit-list { max-height: 420px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; }
+  .commit-item { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 0.85rem; display: flex; gap: 10px; align-items: baseline; }
+  .commit-item:last-child { border-bottom: none; }
+  .commit-sha { font-family: Consolas, monospace; color: var(--primary); font-weight: 600; white-space: nowrap; }
+  .commit-msg { color: var(--text); }
+
+  .mermaid { display: flex; justify-content: center; margin: 16px 0; }
+  .file-path { font-family: Consolas, monospace; font-size: 0.8rem; color: var(--text-light); }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 800px) { .grid-2 { grid-template-columns: 1fr; } }
+  footer { text-align: center; color: var(--text-light); font-size: 0.8rem; padding: 24px 0 40px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>AI First Tools 包 二开修改报告</h1>
+  <p>上游基线 <code style="background:rgba(255,255,255,0.2);color:#fff">5c19e32</code> → 本地最新 <code style="background:rgba(255,255,255,0.2);color:#fff">b6889ff</code> + 未提交改动 · 生成于 2026-07-31</p>
+  <div class="badge-row">
+    <span class="badge">19 次提交</span>
+    <span class="badge">+6532 / -81 行（已提交）</span>
+    <span class="badge">46 个文件变更（已提交）</span>
+    <span class="badge">未提交：10 修改 / 1 删除 / 2 新增</span>
+    <span class="badge">产品名：RayAI</span>
+  </div>
+</header>
+
+<div class="container">
+
+<!-- ═══════════════════════ 1. 总体对比概览 ═══════════════════════ -->
+<section>
+  <h2><span class="sec-num">1</span>上游原始内容与本地修改的总体对比概览</h2>
+
+  <div class="kpi-grid">
+    <div class="kpi"><div class="num">19</div><div class="label">本地提交数（自上游基线）</div></div>
+    <div class="kpi green"><div class="num">6,532</div><div class="label">新增行数（已提交）</div></div>
+    <div class="kpi amber"><div class="num">81</div><div class="label">删除行数（已提交）</div></div>
+    <div class="kpi"><div class="num">13</div><div class="label">新增文件/目录组</div></div>
+    <div class="kpi"><div class="num">19</div><div class="label">修改的上游文件</div></div>
+    <div class="kpi red"><div class="num">1</div><div class="label">删除文件（未提交）</div></div>
+  </div>
+
+  <h3>1.1 变更总览流程图</h3>
+  <div class="mermaid">
+flowchart LR
+    subgraph UP["上游基线 5c19e32"]
+        A1["纯声明式 Tools 包<br/>Skills 57 个 / Agents 9 个 / Pipelines 8 条"]
+        A2["提示词级约束<br/>无代码执行层"]
+    end
+    subgraph LOCAL["本地现状 (RayAI)"]
+        B1["crctl 状态机 CLI<br/>（代码强制层）"]
+        B2["漂移治理 v1/v2 文档"]
+        B3["品牌更名 .rayai"]
+        B4["状态机回退转换 +3"]
+        B5["受控 shell rules.json 单一事实源"]
+        B6["writeback-tasks 重写"]
+        B7["CI / pre-commit / OpenWiki"]
+        B8["Qoder 使用指南 + HTML 讲解"]
+    end
+    UP -->|"19 次提交"| LOCAL
+  </div>
+
+  <h3>1.2 修改的主线脉络</h3>
+  <table>
+    <tr><th style="width:120px">阶段</th><th style="width:200px">提交</th><th>主题</th></tr>
+    <tr><td>① 初始提交</td><td class="file-path">a3ca761</td><td>初次推送至二开仓库，CUSTOM.md、Qoder 指南、漂移治理 v1、HTML 讲解文档</td></tr>
+    <tr><td>② 品牌更名</td><td class="file-path">40447db</td><td>全局 <code>.xinyiai</code> → <code>.rayai</code>（16 文件 / 30 处），新增漂移治理 v2</td></tr>
+    <tr><td>③ 一致性校验</td><td class="file-path">e5746e4 / 91136db / 033a4a3</td><td>skill-matrix / agents-contract 一致性检查脚本 + pre-commit / CI 接线</td></tr>
+    <tr><td>④ crctl 核心</td><td class="file-path">aa89942</td><td>crctl CLI + hooks + CI 适配器入库，EVIDENCE_DRIFT 检测 + 测试套件</td></tr>
+    <tr><td>⑤ crctl 迭代</td><td class="file-path">af7c2ec ~ 0c8e306</td><td>rules.json 单一事实源、outbox 事件通道、evidence-digest、ed25519 授权、RE2 兼容等 9 个修复/增强</td></tr>
+    <tr><td>⑥ 回写期重构</td><td class="file-path">9d65fb6 / b6889ff</td><td>writeback-tasks 原子化重写 + write-dev-tasks slug 字段 + 归档门禁 deliveryIndexComplete</td></tr>
+    <tr><td>⑦ 进行中</td><td class="file-path">工作区</td><td>OpenWiki 自动文档、驳回回退转换、crctl 权限矩阵登记、删除冗余 HTML</td></tr>
+  </table>
+
+  <div class="callout info">
+    <b>一句话概括：</b>上游是「纯声明式、规则靠模型自觉遵守」的 tools 包；本地二开在保留全部上游契约的前提下，新增了 <b>crctl 代码执行层</b>（把状态推进、门禁、git 白名单从提示词约束变为代码强制），并完成品牌更名、状态机补全、工程化增强与文档体系搭建。
+  </div>
+</section>
+
+<!-- ═══════════════════════ 2. 文件级别修改详情 ═══════════════════════ -->
+<section>
+  <h2><span class="sec-num">2</span>文件级别修改详情</h2>
+
+  <h3>2.1 新增文件 / 目录（13 组）</h3>
+  <table>
+    <tr><th>路径</th><th>规模</th><th>类型</th><th>说明</th></tr>
+    <tr><td class="file-path">skills/shared/crctl/</td><td>~2,600 行</td><td><span class="tag tag-new">新增</span></td><td>crctl 状态机 gate CLI：SKILL.md、gates.json、crctl.mjs（1305 行）、check-skill-matrix.mjs、check-agents-contract.mjs、测试套件（501 行 + fixtures）、Claude Code hooks ×2、CI 模板、settings 模板</td></tr>
+    <tr><td class="file-path">skills/shared/controlled-shell/rules.json</td><td>43 行</td><td><span class="tag tag-new">新增</span></td><td>git 白名单单一事实源：19 条子命令 shape + forbiddenFlags + protectedPaths（deny/ask 两级）</td></tr>
+    <tr><td class="file-path">CUSTOM.md</td><td>87+ 行</td><td><span class="tag tag-doc">文档</span></td><td>二开变更台账：合并冲突总则、上游改动清单、新增能力、Bug 修复记录</td></tr>
+    <tr><td class="file-path">QODER-使用指南.md</td><td>805 行</td><td><span class="tag tag-doc">文档</span></td><td>Qoder 平台完整使用指南（8 章 + 57 条指令速查表）</td></tr>
+    <tr><td class="file-path">docs/漂移治理.md</td><td>235 行</td><td><span class="tag tag-doc">文档</span></td><td>漂移治理 v1：IDE 单独使用时的漂移分析</td></tr>
+    <tr><td class="file-path">docs/漂移治理_v2.md</td><td>362 行</td><td><span class="tag tag-doc">文档</span></td><td>漂移治理 v2：10 个漂移点 + 4 个治理组件 + 落地状态追踪</td></tr>
+    <tr><td class="file-path">docs/AI-First-平台架构详解.html</td><td>1,407 行</td><td><span class="tag tag-doc">文档</span></td><td>架构详解 HTML（已提交；工作区中已删除，见 2.3）</td></tr>
+    <tr><td class="file-path">docs/AI-First-研发协同平台-架构讲解.html</td><td>890 行</td><td><span class="tag tag-doc">文档</span></td><td>研发协同平台架构讲解 HTML</td></tr>
+    <tr><td class="file-path">.githooks/</td><td>2 文件</td><td><span class="tag tag-feat">工程化</span></td><td>pre-commit hook + README：本地提交前自动跑 skill-matrix 一致性检查</td></tr>
+    <tr><td class="file-path">.github/workflows/check-skill-matrix.yml</td><td>31 行</td><td><span class="tag tag-feat">工程化</span></td><td>CI：矩阵一致性检查 workflow</td></tr>
+    <tr><td class="file-path">.github/workflows/openwiki-update.yml</td><td>58 行</td><td><span class="tag tag-feat">工程化</span></td><td>OpenWiki 定时（每日 08:00）自动生成代码文档并开 PR</td></tr>
+    <tr><td class="file-path">openwiki/</td><td>12 文件</td><td><span class="tag tag-doc">文档</span></td><td>OpenWiki 生成的知识文档：quickstart、架构、工程文档、漂移治理、pipeline 总览</td></tr>
+  </table>
+
+  <h3>2.2 修改的上游文件（19 个）</h3>
+  <table>
+    <tr><th>文件</th><th>变更规模</th><th>类型</th><th>变更摘要</th></tr>
+    <tr><td class="file-path">skills/writeback/writeback-tasks/SKILL.md</td><td>+91 / -81</td><td><span class="tag tag-mod">重写</span></td><td>原子化重写：以 tasks/_index.yml 的 done 状态为源、id 判重幂等、slug 派生规则、追加 spec-id/version frontmatter（详见 3.5）</td></tr>
+    <tr><td class="file-path">skills/requirement/requirement-register/SKILL.md</td><td>+10 / -10</td><td><span class="tag tag-mod">路径更名</span></td><td>worktree 路径 <code>.xinyiai-worktrees</code> → <code>.rayai-worktrees</code>（5 处）</td></tr>
+    <tr><td class="file-path">skills/planning/focus-briefing/SKILL.md</td><td>+10 / -10</td><td><span class="tag tag-mod">路径更名</span></td><td>pipeline 路径 <code>.xinyiai/pipelines</code> → <code>.rayai/pipelines</code>（2 处）</td></tr>
+    <tr><td class="file-path">skills/shared/controlled-shell/SKILL.md</td><td>+7 / -2</td><td><span class="tag tag-mod">重构</span></td><td>白名单抽取为 rules.json 单一事实源（v0.2.0）；SKILL.md 降级为解说；IDE 适配器改为 crctl git</td></tr>
+    <tr><td class="file-path">skills/develop/implement-code/SKILL.md</td><td>+4 / -4</td><td><span class="tag tag-mod">路径更名</span></td><td>CR workspace 路径 .rayai-worktrees（2 处）</td></tr>
+    <tr><td class="file-path">skills/develop/write-dev-tasks/SKILL.md</td><td>+3</td><td><span class="tag tag-feat">增强</span></td><td>frontmatter 新增 <code>slug</code> 字段（供回写期命名，建议填写非强制）</td></tr>
+    <tr><td class="file-path">skills/cr/cr-archive/SKILL.md</td><td>+4 / -4</td><td><span class="tag tag-mod">路径更名</span></td><td>worktree 清理路径 .rayai-worktrees（2 处）</td></tr>
+    <tr><td class="file-path">skills/requirement/write-requirement-prd/SKILL.md</td><td>+4 / -4</td><td><span class="tag tag-mod">路径更名</span></td><td>knowledge-base worktree 路径（2 处）</td></tr>
+    <tr><td class="file-path">skills/sync/resume-from-remote/SKILL.md</td><td>+4 / -4</td><td><span class="tag tag-mod">路径更名</span></td><td>worktree 路径（2 处）</td></tr>
+    <tr><td class="file-path">skills/shared/engineering-docs/standards/ENGINEERING-STRUCTURE-TEAM.md</td><td>+10 / -10</td><td><span class="tag tag-mod">路径更名</span></td><td>dir-graph/config 路径 .rayai（5 处）</td></tr>
+    <tr><td class="file-path">skills/sync/push-progress / pull-progress / merge-feature-branch / engineering-docs</td><td>各 +2 / -2</td><td><span class="tag tag-mod">路径更名</span></td><td>worktree / dir-graph 路径各 1-2 处</td></tr>
+    <tr><td class="file-path">pipeline-templates/（README + 3 个 JSON）</td><td>+12 / -6</td><td><span class="tag tag-mod">路径更名</span></td><td>pipeline 种子路径 .rayai（resume-cr / requirement-authoring / code-implementation JSON）</td></tr>
+    <tr><td class="file-path">agents/product-planning-agent.md</td><td>+1</td><td><span class="tag tag-fix">Bug 修复</span></td><td>frontmatter 补充缺失的 <code>name:</code> 字段（agent-import 实机发现）</td></tr>
+    <tr><td class="file-path">agents/competitive-analyst-agent.md</td><td>+1</td><td><span class="tag tag-fix">Bug 修复</span></td><td>同上</td></tr>
+    <tr><td class="file-path">agents/customer-support-agent.md</td><td>+2 / -2</td><td><span class="tag tag-mod">路径更名</span></td><td>禁止读取清单中 .xinyiai → .rayai</td></tr>
+    <tr><td class="file-path">README.md</td><td>+2 / -2</td><td><span class="tag tag-mod">文档</span></td><td>resume 节点产出路径 .rayai-worktrees</td></tr>
+  </table>
+
+  <h3>2.3 删除的文件（工作区未提交）</h3>
+  <table>
+    <tr><th>路径</th><th>规模</th><th>说明</th></tr>
+    <tr><td class="file-path">docs/AI-First-平台架构详解.html</td><td>-1,407 行</td><td>与 <code>AI-First-研发协同平台-架构讲解.html</code> 内容重复，删除冗余，仅保留讲解版</td></tr>
+  </table>
+
+  <h3>2.4 工作区未提交的修改（10 个文件）</h3>
+  <table>
+    <tr><th>文件</th><th>变更</th><th>说明</th></tr>
+    <tr><td class="file-path">dir-graph.yaml</td><td>+3</td><td>状态机新增 3 条驳回回退转换（详见 3.3）</td></tr>
+    <tr><td class="file-path">AGENTS.md</td><td>+12</td><td>驳回回退规则声明 + OpenWiki 区块</td></tr>
+    <tr><td class="file-path">README.md</td><td>+6 / -1</td><td>IDE 使用前提（crctl 适配器 + 漂移治理 v2 强制层）+ 状态图 3 条 reject 边</td></tr>
+    <tr><td class="file-path">agent-skill-matrix.yml</td><td>+5 / -1</td><td><code>crctl</code> 登记到 system-orchestrator owns、requirement-writer/dev-agent can-call；更新日期</td></tr>
+    <tr><td class="file-path">AGENT-SKILL-MATRIX.md</td><td>+4 / -1</td><td>crctl 说明段（IDE 场景执行层，不构成绕过 forbidden 边界）</td></tr>
+    <tr><td class="file-path">skills/_index.yml</td><td>+5</td><td>crctl Skill 注册（active）</td></tr>
+    <tr><td class="file-path">CLAUDE.MD</td><td>+10</td><td>OpenWiki 区块声明</td></tr>
+    <tr><td class="file-path">docs/漂移治理_v2.md</td><td>+2</td><td>落地状态更新：P0~P5 已完成、P6/P7 待办</td></tr>
+    <tr><td class="file-path">docs/AI-First-研发协同平台-架构讲解.html</td><td>+1 / -1</td><td>措辞微调（移除「官方建议」表述）</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════════════════ 3. 具体变更内容 ═══════════════════════ -->
+<section>
+  <h2><span class="sec-num">3</span>每个修改文件的具体变更内容</h2>
+
+  <h3>3.1 crctl CLI — 核心新增能力（+2,600 行）</h3>
+  <div class="mermaid">
+flowchart TD
+    subgraph CMD["crctl.mjs 九个子命令"]
+        S1["status<br/>确定性读状态"]
+        S2["advance<br/>校验转换+门禁→写入"]
+        S3["gate<br/>只校验不写"]
+        S4["approve<br/>仅交互终端"]
+        S5["validate<br/>schema 校验"]
+        S6["attempt<br/>review-loop 记账"]
+        S7["test<br/>代执行验证"]
+        S8["next<br/>最小 runner"]
+        S9["git<br/>白名单适配器"]
+    end
+    subgraph SRCS["运行时解析的事实源（不复刻规则）"]
+        D1["dir-graph.yaml<br/>state_machine"]
+        D2["pipeline JSON<br/>passCondition"]
+        D3["gates.json<br/>证据路径映射"]
+    end
+    subgraph OUT["产物"]
+        O1["_backlog.yml / cr.md<br/>CAS 防并发写入"]
+        O2["approval.yml / review-loop.yml"]
+        O3["test-report.md / test-evidence/"]
+        O4[".crctl/audit.log"]
+    end
+    CMD --> SRCS
+    CMD --> OUT
+  </div>
+  <table>
+    <tr><th>子命令</th><th>职责</th><th>替代的提示词约束</th></tr>
+    <tr><td><code>status</code></td><td>确定性读 _backlog + 状态机，输出 status / 合法下一步 / 门禁缺口</td><td>模型凭记忆猜状态</td></tr>
+    <tr><td><code>advance</code></td><td>校验转换合法 + 目标门禁，全过才写文件并 commit（支持 --embedded）</td><td>cr-status-set 的「口头通过」</td></tr>
+    <tr><td><code>gate</code></td><td>只校验不写，供预检与 CI 复用</td><td>pipeline passCondition 无人执行</td></tr>
+    <tr><td><code>approve</code></td><td>仅交互式终端人工审批；非 TTY 返回 APPROVAL_REQUIRES_HUMAN，无旁路</td><td>human_approval 被模型自签</td></tr>
+    <tr><td><code>validate</code></td><td>owners 三角色、verdict 枚举、blockers 结构、test-report/approval/traceability 校验</td><td>validate-doc 契约缺失执行者</td></tr>
+    <tr><td><code>attempt</code></td><td>review-loop 轮次唯一记账点，超 maxAttempts 返回 LOOP_EXHAUSTED</td><td>自修复轮次丢失</td></tr>
+    <tr><td><code>test</code></td><td>代执行 lint/test/build，按真实退出码生成 test-report 骨架</td><td>口头测试结论</td></tr>
+    <tr><td><code>next</code></td><td>按 status + 证据输出下一步节点；blocker 未清空绝不返回 human_approval</td><td>无编排器时的节点跳跃</td></tr>
+    <tr><td><code>git</code></td><td>「子命令 + 形态 + 调用者」三元放行的受控 git；越界返回 FORBIDDEN_SUBCOMMAND</td><td>git 脱离白名单</td></tr>
+  </table>
+
+  <h3>3.2 controlled-shell 重构 — rules.json 单一事实源</h3>
+  <div class="callout info">
+    白名单从 SKILL.md 硬编码（自称 15 条、实为 19 条，存在文档与实现的漂移）抽取为 <code>rules.json</code>，由 <code>crctl.mjs git</code>、<code>pretooluse-guard.mjs</code>、<code>pkg/gitguard</code> 三端共同消费。SKILL.md 降级为解说文档，v0.2.0 修正了条数漂移并新增诚实边界声明。
+  </div>
+  <table>
+    <tr><th>rules.json 结构</th><th>内容</th></tr>
+    <tr><td><code>git[]</code></td><td>19 条子命令（worktree/branch/checkout/fetch/pull/push/add/commit/status/diff/log/ls-remote/rev-parse/symbolic-ref/merge-base/merge-tree/merge/revert/config/remote）的 shape 正则 + callers</td></tr>
+    <tr><td><code>forbiddenFlags</code></td><td>-c / -C / --exec / --upload-pack / --receive-pack / --config-env 一律禁止</td></tr>
+    <tr><td><code>protectedPaths.deny</code></td><td>_backlog.yml / _history.yml / cr.md / approval.yml / review-loop.yml / review-annotations — crctl 独占写权限</td></tr>
+    <tr><td><code>protectedPaths.ask</code></td><td>specs/{id}/PRD|SDD|traceability / delivery/ / test-report.md — 写入需人工确认</td></tr>
+  </table>
+
+  <h3>3.3 状态机回退转换（dir-graph.yaml + AGENTS.md + README.md 三处同步）</h3>
+  <div class="mermaid">
+stateDiagram-v2
+    [*] --> tech_design_review_pending
+    tech_design_review_pending --> tech_designing: approve-tech-design:reject ✨新增
+    tech_design_review_pending --> tech_design_reviewed: approve-tech-design
+    tech_design_reviewed --> task_breakdown: write-dev-tasks
+    task_breakdown --> task_breakdown: write-dev-tasks 暂缓重拆 ✨新增
+    task_breakdown --> developing: approve-dev-start
+    developing --> code_reviewing: review-code pass
+    code_reviewing --> developing: approve-code:reject ✨新增
+    code_reviewing --> code_approved: approve-code
+  </div>
+  <table>
+    <tr><th>新增转换</th><th>触发</th><th>修复的问题</th></tr>
+    <tr><td><code>tech-design-review-pending → tech-designing</code></td><td>approve-tech-design:reject</td><td>架构审批驳回后停留在原状态硬改产物</td></tr>
+    <tr><td><code>task-breakdown → task-breakdown</code></td><td>write-dev-tasks 暂缓重拆</td><td>开发启动暂缓后无法重新拆分任务</td></tr>
+    <tr><td><code>code-reviewing → developing</code></td><td>approve-code:reject</td><td>代码审批驳回后无法回到实现修复</td></tr>
+  </table>
+
+  <h3>3.4 crctl 迭代中的关键修复（5 个 Bug）</h3>
+  <table>
+    <tr><th>提交</th><th>Bug / 增强</th><th>根因与修复</th></tr>
+    <tr><td class="file-path">4907539</td><td>RE2 兼容性</td><td>GitHub Actions 的 Go gitguard 用 RE2 拒绝 lookahead；<code>(?!...)</code> 改为等价字符类 <code>^[^-].*$</code></td></tr>
+    <tr><td class="file-path">5a52cd4</td><td>EVIDENCE_DRIFT 误报</td><td>autocrlf 换行符差异导致证据哈希不一致；哈希前规范化行尾（CR-2026-001 回写期实机发现）</td></tr>
+    <tr><td class="file-path">7e91626</td><td>裸 --grant 崩溃</td><td>无值时 path.isAbsolute(true) 抛 ERR_INVALID_ARG_TYPE；默认落点 .crctl/grants/{cr}-{stage}.grant.json</td></tr>
+    <tr><td class="file-path">0c8e306</td><td>幂等键碰撞</td><td>embedded 占位 sha 用 pendingCommitSha() 消除 cr_sync_event 碰撞；outbox 文件名片段消毒（冒号在 Windows 非法）</td></tr>
+    <tr><td class="file-path">3297c12</td><td>frontmatter 缺失</td><td>product-planning / competitive-analyst 两个 Agent 缺 name 字段（agent-import 实机发现）</td></tr>
+  </table>
+
+  <h3>3.5 writeback-tasks 重写（CR-2026-003 归档事故驱动）</h3>
+  <div class="callout warn">
+    <b>背景：</b>CR-2026-003 归档时曾发生「3 个任务文件被拷贝，但 3 条索引行漏加」直到下一个 CR 归档才被偶然发现。重写目标是消除「拷文件」与「更新索引」两个动作靠记忆分别执行的问题。
+  </div>
+  <table>
+    <tr><th>维度</th><th>上游旧版</th><th>本地新版</th></tr>
+    <tr><td>任务来源</td><td>目录下所有 .md 文件</td><td>tasks/_index.yml 中 <code>status: done</code> 的条目</td></tr>
+    <tr><td>幂等依据</td><td>目标文件是否存在</td><td>id 是否已登记在 delivery/task/_index.yaml（不比较内容）</td></tr>
+    <tr><td>文件名</td><td><code>TASK-{ver}-{CR-NNN}-{NN}-{slug}.md</code>（从未真正采用）</td><td><code>TASK-{version}-{CR-2026-005}-{NN}-{slug}.md</code>（以 CR-2026-001~004 实际写法为准）</td></tr>
+    <tr><td>slug 派生</td><td>title kebab-case（中文分词不确定）</td><td>优先 frontmatter <code>slug:</code> 字段；兜底 <code>task-{NN}</code>（确定性优先）</td></tr>
+    <tr><td>frontmatter</td><td>补全 cr_ref/spec_id/version/status</td><td>插入 spec-id / version 两行（字段名以历史条目为准）</td></tr>
+    <tr><td>原子性</td><td>拷贝与索引两步独立</td><td>一次调用内完成拷贝 + 索引更新（消除遗漏窗口）</td></tr>
+  </table>
+  <p style="margin-top:8px">配套改动：<code>write-dev-tasks</code> 新增 <code>slug</code> 字段提示（CR-2026-005 起）；archived 门禁新增 <code>deliveryIndexComplete</code> 检查（delivery/task/_index.yaml 不存在 ≠ 放行）。</p>
+
+  <h3>3.6 品牌更名 — .xinyiai → .rayai（16 文件 / 30 处）</h3>
+  <table>
+    <tr><th>模式</th><th>处数</th><th>涉及文件</th></tr>
+    <tr><td><code>.xinyiai-worktrees</code> → <code>.rayai-worktrees</code></td><td>16</td><td>requirement-register、implement-code、cr-archive、push/pull-progress、resume-from-remote、merge-feature-branch、write-requirement-prd、README</td></tr>
+    <tr><td><code>.xinyiai/pipelines</code> → <code>.rayai/pipelines</code></td><td>3</td><td>focus-briefing、pipeline-templates/README</td></tr>
+    <tr><td><code>.xinyiai/dir-graph.yaml</code> → <code>.rayai/dir-graph.yaml</code></td><td>5</td><td>engineering-docs、ENGINEERING-STRUCTURE-TEAM</td></tr>
+    <tr><td><code>.xinyiai/config.yaml</code> → <code>.rayai/config.yaml</code></td><td>1</td><td>ENGINEERING-STRUCTURE-TEAM</td></tr>
+    <tr><td>其他 <code>.xinyiai/</code> 引用</td><td>5</td><td>customer-support-agent、resume-cr.pipeline.json 等</td></tr>
+  </table>
+
+  <h3>3.7 工程化与 CI</h3>
+  <table>
+    <tr><th>能力</th><th>说明</th></tr>
+    <tr><td>pre-commit hook</td><td><code>.githooks/pre-commit</code>：提交前自动执行 check-skill-matrix，矩阵不一致阻止提交</td></tr>
+    <tr><td>check-skill-matrix.mjs</td><td>校验每个 active Skill 有且仅有一个 owns owner；Agent 引用的 Skill 必须在 owns/can-call 中</td></tr>
+    <tr><td>check-agents-contract.mjs</td><td>校验 dir-graph agents.contract 三条不变量（新增 Agent 必须先建文档再登记、references 指向 active Skill 等）</td></tr>
+    <tr><td>GitHub Actions ×2</td><td>check-skill-matrix.yml（PR 校验）+ openwiki-update.yml（每日 08:00 自动生成文档并开 PR）</td></tr>
+    <tr><td>OpenWiki 集成</td><td>openwiki/ 12 个生成文档 + CLAUDE.MD/AGENTS.md 注入 OpenWiki 区块</td></tr>
+  </table>
+
+  <h3>3.8 文档体系</h3>
+  <table>
+    <tr><th>文档</th><th>定位</th></tr>
+    <tr><td>CUSTOM.md</td><td>二开台账：合并冲突总则（两边都保留 + 加法优先）、上游改动清单、Bug 修复记录、新增能力索引</td></tr>
+    <tr><td>QODER-使用指南.md</td><td>Qoder 平台落地指南：安装前提 → 配置模板 → 自然语言调用 → 57 条指令速查 → 方案文档改造流程</td></tr>
+    <tr><td>漂移治理 v1/v2</td><td>IDE 单独使用时的漂移根因分析（规则缺少执行者）与代码化治理方案（crctl 落地追踪）</td></tr>
+    <tr><td>HTML ×2</td><td>平台架构可视化讲解（已删除一份冗余）</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════════════════ 4. 分类统计 ═══════════════════════ -->
+<section>
+  <h2><span class="sec-num">4</span>修改的分类统计</h2>
+
+  <div class="grid-2">
+    <div>
+      <h3>4.1 按变更类型分布（已提交 46 文件）</h3>
+      <div class="donut-wrap">
+        <svg width="260" height="260" viewBox="0 0 42 42">
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#e2e8f0" stroke-width="6"/>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#16a34a" stroke-width="6"
+                  stroke-dasharray="25 100" stroke-dashoffset="25" transform="rotate(-90 21 21)"/>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#2563eb" stroke-width="6"
+                  stroke-dasharray="19 100" stroke-dashoffset="50" transform="rotate(-90 21 21)"/>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#d97706" stroke-width="6"
+                  stroke-dasharray="19 100" stroke-dashoffset="69" transform="rotate(-90 21 21)"/>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#8b5cf6" stroke-width="6"
+                  stroke-dasharray="15 100" stroke-dashoffset="88" transform="rotate(-90 21 21)"/>
+          <circle cx="21" cy="21" r="15.9" fill="transparent" stroke="#0891b2" stroke-width="6"
+                  stroke-dasharray="8 100" stroke-dashoffset="103" transform="rotate(-90 21 21)"/>
+          <text x="21" y="20" text-anchor="middle" font-size="5" font-weight="700" fill="#1e293b">46</text>
+          <text x="21" y="25" text-anchor="middle" font-size="2.6" fill="#64748b">文件</text>
+        </svg>
+        <ul class="donut-legend">
+          <li><span class="swatch" style="background:#16a34a"></span> 功能增强 / 新能力 — 25 个（54%）</li>
+          <li><span class="swatch" style="background:#2563eb"></span> 品牌更名 / 路径调整 — 19 个（41%）</li>
+          <li><span class="swatch" style="background:#d97706"></span> Bug 修复 — 19 处（跨文件）</li>
+          <li><span class="swatch" style="background:#8b5cf6"></span> 文档更新 — 7 个（15%）</li>
+          <li><span class="swatch" style="background:#0891b2"></span> 工程化 / CI — 4 个（9%）</li>
+        </ul>
+      </div>
+    </div>
+    <div>
+      <h3>4.2 按行数分布（新增 6,532 行）</h3>
+      <div class="chart-bar">
+        <div class="bar-label"><span>crctl CLI + 测试</span><span>~2,600 行 (40%)</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:40%;background:#16a34a">2,600</div></div>
+      </div>
+      <div class="chart-bar">
+        <div class="bar-label"><span>HTML 架构文档 ×2</span><span>2,297 行 (35%)</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:35%;background:#2563eb">2,297</div></div>
+      </div>
+      <div class="chart-bar">
+        <div class="bar-label"><span>Qoder 使用指南</span><span>805 行 (12%)</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:12%;background:#8b5cf6">805</div></div>
+      </div>
+      <div class="chart-bar">
+        <div class="bar-label"><span>漂移治理 v1/v2</span><span>597 行 (9%)</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:9%;background:#d97706">597</div></div>
+      </div>
+      <div class="chart-bar">
+        <div class="bar-label"><span>其他（规则/CI/hooks/CUSTOM）</span><span>233 行 (4%)</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:4%;background:#0891b2">233</div></div>
+      </div>
+    </div>
+  </div>
+
+  <h3>4.3 提交类型统计（19 次）</h3>
+  <table>
+    <tr><th>类型</th><th>次数</th><th>提交</th></tr>
+    <tr><td><span class="tag tag-feat">feat 功能增强</span></td><td>10</td><td class="file-path">40447db, e5746e4, 91136db, aa89942, 033a4a3, af7c2ec, 1333226, 63f5f0c, d214e60, a7b08cc, 9d65fb6</td></tr>
+    <tr><td><span class="tag tag-fix">fix Bug 修复</span></td><td>5</td><td class="file-path">3297c12, 5a52cd4, 4907539, 7e91626, 0c8e306</td></tr>
+    <tr><td><span class="tag tag-doc">docs 文档</span></td><td>3</td><td class="file-path">a3ca761, b6889ff（+ CUSTOM.md / OpenWiki）</td></tr>
+    <tr><td><span class="tag tag-mod">重构</span></td><td>1</td><td class="file-path">writeback-tasks 重写（9d65fb6）</td></tr>
+  </table>
+
+  <h3>4.4 按 CR 驱动的开发活动统计</h3>
+  <table>
+    <tr><th>CR</th><th>主题</th><th>提交数</th></tr>
+    <tr><td>CR-2026-001</td><td>crctl 初始搭建（CLI 入库、EVIDENCE_DRIFT、测试套件、CI）</td><td>7</td></tr>
+    <tr><td>CR-2026-002</td><td>crctl 迭代（rules.json、outbox、evidence-digest、ed25519、RE2、--grant 修复）</td><td>7</td></tr>
+    <tr><td>CR-2026-003</td><td>embedded 占位 sha / outbox 文件名消毒</td><td>1</td></tr>
+    <tr><td>CR-2026-005</td><td>delivery/task 回写一致性门禁 + writeback-tasks 重写</td><td>2</td></tr>
+    <tr><td>非 CR</td><td>初始提交、品牌更名、frontmatter 修复</td><td>2+</td></tr>
+  </table>
+</section>
+
+<!-- ═══════════════════════ 5. 影响分析 ═══════════════════════ -->
+<section>
+  <h2><span class="sec-num">5</span>修改的影响分析</h2>
+
+  <h3>5.1 对整体系统的影响</h3>
+  <div class="mermaid">
+flowchart LR
+    subgraph BEFORE["改造前（上游）"]
+        B1["规则 = 文档级/提示词级"]
+        B2["执行者 = 模型自觉"]
+        B3["状态推进 = cr-status-set Skill"]
+        B4["git 白名单 = SKILL.md 硬编码"]
+        B5["路径 = .xinyiai-*"]
+    end
+    subgraph AFTER["改造后（RayAI）"]
+        A1["crctl = 代码强制执行层"]
+        A2["执行者 = CLI + hooks + CI"]
+        A3["状态推进 = crctl advance（CAS + 门禁）"]
+        A4["git 白名单 = rules.json 单一事实源"]
+        A5["路径 = .rayai-*"]
+        A6["门禁 = gates.json + archived 检查"]
+    end
+    BEFORE --> AFTER
+  </div>
+
+  <table>
+    <tr><th>影响维度</th><th>正向影响</th><th>潜在风险 / 代价</th></tr>
+    <tr>
+      <td><b>漂移治理</b></td>
+      <td>状态推进、门禁、git 从「模型自觉」升级为「代码强制」；IDE 场景下权威状态唯一合法写入路径</td>
+      <td>增加工具链依赖：需 Node ≥ 18；IDE 必须能调用 crctl</td>
+    </tr>
+    <tr>
+      <td><b>数据一致性</b></td>
+      <td>CAS 写前校验防并发覆盖；outbox 事件通道留审计证据；evidence-digest 双轨检测 EVIDENCE_DRIFT</td>
+      <td>crctl 与平台（Tauri/orchestrator）双轨并存时，需保持行为一致，否则可能出现双写路径分歧</td>
+    </tr>
+    <tr>
+      <td><b>状态机</b></td>
+      <td>3 条驳回回退转换补齐 rejection 路径，审批驳回后可显式回到修复节点</td>
+      <td>dir-graph.yaml / AGENTS.md / README.md 三处同步维护，后续上游合并需人工核对</td>
+    </tr>
+    <tr>
+      <td><b>回写链路</b></td>
+      <td>writeback-tasks 原子化消除「拷文件漏索引」事故窗口；slug 确定性派生保证幂等</td>
+      <td>格式约定以 CR-2026-001~004 实际数据为准，若历史数据不一致需迁移</td>
+    </tr>
+    <tr>
+      <td><b>安全</b></td>
+      <td>protectedPaths deny/ask 两级围栏；approve 强制 TTY 人类在环；git 白名单禁止危险 flags</td>
+      <td>诚实边界：工具校验证据存在与形状，不校验真伪；approve 保证有人按键，不保证人认真看过</td>
+    </tr>
+    <tr>
+      <td><b>可维护性</b></td>
+      <td>rules.json / gates.json 声明式配置，改 JSON 即改门禁；CI + pre-commit 强制矩阵一致性</td>
+      <td>crctl.mjs 已达 1305 行单体，后续拆分压力</td>
+    </tr>
+    <tr>
+      <td><b>品牌</b></td>
+      <td>.rayai 全量更名，与产品名 RayAI 一致</td>
+      <td>上游未来新增 .xinyiai 路径需同步更名；旧 worktree 数据若存在需迁移</td>
+    </tr>
+    <tr>
+      <td><b>文档</b></td>
+      <td>Qoder 指南 + 指令速查 + 漂移治理 + OpenWiki 自动生成，降低使用门槛</td>
+      <td>OpenWiki workflow 依赖 OPENROUTER_API_KEY / LANGSMITH_API_KEY secrets，未配置时 workflow 失败</td>
+    </tr>
+  </table>
+
+  <h3>5.2 风险矩阵</h3>
+  <table>
+    <tr><th>风险</th><th>概率</th><th>影响</th><th>缓解措施</th></tr>
+    <tr><td>上游合并冲突（.rayai 路径 + crctl 与上游新增内容重叠）</td><td>高</td><td>中</td><td>CUSTOM.md 合并冲突总则：两边都保留 + 加法优先；路径更名需手动同步上游新增</td></tr>
+    <tr><td>crctl 与平台执行层双轨行为分歧</td><td>中</td><td>高</td><td>crctl 单一事实源约定（解析 dir-graph/pipeline JSON，不复刻规则）；测试套件 501 行覆盖</td></tr>
+    <tr><td>CR-2026-005 新门禁 deliveryIndexComplete 造成旧 CR 归档阻塞</td><td>中</td><td>中</td><td>幂等判重基于 id 集合，历史已登记任务自动跳过</td></tr>
+    <tr><td>OpenWiki 自动更新 PR 污染工作区</td><td>低</td><td>低</td><td>声明「不手工编辑生成页」，更新走 PR 审查</td></tr>
+    <tr><td>rules.json shape 正则与 git 真实行为漂移</td><td>低</td><td>中</td><td>三端同源消费 + pre-commit/CI 一致性检查</td></tr>
+    <tr><td>删除 HTML 文档导致链接失效</td><td>低</td><td>低</td><td>删除前确认与讲解版内容重复</td></tr>
+  </table>
+
+  <h3>5.3 变更范围矩阵（上游文件 vs 本地改动）</h3>
+  <table>
+    <tr><th>上游目录</th><th>上游文件数</th><th>被修改数</th><th>改动性质</th></tr>
+    <tr><td>skills/</td><td>57 个 Skill</td><td>12</td><td>1 个重写、1 个重构、1 个增强、9 个路径更名</td></tr>
+    <tr><td>agents/</td><td>9 个 Agent</td><td>3</td><td>2 个 Bug 修复（补 name）、1 个路径更名</td></tr>
+    <tr><td>pipeline-templates/</td><td>8 条 Pipeline</td><td>3 个 JSON + README</td><td>路径更名</td></tr>
+    <tr><td>根目录契约文件</td><td>AGENTS.md / dir-graph.yaml / matrix 等</td><td>6（工作区未提交）</td><td>状态机 +3、crctl 登记、OpenWiki</td></tr>
+    <tr><td>docs/ / openwiki/ / .github/ / .githooks/</td><td>—</td><td>全部为本地新增</td><td>文档体系 + 工程化</td></tr>
+  </table>
+
+  <div class="callout risk">
+    <b>最重要的合并注意事项：</b>执行 <code>git merge upstream/main</code> 时，<code>dir-graph.yaml</code>、<code>agent-skill-matrix.yml</code>、<code>skills/_index.yml</code> 三个机器可读事实源是冲突高发区——上游新增 Skill/Agent/转换时，必须同步检查 crctl 的 gates.json 与 rules.json 是否需要跟进，否则可能出现「上游契约变了但代码执行层还在守旧规则」的静默漂移。
+  </div>
+</section>
+
+<footer>
+  AI First Tools 二开修改报告 · 生成于 2026-07-31 · 上游基线 5c19e32 → HEAD b6889ff + 工作区未提交改动
+</footer>
+
+</div>
+
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: 'base', securityLevel: 'loose' });
+</script>
+</body>
+</html>
