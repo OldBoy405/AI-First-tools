@@ -25,6 +25,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      # tools 包是 sibling 仓（不在本仓库树内），CI 单独检出（CR-2026-021 TASK-12 接线）
+      - uses: actions/checkout@v4
+        with:
+          repository: OldBoy405/AI-First-tools
+          ref: custom/main
+          path: tools
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -65,3 +72,9 @@ jobs:
           else
             echo "HEAD 非状态推进 commit，跳过 gate 复核"
           fi
+
+      - name: Lint prompts against crctl (enforce)
+        run: |
+          echo "::group::lint-prompts enforce"
+          node tools/skills/shared/crctl/scripts/lint-prompts.mjs --mode enforce --root tools || exit 1
+          echo "::endgroup::"
