@@ -1709,6 +1709,132 @@ function cmdInboxEmit(ws, cr, gates, flags) {
   ok({ op: 'inbox-emit', cr, event: flags.event, to, file: snap.path });
 }
 
+/* ────────────────────────── next-cr-id / cr-init（S6/S8，CR-2026-021 TASK-06） ──────────────────────────
+ * SDD §2.3/§4.2（SDD-BLOCK-001 修复语义）：
+ * - next-cr-id = 纯只读预览：扫 _index.yml/_backlog.yml 现有 max、返回 CR-{Y}-{NNN+1} 候选。
+ *   不写文件、非权威、不参与分配。
+ * - cr-init = 唯一权威原子分配：不取显式 cr-id 入参，内部读 max → 计算 → casWriteMulti 一次写
+ *   cr.md(新建,expectedHash=null) + _backlog(追加) + _index(登记) → 输出返回分配到的 cr-id。
+ *   并发下后到者见 _index/_backlog hash 已变 → CAS_CONFLICT，三文件全不落盘，调用方重跑拿新号。
+ *   唯一并发冲突码是 CAS_CONFLICT；正常路径无 CR_ALREADY_EXISTS（无外部传入 id，无 TOCTOU）。
+ */
+
+function scanMaxCrNumber(ws, year) {
+  const re = new RegExp('^CR-' + year + '-(\\d{3})$');
+  let max = 0;
+  for (const p of [path.join(ws, 'change-requests', '_index.yml'), backlogPath(ws)]) {
+    const text = readFileChecked(p);
+    if (text == null) continue;
+    for (const m of text.matchAll(/^\s*- id:\s*["']?(CR-\d{4}-\d{3})["']?\s*$/gm)) {
+      const mm = m[1].match(re);
+      if (mm) max = Math.max(max, Number(mm[1]));
+    }
+  }
+  return max;
+}
+
+function formatCrId(year, n) { return `CR-${year}-${String(n).padStart(3, '0')}`; }
+
+function cmdNextCrId(ws, gates, flags) {
+  const year = flags.year || String(new Date().getFullYear());
+  const max = scanMaxCrNumber(ws, year);
+  ok({ crId: formatCrId(year, max + 1), year, max, previewOnly: true, note: '纯只读预览，不参与分配；权威分配请用 crctl cr-init' });
+}
+
+function cmdCrInit(ws, gates, flags) {
+  if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> [--year Y]');
+  if (!flags['owner-requirement']) fail('BAD_ARGS', 'cr-init 需要 --owner-requirement <id>（被指派人业务身份）');
+  const year = flags.year || String(new Date().getFullYear());
+  const cr = formatCrId(year, scanMaxCrNumber(ws, year) + 1);
+  const now = nowIso();
+  const by = identity(ws);
+  const ownerId = String(flags['owner-requirement']);
+  // cr.md 全量 frontmatter（owners/owner-history/时间戳全 crctl 生成）
+  const fm = [
+    '---',
+    `id: ${cr}`,
+    `title: ${flags.title.replaceAll('"', '\\"')}`,
+    'summary: ""',
+    `owner: ${ownerId}`,
+    'owners:',
+    `  requirement:`,
+    `    id: ${ownerId}`,
+    `    assigned-at: "${now}"`,
+    `  development:`,
+    `    id: ${ownerId}`,
+    `    assigned-at: "${now}"`,
+    `  test:`,
+    `    id: ${ownerId}`,
+    `    assigned-at: "${now}"`,
+    'target-version: tbd',
+    'source: manual',
+    'status: drafting',
+    `created: "${now}"`,
+    `updated: "${now}"`,
+    'remote-ref: ""',
+    'last-push-at: ""',
+    'last-push-by: ""',
+    'owner-history:',
+    `  - { role: requirement, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
+    `  - { role: development, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
+    `  - { role: test, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
+    'handover-history: []',
+    '---',
+    '',
+  ].join('\n');
+  // _backlog 条目追加
+  const bp = backlogPath(ws);
+  const backlogText = readFileChecked(bp);
+  if (backlogText == null) fail('BACKLOG_NOT_FOUND', `缺少 ${bp}`);
+  const backlogEntry = [
+    `  - id: ${cr}`,
+    `    title: ${flags.title.replaceAll('"', '\\"')}`,
+    '    summary: ""',
+    `    owner: ${ownerId}`,
+    '    owners:',
+    `      requirement:`,
+    `        id: ${ownerId}`,
+    `        assigned-at: "${now}"`,
+    `      development:`,
+    `        id: ${ownerId}`,
+    `        assigned-at: "${now}"`,
+    `      test:`,
+    `        id: ${ownerId}`,
+    `        assigned-at: "${now}"`,
+    '    target-version: tbd',
+    '    source: manual',
+    '    prd-path: ""',
+    `    created: "${now}"`,
+    `    updated: "${now}"`,
+  ].join('\n');
+  const newBacklog = backlogText.trimEnd() + '\n' + backlogEntry + '\n';
+  // _index 条目追加
+  const ip = path.join(ws, 'change-requests', '_index.yml');
+  const indexText = readFileChecked(ip);
+  if (indexText == null) fail('INDEX_NOT_FOUND', `缺少 ${ip}`);
+  const indexEntry = [
+    `  - id: ${cr}`,
+    `    title: ${flags.title.replaceAll('"', '\\"')}`,
+    '    status: drafting',
+    `    created: "${now}"`,
+  ].join('\n');
+  const newIndex = indexText.trimEnd() + '\n' + indexEntry + '\n';
+  // 原子三文件写：cr.md 期望不存在（创建冲突即 CAS_CONFLICT）；_backlog/_index 用读时 sha256
+  const crDirPath = crDir(ws, cr);
+  fs.mkdirSync(crDirPath, { recursive: true });
+  casWriteMulti([
+    { path: path.join(crDirPath, 'cr.md'), expectedHash: null, newText: fm },
+    { path: bp, expectedHash: sha256(backlogText), newText: newBacklog },
+    { path: ip, expectedHash: sha256(indexText), newText: newIndex },
+  ]);
+  auditLog(ws, { kind: 'ledger', op: 'cr-init', cr, actor: by, title: flags.title });
+  emitOutboxEvent(ws, {
+    event_kind: 'cr-init', cr_id: cr, actor: by,
+    payload: { title: flags.title, ownerRequirement: ownerId },
+  });
+  ok({ op: 'cr-init', cr, title: flags.title, status: 'drafting', files: { crMd: path.join('change-requests', cr, 'cr.md'), backlog: bp, index: ip } });
+}
+
 /** 行级追加 supplemental-reviews 段条目（硬失败：无该段则创建，段结构异常则报错）。 */
 function appendSupplementalReview(text, entry) {
   const norm = text.replaceAll('\r\n', '\n');
@@ -2014,6 +2140,8 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   _backlog owners.{role} 指派（非终态）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
+  crctl next-cr-id  [--year Y]                          只读预览下一个 CR-ID（不写、非权威）
+  crctl cr-init     --title <t> --owner-requirement <id> [--year Y]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
@@ -2079,6 +2207,8 @@ function main() {
     case 'owner-set': return cmdOwnerSet(ws, requireCr(positional), gates, flags);
     case 'backlog-set': return cmdBacklogSet(ws, requireCr(positional), gates, flags);
     case 'inbox-emit': return cmdInboxEmit(ws, requireCr(positional), gates, flags);
+    case 'next-cr-id': return cmdNextCrId(ws, gates, flags);
+    case 'cr-init': return cmdCrInit(ws, gates, flags);
     case 'task': {
       if (positional[0] !== 'done') fail('BAD_ARGS', 'task 仅支持子命令 done：crctl task done <CR-ID> --task <TASK-ID>');
       return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);

@@ -1371,3 +1371,109 @@ test('inbox-emit：缺 --event → BAD_ARGS；--payload 非法 JSON → BAD_ARGS
     assert.equal(r2.stderr.error.code, 'BAD_ARGS');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-021 TASK-06：next-cr-id（只读预览）+ cr-init（原子权威分配）──
+
+test('next-cr-id：只读预览返回 CR-{year}-{max+1}，不写任何文件（AC-4）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-2026-001', status: 'drafting' }, { id: 'CR-2026-003', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-2026-001', 'drafting');
+    writeCrMd(ws, 'CR-2026-003', 'drafting');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r1 = runCrctl(['next-cr-id', '--year', '2026', '--workspace', ws]);
+    assert.equal(r1.status, 0);
+    assert.equal(r1.stdout.crId, 'CR-2026-004');
+    assert.equal(r1.stdout.previewOnly, true);
+    const r2 = runCrctl(['next-cr-id', '--year', '2026', '--workspace', ws]);
+    assert.equal(r2.stdout.crId, 'CR-2026-004', '两次连续调用返回同一候选（非权威、不参与分配）');
+    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before, '不得写任何文件');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('cr-init：权威原子分配 — 三文件建档登记，返回分配到的 cr-id（AC-4）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-2026-001', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-2026-001', 'drafting');
+    writeFileSync(path.join(ws, 'change-requests', '_index.yml'), 'change-requests:\n  - id: CR-2026-001\n    title: x\n    status: drafting\n    created: "2026-08-01T00:00:00+08:00"\n');
+    const r = runCrctl(['cr-init', '--title', '测试 CR', '--owner-requirement', 'Ray', '--year', '2026', '--workspace', ws]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.cr, 'CR-2026-002');
+    const crMd = readFileSync(path.join(ws, 'change-requests', 'CR-2026-002', 'cr.md'), 'utf8');
+    assert.ok(crMd.includes('id: CR-2026-002') && crMd.includes('status: drafting'), 'cr.md 建档');
+    assert.ok(crMd.includes('title: 测试 CR'), 'title 写入 cr.md');
+    assert.ok(crMd.includes('owner-history:') && crMd.includes('initial-assignment'), 'owner-history 生成');
+    const backlog = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(backlog.includes('- id: CR-2026-002'), 'backlog 追加');
+    const index = readFileSync(path.join(ws, 'change-requests', '_index.yml'), 'utf8');
+    assert.ok(index.includes('- id: CR-2026-002') && index.includes('status: drafting'), 'index 登记');
+    // 无显式 cr-id 入参：传入位置参数应被忽略或报错（签名核对）
+    const r2 = runCrctl(['cr-init', 'CR-X', '--title', 't', '--owner-requirement', 'R', '--year', '2026', '--workspace', ws]);
+    assert.equal(r2.status, 0, 'cr-init 无 <cr-id> 位置参数（多余位置参数不影响）');
+    assert.equal(r2.stdout.cr, 'CR-2026-003', '仍按内部 max+1 分配');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('cr-init：并发冲突 → 组件级 mismatch hash 注入，三文件均不落盘（SDD §5 范式）', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'crctl-crinit-'));
+  try {
+    // 复用既有 casWriteMulti 组件级测试范式：从 crctl.mjs 提取 casWriteMulti 源码并注入 stub
+    const src = readFileSync(CRCTL, 'utf8').replaceAll('\r\n', '\n');
+    const m = src.match(/function casWriteMulti\(writes\) \{[\s\S]*?\n\}/);
+    assert.ok(m, 'crctl.mjs 中应能提取 casWriteMulti 源码');
+    const calls = [];
+    const fail = (code, msg) => { throw new Error(code + ': ' + msg); };
+    const readFileChecked = (p) => { calls.push(['read', p]); return p.endsWith('ok.txt') ? 'orig-a' : 'tampered-b'; };
+    const sha256 = (t) => t;
+    const fs = {
+      writeFileSync: (p) => calls.push(['write', p]),
+      renameSync: (t, d) => calls.push(['rename', t, d]),
+    };
+    const moduleText = [
+      'const calls = [];',
+      "const fail = (code, msg) => { throw new Error(code + ': ' + msg); };",
+      "const readFileChecked = (p) => { calls.push(['read', p]); return p.endsWith('ok.txt') ? 'orig-a' : 'tampered-b'; };",
+      'const sha256 = (t) => t;',
+      'const fs = {',
+      "  writeFileSync: (p) => calls.push(['write', p]),",
+      "  renameSync: (t, d) => calls.push(['rename', t, d]),",
+      '};',
+      m[0],
+      'export { casWriteMulti, calls };',
+    ].join('\n');
+    const modPath = path.join(dir, 'casw.mjs');
+    writeFileSync(modPath, moduleText);
+    const { casWriteMulti, calls: c2 } = await import(pathToFileURL(modPath).href);
+    // 三文件写：cr.md expectedHash=null + backlog/index 读时 hash；任一失配 → 整体 CAS_CONFLICT 无 write/rename
+    const ok1 = path.join(dir, 'ok.txt'); // cr.md 对应（expectedHash null 且文件存在 → 冲突）
+    assert.throws(() => casWriteMulti([
+      { path: ok1, expectedHash: null, newText: 'x' },
+      { path: path.join(dir, 'b.txt'), expectedHash: 'orig-b', newText: 'y' },
+      { path: path.join(dir, 'i.txt'), expectedHash: 'orig-i', newText: 'z' },
+    ]), /CAS_CONFLICT/);
+    assert.ok(!c2.some((c) => c[0] === 'write' || c[0] === 'rename'), 'cr.md 已存在（创建冲突）时不得落任何盘');
+    c2.length = 0;
+    // 正常路径：全部 expectedHash 匹配 → 2 次 write + 2 次 rename（null 期望的 ok.txt 读后确认存在则冲突，这里换缺失文件）
+    assert.throws(() => casWriteMulti([
+      { path: path.join(dir, 'missing.txt'), expectedHash: null, newText: 'x' },
+      { path: path.join(dir, 'ok.txt'), expectedHash: 'orig-a', newText: 'y' },
+      { path: path.join(dir, 'bad.txt'), expectedHash: 'tampered-b', newText: 'z' },
+    ]), /CAS_CONFLICT/);
+    assert.ok(!c2.some((c) => c[0] === 'write' || c[0] === 'rename'), '任一侧 hash 失配不得落盘');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('cr-init：缺 --title / --owner-requirement → BAD_ARGS', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-2026-001', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-2026-001', 'drafting');
+    const r1 = runCrctl(['cr-init', '--owner-requirement', 'Ray', '--year', '2026', '--workspace', ws]);
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'BAD_ARGS');
+    const r2 = runCrctl(['cr-init', '--title', 't', '--year', '2026', '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'BAD_ARGS');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
