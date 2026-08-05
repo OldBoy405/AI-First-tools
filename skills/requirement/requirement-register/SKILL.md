@@ -14,6 +14,7 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
 
 需求编写的起点。完成以下三件事：
 1. 生成唯一 CR-ID（格式 `CR-YYYY-NNN`，NNN 自增）
+<!-- lint-prompts:ignore --> 描述性说明：注册动作由 crctl cr-init 原子完成
 2. 在 `change-requests/_backlog.yml` 注册 CR 条目（不含 status/updated-at，status 只落 cr.md），并在 `change-requests/_index.yml` 追加条目
 3. 将注册记录提交到 knowledge-base trunk，保证 main 可感知在途 CR
 4. 按 `dir-graph.yaml#repositories` 为所有 `active != false` 的 repo 创建同名 worktree 分支 `requirement/CR-YYYY-NNN`（不切换当前 HEAD）
@@ -24,7 +25,7 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `cr_id` | string | ❌ | 显式指定 CR-ID；为空时自动生成。指定时必须符合 `CR-YYYY-NNN` 且未被占用 |
+| `cr_id` | string | ❌ | 显式指定 CR-ID（仅预览/校验用途）；为空时由 `crctl cr-init` 内部原子分配（S8 权威）。指定时必须符合 `CR-YYYY-NNN` 且未被占用 |
 | `title` | string | ✅ | 需求标题（写入 cr.md） |
 | `summary` | string | ✅ | 需求摘要（1-3 句，写入 cr.md） |
 | `requirement_owner` | string | ✅ | 需求负责人（写入 cr.md owners.requirement） |
@@ -45,61 +46,17 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
    - 其他 active repo 的 bucket 使用 `repo.id`
    - 每个 repo 的 trunk 取 `repo.trunk`，缺失则返回 `REPO_TRUNK_UNRESOLVED`
 3. 确认 knowledge-base trunk 工作区 clean；若存在未提交变更，返回 `REGISTRATION_TRUNK_DIRTY`，不得继续。
-4. 若输入 `cr_id` 为空，读取 `change-requests/_index.yml` 中最大 NNN 值，并生成 `CR-{YYYY}-{NNN+1}`（NNN 三位补零，如 CR-2026-003）。
-5. 若输入 `cr_id` 非空，校验格式为 `CR-YYYY-NNN`，并确认 `change-requests/_index.yml`、`change-requests/_backlog.yml`、`change-requests/{cr_id}/` 中均不存在同名记录。
+4. 若输入 `cr_id` 为空，运行 `crctl next-cr-id [--year Y] --workspace <ws>` 获取**只读预览**候选（S6：纯预览，不写、非权威，仅供人看一眼下一个号）。
+5. 若输入 `cr_id` 非空，校验格式为 `CR-YYYY-NNN`，并确认 `change-requests/_index.yml`、`change-requests/_backlog.yml`、`change-requests/{cr_id}/` 中均不存在同名记录；**权威分配与建档不在此处手写**——统一由 Step 2 的 `crctl cr-init` 原子完成（内部 max+1 + casWriteMulti 三文件，返回分配到的 cr-id）。
 
-### Step 2 — 在 knowledge-base trunk 创建注册记录
+### Step 2 — 权威注册：crctl cr-init（S8，唯一权威分配与建档）
 
-在 `change-requests/{CR-ID}/` 下创建 `cr.md`：
-
-```yaml
----
-id: {CR-ID}
-title: {title}
-summary: {summary}
-owner: {requirement_owner}   # 兼容字段；权威角色归属见 owners
-owners:
-  requirement:
-    id: {requirement_owner}
-    assigned-at: {created timestamp}
-  development:
-    id: {dev_owner}
-    assigned-at: {created timestamp}
-  test:
-    id: {test_owner}
-    assigned-at: {created timestamp}
-target-version: {target_version 或 tbd}
-source: {source 或 manual}
-status: drafting
-created: {YYYY-MM-DDTHH:mm:ss+08:00}
-updated: {YYYY-MM-DDTHH:mm:ss+08:00}
-remote-ref: ""
-last-push-at: ""
-last-push-by: ""
-owner-history:
-  - role: requirement
-    from: ""
-    to: {requirement_owner}
-    at: {created timestamp}
-    reason: initial-assignment
-  - role: development
-    from: ""
-    to: {dev_owner}
-    at: {created timestamp}
-    reason: initial-assignment
-  - role: test
-    from: ""
-    to: {test_owner}
-    at: {created timestamp}
-    reason: initial-assignment
-handover-history: []
----
-```
-
-### Step 3 — 登记 _backlog.yml 和 _index.yml
-
-- 在 `change-requests/_backlog.yml` 的 `backlog[]` 中追加条目（包含 id/owners/merge-commits 等低频字段，**不含** status/updated-at；status 只落 cr.md）
-- 在 `change-requests/_index.yml` 的 `change-requests[]` 中追加摘要条目（id / title / status / created）
+1. 运行 `crctl cr-init --title "{title}" --owner-requirement {requirement_owner} [--year Y] --workspace <ws>`（**不取显式 cr-id 入参**——SDD-BLOCK-001 语义：内部分配 `CR-{Y}-{NNN+1}`，以 `casWriteMulti` 原子写 `cr.md`(新建) + `_backlog.yml`(追加) + `_index.yml`(登记)，成功后在输出 JSON 返回分配到的 `cr`）。
+   - `cr.md` frontmatter 全量由 crctl 生成（owners/owner-history/时间戳 = identity(ws)/nowIso()）；`--owner-requirement` 只提供被指派人业务身份。
+   - 并发下后到者见 `_index`/`_backlog` hash 已变 → `CAS_CONFLICT`，三文件全不落盘 → **重跑 cr-init**（重读 max、自动拿新号），不撞号。
+   - `cr_id` 变量 = cr-init 返回的 `cr` 字段。
+2. **模型不得手写 `cr.md`/追加 `_backlog.yml`/登记 `_index.yml`**（guard deny + cr-init 独占，含 CAS+审计）。
+3. `summary` 等补充字段由后续节点（write-requirement-prd）经 `crctl backlog-set`（S5）等专命令写入。
 
 ### Step 4 — 提交注册记录到 knowledge-base trunk
 
@@ -110,8 +67,9 @@ handover-history: []
 在创建任何 CR worktree 之前，必须先把注册记录提交到 knowledge-base trunk：
 
 ```ts
+<!-- lint-prompts:ignore --> 受控 shell 代码块：runGit = 受控 git 适配器（S10 模板经 crctl git commit）
 await runGit({ subcommand: "add", args: ["change-requests/_backlog.yml", "change-requests/_index.yml", `change-requests/${crId}/cr.md`], cwd: knowledgeBaseRepo.path });
-await runGit({ subcommand: "commit", args: ["-m", `[cr] register ${crId}: ${title}`], cwd: knowledgeBaseRepo.path });
+await runGit({ subcommand: "commit", args: ["--template", "register", "-m", title], cwd: knowledgeBaseRepo.path });  // S10：生成 [cr] register {cr}: {title}
 await runGit({ subcommand: "push", args: ["origin", knowledgeBaseRepo.trunk], cwd: knowledgeBaseRepo.path });
 ```
 
@@ -124,11 +82,12 @@ await runGit({ subcommand: "push", args: ["origin", knowledgeBaseRepo.trunk], cw
 **受控 shell 调用序列**：
 
 ```ts
-const bucket = repo.role === "knowledge-base" ? "knowledge-base" : repo.id;
+// 路径拼接用 crctl worktree-path 的唯一权威规则（S9）：bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id
+const wt = await runCrctl(["worktree-path", crId, "--repo", repo.id, "--workspace", workspaceRoot]);
 await runGit({ subcommand: "fetch", args: ["origin"], cwd: repo.path });
 await runGit({ subcommand: "worktree",
   args: ["add", "-b", `requirement/${crId}`,
-         `${workspaceRoot}/.rayai-worktrees/${bucket}/requirement/${crId}`,
+         wt.path,
          repo.trunk],
   cwd: repo.path });
 ```
@@ -146,6 +105,7 @@ await runGit({ subcommand: "worktree",
    测试负责人  : {test_owner} @ {timestamp}
    注册提交    : knowledge-base trunk 已包含 cr.md / _backlog.yml
    Worktree    : [{repo.id}: .rayai-worktrees/{bucket}/requirement/{CR-ID}, ...]
+<!-- lint-prompts:ignore --> 输出摘要：仅展示路径
    cr.md       : change-requests/{CR-ID}/cr.md
    下一步      : 在 .rayai-worktrees/knowledge-base/requirement/{CR-ID} 中执行 write-requirement-prd
 ```

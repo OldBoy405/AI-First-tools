@@ -34,6 +34,7 @@ description: 生成 specs/{spec_id}/traceability.yml 的累积追溯链（头部
 
 ### Step 1 — 前置校验
 
+<!-- lint-prompts:ignore --> 描述性：追溯回写说明
 1. 读取 `change-requests/{cr_id}/cr.md`，确认 status=`writing-back`（脚本同样校验，不满足即 `CR_STATUS_MISMATCH` 硬失败）
 2. 确认 `specs/{spec_id}/PRD.md`、`specs/{spec_id}/SDD.md` 均存在（writeback-prd-sdd 已完成）
 
@@ -71,8 +72,8 @@ node tools/skills/writeback/scripts/writeback-traceability.mjs \
 去掉 `--dry-run` 重跑。脚本末尾自检（`- cr: {cr_id}` 段恰 1 处、merge-commits 数与提取结果一致、既有段逐字节保留、无 CRLF），失败输出 `SELF_CHECK_FAILED` 非零退出。成功后提交：
 
 ```bash
-git add specs/{spec_id}/traceability.yml
-git commit -m "writeback({cr_id}): specs/{spec_id} traceability.yml 累积 milestone {milestone}"
+crctl git add specs/{spec_id}/traceability.yml --cwd <knowledge-base worktree>
+crctl git commit --template writeback -m "specs/{spec_id} traceability.yml 累积 milestone {milestone}" --cwd <knowledge-base worktree>
 ```
 
 ### Step 5 — 输出归档前置证据
@@ -81,7 +82,7 @@ git commit -m "writeback({cr_id}): specs/{spec_id} traceability.yml 累积 miles
 
 - traceability.yml 路径
 - 关联 TASK 数量
-- merge commit SHA 是否齐全（脚本已强制六字段齐全，`MERGE_COMMITS_MISSING` 即不齐全）
+- merge commit SHA 是否齐全（脚本已强制三字段齐全（repo/trunk/sha，FR-8 口径），`MERGE_COMMITS_MISSING` 即不齐全）
 - 下一节点必须是 `cr-archive`
 
 ### Step 6 — 输出摘要
@@ -104,7 +105,7 @@ git commit -m "writeback({cr_id}): specs/{spec_id} traceability.yml 累积 miles
 |---|---|
 | specs 侧 traceability.yml 形态 | 跨 CR 累积文件（989 行）：头部（注释 + spec-id/cr-ref/cr-history/target-version/baseline-since/generated-at）+ `milestones:` 段列表——**不可全量重建**（SDD §8 D3） |
 | milestone 段格式 | `  - cr: {cr_id}` + `milestone` + `target-version` + `status` + `merge-commits:` + `frs:`（每条 `- fr: FR-x` + title/sdd/tasks/code/evidence） |
-| merge-commits 写入格式 | 四字段 `repo/trunk/sha/branch`（CR-2026-018/019 段先例）；提取时校验 `_backlog.yml` 六字段（repo/trunk/sha/branch/source-sha/merged-at）齐全，缺失 `MERGE_COMMITS_MISSING` |
+| merge-commits 写入格式 | 四字段 `repo/trunk/sha/branch`（CR-2026-018/019 段先例）；提取时校验 `_backlog.yml` 三字段（repo/trunk/sha）必填、branch 可选（CR-2026-020 复盘 FR-8：生产者 3 字段契约），缺失 `MERGE_COMMITS_MISSING` |
 | 幂等判据 | specs 侧已含 `- cr: {cr_id}` 段 → noop |
 | 权威文件 | specs 侧为唯一权威；change-requests 侧为开发期工作稿，归档后不再同步（FR-7） |
 
@@ -115,7 +116,8 @@ git commit -m "writeback({cr_id}): specs/{spec_id} traceability.yml 累积 miles
 | 错误码 | 处理 |
 |------|------|
 | `BAD_ARGS` | 缺 `--workspace/--cr/--spec/--version/--milestone-file`，补参重跑 |
+<!-- lint-prompts:ignore --> 描述性：追溯回写说明
 | `CR_STATUS_MISMATCH` | cr.md status 非 `writing-back`，先完成 writeback-prd-sdd 的 status 推进 |
 | `STRUCTURE_MISMATCH` | milestone-file 缺 `cr/milestone/target-version/fr-chain[].fr`，或草稿内 merge-commits 与账本提取不一致；报告后停止 |
-| `MERGE_COMMITS_MISSING` | `_backlog.yml` 无该 CR 条目 / 无 merge-commits[] / 字段不齐全——先修复 merge-feature-branch 输出；**不得猜测或自动取 trunk 最新提交** |
+| `MERGE_COMMITS_MISSING` | `_backlog.yml` 无该 CR 条目 / 无 merge-commits[] / 三字段不齐全——先修复 merge-feature-branch 输出；**不得猜测或自动取 trunk 最新提交** |
 | `SELF_CHECK_FAILED` | 追加后自检断言失败，检查输出文件后重跑 |

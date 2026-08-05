@@ -1340,6 +1340,680 @@ function cmdAttempt(ws, cr, gates, flags) {
   ok(r);
 }
 
+/* ────────────────────────── review-record（S1，CR-2026-021 TASK-02） ──────────────────────────
+ * 判断/写入分离（SDD §4.1）：agent 把评审判断写进非受控临时 payload（默认 .crctl/tmp/review-{stage}.yml，
+ * 已被 .crctl/.gitignore 的 `*` 规则忽略），crctl 只做确定性部分——schema 校验 → stage→文件名显式映射
+ * （tech-design→sdd.yml 非同名，与门禁读取口径对齐）→ 注入 reviewer/reviewed-at → casWrite canonical →
+ * 可选级联 attempt → 删除临时 payload。
+ */
+const REVIEW_STAGE_FILES = { requirement: 'requirement.yml', 'tech-design': 'sdd.yml', code: 'code.yml' };
+const REVIEW_STAGE_LOOPS = { requirement: 'review-requirement', 'tech-design': 'review-tech-design', code: 'review-code' };
+// 前置态与各 review-* SKILL 的 Step 顺序对齐（先 review-record 落盘证据、后 advance 进评审态）：
+// - requirement：评审在 drafting 执行（block 回 drafting 重审；requirement-reviewing 保留兼容重跑）
+// - tech-design：write-tech-design 落盘后先进 tech-design-review-pending（其 statusGate 只需 sdd.md），再评审
+// - code：评审在 developing 执行（block 回 developing 修复后重审）
+// 注意：requirement/code 的评审态 statusGate 含 passCondition（需评审证据已存在），
+// 若前置态错设为评审态将与 advance 门禁互锁成死锁——CR-2026-021 开发期实测缺陷（先写后推进）。
+const REVIEW_STAGE_EXPECT = { requirement: ['drafting', 'requirement-reviewing'], 'tech-design': ['tech-design-review-pending'], code: ['developing'] };
+
+function cmdReviewRecord(ws, cr, gates, flags) {
+  const stage = flags.stage;
+  const fileName = REVIEW_STAGE_FILES[stage];
+  if (!fileName) fail('STAGE_UNKNOWN', `--stage 必须是 ${Object.keys(REVIEW_STAGE_FILES).join(' | ')}`);
+  const expect = REVIEW_STAGE_EXPECT[stage];
+  const state = resolveCrState(ws, cr);
+  if (!expect.includes(state.status)) {
+    fail('ILLEGAL_LEDGER_STATE', `review-record --stage ${stage} 仅允许在前置态 ${expect.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect });
+  }
+  // 读取临时 payload（CRLF 归一，纪律 #1；解析失败硬失败不静默）
+  const fromRel = flags.from || path.join('.crctl', 'tmp', `review-${stage}.yml`);
+  const fromPath = path.isAbsolute(fromRel) ? fromRel : path.join(ws, fromRel);
+  const raw = readFileChecked(fromPath);
+  if (raw == null) fail('PAYLOAD_NOT_FOUND', `临时评审 payload 不存在: ${fromPath}（agent 应先把判断写到该非受控路径）`);
+  const payload = parseYaml(raw.replaceAll('\r\n', '\n'));
+  // schema 校验（判断是 agent 的、格式是机械的——这里只校验格式，不替 agent 判断）
+  if (!payload || typeof payload !== 'object') fail('SCHEMA_INVALID', 'payload 顶层必须是映射');
+  if (!['pass', 'block'].includes(payload.verdict)) fail('SCHEMA_INVALID', `verdict=${JSON.stringify(payload.verdict)} 不在枚举 [pass, block]`);
+  if (!Array.isArray(payload.blockers)) fail('SCHEMA_INVALID', 'blockers 必须是列表（可空）');
+  if (!payload.dimensions || typeof payload.dimensions !== 'object' || Array.isArray(payload.dimensions)) {
+    fail('SCHEMA_INVALID', 'dimensions 缺失或不是映射（该 stage 门禁要求的维度必须齐全）');
+  }
+  // --bump-attempt：先检查未 exhausted（避免 canonical 已写而记账失败产生半状态）
+  if (flags['bump-attempt']) {
+    const a = readAttempts(ws, cr, REVIEW_STAGE_LOOPS[stage], gates);
+    if (a.exhausted) fail('LOOP_EXHAUSTED', `${REVIEW_STAGE_LOOPS[stage]} 已达 maxAttempts=${a.max}，不得继续自修复；请人工处理剩余 blocker`, { current: a.current });
+  }
+  // canonical 写入（crctl 独占写：首次创建无 CAS 冲突面；已存在走 casWrite 防并发覆盖）
+  const target = path.join(crDir(ws, cr), 'review-annotations', fileName);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const existing = readFileChecked(target);
+  const yamlOf = (v) => (typeof v === 'string' ? `"${String(v).replaceAll('"', '\\"')}"` : JSON.stringify(v));
+  const lines = [
+    `cr-id: ${cr}`,
+    `review-type: ${stage}`,
+    `reviewer: "${identity(ws)}"`,
+    `reviewed-at: "${nowIso()}"`,
+    `verdict: ${payload.verdict}`,
+    payload.blockers.length === 0 ? 'blockers: []' : 'blockers:',
+    ...payload.blockers.map((b) => `  - ${yamlOf(b)}`),
+    'dimensions:',
+    ...Object.entries(payload.dimensions).map(([k, v]) => `  ${k}: ${yamlOf(v)}`),
+    ...(payload.suggestions && payload.suggestions.length
+      ? ['suggestions:', ...payload.suggestions.map((s) => `  - ${yamlOf(s)}`)]
+      : ['suggestions: []']),
+    '',
+  ];
+  const newText = lines.join('\n');
+  if (existing == null) fs.writeFileSync(target, newText, 'utf8');
+  else casWrite(target, sha256(existing), newText);
+  // 级联 attempt 记账（复用既有 bumpAttempt，不重写）
+  let attempt = null;
+  if (flags['bump-attempt']) attempt = bumpAttempt(ws, cr, REVIEW_STAGE_LOOPS[stage], gates);
+  // 删除临时 payload（避免残留误提交或跨 CR 串味）
+  try { fs.rmSync(fromPath, { force: true }); } catch { /* 删除失败不阻塞主结果 */ }
+  auditLog(ws, { kind: 'ledger', op: 'review-record', cr, stage, verdict: payload.verdict, actor: identity(ws), file: target });
+  emitOutboxEvent(ws, {
+    event_kind: 'review', cr_id: cr, actor: identity(ws),
+    payload: { stage, verdict: payload.verdict, blockerCount: (payload.blockers || []).length },
+  });
+  ok({ op: 'review-record', cr, stage, file: target.replaceAll('\\', '/'), verdict: payload.verdict, ...(attempt ? { attempt: attempt.current } : {}) });
+}
+/* ────────────────────────── review-note（S2，CR-2026-021 TASK-03） ──────────────────────────
+ * 向 approval.yml 的 supplemental-reviews[] 追加一条补充审查记录（CAS+审计）。
+ * 安全边界（不变量 7）：只写 supplemental-reviews 段，绝不触碰 approval.yml 的
+ * #requirement/#tech-design/#development-start/#code 四段审批本体（那四段只经 crctl approve）。
+ * 操作者身份由 identity(ws) 生成，不接受 --by（时间戳/身份生成原则）。
+ */
+function cmdReviewNote(ws, cr, gates, flags) {
+  if (!flags.note) fail('BAD_ARGS', 'review-note 需要 --note <text>');
+  if (flags.by !== undefined) fail('BAD_ARGS', 'review-note 不接受 --by：操作者身份必须由 crctl identity(ws) 生成（与 attempt/task done 同构）');
+  const state = resolveCrState(ws, cr);
+  const { sm } = loadStateMachine(ws);
+  const terminals = sm.terminal || [];
+  if (terminals.includes(state.status)) {
+    fail('ILLEGAL_LEDGER_STATE', `review-note 不允许在终态 ${state.status} 追加补充审查记录（已终结 CR 不再接受补充意见）`, { current: state.status, expect: '非终态' });
+  }
+  const p = path.join(crDir(ws, cr), 'approval.yml');
+  const existing = readFileChecked(p);
+  const stage = flags.stage || '';
+  const note = flags.note.replaceAll('"', '\\"');
+  const entry = [
+    `  - reviewer: "${identity(ws)}"`,
+    `    recorded-at: "${nowIso()}"`,
+    '    decision: note',
+    `    stage: "${stage.replaceAll('"', '\\"')}"`,
+    `    status-at-record: ${state.status}`,
+    `    notes: "${note}"`,
+  ].join('\n');
+  const newText = existing == null
+    ? `# approval.yml — 人工审批记录（各段仅接受 crctl approve 写入；supplemental-reviews 仅接受 crctl review-note 写入）\nsupplemental-reviews:\n${entry}\n`
+    : appendSupplementalReview(existing, entry);
+  if (existing == null) fs.writeFileSync(p, newText, 'utf8');
+  else casWrite(p, sha256(existing), newText);
+  auditLog(ws, { kind: 'ledger', op: 'review-note', cr, actor: identity(ws), stage, file: p });
+  emitOutboxEvent(ws, {
+    event_kind: 'review-note', cr_id: cr, actor: identity(ws),
+    payload: { stage, statusAtRecord: state.status },
+  });
+  ok({ op: 'review-note', cr, file: p.replaceAll('\\', '/'), recordedAt: nowIso() });
+}
+
+/* ────────────────────────── S3/S4/S5（CR-2026-021 TASK-04）：_backlog 白名单字段写 ──────────────────────────
+ * 三个结构同构的字段级写子命令（SDD §3.1）：purpose-specific 白名单，不做通用 patch。
+ * 全部 casWrite 保护单文件 _backlog.yml + matchEntryBlock 定位条目 + auditLog 审计。
+ * 时间戳/操作者身份一律 crctl 生成；owner-set 的 --id 是被指派人业务身份（可调用方传入）。
+ */
+
+/** 从 keyLineIdx 行开始向后扫，返回该 YAML 段的结尾行号（下一个同级或更浅缩进的顶层键，或 EOF）。 */
+function findBlockEnd(lines, keyLineIdx) {
+  const keyIndent = lines[keyLineIdx].match(/^[ \t]*/)[0].length;
+  for (let i = keyLineIdx + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^[ \t]*/)[0];
+    if (m.length <= keyIndent && /^[A-Za-z0-9_-]+:/.test(lines[i])) return i;
+  }
+  return lines.length;
+}
+
+/**
+ * 在 lines（原地不改，返回新数组）中把 itemText 追加为 keyName: 块序列的最后一项。
+ * key 不存在则新建（fieldIndent 为新键行缩进）；key 存在但值为空 flow `[]` 先展开为块序列。
+ */
+function appendToBlockSequence(lines, keyName, itemText, fieldIndent) {
+  const keyRe = new RegExp('^[ \\t]*' + keyName + ':');
+  const idx = lines.findIndex((l) => keyRe.test(l));
+  if (idx === -1) return [...lines, `${fieldIndent}${keyName}:`, itemText];
+  const out = [...lines];
+  if (new RegExp('^[ \\t]*' + keyName + ':\\s*\\[\\]\\s*$').test(out[idx])) {
+    out[idx] = out[idx].replace(/:\s*\[\]\s*$/, ':');
+  }
+  const segEnd = findBlockEnd(out, idx);
+  let lastItem = -1;
+  for (let i = segEnd - 1; i > idx; i--) {
+    if (/^[ \t]*- /.test(out[i])) { lastItem = i; break; }
+  }
+  let insAt = lastItem === -1 ? idx + 1 : lastItem + 1;
+  if (lastItem !== -1) {
+    const itemInd = out[lastItem].match(/^[ \t]*/)[0].length;
+    while (insAt < segEnd && out[insAt].match(/^[ \t]*/)[0].length > itemInd) insAt++;
+  }
+  out.splice(insAt, 0, itemText);
+  return out;
+}
+
+/** checkpoint-add：块内 checkpoints[] 追加 + remote-ref/last-push-at/last-push-by 更新（SDD §3.1）。 */
+function editCheckpointAdd(text, cr, meta) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, cr);
+  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
+  const lines = block.text.split('\n');
+  const fieldIndent = ' '.repeat(block.indent + 2);
+  const itemIndent = ' '.repeat(block.indent + 4);
+  const subIndent = ' '.repeat(block.indent + 6);
+  // 1) checkpoints[] 追加（无键则创建；空 flow [] 展开为块序列）
+  const cpItem = [
+    `${itemIndent}- repo: ${meta.repo}`,
+    `${subIndent}sha: ${meta.sha}`,
+    meta.remoteRef ? `${subIndent}remote-ref: "${meta.remoteRef}"` : null,
+    `${subIndent}pushed-at: "${nowIso()}"`,
+    `${subIndent}by: "${meta.by}"`,
+  ].filter(Boolean).join('\n');
+  let result = appendToBlockSequence(lines, 'checkpoints', cpItem, fieldIndent);
+  // 2) remote-ref / last-push-at / last-push-by 更新（无则插入到条目块尾部）
+  const setField = (key, value) => {
+    const hit = result.some((l) => new RegExp('^[ \\t]*' + key + ':').test(l));
+    if (hit) {
+      result = result.map((l) => (new RegExp('^[ \\t]*' + key + ':').test(l)
+        ? l.replace(/^(.*)$/, `${fieldIndent}${key}: "${value}"`)
+        : l));
+    } else {
+      result.push(`${fieldIndent}${key}: "${value}"`);
+    }
+  };
+  if (meta.remoteRef) setField('remote-ref', meta.remoteRef);
+  setField('last-push-at', nowIso());
+  setField('last-push-by', meta.by);
+  return norm.slice(0, block.start) + result.join('\n') + norm.slice(block.end);
+}
+
+/** owner-set：块内 owners.{role} 的 id + assigned-at 更新（crctl 生成时间戳）。 */
+function editOwnerSet(text, cr, role, id) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, cr);
+  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
+  const roleRe = new RegExp('^([ \\t]*)' + role + ':', 'm');
+  if (!roleRe.test(block.text)) fail('OWNER_ROLE_MISSING', `${cr} 条目中缺少 owners.${role} 块，结构异常`);
+  const subIndent = ' '.repeat(block.indent + 6);
+  const lines = block.text.split('\n');
+  const roleIdx = lines.findIndex((l) => new RegExp('^[ \\t]*' + role + ':').test(l));
+  const endIdx = findBlockEnd(lines, roleIdx);
+  const seg = lines.slice(roleIdx + 1, endIdx);
+  const hasId = seg.some((l) => /^\s*id:/.test(l));
+  const hasAt = seg.some((l) => /^\s*assigned-at:/.test(l));
+  const out = [];
+  for (let i = roleIdx + 1; i < endIdx; i++) {
+    const l = lines[i];
+    if (/^\s*id:/.test(l)) out.push(l.replace(/^(\s*)id:.*$/, `$1id: ${id}`));
+    else if (/^\s*assigned-at:/.test(l)) out.push(l.replace(/^(\s*)assigned-at:.*$/, `$1assigned-at: "${nowIso()}"`));
+    else out.push(l);
+  }
+  if (!hasId) out.unshift(`${subIndent}id: ${id}`);
+  if (!hasAt) out.splice(hasId ? 1 : 1, 0, `${subIndent}assigned-at: "${nowIso()}"`);
+  const nb = lines.slice(0, roleIdx + 1).concat(out, lines.slice(endIdx)).join('\n');
+  return norm.slice(0, block.start) + nb + '\n' + norm.slice(block.end);
+}
+
+/** backlog-set：白名单标量字段 prd-path/sdd-path 替换或插入。 */
+const BACKLOG_SET_FIELDS = ['prd-path', 'sdd-path'];
+function editBacklogSet(text, cr, field, value) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, cr);
+  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
+  const lines = block.text.split('\n');
+  const hit = lines.some((l) => new RegExp('^[ \\t]*' + field + ':').test(l));
+  const fieldIndent = ' '.repeat(block.indent + 2);
+  let out;
+  if (hit) {
+    out = lines.map((l) => (new RegExp('^[ \\t]*' + field + ':').test(l)
+      ? l.replace(/^(.*)$/, `${fieldIndent}${field}: "${value}"`)
+      : l));
+  } else {
+    out = [...lines, `${fieldIndent}${field}: "${value}"`];
+  }
+  return norm.slice(0, block.start) + out.join('\n') + norm.slice(block.end);
+}
+
+function cmdCheckpointAdd(ws, cr, gates, flags) {
+  if (!flags.repo || !flags.sha) fail('BAD_ARGS', 'checkpoint-add 需要 --repo <r> --sha <sha> [--remote-ref <ref>]');
+  const state = resolveCrState(ws, cr);
+  const LEGAL = ['developing', 'code-reviewing', 'code-approved', 'merging', 'writing-back'];
+  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `checkpoint-add 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
+  const snap = loadBacklogEntry(ws, cr);
+  const newText = editCheckpointAdd(snap.text, cr, { repo: flags.repo, sha: flags.sha, remoteRef: flags['remote-ref'] || null, by: identity(ws) });
+  casWrite(snap.path, snap.hash, newText);
+  auditLog(ws, { kind: 'ledger', op: 'checkpoint-add', cr, actor: identity(ws), repo: flags.repo, sha: flags.sha });
+  ok({ op: 'checkpoint-add', cr, repo: flags.repo, sha: flags.sha, file: snap.path });
+}
+
+function cmdOwnerSet(ws, cr, gates, flags) {
+  if (!flags.role || !flags.id) fail('BAD_ARGS', 'owner-set 需要 --role <requirement|development|test> --id <id>');
+  if (!['requirement', 'development', 'test'].includes(flags.role)) fail('BAD_ARGS', `--role 必须是 requirement|development|test（当前 ${flags.role}）`);
+  const state = resolveCrState(ws, cr);
+  const { sm } = loadStateMachine(ws);
+  if ((sm.terminal || []).includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `owner-set 不允许在终态 ${state.status} 修改负责人`, { current: state.status, expect: '非终态' });
+  const snap = loadBacklogEntry(ws, cr);
+  const newText = editOwnerSet(snap.text, cr, flags.role, flags.id);
+  casWrite(snap.path, snap.hash, newText);
+  auditLog(ws, { kind: 'ledger', op: 'owner-set', cr, actor: identity(ws), role: flags.role, to: flags.id });
+  ok({ op: 'owner-set', cr, role: flags.role, id: flags.id, file: snap.path });
+}
+
+function cmdBacklogSet(ws, cr, gates, flags) {
+  if (!flags.field || flags.value === undefined) fail('BAD_ARGS', 'backlog-set 需要 --field <prd-path|sdd-path> --value <v>');
+  if (!BACKLOG_SET_FIELDS.includes(flags.field)) {
+    fail('FIELD_NOT_ALLOWED', `backlog-set 白名单仅允许 ${BACKLOG_SET_FIELDS.join(' | ')}；${flags.field} 属受控字段，各有专命令（status→advance、updated-at/owners→crctl 自动维护、merge-commits→merge-metadata）`, { field: flags.field, allowed: BACKLOG_SET_FIELDS });
+  }
+  const state = resolveCrState(ws, cr);
+  const { sm } = loadStateMachine(ws);
+  if ((sm.terminal || []).includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `backlog-set 不允许在终态 ${state.status} 修改字段`, { current: state.status, expect: '非终态' });
+  const snap = loadBacklogEntry(ws, cr);
+  const newText = editBacklogSet(snap.text, cr, flags.field, flags.value);
+  casWrite(snap.path, snap.hash, newText);
+  auditLog(ws, { kind: 'ledger', op: 'backlog-set', cr, actor: identity(ws), field: flags.field, value: flags.value });
+  ok({ op: 'backlog-set', cr, field: flags.field, value: flags.value, file: snap.path });
+}
+
+/* ────────────────────────── inbox-emit（CR-2026-021 TASK-05） ──────────────────────────
+ * 专命令追加 _backlog 条目 notify-log[]（事件追加语义，比标量 set 重，不复用 backlog-set）。
+ * 同时把 to 列表合并进 notify-pending（去重）。事件 payload 结构与 inbox-emit SKILL 既有
+ * 消费逻辑对齐：{at, event, to, payload, handled:false}。时间戳/身份由 crctl 生成。
+ */
+function editInboxEmit(text, cr, meta) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, cr);
+  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
+  const lines = block.text.split('\n');
+  const fieldIndent = ' '.repeat(block.indent + 2);
+  const itemIndent = ' '.repeat(block.indent + 4);
+  const subIndent = ' '.repeat(block.indent + 6);
+  const payloadJson = meta.payload ? ` ${JSON.stringify(meta.payload)}` : '';
+  const logItem = [
+    `${itemIndent}- at: "${nowIso()}"`,
+    `${subIndent}event: ${meta.event}`,
+    `${subIndent}to: ${JSON.stringify(meta.to)}`,
+    `${subIndent}payload:${payloadJson || ' {}'}`,
+    `${subIndent}handled: false`,
+  ].join('\n');
+  // notify-log 追加（无键则创建）
+  const result = appendToBlockSequence(lines, 'notify-log', logItem, fieldIndent);
+  // notify-pending 合并（去重；无键则创建）
+  const npIdx = result.findIndex((l) => /^[ \t]*notify-pending:/.test(l));
+  const npFlow = /^[ \t]*notify-pending:\s*\[[^\]]*\]\s*$/.exec(npIdx === -1 ? '' : result[npIdx]);
+  if (npIdx === -1) {
+    result.push(`${fieldIndent}notify-pending: ${JSON.stringify(meta.to)}`);
+  } else if (npFlow) {
+    let items = [];
+    const inner = npFlow[0].replace(/^[ \t]*notify-pending:\s*\[/, '').replace(/\]\s*$/, '').trim();
+    if (inner) {
+      try { items = JSON.parse('[' + inner + ']'); } catch { fail('LEDGER_PARSE_FAILED', `notify-pending 现有内容不是合法 JSON 数组: ${inner}`); }
+      if (!Array.isArray(items)) fail('LEDGER_PARSE_FAILED', `notify-pending 现有内容解析结果非数组: ${inner}`);
+    }
+    const merged = [...new Set([...items, ...meta.to])];
+    result[npIdx] = result[npIdx].replace(/^([ \t]*)notify-pending:.*$/, `$1notify-pending: ${JSON.stringify(merged)}`);
+  } else {
+    // 块序列形态：解析现有元素后整段重写为 flow（crctl 独占写，无并发面）
+    const npEnd = findBlockEnd(result, npIdx);
+    const seg = result.slice(npIdx + 1, npEnd).map((l) => l.trim().replace(/^- /, '').replace(/^["']|["']$/g, '')).filter(Boolean);
+    const merged = [...new Set([...seg, ...meta.to])];
+    result.splice(npIdx, npEnd - npIdx, `${fieldIndent}notify-pending: ${JSON.stringify(merged)}`);
+  }
+  return norm.slice(0, block.start) + result.join('\n') + norm.slice(block.end);
+}
+
+function cmdInboxEmit(ws, cr, gates, flags) {
+  if (!flags.event) fail('BAD_ARGS', 'inbox-emit 需要 --event <event> [--to <a,b>] [--payload <json>]');
+  const state = resolveCrState(ws, cr);
+  const { sm } = loadStateMachine(ws);
+  if ((sm.terminal || []).includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `inbox-emit 不允许在终态 ${state.status} 追加通知`, { current: state.status, expect: '非终态' });
+  let to = [];
+  if (flags.to) {
+    try { to = JSON.parse(flags.to); } catch { to = String(flags.to).split(',').map((s) => s.trim()).filter(Boolean); }
+    if (!Array.isArray(to)) to = [String(to)];
+  }
+  let payload = null;
+  if (flags.payload) {
+    try { payload = JSON.parse(flags.payload); } catch { fail('BAD_ARGS', `--payload 不是合法 JSON: ${flags.payload}`); }
+  }
+  const snap = loadBacklogEntry(ws, cr);
+  const newText = editInboxEmit(snap.text, cr, { event: flags.event, to, payload });
+  casWrite(snap.path, snap.hash, newText);
+  auditLog(ws, { kind: 'ledger', op: 'inbox-emit', cr, actor: identity(ws), event: flags.event, to });
+  emitOutboxEvent(ws, {
+    event_kind: 'inbox-emit', cr_id: cr, actor: identity(ws),
+    payload: { event: flags.event, to },
+  });
+  ok({ op: 'inbox-emit', cr, event: flags.event, to, file: snap.path });
+}
+
+/* ────────────────────────── next-cr-id / cr-init（S6/S8，CR-2026-021 TASK-06） ──────────────────────────
+ * SDD §2.3/§4.2（SDD-BLOCK-001 修复语义）：
+ * - next-cr-id = 纯只读预览：扫 _index.yml/_backlog.yml 现有 max、返回 CR-{Y}-{NNN+1} 候选。
+ *   不写文件、非权威、不参与分配。
+ * - cr-init = 唯一权威原子分配：不取显式 cr-id 入参，内部读 max → 计算 → casWriteMulti 一次写
+ *   cr.md(新建,expectedHash=null) + _backlog(追加) + _index(登记) → 输出返回分配到的 cr-id。
+ *   并发下后到者见 _index/_backlog hash 已变 → CAS_CONFLICT，三文件全不落盘，调用方重跑拿新号。
+ *   唯一并发冲突码是 CAS_CONFLICT；正常路径无 CR_ALREADY_EXISTS（无外部传入 id，无 TOCTOU）。
+ */
+
+function scanMaxCrNumber(ws, year) {
+  const re = new RegExp('^CR-' + year + '-(\\d{3})$');
+  let max = 0;
+  for (const p of [path.join(ws, 'change-requests', '_index.yml'), backlogPath(ws)]) {
+    const text = readFileChecked(p);
+    if (text == null) continue;
+    for (const m of text.matchAll(/^\s*- id:\s*["']?(CR-\d{4}-\d{3})["']?\s*$/gm)) {
+      const mm = m[1].match(re);
+      if (mm) max = Math.max(max, Number(mm[1]));
+    }
+  }
+  return max;
+}
+
+function formatCrId(year, n) { return `CR-${year}-${String(n).padStart(3, '0')}`; }
+
+function cmdNextCrId(ws, gates, flags) {
+  const year = flags.year || String(new Date().getFullYear());
+  const max = scanMaxCrNumber(ws, year);
+  ok({ crId: formatCrId(year, max + 1), year, max, previewOnly: true, note: '纯只读预览，不参与分配；权威分配请用 crctl cr-init' });
+}
+
+function cmdCrInit(ws, gates, flags) {
+  if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> [--year Y]');
+  if (!flags['owner-requirement']) fail('BAD_ARGS', 'cr-init 需要 --owner-requirement <id>（被指派人业务身份）');
+  const year = flags.year || String(new Date().getFullYear());
+  const cr = formatCrId(year, scanMaxCrNumber(ws, year) + 1);
+  const now = nowIso();
+  const by = identity(ws);
+  const ownerId = String(flags['owner-requirement']);
+  // cr.md 全量 frontmatter（owners/owner-history/时间戳全 crctl 生成）
+  const fm = [
+    '---',
+    `id: ${cr}`,
+    `title: ${flags.title.replaceAll('"', '\\"')}`,
+    'summary: ""',
+    `owner: ${ownerId}`,
+    'owners:',
+    `  requirement:`,
+    `    id: ${ownerId}`,
+    `    assigned-at: "${now}"`,
+    `  development:`,
+    `    id: ${ownerId}`,
+    `    assigned-at: "${now}"`,
+    `  test:`,
+    `    id: ${ownerId}`,
+    `    assigned-at: "${now}"`,
+    'target-version: tbd',
+    'source: manual',
+    'status: drafting',
+    `created: "${now}"`,
+    `updated: "${now}"`,
+    'remote-ref: ""',
+    'last-push-at: ""',
+    'last-push-by: ""',
+    'owner-history:',
+    `  - { role: requirement, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
+    `  - { role: development, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
+    `  - { role: test, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
+    'handover-history: []',
+    '---',
+    '',
+  ].join('\n');
+  // _backlog 条目追加
+  const bp = backlogPath(ws);
+  const backlogText = readFileChecked(bp);
+  if (backlogText == null) fail('BACKLOG_NOT_FOUND', `缺少 ${bp}`);
+  const backlogEntry = [
+    `  - id: ${cr}`,
+    `    title: ${flags.title.replaceAll('"', '\\"')}`,
+    '    summary: ""',
+    `    owner: ${ownerId}`,
+    '    owners:',
+    `      requirement:`,
+    `        id: ${ownerId}`,
+    `        assigned-at: "${now}"`,
+    `      development:`,
+    `        id: ${ownerId}`,
+    `        assigned-at: "${now}"`,
+    `      test:`,
+    `        id: ${ownerId}`,
+    `        assigned-at: "${now}"`,
+    '    target-version: tbd',
+    '    source: manual',
+    '    prd-path: ""',
+    `    created: "${now}"`,
+    `    updated: "${now}"`,
+  ].join('\n');
+  const newBacklog = backlogText.trimEnd() + '\n' + backlogEntry + '\n';
+  // _index 条目追加
+  const ip = path.join(ws, 'change-requests', '_index.yml');
+  const indexText = readFileChecked(ip);
+  if (indexText == null) fail('INDEX_NOT_FOUND', `缺少 ${ip}`);
+  const indexEntry = [
+    `  - id: ${cr}`,
+    `    title: ${flags.title.replaceAll('"', '\\"')}`,
+    '    status: drafting',
+    `    created: "${now}"`,
+  ].join('\n');
+  const newIndex = indexText.trimEnd() + '\n' + indexEntry + '\n';
+  // 原子三文件写：cr.md 期望不存在（创建冲突即 CAS_CONFLICT）；_backlog/_index 用读时 sha256
+  const crDirPath = crDir(ws, cr);
+  fs.mkdirSync(crDirPath, { recursive: true });
+  casWriteMulti([
+    { path: path.join(crDirPath, 'cr.md'), expectedHash: null, newText: fm },
+    { path: bp, expectedHash: sha256(backlogText), newText: newBacklog },
+    { path: ip, expectedHash: sha256(indexText), newText: newIndex },
+  ]);
+  auditLog(ws, { kind: 'ledger', op: 'cr-init', cr, actor: by, title: flags.title });
+  emitOutboxEvent(ws, {
+    event_kind: 'cr-init', cr_id: cr, actor: by,
+    payload: { title: flags.title, ownerRequirement: ownerId },
+  });
+  ok({ op: 'cr-init', cr, title: flags.title, status: 'drafting', files: { crMd: path.join('change-requests', cr, 'cr.md'), backlog: bp, index: ip } });
+}
+
+/* ────────────────────────── task allocate（S7，CR-2026-021 TASK-07） ──────────────────────────
+ * 扩展现有 task 子命令族：CAS 保护的 TASK-ID 分配（SDD §2.3）。
+ * 分配即写、不接受调用方传入编号：内部扫 tasks/_index.yml 现有 max → {cr}-TASK-{NN+1}，
+ * slug 缺失回退 task-{NN}（与 writeback-tasks.mjs 的 slug 兜底风格对齐）。唯一并发冲突码 CAS_CONFLICT。
+ */
+function scanMaxTaskNumber(text, cr) {
+  const re = new RegExp('- id:\\s*["\']?' + cr + '-TASK-(\\d+)', 'g');
+  let max = 0;
+  for (const m of text.matchAll(re)) max = Math.max(max, Number(m[1]));
+  return max;
+}
+
+/** tasks/_index.yml 追加最小条目 {id, slug, status: pending}（title/estimate/depends-on 由 write-dev-tasks 后续填充）。 */
+function appendTaskEntry(text, cr, taskId, slug) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const lines = norm.split('\n');
+  const idx = lines.findIndex((l) => /^tasks:/.test(l));
+  if (idx === -1) fail('TASK_INDEX_SHAPE', 'tasks/_index.yml 缺少 tasks: 段，结构异常');
+  if (lines.some((l) => new RegExp('- id:\\s*["\']?' + taskId + '["\']?\\s*$').test(l))) {
+    fail('TASK_ALREADY_EXISTS', `${taskId} 已存在于 tasks/_index.yml`);
+  }
+  const entry = `  - id: ${taskId}\n    slug: ${slug}\n    status: pending`;
+  // 定位 tasks: 段尾（下一个顶层键或 EOF）
+  let tail = lines.length;
+  for (let i = idx + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^[ \t]*/)[0];
+    if (m.length === 0 && /^[A-Za-z0-9_-]+:/.test(lines[i])) { tail = i; break; }
+  }
+  lines.splice(tail, 0, entry);
+  return lines.join('\n');
+}
+
+function cmdTaskAllocate(ws, cr, gates, flags) {
+  const state = resolveCrState(ws, cr);
+  const LEGAL = ['task-breakdown', 'developing'];
+  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `task allocate 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
+  const p = path.join(crDir(ws, cr), 'tasks', '_index.yml');
+  const text = readFileChecked(p);
+  if (text == null) fail('TASK_INDEX_NOT_FOUND', `缺少 ${p}（请先由 write-dev-tasks 创建 tasks/_index.yml 骨架）`);
+  const n = scanMaxTaskNumber(text, cr) + 1;
+  const nn = String(n).padStart(2, '0');
+  const taskId = `${cr}-TASK-${nn}`;
+  const slug = flags.slug || `task-${nn}`;
+  const newText = appendTaskEntry(text, cr, taskId, slug);
+  casWrite(p, sha256(text), newText);
+  auditLog(ws, { kind: 'ledger', op: 'task-allocate', cr, actor: identity(ws), task: taskId, slug });
+  ok({ op: 'task-allocate', cr, task: taskId, slug, file: p });
+}
+
+/* ────────────────────────── worktree-path / report / cr-metrics（S9/S11，CR-2026-021 TASK-08） ──────────────────────────
+ * 两个只读子命令（SDD §3.2）：不写任何文件、无 CAS。
+ * - worktree-path <cr> --repo <r>：唯一权威拼接规则（从 requirement-register 等 4+ 处 SKILL prose 提炼）：
+ *   bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id；path = {ws}/.rayai-worktrees/{bucket}/requirement/{cr}
+ * - report / cr-metrics [--period <N>d]：跨 CR 聚合（对齐 cr-dashboard Step 2 口径）——
+ *   状态直方图（在途 cr.md frontmatter + _history.yml 归档 final-status，累计口径，不受 --period 影响）、
+ *   周期活动计数 periodActivity（按 archived-at，仅当传 --period 时按窗口过滤，格式仅支持 <N>d 如 7d/30d，
+ *   非法格式 BAD_ARGS 硬拒而非静默忽略）、SLA 阈值比较（change-requests/_config.yml#sla，缺省跳过，累计口径）。
+ */
+
+function cmdWorktreePath(ws, cr, gates, flags) {
+  if (!flags.repo) fail('BAD_ARGS', 'worktree-path 需要 --repo <repo-id>');
+  const bucket = flags.repo === 'knowledge-base' || flags.repo === 'ai-first-platform-docs' ? 'knowledge-base' : flags.repo;
+  const p = path.join(ws, '.rayai-worktrees', bucket, 'requirement', cr);
+  ok({ op: 'worktree-path', cr, repo: flags.repo, bucket, path: p });
+}
+
+/** 解析 --period（仅支持 <N>d，如 7d/30d），返回该窗口起始的日期字符串（YYYY-MM-DD）；无 period 输入返回 null。 */
+function periodCutoffDay(period) {
+  const m = /^(\d+)d$/.exec(String(period).trim());
+  if (!m) fail('BAD_ARGS', `--period 格式不支持: ${period}（仅支持 <N>d，如 7d/30d）`);
+  const cutoff = new Date(Date.now() - Number(m[1]) * 86400000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${cutoff.getFullYear()}-${pad(cutoff.getMonth() + 1)}-${pad(cutoff.getDate())}`;
+}
+
+function cmdReport(ws, gates, flags) {
+  const cutoffDay = flags.period !== undefined ? periodCutoffDay(flags.period) : null;
+  const statusHistogram = {};
+  const active = [];
+  // 在途：扫描 change-requests/*/cr.md frontmatter status
+  const crDirPath = path.join(ws, 'change-requests');
+  if (fs.existsSync(crDirPath)) {
+    for (const name of fs.readdirSync(crDirPath)) {
+      if (!/^CR-/.test(name) || name.includes('.')) continue; // CR 目录（含测试短 ID），排除 _backlog.yml 等文件
+      const md = readCrMdFrontmatter(ws, name);
+      if (!md || !md.status) continue;
+      statusHistogram[md.status] = (statusHistogram[md.status] || 0) + 1;
+      active.push({ cr: name, status: md.status, created: md.created || '' });
+    }
+  }
+  // 归档：_history.yml final-status
+  const historyText = readFileChecked(path.join(ws, 'change-requests', '_history.yml'));
+  let archived = 0;
+  const periodActivity = { byDay: {}, byMonth: {} };
+  if (historyText) {
+    const doc = parseYaml(historyText);
+    const list = Array.isArray(doc) ? doc : (doc && doc.history) || [];
+    for (const e of list) {
+      if (!e || !e.id) continue;
+      const fs_ = e['final-status'] || 'archived';
+      statusHistogram[fs_] = (statusHistogram[fs_] || 0) + 1;
+      if (e['archived-at']) {
+        archived++;
+        const d = String(e['archived-at']).slice(0, 10);
+        if (cutoffDay === null || d >= cutoffDay) {
+          periodActivity.byDay[d] = (periodActivity.byDay[d] || 0) + 1;
+          periodActivity.byMonth[d.slice(0, 7)] = (periodActivity.byMonth[d.slice(0, 7)] || 0) + 1;
+        }
+      }
+    }
+  }
+  // SLA：_config.yml#sla（缺省跳过比较）
+  const configText = readFileChecked(path.join(ws, 'change-requests', '_config.yml'));
+  let sla = null;
+  if (configText) {
+    try { sla = parseYaml(configText).sla || null; } catch { /* 结构异常跳过 SLA */ }
+  }
+  ok({
+    op: 'report',
+    total: active.length + archived,
+    active: active.length,
+    archived,
+    statusHistogram,
+    period: flags.period !== undefined ? flags.period : null,
+    periodActivity,
+    ...(sla ? { sla } : {}),
+  });
+}
+
+function cmdCrMetrics(ws, gates, flags) {
+  const period = flags.period || '7d';
+  return cmdReport(ws, gates, { ...flags, period });
+}
+
+/* ────────────────────────── git commit --template（S10，CR-2026-021 TASK-09） ──────────────────────────
+ * 给既有 git commit 分支加格式化模板（不是新顶层子命令）：
+ *   register:        [cr] register {cr}: {subject}
+ *   task-breakdown:  feat({cr}): task breakdown ({subject})
+ *   writeback:       writeback({cr}): {subject}
+ * cr 从 --cwd 当前分支名 requirement/{cr} 提取（提取不到则要求 subject 自带 CR 前缀）。
+ * 不改变现有 -m 直传路径的白名单校验（--template 是新增可选分支）。
+ */
+const COMMIT_TEMPLATES = {
+  register: (cr, subject) => `[cr] register ${cr}: ${subject}`,
+  'task-breakdown': (cr, subject) => `feat(${cr}): task breakdown (${subject})`,
+  writeback: (cr, subject) => `writeback(${cr}): ${subject}`,
+};
+
+function resolveTemplateCr(ws, cwd, subject) {
+  const r = controlledGit(ws, 'branch', ['--show-current'], cwd, 'crctl-commit-template');
+  if (r.ok && r.stdout) {
+    const m = r.stdout.trim().match(/requirement\/(CR-[\w-]+)/); // 兼容 CR-YYYY-NNN 与测试短 ID
+    if (m) return m[1];
+  }
+  const sm = subject.match(/CR-\d{4}-\d{3}/);
+  if (sm) return sm[0];
+  fail('BAD_ARGS', 'git commit --template 无法确定 cr：--cwd 分支非 requirement/CR-* 且 subject 不含 CR 编号');
+}
+
+function applyCommitTemplate(ws, argv, flags) {
+  const kind = flags.template;
+  const tpl = COMMIT_TEMPLATES[kind];
+  if (!tpl) fail('BAD_ARGS', `--template 必须是 ${Object.keys(COMMIT_TEMPLATES).join(' | ')}（当前 ${kind}）`);
+  const mi = argv.indexOf('-m');
+  if (mi === -1) fail('BAD_ARGS', 'git commit --template 需要同时提供 -m <subject>（作为模板的 subject 部分）');
+  const subject = String(argv[mi + 1] || '').trim();
+  if (!subject) fail('BAD_ARGS', '-m subject 为空');
+  const cr = resolveTemplateCr(ws, flags.cwd ? path.resolve(flags.cwd) : ws, subject);
+  argv[mi + 1] = tpl(cr, subject);
+  return argv;
+}
+
+/** 行级追加 supplemental-reviews 段条目（硬失败：无该段则创建，段结构异常则报错）。 */
+function appendSupplementalReview(text, entry) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const lines = norm.split('\n');
+  const idx = lines.findIndex((l) => /^supplemental-reviews:/.test(l));
+  if (idx === -1) {
+    const tail = norm.trimEnd();
+    return tail + '\n' + (tail.endsWith(':') ? '' : 'supplemental-reviews:\n') + entry + '\n';
+  }
+  const keyIndent = lines[idx].match(/^[ \t]*/)[0].length;
+  const segEnd = findBlockEnd(lines, idx);
+  const seg = lines.slice(idx + 1, segEnd);
+  // 段结构检查只针对列表项层级（缩进 ≤ 键缩进+2 的非空行）：子字段行（更深缩进）不算异常
+  const badLine = seg.find((l) => {
+    const ind = l.match(/^[ \t]*/)[0].length;
+    return ind > 0 && ind <= keyIndent + 2 && /^\S/.test(l.trimStart()) && !/^-/.test(l.trimStart());
+  });
+  if (badLine) fail('APPROVAL_SHAPE', `supplemental-reviews 段包含非列表行（${badLine.trim()}），结构异常，拒绝追加`);
+  lines.splice(segEnd, 0, entry);
+  return lines.join('\n');
+}
+
 function cmdTest(ws, cr, gates, flags) {
   const cmds = flags.cmdList || [];
   if (cmds.length === 0) fail('BAD_ARGS', 'test 需要至少一个 --cmd "<command>"');
@@ -1572,7 +2246,9 @@ function cmdNext(ws, cr, gates, flags) {
 function cmdGit(ws, argv, flags) {
   const sub = argv[0];
   if (!sub) fail('BAD_ARGS', 'git 需要子命令，如 crctl git status --short --cwd <path>');
-  const args = argv.slice(1);
+  let args = argv.slice(1);
+  // S10（CR-2026-021 TASK-09）：git commit --template <kind> 生成规范 message（可选分支，不影响 -m 直传白名单校验）
+  if (sub === 'commit' && flags.template) args = applyCommitTemplate(ws, args, flags);
   const r = controlledGit(ws, sub, args, flags.cwd ? path.resolve(flags.cwd) : ws, flags.caller);
   if (r.code === 'FORBIDDEN_SUBCOMMAND') fail('FORBIDDEN_SUBCOMMAND', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   if (r.code === 'SHELL_UNAVAILABLE') fail('SHELL_UNAVAILABLE', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
@@ -1611,12 +2287,25 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
                         [--approver <id>] [--spec-id <id>]   仅限交互式终端（人类在环）
   crctl validate <file>                          受控产物 schema 校验（validate-doc 代码化）
   crctl attempt <cr_id> --loop <ref>             review-loop 轮次唯一记账点；超限返回 LOOP_EXHAUSTED
+  crctl review-record <cr_id> --stage <requirement|tech-design|code> --from <payload.yml> [--bump-attempt]
+                                                schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）
+  crctl review-note  <cr_id> [--stage <s>] --note <text>  approval.yml supplemental-reviews[] 追加（不接受 --by，身份 crctl 生成）
+  crctl checkpoint-add <cr_id> --repo <r> --sha <sha> [--remote-ref <ref>]   _backlog checkpoints[] 追加 + 推送元数据（developing~writing-back）
+  crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   _backlog owners.{role} 指派（非终态）
+  crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
+  crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
+  crctl next-cr-id  [--year Y]                          只读预览下一个 CR-ID（不写、非权威）
+  crctl cr-init     --title <t> --owner-requirement <id> [--year Y]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记
+  crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
+  crctl report | crctl cr-metrics [--period <N>d]   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
   crctl migrate-backlog                          _backlog.yml v1->v2 迁移（撤出 status/updated-at，升 schema）
   crctl git     <sub> [args...] [--cwd <p>] [--caller <skill>]   controlled-shell 白名单执行
+                （git commit 可加 --template <register|task-breakdown|writeback> 生成规范 message）
   crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
+  crctl task allocate <cr_id> [--slug <s>]   tasks/_index.yml CAS 分配 TASK-ID（task-breakdown/developing 态）
   crctl merge-metadata <cr_id> --repo <r> --trunk <t> --sha <sha>
                                                 _backlog.yml merge-commits[] 追加（merging/writing-back 态）
   crctl archive-move <cr_id> --final-status <s> [--archive-reason <r>] [--spec-id <id>]
@@ -1644,7 +2333,7 @@ function parseArgs(argv) {
 
 /** git 子命令专用解析：只抽取 crctl 自己的旗标，git 的旗标（--short 等）原样透传 */
 function parseGitArgs(argv) {
-  const CRCTL_FLAGS = ['--cwd', '--caller', '--workspace'];
+  const CRCTL_FLAGS = ['--cwd', '--caller', '--workspace', '--template']; // --template 是 crctl 的 commit 模板旗标，不透传给 git
   const flags = {};
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
@@ -1670,9 +2359,21 @@ function main() {
       return cmdValidate(ws, positional[0], gates);
     }
     case 'attempt': return cmdAttempt(ws, requireCr(positional), gates, flags);
+    case 'review-record': return cmdReviewRecord(ws, requireCr(positional), gates, flags);
+    case 'review-note': return cmdReviewNote(ws, requireCr(positional), gates, flags);
+    case 'checkpoint-add': return cmdCheckpointAdd(ws, requireCr(positional), gates, flags);
+    case 'owner-set': return cmdOwnerSet(ws, requireCr(positional), gates, flags);
+    case 'backlog-set': return cmdBacklogSet(ws, requireCr(positional), gates, flags);
+    case 'inbox-emit': return cmdInboxEmit(ws, requireCr(positional), gates, flags);
+    case 'next-cr-id': return cmdNextCrId(ws, gates, flags);
+    case 'cr-init': return cmdCrInit(ws, gates, flags);
+    case 'worktree-path': return cmdWorktreePath(ws, requireCr(positional), gates, flags);
+    case 'report': return cmdReport(ws, gates, flags);
+    case 'cr-metrics': return cmdCrMetrics(ws, gates, flags);
     case 'task': {
-      if (positional[0] !== 'done') fail('BAD_ARGS', 'task 仅支持子命令 done：crctl task done <CR-ID> --task <TASK-ID>');
-      return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
+      if (positional[0] === 'done') return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
+      if (positional[0] === 'allocate') return cmdTaskAllocate(ws, requireCr(positional.slice(1)), gates, flags);
+      fail('BAD_ARGS', 'task 仅支持子命令 done/allocate：crctl task done <CR-ID> --task <TASK-ID> | crctl task allocate <CR-ID> [--slug <s>]');
     }
     case 'merge-metadata': return cmdMergeMetadata(ws, requireCr(positional), gates, flags);
     case 'archive-move': return cmdArchiveMove(ws, requireCr(positional), gates, flags);

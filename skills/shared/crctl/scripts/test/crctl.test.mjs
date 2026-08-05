@@ -1084,3 +1084,557 @@ test('FR-2 回退：非 git workspace 的 status 不触发 STATUS_DIVERGED、不
     assert.ok(!existsSync(path.join(ws, '.crctl', 'audit.log')), 'status 在非 git 工作区不应写 audit.log（.git 门控命中，未触达 controlledGit）');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-021 TASK-02：review-record（S1，判断/写入分离）──────────────
+
+function writeReviewPayload(ws, cr, stage, content) {
+  const dir = path.join(ws, '.crctl', 'tmp');
+  mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, 'review-' + stage + '.yml');
+  writeFileSync(p, content);
+  return p;
+}
+
+test('review-record：tech-design stage 写入 sdd.yml（非 tech-design.yml）+ payload 删除 + 元数据 crctl 生成（AC-1）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-review-pending');
+    const payload = writeReviewPayload(ws, 'CR-T1', 'tech-design',
+      'verdict: pass\nblockers: []\ndimensions:\n  structure: ok\n  consistency: ok\nsuggestions:\n  - "abc"\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.op, 'review-record');
+    assert.ok(r.stdout.file.replaceAll('\\', '/').endsWith('review-annotations/sdd.yml'), '应写 sdd.yml（非 tech-design.yml）: ' + r.stdout.file);
+    assert.equal(existsSync(payload), false, '临时 payload 应被删除');
+    const out = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'sdd.yml'), 'utf8');
+    assert.ok(out.includes('verdict: pass'), 'verdict 写入');
+    assert.ok(out.includes('blockers: []'), '空 blockers 用 flow 空数组');
+    assert.ok(out.includes('structure: "ok"'), 'dimensions 写入');
+    assert.ok(out.includes('reviewer:'), 'reviewer 由 crctl 生成');
+    assert.ok(out.includes('reviewed-at:'), 'reviewed-at 由 crctl 生成');
+    assert.ok(out.includes('suggestions:') && out.includes('abc'), 'suggestions 写入');
+    assert.ok(out.includes('review-type: tech-design'), 'review-type 写入');
+    assert.ok(out.includes('cr-id: CR-T1'), 'cr-id 写入');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-record：verdict 非法 → SCHEMA_INVALID，不写 canonical、payload 保留', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'requirement-reviewing');
+    const payload = writeReviewPayload(ws, 'CR-T1', 'requirement', 'verdict: maybe\nblockers: []\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'requirement', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'SCHEMA_INVALID');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'requirement.yml')), false, '不得写入 canonical');
+    assert.equal(existsSync(payload), true, '非法 payload 不得被删除');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-record：前置态非法（drafting 对 code stage）→ ILLEGAL_LEDGER_STATE，文件零变更（§0 范式；code 前置态=developing）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const payload = writeReviewPayload(ws, 'CR-T1', 'code', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'code', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'code.yml')), false, '前置态非法不得写文件');
+    assert.equal(existsSync(payload), true, '前置态非法不得消费 payload');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-record：未知 stage → STAGE_UNKNOWN', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'requirement-reviewing');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'bogus', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'STAGE_UNKNOWN');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-record：--bump-attempt 级联 attempt 记账（复用既有 bumpAttempt）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeReviewPayload(ws, 'CR-T1', 'code', 'verdict: block\nblockers:\n  - "bug A"\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'code', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.attempt, 1, 'attempt 级联为 1');
+    const loop = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-loop.yml'), 'utf8');
+    assert.ok(loop.includes('current-attempt: 1'), 'review-loop.yml 记账');
+    assert.ok(loop.includes('review-code'), 'loop ref = review-code');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-record：payload 缺失 → PAYLOAD_NOT_FOUND', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'requirement-reviewing');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'requirement', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'PAYLOAD_NOT_FOUND');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-021 TASK-03：review-note（S2，supplemental-reviews 追加）─────
+
+test('review-note：无 approval.yml 时创建文件并写入 supplemental-reviews（AC-2）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r = runCrctl(['review-note', 'CR-T1', '--stage', 'code', '--note', '补充意见', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.op, 'review-note');
+    const out = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml'), 'utf8');
+    assert.ok(out.includes('supplemental-reviews:'), '创建 supplemental-reviews 段');
+    assert.ok(out.includes('decision: note'), 'decision=note');
+    assert.ok(out.includes('notes: "补充意见"'), 'notes 写入');
+    assert.ok(out.includes('status-at-record: developing'), 'status-at-record 写入');
+    assert.ok(out.includes('reviewer:') && out.includes('recorded-at:'), '身份/时间戳由 crctl 生成');
+    assert.ok(!out.includes('requirement:'), '不得写入审批段');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-note：已有四审批段时追加，四段本体零改动（安全边界）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeApprovalYml(ws, 'CR-T1', 'code', { approver: 'Human', 'approved-at': '2026-08-04T12:00:00+08:00', via: 'crctl-approve' });
+    const before = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml'), 'utf8');
+    const r = runCrctl(['review-note', 'CR-T1', '--note', '追加意见', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const after = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml'), 'utf8');
+    assert.ok(after.includes('supplemental-reviews:'), '追加 supplemental-reviews 段');
+    assert.ok(after.includes('追加意见'), 'notes 存在');
+    assert.ok(after.includes('code:\n  approver: "Human"'), 'code 审批段本体不变');
+    assert.ok(after.startsWith(before.trimEnd()), '既有内容原样保留（追加在尾部）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-note：--by 传入 → BAD_ARGS 拒绝（非静默忽略，AC-2）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r = runCrctl(['review-note', 'CR-T1', '--note', 'x', '--by', 'Someone', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'BAD_ARGS');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml')), false, '拒绝后不得写文件');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-note：终态（archived）→ ILLEGAL_LEDGER_STATE，文件零变更', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'archived');
+    const r = runCrctl(['review-note', 'CR-T1', '--note', 'x', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml')), false);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-note：同一文件二次追加 → 两条记录共存（数组追加语义）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    assert.equal(runCrctl(['review-note', 'CR-T1', '--note', '意见一', '--workspace', ws]).status, 0);
+    assert.equal(runCrctl(['review-note', 'CR-T1', '--note', '意见二', '--workspace', ws]).status, 0);
+    const out = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml'), 'utf8');
+    const count = (out.match(/decision: note/g) || []).length;
+    assert.equal(count, 2, '两条补充审查记录共存');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-021 TASK-04：checkpoint-add / owner-set / backlog-set（S3/S4/S5）──
+
+test('checkpoint-add：追加 checkpoints[] + remote-ref/last-push 元数据（AC-3）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r = runCrctl(['checkpoint-add', 'CR-T1', '--repo', 'ai-first-platform-docs', '--sha', 'abc123', '--remote-ref', 'refs/heads/master', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.op, 'checkpoint-add');
+    const out = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(out.includes('checkpoints:'), 'checkpoints 段创建');
+    assert.ok(out.includes('- repo: ai-first-platform-docs'), 'checkpoint 条目');
+    assert.ok(out.includes('sha: abc123'), 'sha 写入');
+    assert.ok(out.includes('remote-ref: "refs/heads/master"'), 'remote-ref 写入');
+    assert.ok(out.includes('last-push-at:') && out.includes('last-push-by:'), '推送元数据由 crctl 生成');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('checkpoint-add：非 developing~writing-back 态 → ILLEGAL_LEDGER_STATE 零写', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r = runCrctl(['checkpoint-add', 'CR-T1', '--repo', 'r', '--sha', 's', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('owner-set：更新 owners.{role}.id + assigned-at（AC-3）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const r = runCrctl(['owner-set', 'CR-T1', '--role', 'development', '--id', 'Alice', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const out = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(out.includes('id: Alice'), '新负责人写入');
+    assert.ok(out.match(/assigned-at: "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00"/), 'assigned-at 由 crctl 生成');
+    assert.ok(out.includes('id: Ray'), '其他角色 owner 不受影响');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('owner-set：非法 role → BAD_ARGS；终态 → ILLEGAL_LEDGER_STATE', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const r1 = runCrctl(['owner-set', 'CR-T1', '--role', 'bogus', '--id', 'X', '--workspace', ws]);
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'BAD_ARGS');
+    writeCrEntry(ws, 'CR-T2', 'archived');
+    const r2 = runCrctl(['owner-set', 'CR-T2', '--role', 'requirement', '--id', 'X', '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('backlog-set：prd-path 白名单写入（AC-3）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const r = runCrctl(['backlog-set', 'CR-T1', '--field', 'prd-path', '--value', 'change-requests/CR-T1/prd.md', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const out = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(out.includes('prd-path: "change-requests/CR-T1/prd.md"'), 'prd-path 写入');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('backlog-set：status 硬拒 → FIELD_NOT_ALLOWED（AC-3）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r = runCrctl(['backlog-set', 'CR-T1', '--field', 'status', '--value', 'archived', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'FIELD_NOT_ALLOWED');
+    assert.ok(String(r.stderr.error.message).includes('advance'), '提示改用 advance');
+    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-021 TASK-05：inbox-emit（notify-log 事件追加）──
+
+test('inbox-emit：notify-log 追加 + notify-pending 合并去重（AC-5 对应）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r1 = runCrctl(['inbox-emit', 'CR-T1', '--event', 'code-reviewing', '--to', '["Ray","Alice"]', '--workspace', ws]);
+    assert.equal(r1.status, 0);
+    const r2 = runCrctl(['inbox-emit', 'CR-T1', '--event', 'code-approved', '--to', 'Alice,Bob', '--payload', '{"decision":"approve"}', '--workspace', ws]);
+    assert.equal(r2.status, 0);
+    const out = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(out.includes('notify-log:'), 'notify-log 段创建');
+    assert.equal((out.match(/handled: false/g) || []).length, 2, '两条 notify-log 条目');
+    assert.ok(out.includes('event: code-reviewing') && out.includes('event: code-approved'), '事件写入');
+    assert.ok(out.includes('payload: {"decision":"approve"}'), 'payload 写入');
+    assert.ok(out.includes('notify-pending: ["Ray","Alice","Bob"]'), 'notify-pending 合并且去重');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('inbox-emit：终态（archived）→ ILLEGAL_LEDGER_STATE 零写', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'archived');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r = runCrctl(['inbox-emit', 'CR-T1', '--event', 'archived', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('inbox-emit：缺 --event → BAD_ARGS；--payload 非法 JSON → BAD_ARGS', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r1 = runCrctl(['inbox-emit', 'CR-T1', '--workspace', ws]);
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'BAD_ARGS');
+    const r2 = runCrctl(['inbox-emit', 'CR-T1', '--event', 'x', '--payload', 'not-json', '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'BAD_ARGS');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-021 TASK-06：next-cr-id（只读预览）+ cr-init（原子权威分配）──
+
+test('next-cr-id：只读预览返回 CR-{year}-{max+1}，不写任何文件（AC-4）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-2026-001', status: 'drafting' }, { id: 'CR-2026-003', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-2026-001', 'drafting');
+    writeCrMd(ws, 'CR-2026-003', 'drafting');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r1 = runCrctl(['next-cr-id', '--year', '2026', '--workspace', ws]);
+    assert.equal(r1.status, 0);
+    assert.equal(r1.stdout.crId, 'CR-2026-004');
+    assert.equal(r1.stdout.previewOnly, true);
+    const r2 = runCrctl(['next-cr-id', '--year', '2026', '--workspace', ws]);
+    assert.equal(r2.stdout.crId, 'CR-2026-004', '两次连续调用返回同一候选（非权威、不参与分配）');
+    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before, '不得写任何文件');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('cr-init：权威原子分配 — 三文件建档登记，返回分配到的 cr-id（AC-4）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-2026-001', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-2026-001', 'drafting');
+    writeFileSync(path.join(ws, 'change-requests', '_index.yml'), 'change-requests:\n  - id: CR-2026-001\n    title: x\n    status: drafting\n    created: "2026-08-01T00:00:00+08:00"\n');
+    const r = runCrctl(['cr-init', '--title', '测试 CR', '--owner-requirement', 'Ray', '--year', '2026', '--workspace', ws]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout.cr, 'CR-2026-002');
+    const crMd = readFileSync(path.join(ws, 'change-requests', 'CR-2026-002', 'cr.md'), 'utf8');
+    assert.ok(crMd.includes('id: CR-2026-002') && crMd.includes('status: drafting'), 'cr.md 建档');
+    assert.ok(crMd.includes('title: 测试 CR'), 'title 写入 cr.md');
+    assert.ok(crMd.includes('owner-history:') && crMd.includes('initial-assignment'), 'owner-history 生成');
+    const backlog = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(backlog.includes('- id: CR-2026-002'), 'backlog 追加');
+    const index = readFileSync(path.join(ws, 'change-requests', '_index.yml'), 'utf8');
+    assert.ok(index.includes('- id: CR-2026-002') && index.includes('status: drafting'), 'index 登记');
+    // 无显式 cr-id 入参：传入位置参数应被忽略或报错（签名核对）
+    const r2 = runCrctl(['cr-init', 'CR-X', '--title', 't', '--owner-requirement', 'R', '--year', '2026', '--workspace', ws]);
+    assert.equal(r2.status, 0, 'cr-init 无 <cr-id> 位置参数（多余位置参数不影响）');
+    assert.equal(r2.stdout.cr, 'CR-2026-003', '仍按内部 max+1 分配');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('cr-init：并发冲突 → 组件级 mismatch hash 注入，三文件均不落盘（SDD §5 范式）', async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'crctl-crinit-'));
+  try {
+    // 复用既有 casWriteMulti 组件级测试范式：从 crctl.mjs 提取 casWriteMulti 源码并注入 stub
+    const src = readFileSync(CRCTL, 'utf8').replaceAll('\r\n', '\n');
+    const m = src.match(/function casWriteMulti\(writes\) \{[\s\S]*?\n\}/);
+    assert.ok(m, 'crctl.mjs 中应能提取 casWriteMulti 源码');
+    const calls = [];
+    const fail = (code, msg) => { throw new Error(code + ': ' + msg); };
+    const readFileChecked = (p) => { calls.push(['read', p]); return p.endsWith('ok.txt') ? 'orig-a' : 'tampered-b'; };
+    const sha256 = (t) => t;
+    const fs = {
+      writeFileSync: (p) => calls.push(['write', p]),
+      renameSync: (t, d) => calls.push(['rename', t, d]),
+    };
+    const moduleText = [
+      'const calls = [];',
+      "const fail = (code, msg) => { throw new Error(code + ': ' + msg); };",
+      "const readFileChecked = (p) => { calls.push(['read', p]); return p.endsWith('ok.txt') ? 'orig-a' : 'tampered-b'; };",
+      'const sha256 = (t) => t;',
+      'const fs = {',
+      "  writeFileSync: (p) => calls.push(['write', p]),",
+      "  renameSync: (t, d) => calls.push(['rename', t, d]),",
+      '};',
+      m[0],
+      'export { casWriteMulti, calls };',
+    ].join('\n');
+    const modPath = path.join(dir, 'casw.mjs');
+    writeFileSync(modPath, moduleText);
+    const { casWriteMulti, calls: c2 } = await import(pathToFileURL(modPath).href);
+    // 三文件写：cr.md expectedHash=null + backlog/index 读时 hash；任一失配 → 整体 CAS_CONFLICT 无 write/rename
+    const ok1 = path.join(dir, 'ok.txt'); // cr.md 对应（expectedHash null 且文件存在 → 冲突）
+    assert.throws(() => casWriteMulti([
+      { path: ok1, expectedHash: null, newText: 'x' },
+      { path: path.join(dir, 'b.txt'), expectedHash: 'orig-b', newText: 'y' },
+      { path: path.join(dir, 'i.txt'), expectedHash: 'orig-i', newText: 'z' },
+    ]), /CAS_CONFLICT/);
+    assert.ok(!c2.some((c) => c[0] === 'write' || c[0] === 'rename'), 'cr.md 已存在（创建冲突）时不得落任何盘');
+    c2.length = 0;
+    // 正常路径：全部 expectedHash 匹配 → 2 次 write + 2 次 rename（null 期望的 ok.txt 读后确认存在则冲突，这里换缺失文件）
+    assert.throws(() => casWriteMulti([
+      { path: path.join(dir, 'missing.txt'), expectedHash: null, newText: 'x' },
+      { path: path.join(dir, 'ok.txt'), expectedHash: 'orig-a', newText: 'y' },
+      { path: path.join(dir, 'bad.txt'), expectedHash: 'tampered-b', newText: 'z' },
+    ]), /CAS_CONFLICT/);
+    assert.ok(!c2.some((c) => c[0] === 'write' || c[0] === 'rename'), '任一侧 hash 失配不得落盘');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('cr-init：缺 --title / --owner-requirement → BAD_ARGS', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-2026-001', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-2026-001', 'drafting');
+    const r1 = runCrctl(['cr-init', '--owner-requirement', 'Ray', '--year', '2026', '--workspace', ws]);
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'BAD_ARGS');
+    const r2 = runCrctl(['cr-init', '--title', 't', '--year', '2026', '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'BAD_ARGS');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-021 TASK-07：task allocate（S7，TASK-ID CAS 分配）──
+
+test('task allocate：顺序分配 TASK-ID + slug 兜底命名（AC-5）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    const dir = path.join(ws, 'change-requests', 'CR-T1', 'tasks');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, '_index.yml'), 'cr-id: CR-T1\ntasks:\n  - id: CR-T1-TASK-01\n    title: x\n    status: pending\n    estimate: 1h\n    depends-on: []\n');
+    const r1 = runCrctl(['task', 'allocate', 'CR-T1', '--workspace', ws]);
+    assert.equal(r1.status, 0);
+    assert.equal(r1.stdout.task, 'CR-T1-TASK-02');
+    assert.equal(r1.stdout.slug, 'task-02', 'slug 缺失回退 task-{NN}');
+    const r2 = runCrctl(['task', 'allocate', 'CR-T1', '--slug', 'fix-bug', '--workspace', ws]);
+    assert.equal(r2.status, 0);
+    assert.equal(r2.stdout.task, 'CR-T1-TASK-03');
+    assert.equal(r2.stdout.slug, 'fix-bug');
+    const out = readFileSync(path.join(dir, '_index.yml'), 'utf8');
+    assert.ok(out.includes('- id: CR-T1-TASK-02') && out.includes('- id: CR-T1-TASK-03'), '两条新任务登记');
+    assert.ok(out.includes('slug: task-02') && out.includes('slug: fix-bug'), 'slug 写入');
+    assert.ok(out.includes('status: pending'), '最小条目 status: pending');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('task allocate：非法前置态（drafting）→ ILLEGAL_LEDGER_STATE 零写', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const dir = path.join(ws, 'change-requests', 'CR-T1', 'tasks');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, '_index.yml'), 'cr-id: CR-T1\ntasks: []\n');
+    const before = readFileSync(path.join(dir, '_index.yml'), 'utf8');
+    const r = runCrctl(['task', 'allocate', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.equal(readFileSync(path.join(dir, '_index.yml'), 'utf8'), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('task allocate：tasks/_index.yml 缺失 → TASK_INDEX_NOT_FOUND', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    const r = runCrctl(['task', 'allocate', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'TASK_INDEX_NOT_FOUND');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-021 TASK-08：worktree-path + report/cr-metrics（S9/S11 只读）──
+
+test('worktree-path：确定性路径输出且不写任何文件（AC-6）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r1 = runCrctl(['worktree-path', 'CR-T1', '--repo', 'ai-first-platform-docs', '--workspace', ws]);
+    assert.equal(r1.status, 0);
+    assert.equal(r1.stdout.bucket, 'knowledge-base', 'knowledge-base role → knowledge-base bucket');
+    assert.ok(r1.stdout.path.replaceAll('\\', '/').endsWith('.rayai-worktrees/knowledge-base/requirement/CR-T1'), '路径模板拼接');
+    const r2 = runCrctl(['worktree-path', 'CR-T1', '--repo', 'multica', '--workspace', ws]);
+    assert.equal(r2.stdout.bucket, 'multica', '非 knowledge-base role → repo.id bucket');
+    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before, '不得写任何文件');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('report/cr-metrics：状态直方图 + 周期活动计数（AC-6）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeCrEntry(ws, 'CR-T2', 'drafting');
+    writeFileSync(path.join(ws, 'change-requests', '_history.yml'),
+      'history:\n  - id: CR-OLD\n    final-status: archived\n    archived-at: "2026-08-03T10:00:00+08:00"\n');
+    const r = runCrctl(['report', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.op, 'report');
+    assert.equal(r.stdout.active, 2, '在途 2 个');
+    assert.equal(r.stdout.archived, 1, '归档 1 个');
+    assert.equal(r.stdout.statusHistogram.developing, 1);
+    assert.equal(r.stdout.statusHistogram.drafting, 1);
+    assert.equal(r.stdout.statusHistogram.archived, 1);
+    assert.equal(r.stdout.period, null, '未传 --period 时回显 null');
+    assert.equal(r.stdout.periodActivity.byDay['2026-08-03'], 1, '按日活动计数');
+    assert.equal(r.stdout.periodActivity.byMonth['2026-08'], 1, '按月活动计数');
+    const r2 = runCrctl(['cr-metrics', '--period', '30d', '--workspace', ws]);
+    assert.equal(r2.status, 0);
+    assert.equal(r2.stdout.total, 3);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('report --period：真正按窗口过滤 periodActivity（窗口外不计入，累计总数不受影响，AC-6）', () => {
+  const ws = makeWorkspace();
+  try {
+    // 本地日历日（与 crctl.mjs periodCutoffDay 的 getFullYear/getMonth/getDate 口径一致，避免 UTC/本地时区错位导致的边界闪烁）
+    const fmt = (d) => {
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    };
+    const today = new Date();
+    const recent = fmt(today); // 窗口内
+    const old = fmt(new Date(today.getTime() - 400 * 86400000)); // 远早于任何 <90d 窗口
+    writeFileSync(path.join(ws, 'change-requests', '_history.yml'),
+      `history:\n  - id: CR-OLD\n    final-status: archived\n    archived-at: "${old}T10:00:00+08:00"\n` +
+      `  - id: CR-NEW\n    final-status: archived\n    archived-at: "${recent}T10:00:00+08:00"\n`);
+    const rNoPeriod = runCrctl(['report', '--workspace', ws]);
+    assert.equal(rNoPeriod.stdout.archived, 2, '无 --period 时累计总数含全部历史');
+    assert.equal(rNoPeriod.stdout.periodActivity.byDay[old], 1, '无 --period 时窗口外的一天也计入 periodActivity');
+    const rPeriod = runCrctl(['report', '--period', '7d', '--workspace', ws]);
+    assert.equal(rPeriod.status, 0);
+    assert.equal(rPeriod.stdout.period, '7d');
+    assert.equal(rPeriod.stdout.archived, 2, '--period 不影响累计总数（SLA/直方图口径）');
+    assert.equal(rPeriod.stdout.periodActivity.byDay[recent], 1, '窗口内的一天计入 periodActivity');
+    assert.equal(rPeriod.stdout.periodActivity.byDay[old], undefined, '窗口外的一天被 --period 过滤，不再计入 periodActivity');
+    const rBad = runCrctl(['report', '--period', 'not-a-period', '--workspace', ws]);
+    assert.equal(rBad.status, 1);
+    assert.equal(rBad.stderr.error.code, 'BAD_ARGS', '非法 --period 格式硬拒，而非静默忽略');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-021 TASK-09：git commit --template（S10）──
+
+function initGitWs(ws, branch) {
+  const git = (args) => {
+    const r = spawnSync('git', ['-C', ws, ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')} 失败: ${r.stderr}`);
+    return (r.stdout || '').trim();
+  };
+  git(['init', '-b', branch]);
+  git(['config', 'user.email', 't@t']);
+  git(['config', 'user.name', 'tester']);
+  return git;
+}
+
+test('git commit --template register：生成规范 message（AC-8 对应）', () => {
+  const ws = makeWorkspace();
+  try {
+    const git = initGitWs(ws, 'requirement/CR-T1');
+    writeFileSync(path.join(ws, 'a.txt'), 'x');
+    git(['add', 'a.txt']);
+    const r = runCrctl(['git', 'commit', '--template', 'register', '-m', '新需求', '--cwd', ws, '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    const msg = git(['log', '--oneline', '-1']);
+    assert.ok(msg.includes('[cr] register CR-T1: 新需求'), `message=${msg}`); // git log --oneline 带 SHA 前缀
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('git commit --template：未知 kind → BAD_ARGS；无法确定 cr → BAD_ARGS', () => {
+  const ws = makeWorkspace();
+  try {
+    const git = initGitWs(ws, 'master');
+    writeFileSync(path.join(ws, 'a.txt'), 'x');
+    git(['add', 'a.txt']);
+    const r1 = runCrctl(['git', 'commit', '--template', 'bogus', '-m', 'x', '--cwd', ws, '--workspace', ws]);
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'BAD_ARGS');
+    const r2 = runCrctl(['git', 'commit', '--template', 'register', '-m', '无CR编号', '--cwd', ws, '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'BAD_ARGS');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

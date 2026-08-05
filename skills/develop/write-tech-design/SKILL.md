@@ -44,14 +44,17 @@ description: 读取 change-requests/{CR-ID}/prd.md，在同目录编写 sdd.md �
    - **不存在**（该仓首次走到技术设计评审，按需懒加载起草，成本只付一次）：本 Agent 花一轮读**目标仓自己的**代码（入口文件、目录结构、依赖方向、已有约定），套用 `skills/shared/engineering-docs/templates/ARCHITECTURE-template.md` 填成实际内容（禁止留占位符），落盘到目标仓根目录 `ARCHITECTURE.md`，与 `sdd.md` 同一 commit 提交。**禁止参考 `tools/ARCHITECTURE.md` 的内容**（其不变量如"零依赖""crctl 单一状态写者"是方法论包自身治理事实，不是通用事实）——只能把它当"8 节骨架长什么样"的结构范例，绝不能抄条款。在 Step 5 输出摘要中标注"新起草 ARCHITECTURE.md（{repo}）"，随本轮 `review-tech-design`/`approve-tech-design` 人工过一眼确认，不另开审批节点。
    - 仅在文件缺失时起草；已存在则只读不改——普通 CR 不得借道修订它（架构级变更需求见该文档自身"维护规则"一节）。
 3. 读取 CR 当前 status：
-   - 初次生成：必须为 `requirement-approved`，随后调用 `cr-status-set`（`next_status=tech-designing`，`trigger=write-tech-design`，`expected_current_status=requirement-approved`）将 status 推进到 `tech-designing`。
+   - 初次生成：必须为 `requirement-approved`，随后调用 `crctl advance --to tech-designing，`trigger=write-tech-design`，`expected_current_status=requirement-approved`）将 status 推进到 `tech-designing`。
+<!-- lint-prompts:ignore --> 描述性：回修读取评审记录
    - reviewLoop 回修：若存在 `review_feedback`，或 `change-requests/{cr_id}/review-annotations/sdd.yml` 的 `verdict=block`，允许当前 status 为 `tech-designing`，不得因非 `requirement-approved` abort。
    - 其他状态：停止执行，输出当前 status、是否存在 `review_feedback` 与下一步建议。
 
 ### Step 2 — 生成 SDD
 
+<!-- lint-prompts:ignore --> 描述性：回修读取评审记录
 若存在 `review_feedback`，或 status=`tech-designing` 且上一轮 `review-annotations/sdd.yml verdict=block`，先进入自修复模式：
 
+<!-- lint-prompts:ignore --> 描述性：回修读取评审记录
 1. 读取上一轮 `review-annotations/sdd.yml` 与 `review_feedback.blockers`；若 `review_feedback` 缺失，则从 `sdd.yml` 的 blockers、repair-target、repair-instructions 组装修复输入。
 2. 按 `repair-instructions` 修订同一份 `sdd.md`，重点补齐 PRD↔SDD 映射、接口契约、数据模型、风险与测试设计。
 3. 不重写已确认的整体方案，除非 blocker 明确要求替换。
@@ -77,6 +80,7 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 5. **技术选型与替代方案** — 决策说明与权衡
 6. **FR 到技术实现映射** — 每条 FR-* 对应的技术方案条目
 7. **安全与性能考量** — 边界条件、性能目标、安全控制点
+8. **Prompt 采纳影响**（条件性小节，CR-2026-021 FR-25/AC-15）：**若本 CR 的 diff 会触及 `skills/shared/crctl/scripts/crctl.mjs` 的 dispatch 分支或 `skills/shared/controlled-shell/rules.json` 的 `protectedPaths.deny`（= crctl 命令面或 guard deny 面有新增/变更）**，本节为必填，列出应改为调用新增/扩展子命令的 skill 清单（每项含 skill 路径 + 现状 + 应改为的调用方式），供 `review-tech-design` 与人工审批逐条核对；若本 CR 不触及上述两处，本节可省略。`lint-prompts` 只能机械抓到"prompt 还在做 crctl 已接管/已禁止的事"（CONTRADICTS/STALE），抓不到"crctl 新增了能力、某 skill 该采纳却还没采纳"——这一类必须靠本节 + 评审兜底。
 
 ### Step 3 — 落盘并 commit
 
@@ -85,7 +89,7 @@ Commit：`feat({cr_id}): draft SDD - tech design`
 
 ### Step 4 — 推进状态至待评审
 
-sdd.md 完整落盘后，调用 `cr-status-set`（`cr_id={cr_id}`，`next_status=tech-design-review-pending`，`trigger=write-tech-design-complete`，`expected_current_status=tech-designing`）将 CR 推进到「待技术评审」状态，等待 `review-tech-design` 进入。
+sdd.md 完整落盘后，调用 `crctl advance --to tech-design-review-pending，`trigger=write-tech-design-complete`，`expected_current_status=tech-designing`）将 CR 推进到「待技术评审」状态，等待 `review-tech-design` 进入。
 
 ### Step 5 — 输出摘要
 

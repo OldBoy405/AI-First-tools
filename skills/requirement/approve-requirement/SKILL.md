@@ -28,56 +28,18 @@ description: 需求审批通过后的收尾动作：在 approval.yml 记录审�
 
 ## 执行步骤
 
-### Step 1 — 前置校验
-
-1. 确认 `change-requests/{cr_id}/cr.md` 存在
-2. CR status 必须为 `requirement-reviewing`
-3. 确认 `change-requests/{cr_id}/review-annotations/requirement.yml` 存在，且 `verdict=pass`、blockers 为空
-4. 确认 `cr.md owners.requirement.id` 与 `owners.requirement.assigned-at` 均存在；若 `approver` 为空，使用该负责人作为审批人
-
-### Step 2 — 写 approval.yml
-
-创建 `change-requests/{cr_id}/approval.yml`：
-
-```yaml
-cr-id: {cr_id}
-stage: requirement
-approver: {approver}
-approved-at: {YYYY-MM-DDTHH:mm:ss+08:00}
-owner-role: requirement
-notes: "{notes 或 ''}"
-prd-ref: "change-requests/{cr_id}/prd.md"
-review-ref: "change-requests/{cr_id}/review-annotations/requirement.yml"
-```
-
-### Step 3 — 推进 CR status
-
-调用 `cr-status-set`：
-```
-cr_id: {cr_id}
-next_status: requirement-approved
-trigger: approve-requirement
-expected_current_status: requirement-reviewing
-```
-
-同步更新 `change-requests/{cr_id}/cr.md` frontmatter 的 `status` 字段。
-
-### Step 4 — 输出摘要
-
-```
-✅ 需求审批完成
-   CR       : {cr_id}
-   Status   : requirement-approved
-   Approver : {approver}
-   下一步   : 执行 architecture-design pipeline（trigger: architecture, cr_id: {cr_id}）
-```
-
----
+1. 运行 `crctl approve {cr_id} --stage requirement`（**仅限人类交互式终端，无旁路**）——crctl 自动完成：
+   - 前置态校验（当前 status=requirement-reviewing）
+   - 评审证据校验（review-annotations/requirement.yml verdict=pass 且 blockers 为空）
+   - 计算证据摘要并写入 approval.yml#requirement（CAS+审计）
+   - 级联 advance 到 requirement-approved
+2. Agent/管道**不得**代写 approval.yml 或推进 status；非 TTY 调用 crctl 一律拒绝（APPROVAL_REQUIRES_HUMAN）。
+3. 输出审批记录路径、当前 status 和下一步：write-tech-design。
 
 ## 错误处理
 
-| 错误 | 处理 |
+| 场景 | 行为 |
 |------|------|
-| CR status 非 `requirement-reviewing` | 停止执行，提示当前状态，要求先完成评审 |
-| 需求评审不存在或未通过 | 停止执行，要求先修复 PRD 并重新运行 review-requirement |
-| cr-status-set 失败 | 回滚 approval.yml 写入，保持原 status |
+| status 不是 `requirement-reviewing` | crctl approve 拒绝（CR_STATUS_CURRENT_MISMATCH），abort |
+| 评审证据未通过（review-annotations/requirement.yml verdict 非 pass 或 blockers 非空） | crctl approve 拒绝（GATE_BLOCKED），先修复并重跑 review-requirement |
+| 非 TTY 调用 | crctl approve 拒绝（APPROVAL_REQUIRES_HUMAN），必须人工在终端执行 |

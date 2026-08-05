@@ -59,6 +59,7 @@ updatedAt: "{ISO-时间戳}"
 保留文件原有 `schema` 与 `title` 字段不变。
 
 ## 明确不做
+<!-- lint-prompts:ignore --> 反例说明：不执行任何裸 git 操作
 - ❌ 不执行 `git add/commit` 或任何分支操作
 - ❌ 不调用 `requirement-register` / `write-requirement-prd` 等后续 skill
 - ❌ 不触发 review 门，不建议"进入 spec 流程"

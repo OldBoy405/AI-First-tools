@@ -35,7 +35,7 @@ description: 受控 shell 执行规范（方案 a）。所有 sync/requirement �
 | `pull` | `pull --ff-only` | pull-progress |
 | `push` | `push -u origin <branch>` / `push origin <trunk>` / `push origin --delete <branch>` | push-progress, handover-cr, merge-feature-branch, cr-archive |
 | `add` | `add -A` / `add <path...>` | requirement-register, push-progress, merge-feature-branch, cr-archive |
-| `commit` | `commit -m "wip: ..."` / `commit -m "[cr] ..."` / `commit -m "merge(CR-...): ..."` | requirement-register, push-progress, cr-status-set, inbox-emit, cr-review-record, merge-feature-branch, cr-archive |
+| `commit` | `commit -m "wip: ..."` / `commit -m "[cr] ..."` / `commit -m "merge(CR-...): ..."` | requirement-register, push-progress, inbox-emit, cr-review-record, merge-feature-branch, cr-archive |
 | `status` | `status --short` | pull-progress, cr-archive |
 | `diff` | `diff --cached --quiet` / `--stat` / `--name-only <range>` / `--unified=N <range>` | push-progress, review-code |
 | `log` | `log --oneline -N` / `log --oneline <range>` | review-code |
@@ -72,7 +72,8 @@ description: 受控 shell 执行规范（方案 a）。所有 sync/requirement �
   "error": {
     "code": "SHELL_UNAVAILABLE" | "FORBIDDEN_SUBCOMMAND" | "EXEC_FAILED" | "UNEXPECTED",
     "message": "人类可读错误",
-    "attempted_command": "git worktree add -b ...",
+    <!-- lint-prompts:ignore --> 反例示例：被拒绝的 attempted_command 形态
+"attempted_command": "git worktree add -b ...",
     "cwd": "/abs/path/or/relative",
     "stdout": "...",
     "stderr": "..."

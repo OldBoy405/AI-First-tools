@@ -46,7 +46,7 @@
       "kind": "skill",
       "label": "回写 PRD / SDD 到 specs/",
       "ref": "writeback-prd-sdd",
-      "prompt": "将 change-requests/{{inputs.cr_id}}/{prd.md,sdd.md} 增量回写到 specs/{{inputs.spec_id}}/{PRD.md,SDD.md} 并维护 specs/_index.yml：\n- 调用 tools/skills/writeback/scripts/writeback-prd-sdd.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}}）：先 --dry-run 核对里程碑节追加 diff（标题 ## {名}（v{version} · CR-{id}）、原文 H 级 +1、既有章节原样保留），无误后实跑（脚本末尾自检，失败 SELF_CHECK_FAILED 非零退出）\n- specs/ 是跨 CR 累积基线（纪律 #6）：只做末尾追加里程碑节 + frontmatter 行级更新，禁止全量覆盖；不做旧版本备份（回写即 git commit，历史由 git 承载）\n- 使用必填输入 target_version={{inputs.target_version}}，不得在本节点重新推导版本\n\n在 node-2.md 输出目标 spec_id 与新建/更新标记、变更文件清单。",
+      "prompt": "将 change-requests/{{inputs.cr_id}}/{prd.md,sdd.md} 增量回写到 specs/{{inputs.spec_id}}/{PRD.md,SDD.md} 并维护 specs/_index.yml：\n- 调用 tools/skills/writeback/scripts/writeback-prd-sdd.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}}）：先 --dry-run 核对里程碑节追加 diff（标题 ## {名}（v{version} · CR-{id}）、原文 H 级 +1、既有章节原样保留），无误后实跑（脚本末尾自检，失败 SELF_CHECK_FAILED 非零退出）\n- specs/ 是跨 CR 累积基线（纪律 #6）：只做末尾追加里程碑节 + frontmatter 行级更新，禁止全量覆盖；不做旧版本备份（回写即提交，历史由 git 承载）\n- 使用必填输入 target_version={{inputs.target_version}}，不得在本节点重新推导版本\n\n在 node-2.md 输出目标 spec_id 与新建/更新标记、变更文件清单。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },
@@ -64,7 +64,7 @@
       "kind": "skill",
       "label": "回写追溯链",
       "ref": "writeback-traceability",
-      "prompt": "在 specs/{{inputs.spec_id}}/traceability.yml（跨 CR 累积的唯一权威文件）追加本 CR 的 milestone 段：\n- 按证据源起草 milestone-file（fr-chain 的 title/sdd/code/evidence 为编辑性内容），merge-commits 由脚本从 change-requests/_backlog.yml 定向提取注入（六字段齐全校验，缺失 MERGE_COMMITS_MISSING 硬失败，不猜测）\n- 调用 tools/skills/writeback/scripts/writeback-traceability.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --milestone-file <path>）：先 --dry-run 核对（既有 milestones 段不得出现在 diff 中），无误后实跑（脚本末尾自检）\n- 不做\"与 change-requests/{{inputs.cr_id}}/traceability.yml 保持一致\"校验——specs 侧为唯一权威文件，change-requests 侧为开发期工作稿，归档后不再同步\n\n在 node-4.md 输出链路条目数与未对齐项。",
+      "prompt": "<!-- lint-prompts:ignore --> 脚本内部处理说明：merge-commits 由脚本从 _backlog.yml 提取，milestone 段由脚本追加\n在 specs/{{inputs.spec_id}}/traceability.yml（跨 CR 累积的唯一权威文件）追加本 CR 的 milestone 段：\n- 按证据源起草 milestone-file（fr-chain 的 title/sdd/code/evidence 为编辑性内容），merge-commits 由脚本从 change-requests/_backlog.yml 定向提取注入（三字段必填校验（repo/trunk/sha，FR-8），缺失 MERGE_COMMITS_MISSING 硬失败，不猜测）\n- 调用 tools/skills/writeback/scripts/writeback-traceability.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --milestone-file <path>）：先 --dry-run 核对（既有 milestones 段不得出现在 diff 中），无误后实跑（脚本末尾自检）\n- 不做\"与 change-requests/{{inputs.cr_id}}/traceability.yml 保持一致\"校验——specs 侧为唯一权威文件，change-requests 侧为开发期工作稿，归档后不再同步\n\n在 node-4.md 输出链路条目数与未对齐项。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -73,7 +73,7 @@
       "kind": "skill",
       "label": "归档 CR",
       "ref": "cr-archive",
-      "prompt": "将 CR {{inputs.cr_id}} 从 change-requests/_backlog.yml 移入 _history.yml：\n- 对 writing-back → archived 使用 cr-status-set 的 embedded 校验，不单独提交中间 archived 状态\n- 在同一归档账本 commit 中同步 cr.md、_backlog.yml、_history.yml 与 _index.yml，记录 archived-at、merge-commits、writeback_spec_id={{inputs.spec_id}}\n- 若上次归档发布失败导致 backlog 中 status 已为 archived，按 archive-repair 继续完成 backlog→history 移动\n- 若 history 已存在但 origin/trunk 尚未包含归档账本，按 publish-retry 只重试归档账本 commit/push，不重复移动 backlog/history\n- 若 history 已存在且 cleanup-report.yml 为 pending，跳过账本移动，只重试 cleanup\n- 先确认归档账本已推送到 knowledge-base trunk，成功后才进入清理阶段\n- 清理阶段通过 controlled-shell 删除远端 requirement/{{inputs.cr_id}} 分支，并移除本地 CR worktree；缺失 worktree 视为 skipped-missing\n- 清理失败不得回滚已发布归档记录，必须写 cleanup-report.yml 并输出 cleanup-pending，后续可重试 cleanup\n- 保留 change-requests/{{inputs.cr_id}}/ 目录作为历史痕迹，下次 CR 可参考\n\n在 node-5.md 输出归档汇总：spec_id、task 数、追溯链条数、归档 commit SHA 与 cleanup 状态。",
+      "prompt": "经 `crctl archive-move` 将 CR {{inputs.cr_id}} 从 change-requests/_backlog.yml 移入 _history.yml（双文件原子 CAS，模型不得手写账本）：\n- 对 writing-back → archived 使用 crctl advance 的 embedded 校验，不单独提交中间 archived 状态\n- 在同一归档账本 commit 中同步 cr.md、_backlog.yml、_history.yml 与 _index.yml，记录 archived-at、merge-commits、writeback_spec_id={{inputs.spec_id}}\n- 若上次归档发布失败导致 backlog 中 status 已为 archived，按 archive-repair 继续完成 backlog→history 移动\n- 若 history 已存在但 origin/trunk 尚未包含归档账本，按 publish-retry 只重试归档账本 commit/push，不重复移动 backlog/history\n- 若 history 已存在且 cleanup-report.yml 为 pending，跳过账本移动，只重试 cleanup\n- 先确认归档账本已推送到 knowledge-base trunk，成功后才进入清理阶段\n- 清理阶段通过 controlled-shell 删除远端 requirement/{{inputs.cr_id}} 分支，并移除本地 CR worktree；缺失 worktree 视为 skipped-missing\n- 清理失败不得回滚已发布归档记录，必须写 cleanup-report.yml 并输出 cleanup-pending，后续可重试 cleanup\n- 保留 change-requests/{{inputs.cr_id}}/ 目录作为历史痕迹，下次 CR 可参考\n- 【回写清单】本 CR 若 diff 触及 `crctl.mjs` 的 dispatch 或 `rules.json` 的 `protectedPaths.deny`：① 跑 `crctl lint-prompts` 清零 CONTRADICTS/STALE；② 对新增子命令，在 SDD『prompt 采纳影响』小节列出应改为调用它的 skill 清单并逐一改，由评审兜底（归档前必须完成，否则不得进入归档）\n\n在 node-5.md 输出归档汇总：spec_id、task 数、追溯链条数、归档 commit SHA 与 cleanup 状态。",
       "onFail": "abort",
       "timeoutMinutes": 10
     }

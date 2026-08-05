@@ -1,5 +1,7 @@
 ---
 name: review-code
+<!-- lint-prompts:ignore --> 评审校验说明：只读 test-report 的 status 字段
+
 description: 读取 CR 代码 worktree 的代码 diff、验证日志、change-requests/{CR-ID}/sdd.md、tasks/* 和 test-report.md 执行代码评审；未通过时回到 implement-code 自修复，通过后推进到 code-reviewing。
 ---
 
@@ -14,6 +16,7 @@ description: 读取 CR 代码 worktree 的代码 diff、验证日志、change-re
 
 在开发者完成编码并推送统一 checkpoint 后，基于 CR 代码 worktree 的只读 diff、验证日志与 CR 设计文档执行代码评审。评审通过时推进 CR status 到 `code-reviewing`，等待 `approve-code` 做人工审批；有 blocker 或 `test-report.status=block` 时回退到 `developing`，并由 pipeline `reviewLoop` 自动回到 `implement-code` 修复。blocker 未清空前不得进入 `human_approval`。
 
+<!-- lint-prompts:ignore --> 反例说明：仅凭统计信息不足
 > **证据要求**：仅有 `git diff --stat` 或 commit log 不足以支撑代码评审。必须读取实际 diff、变更文件、lint/test/build 输出或明确的不适用说明。
 
 ---
@@ -35,10 +38,10 @@ description: 读取 CR 代码 worktree 的代码 diff、验证日志、change-re
 
 在各参与代码仓的 CR worktree 中解析 trunk，并执行只读命令。不要用已推送的 `origin/requirement/{cr_id}...HEAD` 作为唯一 diff range；checkpoint 推送后该范围可能为空。应比较 trunk merge-base 到当前 HEAD：
 ```bash
-git merge-base origin/{trunk} HEAD
-git diff --name-only {merge-base}...HEAD
-git diff --unified=80 {merge-base}...HEAD
-git log --oneline {merge-base}..HEAD
+crctl git merge-base origin/{trunk} HEAD --cwd <worktree>
+crctl git diff --name-only {merge-base}...HEAD --cwd <worktree>
+crctl git diff --unified=80 {merge-base}...HEAD --cwd <worktree>
+crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 ```
 
 同时读取 `implement-code` 节点输出中的验证命令与结果；若缺失，必须重新运行或要求补齐：
@@ -71,66 +74,28 @@ Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项
 | **测试覆盖** | 是否有对应单元/集成测试 |
 | **测试证据可信度** | `test-report.md` 是否覆盖 TASK 验收条件，是否说明未覆盖风险 |
 
-### Step 4 — 写评审批注
+### Step 4 — 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
 
-创建 `change-requests/{cr_id}/review-annotations/code.yml`：
-
-```yaml
-cr-id: {cr_id}
-review-type: code
-reviewer: {reviewer}
-reviewed-at: {YYYY-MM-DDTHH:mm:ss+08:00}
-verdict: pass | block
-blockers:
-  - id: CODE-BLOCK-001
-    severity: critical | major | minor
-    file: "{file}:{line-range}"
-    issue: "{问题描述}"
-    suggestion: "{改进建议}"
-repair-target: implement-code
-repair-instructions:
-  - "按 CODE-BLOCK-001 修复对应文件，并重新运行受影响测试与构建"
-review-loop:
-  pass-condition:
-    allOf:
-      - path: verdict
-        equals: pass
-      - path: blockers
-        isEmpty: true
-      - path: test-report.status
-        equals: pass
-  on-block: route-to-repair-node
-  max-attempts: 3
-  current-attempt: {self_repair_attempt 或 0}
-  attempts:
-    - attempt: {self_repair_attempt 或 0}
-      reviewed-at: {YYYY-MM-DDTHH:mm:ss+08:00}
-      result: pass | block
-      blocker-count: {N}
-      repair-target: implement-code
-suggestions: []
-task-coverage:
-  total: {N}
-  verified: {N}
-  unverified: []
-verification:
-  lint: pass | fail | not-applicable
-  test: pass | fail | not-applicable
-  build: pass | fail | not-applicable
-test-report:
-  file: "change-requests/{cr_id}/test-report.md"
-  status: pass | block
-  uncovered-risks: []
-evidence:
-  diff-range: "{merge-base}...HEAD"
-  changed-files: []
-```
+1. 完成上述评审后，把**判断**写入非受控临时 payload `.crctl/tmp/review-code.yml`（不在 guard deny 面，已被 `.crctl/.gitignore` 忽略）：
+   ```yaml
+   verdict: pass | block
+   blockers: []          # block 时列出 blocker（字符串列表）
+   dimensions: {评审维度: 结论, ...}   # 该 stage 门禁要求的维度齐全
+   suggestions: []       # 可选
+   ```
+2. 运行 `crctl review-record {cr_id} --stage code --bump-attempt --workspace <worktree>`（`--from` 缺省即 `.crctl/tmp/review-code.yml`，无需显式指定），crctl 自动完成**确定性部分**：
+   - schema 校验（verdict 枚举/blockers 列表/dimensions 齐全；失败 `SCHEMA_INVALID` 不写）
+   - stage→文件名显式映射（code→code.yml）
+   - 注入 reviewer=identity(ws)/reviewed-at=nowIso()，CAS 写入 canonical `review-annotations/code.yml`
+   - `--bump-attempt` 级联 `crctl attempt` 记账（review-loop.yml，crctl 独占）
+   - 成功后删除临时 payload（避免残留/跨 CR 串味）
+3. **模型不得直接 Write `review-annotations/code.yml` 或手写 review-loop**（guard deny + crctl 独占写）。
 
 ### Step 5 — 更新 traceability.yml 并推进 status
 
-- 在 `change-requests/{cr_id}/traceability.yml` 写入 `reviews.code`，并持久化 `review-loop.current-attempt` 与 `review-loop.attempts[]`
-- verdict=pass 且 blockers 为空且 `test-report.status=pass` → 调用 `cr-status-set`（`next_status=code-reviewing`，`trigger=review-code`，`expected_current_status=developing`），允许进入 `human_approval`
-- verdict=block、blockers 非空或 `test-report.status=block` → 调用 `cr-status-set`（`next_status=developing`，`trigger=review-code:block -> implement-code`，`expected_current_status=developing`），输出 `repair-target=implement-code`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到代码实现节点；不得进入 `human_approval`
+- 在 `change-requests/{cr_id}/traceability.yml` 写入 `reviews.code` 引用（review-loop 轮次记账已由 `crctl review-record --bump-attempt` 级联完成，见 Step 4）
+- verdict=pass 且 blockers 为空且 `test-report.status=pass` → 调用 `crctl advance --to code-reviewing，`trigger=review-code`，`expected_current_status=developing`），允许进入 `human_approval`
+- verdict=block、blockers 非空或 `test-report.status=block` → 调用 `crctl advance --to developing，`trigger=review-code:block -> implement-code`，`expected_current_status=developing`），输出 `repair-target=implement-code`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到代码实现节点；不得进入 `human_approval`
 
 ### Step 6 — 输出摘要
 

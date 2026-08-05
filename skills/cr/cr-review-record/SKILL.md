@@ -12,6 +12,7 @@ scope: change-request-lifecycle
 
 # CR Review Record Skill（原子）
 
+<!-- lint-prompts:ignore --> 描述性：审批记录说明（实际写入走 crctl review-note）
 记录一次 CR 的补充审查意见或人工决策：写入 `approval.yml` 或对应 review 记录。主流程中需求、技术、代码审批分别由 `approve-requirement`、`approve-tech-design`、`approve-code` 负责推进状态；本 Skill 不替代这些显式状态 Skill。
 
 ## 触发意图
@@ -38,20 +39,12 @@ scope: change-request-lifecycle
 ## 操作步骤
 
 1. 读 `change-requests/{CR-ID}/cr.md`
-2. **写入 / 更新** `change-requests/{CR-ID}/approval.yml` 的 `supplemental-reviews` 段：
-   ```yaml
-   cr-id: {CR-ID}
-   type: {cr.type}
-   supplemental-reviews:
-     - reviewer: {reviewer}
-       recorded-at: "YYYY-MM-DDTHH:mm:ss+HH:mm"
-       decision: {decision}
-       status-at-record: {current-status}
-       conditions: {conditions}
-       notes: "{notes}"
-   ```
-3. 若 `decision=reject`：调用 `cr-status-set`（`next_status=rejected`，`trigger=cr-review-record:reject`）将 status 推进到 `rejected`，并写明 reject reason。
-4. 若 `decision=withdraw`：调用 `cr-status-set`（`next_status=withdrawn`，`trigger=cr-review-record:withdraw`）将 status 推进到 `withdrawn`，并写明 withdraw reason。
+<!-- lint-prompts:ignore --> 描述性：审批记录说明（实际写入走 crctl review-note）
+2. 运行 `crctl review-note {CR-ID} --stage {stage} --note "{notes}" --workspace <worktree>`（S2）：向 `approval.yml#supplemental-reviews[]` **追加**一条补充审查记录（CAS+审计，操作者身份由 crctl 生成，不接受 --by）。模型**不得**直接 Write `approval.yml` 的 supplemental-reviews 段（guard deny + crctl 独占写）。
+   - 记录含 `decision={decision}`、`status-at-record`（crctl 读取当前 status）、`notes`。
+   - 四段审批本体（#requirement/#tech-design/#dev-start/#code）绝不触碰——那仍只经 `crctl approve` TTY。
+3. 若 `decision=reject`：调用 `crctl advance --to rejected，`trigger=cr-review-record:reject`）将 status 推进到 `rejected`，并写明 reject reason。
+4. 若 `decision=withdraw`：调用 `crctl advance --to withdrawn，`trigger=cr-review-record:withdraw`）将 status 推进到 `withdrawn`，并写明 withdraw reason。
 5. 若 `decision=note`：不改变 status。
 6. Commit：`[cr] review {CR-ID} decision={decision} by={reviewer}`
 
@@ -64,5 +57,6 @@ scope: change-request-lifecycle
 
 ## 输出
 
+<!-- lint-prompts:ignore --> 描述性：审批记录说明（实际写入走 crctl review-note）
 - `change-requests/{CR-ID}/approval.yml`
 - 如 decision 为 reject / withdraw，则 `cr.md` frontmatter status 更新

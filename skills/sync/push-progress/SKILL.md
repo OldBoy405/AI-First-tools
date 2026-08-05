@@ -1,6 +1,7 @@
 ---
 name: push-progress
-description: "按 dir-graph.yaml repositories 遍历所有 active repo，将 CR worktree 未提交变更打包为 wip checkpoint 并推送 origin 同名分支，更新 _backlog.yml 的 remote/ref/checkpoints 字段。"
+<!-- lint-prompts:ignore --> 描述性：推送说明（实际写入走 crctl checkpoint-add）
+description: "按 dir-graph.yaml repositories 遍历所有 active repo，将 CR worktree 未提交变更打包为 wip checkpoint 并推送 origin 同名分支，经 crctl checkpoint-add 更新 _backlog.yml 的 remote-ref/last-push/checkpoints 字段（S3）。"
 ---
 
 # Skill: push-progress
@@ -12,6 +13,7 @@ description: "按 dir-graph.yaml repositories 遍历所有 active repo，将 CR 
 
 ## 用途
 
+<!-- lint-prompts:ignore --> 描述性：推送说明（实际写入走 crctl checkpoint-add）
 一键将同一 CR workspace 中所有 active repo 的工作进度提交并推送到远端，作为 checkpoint 供换机或协作者续接。commit message 采用 `wip:` 前缀以与正式提交区分。同时更新 `change-requests/_backlog.yml` 中对应 CR 条目的 `remote-ref`、`last-push-at`、`last-push-by` 与 `checkpoints[]` 字段。
 
 ---
@@ -35,6 +37,7 @@ description: "按 dir-graph.yaml repositories 遍历所有 active repo，将 CR 
    - `branch = requirement/{cr_id}`
    - `bucket = knowledge-base`（当 `repo.role=knowledge-base`）或 `repo.id`
    - `worktreePath = {workspaceRoot}/.rayai-worktrees/{bucket}/requirement/{cr_id}`
+<!-- lint-prompts:ignore --> 描述性：推送说明（实际写入走 crctl checkpoint-add）
 4. 读取 `change-requests/_backlog.yml`，确认存在 `cr_id` 条目。
 5. 任一 active repo 的 worktree 不存在则返回 `WORKTREE_MISSING`，不得只推部分 repo。
 
@@ -61,6 +64,7 @@ const head = await runGit({ subcommand: "rev-parse", args: ["HEAD"], cwd: repo.w
 
 ### Step 3 — 更新 _backlog.yml
 
+<!-- lint-prompts:ignore --> 描述性：推送说明（实际写入走 crctl checkpoint-add）
 在 `change-requests/_backlog.yml` 对应 CR 条目更新：
 
 ```yaml
@@ -94,6 +98,7 @@ checkpoints:
 |------|------|
 | 远端分支不存在（首次 push） | `-u origin` 会自动创建远端分支，正常处理 |
 | push 被拒绝（非 fast-forward） | 提示先执行 `pull-progress` 合入他人变更后重试 |
+<!-- lint-prompts:ignore --> 描述性：推送说明（实际写入走 crctl checkpoint-add）
 | `_backlog.yml` CR 条目不存在 | 停止执行，返回 `CR_NOT_FOUND` |
 | active repo worktree 缺失 | 停止执行，返回 `WORKTREE_MISSING`，不得只推部分 repo |
 | 受控 shell 不可用（`SHELL_UNAVAILABLE`） | 停止执行，返回结构化错误；**禁止**输出「请在终端运行」提示 |

@@ -29,7 +29,7 @@ description: "CR 全局看板，展示 SLA 风险与阻塞项"
 
 ### Step 1 — 读取数据
 
-1. 扫描 `change-requests/{CR-ID}/cr.md` frontmatter → 在途 CR 列表与 status
+1. 运行 `crctl report --workspace <ws>`（S11：跨 CR 状态直方图/SLA/周期活动聚合，只读）——统计口径与手动核对一致
 2. 读取 `change-requests/_history.yml` → `history[]`（已归档 CR，按 `period` 过滤）
 3. 读取 `change-requests/_config.yml`（获取 SLA 阈值）
 

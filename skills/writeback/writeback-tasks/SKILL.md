@@ -35,6 +35,7 @@ description: 将 change-requests/{CR-ID}/tasks/ 下 status=done 的任务原子�
 
 ### Step 1 — 前置校验
 
+<!-- lint-prompts:ignore --> 描述性：任务回写说明
 1. 读取 `change-requests/{cr_id}/cr.md`，确认 `status: writing-back`（脚本同样校验，不满足即 `CR_STATUS_MISMATCH` 硬失败）。
 2. 读取 `change-requests/{cr_id}/tasks/_index.yml`，筛出 `status: done` 的任务列表；为空则脚本输出 noop 并结束（无需回写）。
 
@@ -52,8 +53,8 @@ node tools/skills/writeback/scripts/writeback-tasks.mjs \
 去掉 `--dry-run` 重跑。脚本末尾自检（新增 id 在索引中恰 1 条、frontmatter 注入齐全、全文件无 CRLF），失败输出 `SELF_CHECK_FAILED` 非零退出。成功后提交：
 
 ```bash
-git add delivery/task/
-git commit -m "writeback({cr_id}): 任务回写 delivery/task {N} 项（{version}）"
+crctl git add delivery/task/ --cwd <knowledge-base worktree>
+crctl git commit --template writeback -m "任务回写 delivery/task {N} 项（{version}）" --cwd <knowledge-base worktree>
 ```
 
 ### Step 4 — 输出摘要
@@ -85,6 +86,7 @@ git commit -m "writeback({cr_id}): 任务回写 delivery/task {N} 项（{version
 | 错误码 | 处理 |
 |------|------|
 | `BAD_ARGS` | 缺 `--workspace/--cr/--spec/--version`，补参重跑 |
+<!-- lint-prompts:ignore --> 描述性：任务回写说明
 | `CR_STATUS_MISMATCH` | cr.md status 非 `writing-back`，先完成 writeback-prd-sdd 的 status 推进 |
 | `STRUCTURE_MISMATCH` | tasks/_index.yml 标记 done 的任务无对应 TASK-*.md 源文件，报告后停止 |
 | `SELF_CHECK_FAILED` | 回写后自检断言失败，检查输出文件后重跑 |

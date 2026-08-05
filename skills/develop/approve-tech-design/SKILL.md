@@ -22,28 +22,18 @@ description: 记录架构设计人工审批结论，校验 change-requests/{CR-I
 
 ## 执行步骤
 
-1. 读取 `change-requests/{cr_id}/cr.md` frontmatter，确认当前 status 为 `tech-design-review-pending`。
-2. 确认 `cr.md owners.development.id` 与 `owners.development.assigned-at` 均存在；若 `approver` 为空，使用该负责人。
-3. 读取 `change-requests/{cr_id}/review-annotations/sdd.yml`，确认 `verdict=pass` 且 blockers 为空。
-4. 写入或更新 `change-requests/{cr_id}/approval.yml` 的 `tech-design` 段：
-
-```yaml
-tech-design:
-  approver: {approver}
-  approved-at: {YYYY-MM-DDTHH:mm:ss+08:00}
-  owner-role: development
-  notes: "{notes 或 ''}"
-  sdd-ref: "change-requests/{cr_id}/sdd.md"
-  review-ref: "change-requests/{cr_id}/review-annotations/sdd.yml"
-```
-
-5. 调用 `cr-status-set`（`next_status=tech-design-reviewed`，`trigger=approve-tech-design`，`expected_current_status=tech-design-review-pending`）将 status 推进为 `tech-design-reviewed`。
-6. 输出摘要与下一步：`coding` pipeline。
+1. 运行 `crctl approve {cr_id} --stage tech-design`（**仅限人类交互式终端，无旁路**）——crctl 自动完成：
+   - 前置态校验（当前 status=tech-design-review-pending）
+   - 评审证据校验（review-annotations/sdd.yml verdict=pass 且 blockers 为空）
+   - 计算证据摘要并写入 approval.yml#tech-design（CAS+审计）
+   - 级联 advance 到 tech-design-reviewed
+2. Agent/管道**不得**代写 approval.yml 或推进 status；非 TTY 调用 crctl 一律拒绝（APPROVAL_REQUIRES_HUMAN）。
+3. 输出审批记录路径、当前 status 和下一步：write-dev-plan。
 
 ## 错误处理
 
 | 场景 | 行为 |
 |------|------|
-| status 不是 `tech-design-review-pending` | abort，输出当前 status 与允许的下一步 |
-| sdd 评审不存在或 verdict 非 pass | abort，要求先修复并重新运行 `review-tech-design` |
-| cr-status-set 失败 | 回滚本次 approval.yml 修改，保持原 status |
+| status 不是 `tech-design-review-pending` | crctl approve 拒绝（CR_STATUS_CURRENT_MISMATCH），abort |
+| 评审证据未通过（review-annotations/sdd.yml verdict 非 pass 或 blockers 非空） | crctl approve 拒绝（GATE_BLOCKED），先修复并重跑 review-tech-design |
+| 非 TTY 调用 | crctl approve 拒绝（APPROVAL_REQUIRES_HUMAN），必须人工在终端执行 |
