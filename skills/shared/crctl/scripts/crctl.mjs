@@ -1886,6 +1886,77 @@ function cmdTaskAllocate(ws, cr, gates, flags) {
   ok({ op: 'task-allocate', cr, task: taskId, slug, file: p });
 }
 
+/* ────────────────────────── worktree-path / report / cr-metrics（S9/S11，CR-2026-021 TASK-08） ──────────────────────────
+ * 两个只读子命令（SDD §3.2）：不写任何文件、无 CAS。
+ * - worktree-path <cr> --repo <r>：唯一权威拼接规则（从 requirement-register 等 4+ 处 SKILL prose 提炼）：
+ *   bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id；path = {ws}/.rayai-worktrees/{bucket}/requirement/{cr}
+ * - report / cr-metrics [--period P]：跨 CR 聚合（对齐 cr-dashboard Step 2 口径）——
+ *   状态直方图（在途 cr.md frontmatter + _history.yml 归档 final-status）、周期活动计数（archived-at）、
+ *   SLA 阈值比较（change-requests/_config.yml#sla，缺省跳过）。
+ */
+
+function cmdWorktreePath(ws, cr, gates, flags) {
+  if (!flags.repo) fail('BAD_ARGS', 'worktree-path 需要 --repo <repo-id>');
+  const bucket = flags.repo === 'knowledge-base' || flags.repo === 'ai-first-platform-docs' ? 'knowledge-base' : flags.repo;
+  const p = path.join(ws, '.rayai-worktrees', bucket, 'requirement', cr);
+  ok({ op: 'worktree-path', cr, repo: flags.repo, bucket, path: p });
+}
+
+function cmdReport(ws, gates, flags) {
+  const statusHistogram = {};
+  const active = [];
+  // 在途：扫描 change-requests/*/cr.md frontmatter status
+  const crDirPath = path.join(ws, 'change-requests');
+  if (fs.existsSync(crDirPath)) {
+    for (const name of fs.readdirSync(crDirPath)) {
+      if (!/^CR-/.test(name) || name.includes('.')) continue; // CR 目录（含测试短 ID），排除 _backlog.yml 等文件
+      const md = readCrMdFrontmatter(ws, name);
+      if (!md || !md.status) continue;
+      statusHistogram[md.status] = (statusHistogram[md.status] || 0) + 1;
+      active.push({ cr: name, status: md.status, created: md.created || '' });
+    }
+  }
+  // 归档：_history.yml final-status
+  const historyText = readFileChecked(path.join(ws, 'change-requests', '_history.yml'));
+  let archived = 0;
+  const periodActivity = { byDay: {}, byMonth: {} };
+  if (historyText) {
+    const doc = parseYaml(historyText);
+    const list = Array.isArray(doc) ? doc : (doc && doc.history) || [];
+    for (const e of list) {
+      if (!e || !e.id) continue;
+      const fs_ = e['final-status'] || 'archived';
+      statusHistogram[fs_] = (statusHistogram[fs_] || 0) + 1;
+      if (e['archived-at']) {
+        archived++;
+        const d = String(e['archived-at']).slice(0, 10);
+        periodActivity.byDay[d] = (periodActivity.byDay[d] || 0) + 1;
+        periodActivity.byMonth[d.slice(0, 7)] = (periodActivity.byMonth[d.slice(0, 7)] || 0) + 1;
+      }
+    }
+  }
+  // SLA：_config.yml#sla（缺省跳过比较）
+  const configText = readFileChecked(path.join(ws, 'change-requests', '_config.yml'));
+  let sla = null;
+  if (configText) {
+    try { sla = parseYaml(configText).sla || null; } catch { /* 结构异常跳过 SLA */ }
+  }
+  ok({
+    op: 'report',
+    total: active.length + archived,
+    active: active.length,
+    archived,
+    statusHistogram,
+    periodActivity,
+    ...(sla ? { sla } : {}),
+  });
+}
+
+function cmdCrMetrics(ws, gates, flags) {
+  const period = flags.period || '7d';
+  return cmdReport(ws, gates, { ...flags, period });
+}
+
 /** 行级追加 supplemental-reviews 段条目（硬失败：无该段则创建，段结构异常则报错）。 */
 function appendSupplementalReview(text, entry) {
   const norm = text.replaceAll('\r\n', '\n');
@@ -2193,6 +2264,8 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
   crctl next-cr-id  [--year Y]                          只读预览下一个 CR-ID（不写、非权威）
   crctl cr-init     --title <t> --owner-requirement <id> [--year Y]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记
+  crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
+  crctl report | crctl cr-metrics [--period P]   跨 CR 聚合：状态直方图/SLA/周期活动（只读）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
@@ -2261,6 +2334,9 @@ function main() {
     case 'inbox-emit': return cmdInboxEmit(ws, requireCr(positional), gates, flags);
     case 'next-cr-id': return cmdNextCrId(ws, gates, flags);
     case 'cr-init': return cmdCrInit(ws, gates, flags);
+    case 'worktree-path': return cmdWorktreePath(ws, requireCr(positional), gates, flags);
+    case 'report': return cmdReport(ws, gates, flags);
+    case 'cr-metrics': return cmdCrMetrics(ws, gates, flags);
     case 'task': {
       if (positional[0] === 'done') return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
       if (positional[0] === 'allocate') return cmdTaskAllocate(ws, requireCr(positional.slice(1)), gates, flags);

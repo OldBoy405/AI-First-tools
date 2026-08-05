@@ -1526,3 +1526,43 @@ test('task allocate：tasks/_index.yml 缺失 → TASK_INDEX_NOT_FOUND', () => {
     assert.equal(r.stderr.error.code, 'TASK_INDEX_NOT_FOUND');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-021 TASK-08：worktree-path + report/cr-metrics（S9/S11 只读）──
+
+test('worktree-path：确定性路径输出且不写任何文件（AC-6）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r1 = runCrctl(['worktree-path', 'CR-T1', '--repo', 'ai-first-platform-docs', '--workspace', ws]);
+    assert.equal(r1.status, 0);
+    assert.equal(r1.stdout.bucket, 'knowledge-base', 'knowledge-base role → knowledge-base bucket');
+    assert.ok(r1.stdout.path.replaceAll('\\', '/').endsWith('.rayai-worktrees/knowledge-base/requirement/CR-T1'), '路径模板拼接');
+    const r2 = runCrctl(['worktree-path', 'CR-T1', '--repo', 'multica', '--workspace', ws]);
+    assert.equal(r2.stdout.bucket, 'multica', '非 knowledge-base role → repo.id bucket');
+    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before, '不得写任何文件');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('report/cr-metrics：状态直方图 + 周期活动计数（AC-6）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeCrEntry(ws, 'CR-T2', 'drafting');
+    writeFileSync(path.join(ws, 'change-requests', '_history.yml'),
+      'history:\n  - id: CR-OLD\n    final-status: archived\n    archived-at: "2026-08-03T10:00:00+08:00"\n');
+    const r = runCrctl(['report', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.op, 'report');
+    assert.equal(r.stdout.active, 2, '在途 2 个');
+    assert.equal(r.stdout.archived, 1, '归档 1 个');
+    assert.equal(r.stdout.statusHistogram.developing, 1);
+    assert.equal(r.stdout.statusHistogram.drafting, 1);
+    assert.equal(r.stdout.statusHistogram.archived, 1);
+    assert.equal(r.stdout.periodActivity.byDay['2026-08-03'], 1, '按日活动计数');
+    assert.equal(r.stdout.periodActivity.byMonth['2026-08'], 1, '按月活动计数');
+    const r2 = runCrctl(['cr-metrics', '--period', '30d', '--workspace', ws]);
+    assert.equal(r2.status, 0);
+    assert.equal(r2.stdout.total, 3);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
