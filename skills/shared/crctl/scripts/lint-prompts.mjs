@@ -144,10 +144,14 @@ function runRules(para, ctx) {
       }
     }
   }
-  // R6 手写 test-report frontmatter
-  if (t.includes('test-report.md') && /\b(status|commands):/.test(t) && /写|手写|生成|编辑|status:/i.test(t)) {
-    const idx = t.indexOf('test-report.md');
-    findings.push({ rule: 'R6', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + lineOf(t, idx) - 1, why: 'test-report.md frontmatter 应由 crctl test 生成，prompt 不得手写 status:/commands:' });
+  // R6 手写 test-report frontmatter（行级邻近判定：test-report.md 与 status:/commands: 同行才算教手写；
+  // 模板/校验说明里跨行的 status 字段引用不算）
+  const trLines = t.split('\n');
+  for (let li = 0; li < trLines.length; li++) {
+    const l = trLines[li];
+    if (l.includes('test-report.md') && (/\b(status|commands):/.test(l) || /手写|手动编辑/.test(l))) {
+      findings.push({ rule: 'R6', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: 'test-report.md frontmatter 应由 crctl test 生成，prompt 不得手写 status:/commands:' });
+    }
   }
   return findings;
 }

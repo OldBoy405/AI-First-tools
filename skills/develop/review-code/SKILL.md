@@ -1,5 +1,7 @@
 ---
 name: review-code
+<!-- lint-prompts:ignore --> 评审校验说明：只读 test-report 的 status 字段
+
 description: 读取 CR 代码 worktree 的代码 diff、验证日志、change-requests/{CR-ID}/sdd.md、tasks/* 和 test-report.md 执行代码评审；未通过时回到 implement-code 自修复，通过后推进到 code-reviewing。
 ---
 

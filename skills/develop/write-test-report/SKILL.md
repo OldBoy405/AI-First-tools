@@ -44,58 +44,23 @@ description: 汇总 implement-code 的验证命令、TASK 验收条件与测试�
 
 若某项验证不适用，必须写明原因；不得空白通过。
 
-### Step 3 — 写入 test-report.md
+### Step 3 — 生成 test-report.md（frontmatter 交 crctl test，D3）
 
-写入 `change-requests/{cr_id}/test-report.md`：
-
-```yaml
----
-id: {cr_id}-test-report
-type: TEST_REPORT
-cr-ref: {cr_id}
-tester: {tester}
-tester-assigned-at: {cr.md owners.test.assigned-at}
-status: pass | block
-blockers:
-  - id: TEST-BLOCK-001
-    issue: "{缺失或失败的验证项}"
-    suggestion: "{交回 implement-code 的修复或补证建议}"
-repair-target: implement-code
-repair-instructions:
-  - "{status=block 时列出需要 implement-code 修复或补证的动作；status=pass 时为空数组}"
-review-loop:
-  pass-condition:
-    allOf:
-      - path: status
-        equals: pass
-      - path: blockers
-        isEmpty: true
-  on-block: route-to-repair-node
-  max-attempts: 3
-  current-attempt: {self_repair_attempt 或 0}
-  attempts:
-    - attempt: {self_repair_attempt 或 0}
-      generated-at: {YYYY-MM-DDTHH:mm:ss+08:00}
-      result: pass | block
-      blocker-count: {N}
-      repair-target: implement-code
-created: {YYYY-MM-DDTHH:mm:ss+08:00}
-updated: {YYYY-MM-DDTHH:mm:ss+08:00}
----
-```
-
-正文结构：
-
-1. 测试摘要。
-2. 验证命令与结果。
-3. TASK 验收覆盖矩阵。
-4. 新增/修改测试文件。
-5. 未覆盖风险。
-6. 下一步建议。
+1. 运行 `crctl test {cr_id} --cmd "<验证命令1>" [--cmd "<验证命令2>" ...] [--cwd <path>] --workspace <worktree>`：
+   - crctl 按**真实退出码**生成 `test-report.md` 的 frontmatter（status 字段取值 pass|block、commands 数组、tester、generated-by: crctl-test）。
+   - **模型不得改写 frontmatter 的 status/commands 段**（`generated-by: crctl-test` 即防改写标记）。
+2. 模型只在 `<!-- crctl:analysis-below -->` 标记**以下**补充分析段：
+   - 测试摘要（对应 TASK 验收条件）
+   - 验证命令与结果解读
+   - TASK 验收覆盖矩阵
+   - 新增/修改测试文件
+   - 未覆盖风险（含"不适用"说明，不得空白通过）
+   - 下一步建议
+3. 若全部命令 exit 0，crctl 生成 `status: pass`；任一失败为 `status: block`，pipeline 必须把失败命令与未覆盖 TASK 作为 `review_feedback` 回传 `implement-code` 自修复；`status=pass` 前不得进入 `review-code` 或人工审批。
 
 ### Step 4 — 更新 traceability.yml
 
-在 `change-requests/{cr_id}/traceability.yml` 中写入：
+在 `change-requests/{cr_id}/traceability.yml` 中写入测试证据段（review-loop 轮次记账统一走 `crctl attempt --loop write-test-report`，TASK-17 起生效）：
 
 ```yaml
 tests:
