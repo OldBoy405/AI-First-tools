@@ -5,7 +5,7 @@ title: tools（AI First 方法论包）架构地图
 status: living
 owner: Ray
 created: "2026-08-04T17:45:00+08:00"
-updated: "2026-08-04T17:45:00+08:00"
+updated: "2026-08-05T15:10:00+08:00"
 ---
 
 # ARCHITECTURE.md — tools（AI First 方法论包）
@@ -41,8 +41,6 @@ updated: "2026-08-04T17:45:00+08:00"
 ### `skills/shared/crctl/scripts/crctl.mjs`
 
 状态机与账本的唯一可执行治理工具。**刻意单文件**（当前 1400+ 行），不因体量拆分——拆分会打散"状态机 + CAS + 审计"这条强内聚的写入路径，抵消单文件带来的"改动即全貌可见"优势（对标 esbuild/Litestream 的单文件哲学）。
-
-CR-2026-021 起写入子命令族扩至覆盖：`review-annotations/{stage}.yml`（review-record）、`approval.yml#supplemental-reviews[]`（review-note）、`_backlog` 非 status 字段（checkpoint-add/owner-set/backlog-set/inbox-emit）、CR-ID/TASK-ID 分配与首次建档（next-cr-id/cr-init/task allocate）、只读聚合（worktree-path/report/cr-metrics）、`git commit --template` 消息模板。全部沿用「状态机 + CAS + `.crctl/audit.log` 审计」同一条写入路径，无旁路。
 
 CR-2026-021 起写入子命令族扩至覆盖：`review-annotations/{stage}.yml`（review-record）、`approval.yml#supplemental-reviews[]`（review-note）、`_backlog` 非 status 字段（checkpoint-add/owner-set/backlog-set/inbox-emit）、CR-ID/TASK-ID 分配与首次建档（next-cr-id/cr-init/task allocate）、只读聚合（worktree-path/report/cr-metrics）、`git commit --template` 消息模板。全部沿用「状态机 + CAS + `.crctl/audit.log` 审计」同一条写入路径，无旁路。
 
@@ -110,7 +108,6 @@ crctl（scripts/crctl.mjs）          # 状态与账本的唯一写入执行器�
 ## 8. 本文档的维护规则
 
 - 触发修订的变更：新增/删除 skills 顶层分组、Pipeline 结构性变化、crctl 新增写入子命令、状态机口径变化、否决一个重大方案。
-  - 已登记：CR-2026-021（T1.3）crctl 新增 9 写 + 2 只读 + 1 处 git commit 扩展子命令（review-record/review-note/checkpoint-add/owner-set/backlog-set/inbox-emit/next-cr-id/cr-init/task allocate + worktree-path/report/cr-metrics + --template），§3 代码地图已同步；不改 §5/§6 判据（全部合既有不变量）。
   - 已登记：CR-2026-021（T1.3）crctl 新增 9 写 + 2 只读 + 1 处 git commit 扩展子命令（review-record/review-note/checkpoint-add/owner-set/backlog-set/inbox-emit/next-cr-id/cr-init/task allocate + worktree-path/report/cr-metrics + --template），§3 代码地图已同步；不改 §5/§6 判据（全部合既有不变量）。
 - 普通 Skill 文档措辞调整、单个 CR 的功能改动**不需要**改本文档——若发现必须改，说明该改动是架构级变更，先过设计评审。
 - 评审对照：`review-tech-design` 的"架构合理性"维度逐条对照 §4/§5/§6 判定。

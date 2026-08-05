@@ -80,6 +80,7 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 5. **技术选型与替代方案** — 决策说明与权衡
 6. **FR 到技术实现映射** — 每条 FR-* 对应的技术方案条目
 7. **安全与性能考量** — 边界条件、性能目标、安全控制点
+8. **Prompt 采纳影响**（条件性小节，CR-2026-021 FR-25/AC-15）：**若本 CR 的 diff 会触及 `skills/shared/crctl/scripts/crctl.mjs` 的 dispatch 分支或 `skills/shared/controlled-shell/rules.json` 的 `protectedPaths.deny`（= crctl 命令面或 guard deny 面有新增/变更）**，本节为必填，列出应改为调用新增/扩展子命令的 skill 清单（每项含 skill 路径 + 现状 + 应改为的调用方式），供 `review-tech-design` 与人工审批逐条核对；若本 CR 不触及上述两处，本节可省略。`lint-prompts` 只能机械抓到"prompt 还在做 crctl 已接管/已禁止的事"（CONTRADICTS/STALE），抓不到"crctl 新增了能力、某 skill 该采纳却还没采纳"——这一类必须靠本节 + 评审兜底。
 
 ### Step 3 — 落盘并 commit
 

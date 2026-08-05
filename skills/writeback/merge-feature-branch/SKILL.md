@@ -18,8 +18,7 @@ description: 按 dir-graph.yaml repositories 动态解析参与仓，通过 dry-
 本 Skill 必须采用“两阶段合并”：
 1. **预检阶段**：所有 repo 先完成远端新鲜度检查与 `merge-tree --write-tree` dry-run，不修改任何 trunk。
 2. **本地合并阶段**：所有 repo 使用 `merge --no-commit --no-ff` 完成本地合并准备；只有全部 repo 都成功后才逐仓 commit。
-<!-- lint-prompts:ignore --> 描述性说明：历史契约引用（cr-status-set）
-3. **远端发布阶段**：只有全部 repo 本地 merge commit 都已生成，且所有 origin trunk 仍与预检 SHA 一致，才允许 push。全部 push 成功后，使用 `cr-status-set commit_mode=embedded` 校验 `code-approved → merging`，并把状态与 `merge-commits[]` 放在同一 metadata commit 中发布。
+3. **远端发布阶段**：只有全部 repo 本地 merge commit 都已生成，且所有 origin trunk 仍与预检 SHA 一致，才允许 push。全部 push 成功后，使用 `crctl advance --to merging --embedded` 校验 `code-approved → merging`（见 Step 4 详细调用），并把状态与 `merge-commits[]` 放在同一 metadata commit 中发布。
 4. **自动补偿阶段**：若远端发布阶段任一 repo push 失败，必须对已成功 push 的 repo 自动执行补偿 revert，并验证远端 trunk 回到“未包含本 CR”的状态；补偿完成前不得进入 writeback。
 
 不得在全部参与仓本地合并成功前 push 任何 trunk。本 Skill 不清理本地 worktree、不删除远端分支，统一留给 `cr-archive`。

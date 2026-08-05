@@ -12,8 +12,7 @@ description: "归档新四阶段 CR：以 cr.md frontmatter status 为 final-sta
 
 ## 用途
 
-<!-- lint-prompts:ignore --> 描述性说明：归档流程历史引用
-将新四阶段 CR 从 `change-requests/_backlog.yml` 移出，追加到 `change-requests/_history.yml`。成功回写场景必须通过 `cr-status-set commit_mode=embedded` 校验 `writing-back → archived`，并在同一个归档账本 commit 中同步 `cr.md`、`_backlog.yml`、`_history.yml` 与 `_index.yml`。主动撤回或拒绝场景可保留 `withdrawn` / `rejected` 作为 final-status 归档。
+将新四阶段 CR 从 `change-requests/_backlog.yml` 移出，追加到 `change-requests/_history.yml`。成功回写场景必须通过 `crctl advance --to archived --trigger cr-archive --expect writing-back --embedded` 校验 `writing-back → archived`，并在同一个归档账本 commit 中同步 `cr.md`、`_backlog.yml`、`_history.yml` 与 `_index.yml`（经 `crctl archive-move` 一并完成，见 Step 3）。主动撤回或拒绝场景可保留 `withdrawn` / `rejected` 作为 final-status 归档。
 
 ---
 

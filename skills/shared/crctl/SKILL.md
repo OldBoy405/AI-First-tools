@@ -1,7 +1,6 @@
 ---
 name: crctl
-<!-- lint-prompts:ignore --> 描述性说明：历史契约引用（cr-status-set）
-description: CR 状态机 gate CLI（漂移治理 v2 组件 A）：在 IDE 单独使用本 tools 包时，作为 cr-status-set / controlled-shell / validate-doc 的代码化执行器，把状态推进、门禁校验、人工审批、git 白名单从「模型自觉」变成「代码强制」。
+description: CR 状态机 gate CLI（漂移治理 v2 组件 A）：在 IDE 单独使用本 tools 包时，作为状态推进 / controlled-shell / validate-doc 等历史手动流程的代码化执行器，把状态推进、门禁校验、人工审批、git 白名单从「模型自觉」变成「代码强制」（状态推进唯一通道为 `crctl advance`）。
 ---
 <!-- meta
 id: crctl

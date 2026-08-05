@@ -47,6 +47,7 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 | **接口契约** | 接口定义是否清晰，类型是否完整 |
 | **性能与安全** | 关键路径是否有性能考量，安全控制点是否完备 |
 | **可测试性** | 技术方案是否易于单元/集成测试 |
+| **Prompt 采纳影响**（CR-2026-021 FR-25，条件性） | 若本 CR 的 diff 触及 `crctl.mjs` dispatch 或 `rules.json#protectedPaths.deny`，SDD 第 8 节必须存在且列出应改为调用新增/扩展子命令的 skill 清单；缺失记为 blocker（`lint-prompts` 抓不到"新增能力未被采纳"这类漂移，只能由本维度人工兜底）。不触及上述两处则本项跳过 |
 
 ### Step 3 — 写评审批注 — 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
 

@@ -99,20 +99,8 @@ await runGit({ subcommand: "worktree",
    新 owner        : {new_owner_role}:{new_owner}（如已指定）
    最后推送时间    : {last-push-at}
 
-➡️  按当前状态和评审证据继续：
-   - drafting → requirement-authoring：从 write-requirement-prd / review-requirement 继续
-   - requirement-reviewing + requirement.yml verdict=pass 且 blockers=[] → 等待 human_approval，下一节点 approve-requirement
-   - requirement-reviewing + requirement.yml 未通过或缺失 → 回到 write-requirement-prd 自修复并重审
-   - requirement-approved → architecture-design：从 write-tech-design 开始
-   - tech-designing → architecture-design：从 write-tech-design / review-tech-design 继续
-   - tech-design-review-pending + sdd.yml verdict=pass 且 blockers=[] → 等待 human_approval，下一节点 approve-tech-design
-   - tech-design-review-pending + sdd.yml 未通过或缺失 → 继续 review-tech-design，或回到 write-tech-design 自修复
-   - tech-design-reviewed → code-implementation：从 write-dev-plan 开始
-   - task-breakdown → 等待开发启动 human_approval，下一节点 approve-dev-start；若任务需修订则回到 write-dev-tasks
-   - developing → code-implementation：从 implement-code / write-test-report / review-code 继续
-   - code-reviewing + code.yml verdict=pass、blockers=[] 且 test-report.md status=pass → 等待 human_approval，下一节点 approve-code
-   - code-reviewing + 代码评审或测试报告未通过 → 回到 implement-code 自修复并重测重审
-   - code-approved → feature-writeback pipeline
+➡️  按当前状态和评审证据继续（CR-2026-021 D8：状态→下一节点判断唯一收敛为 `crctl next`，不再本地维护硬编码映射表）：
+   跑 `crctl next {cr_id} --workspace {knowledgeBaseRepo.path}`，按其 `next`/`humanApproval`/`why` 输出继续；若 `crctl status` 报 `STATUS_DIVERGED`（主 workspace 视图落后于 CR worktree 分支），先按其指向的 worktree 为准再重跑 `crctl next`。
 ```
 
 ---
