@@ -55,7 +55,7 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
    - 并发下后到者见 `_index`/`_backlog` hash 已变 → `CAS_CONFLICT`，三文件全不落盘 → **重跑 cr-init**（重读 max、自动拿新号），不撞号。
    - `cr_id` 变量 = cr-init 返回的 `cr` 字段。
 2. **模型不得手写 `cr.md`/追加 `_backlog.yml`/登记 `_index.yml`**（guard deny + cr-init 独占，含 CAS+审计）。
-3. `summary` 等补充字段由后续节点（write-requirement-prd）经 `crctl backlog-set`（S5）等专命令写入。
+3. `summary`/`source`/`target-version` 等注册元信息字段由注册方在 cr-init 建档后直接补全 `cr.md` frontmatter，随 Step 4 的 register 提交一并入库（先例：CR-2026-021 register 提交即含完整 summary/source）。注：`crctl backlog-set`（S5）白名单仅 `prd-path|sdd-path`，不承担 summary 写入。
 
 ### Step 4 — 提交注册记录到 knowledge-base trunk
 
@@ -68,7 +68,7 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
 ```ts
 <!-- lint-prompts:ignore --> 受控 shell 代码块：runGit = 受控 git 适配器（S10 模板经 crctl git commit）
 await runGit({ subcommand: "add", args: ["change-requests/_backlog.yml", "change-requests/_index.yml", `change-requests/${crId}/cr.md`], cwd: knowledgeBaseRepo.path });
-await runGit({ subcommand: "commit", args: ["--template", "register", "-m", title], cwd: knowledgeBaseRepo.path });  // S10：生成 [cr] register {cr}: {title}
+await runGit({ subcommand: "commit", args: ["--template", "register", "-m", `${crId} ${title}`], cwd: knowledgeBaseRepo.path });  // S10：生成 [cr] register {cr}: {subject}；注册在 trunk（master）提交，分支探测落空，subject 必须含 CR 编号供 resolveTemplateCr 正则兜底
 await runGit({ subcommand: "push", args: ["origin", knowledgeBaseRepo.trunk], cwd: knowledgeBaseRepo.path });
 ```
 
