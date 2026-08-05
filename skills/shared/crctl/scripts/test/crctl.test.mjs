@@ -1131,7 +1131,7 @@ test('review-record：verdict 非法 → SCHEMA_INVALID，不写 canonical、pay
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-test('review-record：前置态非法（drafting）→ ILLEGAL_LEDGER_STATE，文件零变更（§0 范式）', () => {
+test('review-record：前置态非法（drafting 对 code stage）→ ILLEGAL_LEDGER_STATE，文件零变更（§0 范式；code 前置态=developing）', () => {
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-T1', 'drafting');
@@ -1157,7 +1157,7 @@ test('review-record：未知 stage → STAGE_UNKNOWN', () => {
 test('review-record：--bump-attempt 级联 attempt 记账（复用既有 bumpAttempt）', () => {
   const ws = makeWorkspace();
   try {
-    writeCrEntry(ws, 'CR-T1', 'code-reviewing');
+    writeCrEntry(ws, 'CR-T1', 'developing');
     writeReviewPayload(ws, 'CR-T1', 'code', 'verdict: block\nblockers:\n  - "bug A"\ndimensions:\n  a: b\n');
     const r = runCrctl(['review-record', 'CR-T1', '--stage', 'code', '--bump-attempt', '--workspace', ws]);
     assert.equal(r.status, 0);

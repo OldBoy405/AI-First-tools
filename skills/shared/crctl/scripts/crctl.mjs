@@ -1348,7 +1348,13 @@ function cmdAttempt(ws, cr, gates, flags) {
  */
 const REVIEW_STAGE_FILES = { requirement: 'requirement.yml', 'tech-design': 'sdd.yml', code: 'code.yml' };
 const REVIEW_STAGE_LOOPS = { requirement: 'review-requirement', 'tech-design': 'review-tech-design', code: 'review-code' };
-const REVIEW_STAGE_EXPECT = { requirement: ['requirement-reviewing'], 'tech-design': ['tech-design-review-pending'], code: ['code-reviewing'] };
+// 前置态与各 review-* SKILL 的 Step 顺序对齐（先 review-record 落盘证据、后 advance 进评审态）：
+// - requirement：评审在 drafting 执行（block 回 drafting 重审；requirement-reviewing 保留兼容重跑）
+// - tech-design：write-tech-design 落盘后先进 tech-design-review-pending（其 statusGate 只需 sdd.md），再评审
+// - code：评审在 developing 执行（block 回 developing 修复后重审）
+// 注意：requirement/code 的评审态 statusGate 含 passCondition（需评审证据已存在），
+// 若前置态错设为评审态将与 advance 门禁互锁成死锁——CR-2026-021 开发期实测缺陷（先写后推进）。
+const REVIEW_STAGE_EXPECT = { requirement: ['drafting', 'requirement-reviewing'], 'tech-design': ['tech-design-review-pending'], code: ['developing'] };
 
 function cmdReviewRecord(ws, cr, gates, flags) {
   const stage = flags.stage;
