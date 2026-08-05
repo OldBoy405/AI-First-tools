@@ -22,34 +22,18 @@ description: 记录代码人工审批结论，校验 change-requests/{CR-ID}/rev
 
 ## 执行步骤
 
-1. 读取 `change-requests/{cr_id}/cr.md` frontmatter，确认当前 status 为 `code-reviewing`。
-2. 确认 `cr.md owners.development.id` 与 `owners.development.assigned-at` 均存在；若 `approver` 为空，使用该负责人。
-3. 确认 `cr.md owners.test.id` 与 `owners.test.assigned-at` 均存在。
-4. 读取 `change-requests/{cr_id}/review-annotations/code.yml`，确认 `verdict=pass` 且 blockers 为空。
-5. 确认 `change-requests/{cr_id}/test-report.md` 存在且 frontmatter `status=pass`，并确认其 `tester` 与 `owners.test.id` 一致；若不一致，必须在 approval.yml 记录偏差说明。
-6. 确认 `review-annotations/code.yml` 包含验证命令记录：lint/test/build 均为 pass，或明确标记不适用并说明原因，并引用 `test-report.md`。
-7. 写入或更新 `change-requests/{cr_id}/approval.yml` 的 `code` 段：
-
-```yaml
-code:
-  approver: {approver}
-  approved-at: {YYYY-MM-DDTHH:mm:ss+08:00}
-  owner-role: development
-  test-owner: {cr.md owners.test.id}
-  notes: "{notes 或 ''}"
-  review-ref: "change-requests/{cr_id}/review-annotations/code.yml"
-  test-report-ref: "change-requests/{cr_id}/test-report.md"
-```
-
-8. 调用 `cr-status-set`（`next_status=code-approved`，`trigger=approve-code`，`expected_current_status=code-reviewing`）将 status 推进为 `code-approved`。
-9. 输出摘要与下一步：`writeback` pipeline。
+1. 运行 `crctl approve {cr_id} --stage code`（**仅限人类交互式终端，无旁路**）——crctl 自动完成：
+   - 前置态校验（当前 status=code-reviewing）
+   - 评审证据校验（review-annotations/code.yml verdict=pass 且 blockers 为空）
+   - 计算证据摘要并写入 approval.yml#code（CAS+审计）
+   - 级联 advance 到 code-approved
+2. Agent/管道**不得**代写 approval.yml 或推进 status；非 TTY 调用 crctl 一律拒绝（APPROVAL_REQUIRES_HUMAN）。
+3. 输出审批记录路径、当前 status 和下一步：writeback pipeline。
 
 ## 错误处理
 
 | 场景 | 行为 |
 |------|------|
-| status 不是 `code-reviewing` | abort，输出当前 status 与允许的下一步 |
-| code 评审不存在或 verdict 非 pass | abort，要求先修复代码并重新运行 `review-code` |
-| test-report 不存在或 status 非 pass | abort，要求先运行 `write-test-report` 或修复测试失败项 |
-| 验证命令缺失 | abort，要求补充 lint/test/build 或不适用说明 |
-| cr-status-set 失败 | 回滚本次 approval.yml 修改，保持原 status |
+| status 不是 `code-reviewing` | crctl approve 拒绝（CR_STATUS_CURRENT_MISMATCH），abort |
+| 评审证据未通过（review-annotations/code.yml verdict 非 pass 或 blockers 非空） | crctl approve 拒绝（GATE_BLOCKED），先修复并重跑 review-code |
+| 非 TTY 调用 | crctl approve 拒绝（APPROVAL_REQUIRES_HUMAN），必须人工在终端执行 |

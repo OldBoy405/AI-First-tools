@@ -37,36 +37,18 @@ description: 记录任务拆分后的开发启动人工确认，校验 plan.md �
 
 ## 执行步骤
 
-1. 校验所有前置条件；任一失败则 abort，不推进状态。
-2. 在 `change-requests/{cr_id}/approval.yml` 写入或更新 `development-start` 段：
-   ```yaml
-   development-start:
-     approved-by: {approver}
-     approved-at: {YYYY-MM-DDTHH:mm:ss+08:00}
-     owner-role: development
-     from-status: task-breakdown
-     to-status: developing
-     accepted-artifacts:
-       plan: change-requests/{cr_id}/plan.md
-       tasks-index: change-requests/{cr_id}/tasks/_index.yml
-   ```
-3. 调用 `cr-status-set`（`next_status=developing`，`trigger=approve-dev-start`，`expected_current_status=task-breakdown`）将 status 推进为 `developing`。
-4. 输出审批记录路径、当前 status 和下一步 `implement-code` 指令。
+1. 运行 `crctl approve {cr_id} --stage dev-start`（**仅限人类交互式终端，无旁路**）——crctl 自动完成：
+   - 前置态校验（当前 status=task-breakdown）
+   - 审批前置产物校验（plan.md 与 tasks/ 存在）
+   - 计算证据摘要并写入 approval.yml#dev-start（CAS+审计）
+   - 级联 advance 到 developing
+2. Agent/管道**不得**代写 approval.yml 或推进 status；非 TTY 调用 crctl 一律拒绝（APPROVAL_REQUIRES_HUMAN）。
+3. 输出审批记录路径、当前 status 和下一步：implement-code。
 
----
+## 错误处理
 
-## 禁止事项
-
-- 不修改 `plan.md` 或 `tasks/` 内容。
-- 不直接写代码。
-- 不跳过 `cr-status-set` 手工编辑 `_backlog.yml`。
-
----
-
-## 失败处理
-
-| 情况 | 处理 |
+| 场景 | 行为 |
 |------|------|
-| status 不是 `task-breakdown` | abort，输出当前 status 与允许的下一步 |
-| plan.md 或 tasks 缺失 | abort，要求重新运行 `write-dev-plan` / `write-dev-tasks` |
-| 人工确认缺失 | abort，等待 pipeline 的 human_approval |
+| status 不是 `task-breakdown` | crctl approve 拒绝（CR_STATUS_CURRENT_MISMATCH），abort |
+| 评审证据未通过（plan/tasks 缺失） | crctl approve 拒绝（GATE_BLOCKED），先修复并重跑 write-dev-plan / write-dev-tasks |
+| 非 TTY 调用 | crctl approve 拒绝（APPROVAL_REQUIRES_HUMAN），必须人工在终端执行 |
