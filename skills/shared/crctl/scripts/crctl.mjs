@@ -1500,6 +1500,14 @@ function appendToBlockSequence(lines, keyName, itemText, fieldIndent) {
   return out;
 }
 
+/** 在块顶层 lines 中 upsert 一个标量字段 `key: "value"`：命中则原位替换，未命中则追加到块尾。返回新数组。 */
+function upsertTopField(lines, indent, key, value) {
+  const re = new RegExp('^[ \\t]*' + key + ':');
+  const newLine = `${indent}${key}: "${value}"`;
+  const hit = lines.some((l) => re.test(l));
+  return hit ? lines.map((l) => (re.test(l) ? newLine : l)) : [...lines, newLine];
+}
+
 /** checkpoint-add：块内 checkpoints[] 追加 + remote-ref/last-push-at/last-push-by 更新（SDD §3.1）。 */
 function editCheckpointAdd(text, cr, meta) {
   const norm = text.replaceAll('\r\n', '\n');
@@ -1519,19 +1527,9 @@ function editCheckpointAdd(text, cr, meta) {
   ].filter(Boolean).join('\n');
   let result = appendToBlockSequence(lines, 'checkpoints', cpItem, fieldIndent);
   // 2) remote-ref / last-push-at / last-push-by 更新（无则插入到条目块尾部）
-  const setField = (key, value) => {
-    const hit = result.some((l) => new RegExp('^[ \\t]*' + key + ':').test(l));
-    if (hit) {
-      result = result.map((l) => (new RegExp('^[ \\t]*' + key + ':').test(l)
-        ? l.replace(/^(.*)$/, `${fieldIndent}${key}: "${value}"`)
-        : l));
-    } else {
-      result.push(`${fieldIndent}${key}: "${value}"`);
-    }
-  };
-  if (meta.remoteRef) setField('remote-ref', meta.remoteRef);
-  setField('last-push-at', nowIso());
-  setField('last-push-by', meta.by);
+  if (meta.remoteRef) result = upsertTopField(result, fieldIndent, 'remote-ref', meta.remoteRef);
+  result = upsertTopField(result, fieldIndent, 'last-push-at', nowIso());
+  result = upsertTopField(result, fieldIndent, 'last-push-by', meta.by);
   return norm.slice(0, block.start) + result.join('\n') + norm.slice(block.end);
 }
 
@@ -1557,7 +1555,7 @@ function editOwnerSet(text, cr, role, id) {
     else out.push(l);
   }
   if (!hasId) out.unshift(`${subIndent}id: ${id}`);
-  if (!hasAt) out.splice(hasId ? 1 : 1, 0, `${subIndent}assigned-at: "${nowIso()}"`);
+  if (!hasAt) out.splice(1, 0, `${subIndent}assigned-at: "${nowIso()}"`);
   const nb = lines.slice(0, roleIdx + 1).concat(out, lines.slice(endIdx)).join('\n');
   return norm.slice(0, block.start) + nb + '\n' + norm.slice(block.end);
 }
@@ -1569,16 +1567,8 @@ function editBacklogSet(text, cr, field, value) {
   const block = matchEntryBlock(norm, cr);
   if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
   const lines = block.text.split('\n');
-  const hit = lines.some((l) => new RegExp('^[ \\t]*' + field + ':').test(l));
   const fieldIndent = ' '.repeat(block.indent + 2);
-  let out;
-  if (hit) {
-    out = lines.map((l) => (new RegExp('^[ \\t]*' + field + ':').test(l)
-      ? l.replace(/^(.*)$/, `${fieldIndent}${field}: "${value}"`)
-      : l));
-  } else {
-    out = [...lines, `${fieldIndent}${field}: "${value}"`];
-  }
+  const out = upsertTopField(lines, fieldIndent, field, value);
   return norm.slice(0, block.start) + out.join('\n') + norm.slice(block.end);
 }
 
@@ -1694,14 +1684,12 @@ function cmdInboxEmit(ws, cr, gates, flags) {
   ok({ op: 'inbox-emit', cr, event: flags.event, to, file: snap.path });
 }
 
-/* ────────────────────────── next-cr-id / cr-init（S6/S8，CR-2026-021 TASK-06） ──────────────────────────
+/* ────────────────────────── cr-init（S8，CR-2026-021 TASK-06） ──────────────────────────
  * SDD §2.3/§4.2（SDD-BLOCK-001 修复语义）：
- * - next-cr-id = 纯只读预览：扫 _index.yml/_backlog.yml 现有 max、返回 CR-{Y}-{NNN+1} 候选。
- *   不写文件、非权威、不参与分配。
- * - cr-init = 唯一权威原子分配：不取显式 cr-id 入参，内部读 max → 计算 → casWriteMulti 一次写
+ * cr-init = 唯一权威原子分配：不取显式 cr-id 入参，内部读 max → 计算 → casWriteMulti 一次写
  *   cr.md(新建,expectedHash=null) + _backlog(追加) + _index(登记) → 输出返回分配到的 cr-id。
- *   并发下后到者见 _index/_backlog hash 已变 → CAS_CONFLICT，三文件全不落盘，调用方重跑拿新号。
- *   唯一并发冲突码是 CAS_CONFLICT；正常路径无 CR_ALREADY_EXISTS（无外部传入 id，无 TOCTOU）。
+ * 并发下后到者见 _index/_backlog hash 已变 → CAS_CONFLICT，三文件全不落盘，调用方重跑拿新号。
+ * 唯一并发冲突码是 CAS_CONFLICT；正常路径无 CR_ALREADY_EXISTS（无外部传入 id，无 TOCTOU）。
  */
 
 function scanMaxCrNumber(ws, year) {
@@ -1719,12 +1707,6 @@ function scanMaxCrNumber(ws, year) {
 }
 
 function formatCrId(year, n) { return `CR-${year}-${String(n).padStart(3, '0')}`; }
-
-function cmdNextCrId(ws, gates, flags) {
-  const year = flags.year || String(new Date().getFullYear());
-  const max = scanMaxCrNumber(ws, year);
-  ok({ crId: formatCrId(year, max + 1), year, max, previewOnly: true, note: '纯只读预览，不参与分配；权威分配请用 crctl cr-init' });
-}
 
 function cmdCrInit(ws, gates, flags) {
   if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> [--year Y]');
@@ -2294,7 +2276,6 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   _backlog owners.{role} 指派（非终态）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
-  crctl next-cr-id  [--year Y]                          只读预览下一个 CR-ID（不写、非权威）
   crctl cr-init     --title <t> --owner-requirement <id> [--year Y]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记
   crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
   crctl report | crctl cr-metrics [--period <N>d]   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
@@ -2365,7 +2346,6 @@ function main() {
     case 'owner-set': return cmdOwnerSet(ws, requireCr(positional), gates, flags);
     case 'backlog-set': return cmdBacklogSet(ws, requireCr(positional), gates, flags);
     case 'inbox-emit': return cmdInboxEmit(ws, requireCr(positional), gates, flags);
-    case 'next-cr-id': return cmdNextCrId(ws, gates, flags);
     case 'cr-init': return cmdCrInit(ws, gates, flags);
     case 'worktree-path': return cmdWorktreePath(ws, requireCr(positional), gates, flags);
     case 'report': return cmdReport(ws, gates, flags);

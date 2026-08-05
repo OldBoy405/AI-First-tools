@@ -271,7 +271,7 @@ skills:
 
   - id: crctl
     path: ./shared/crctl/SKILL.md
-    brief: "CR 状态机 gate CLI（漂移治理 v2 组件 A）：IDE 单独使用时状态推进 / controlled-shell / validate-doc 等历史手动流程的代码化执行器；status/advance/gate/approve/validate/attempt/test/next/git + 账本子命令 task done/allocate、merge-metadata、archive-move、migrate-backlog、review-record、review-note、checkpoint-add、owner-set、backlog-set、inbox-emit、next-cr-id、cr-init、worktree-path、report/cr-metrics、git commit --template（CR-2026-021 起）"
+    brief: "CR 状态机 gate CLI（漂移治理 v2 组件 A）：IDE 单独使用时状态推进 / controlled-shell / validate-doc 等历史手动流程的代码化执行器；status/advance/gate/approve/validate/attempt/test/next/git + 账本子命令 task done/allocate、merge-metadata、archive-move、migrate-backlog、review-record、review-note、checkpoint-add、owner-set、backlog-set、inbox-emit、cr-init、worktree-path、report/cr-metrics、git commit --template（CR-2026-021 起）"
     status: active
 
   # ─── Change Request (CR) 通用 Skill（cr/ 子目录，保留部分）─────────────

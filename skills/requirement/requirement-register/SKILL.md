@@ -46,8 +46,7 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
    - 其他 active repo 的 bucket 使用 `repo.id`
    - 每个 repo 的 trunk 取 `repo.trunk`，缺失则返回 `REPO_TRUNK_UNRESOLVED`
 3. 确认 knowledge-base trunk 工作区 clean；若存在未提交变更，返回 `REGISTRATION_TRUNK_DIRTY`，不得继续。
-4. 若输入 `cr_id` 为空，运行 `crctl next-cr-id [--year Y] --workspace <ws>` 获取**只读预览**候选（S6：纯预览，不写、非权威，仅供人看一眼下一个号）。
-5. 若输入 `cr_id` 非空，校验格式为 `CR-YYYY-NNN`，并确认 `change-requests/_index.yml`、`change-requests/_backlog.yml`、`change-requests/{cr_id}/` 中均不存在同名记录；**权威分配与建档不在此处手写**——统一由 Step 2 的 `crctl cr-init` 原子完成（内部 max+1 + casWriteMulti 三文件，返回分配到的 cr-id）。
+4. 若输入 `cr_id` 非空，校验格式为 `CR-YYYY-NNN`，并确认 `change-requests/_index.yml`、`change-requests/_backlog.yml`、`change-requests/{cr_id}/` 中均不存在同名记录；若为空，直接进入 Step 2。**权威分配与建档不在此处手写**——统一由 Step 2 的 `crctl cr-init` 原子完成（内部 max+1 + casWriteMulti 三文件，返回分配到的 cr-id）。
 
 ### Step 2 — 权威注册：crctl cr-init（S8，唯一权威分配与建档）
 

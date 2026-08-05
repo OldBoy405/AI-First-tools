@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI First tools 工具包 · 二开修改报告（对比上游）</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<style>
+:root{
+  --bg:#f4f6fb; --panel:#ffffff; --panel2:#eef2f9; --line:#dde4f0;
+  --txt:#1c2740; --sub:#4a5878; --dim:#8a96b0;
+  --blue:#2563eb; --green:#0e9f6e; --amber:#d97706; --red:#dc2626; --purple:#7c3aed;
+  --mono:"Cascadia Code","JetBrains Mono",Consolas,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--txt);font:15px/1.75 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;padding-left:300px}
+/* ── Sidebar ── */
+#sidebar{position:fixed;inset:0 auto 0 0;width:300px;background:var(--panel);border-right:1px solid var(--line);overflow-y:auto;z-index:50;padding:22px 0 40px}
+#sidebar .brand{padding:0 20px 16px;border-bottom:1px solid var(--line);margin-bottom:12px}
+#sidebar .brand h1{font-size:16px;color:var(--txt);line-height:1.4}
+#sidebar .brand small{color:var(--sub);font-size:12px}
+#sidebar .brand .logo{display:inline-block;background:linear-gradient(135deg,var(--blue),var(--purple));border-radius:8px;width:34px;height:34px;text-align:center;line-height:34px;font-weight:700;font-size:16px;color:#fff;margin-bottom:8px}
+#sidebar nav a{display:block;padding:7px 20px;color:var(--sub);text-decoration:none;font-size:13px;border-left:3px solid transparent}
+#sidebar nav a:hover{color:var(--txt);background:var(--panel2)}
+#sidebar nav a.lv2{padding-left:36px;font-size:12.5px;color:var(--dim)}
+#sidebar nav a.active{color:var(--blue);border-left-color:var(--blue);background:rgba(37,99,235,.1)}
+#sidebar nav .sec{color:var(--txt);font-weight:700;font-size:12px;letter-spacing:.12em;padding:16px 20px 6px;text-transform:uppercase}
+/* ── Search ── */
+#searchwrap{padding:10px 16px;border-bottom:1px solid var(--line);margin-bottom:8px}
+#searchwrap input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--txt);padding:8px 12px;font-size:13px;outline:none}
+#searchwrap input:focus{border-color:var(--blue)}
+#searchwrap .hint{color:var(--dim);font-size:11px;margin-top:6px}
+mark.hl{background:#fde68a;color:#7c2d12;border-radius:3px;padding:0 2px}
+/* ── Main ── */
+main{padding:0 48px 80px;max-width:1180px}
+section{padding-top:56px}
+.anchor{display:block;position:relative;top:-70px;visibility:hidden}
+h2{font-size:26px;margin-bottom:6px;display:flex;align-items:center;gap:12px}
+h2 .no{display:inline-flex;width:38px;height:38px;border-radius:10px;background:linear-gradient(135deg,var(--blue),var(--purple));color:#fff;align-items:center;justify-content:center;font-size:17px;flex:none}
+h3{font-size:19px;margin:34px 0 12px;color:var(--txt);border-left:4px solid var(--blue);padding-left:12px}
+h4{font-size:15.5px;margin:22px 0 8px;color:#33415f}
+p{color:var(--sub);margin-bottom:10px}
+ul,ol{margin:0 0 12px 22px;color:var(--sub)}
+li{margin-bottom:5px}
+b,strong{color:var(--txt)}
+code{font-family:var(--mono);font-size:.88em;background:var(--panel2);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:#1d4ed8}
+pre{background:#f8fafd;border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;margin:12px 0;font-family:var(--mono);font-size:12.5px;line-height:1.65;color:#2b3a5c}
+pre code{background:none;border:none;padding:0;color:inherit}
+/* ── Cards / Grid ── */
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(2,1fr)}
+.g3{grid-template-columns:repeat(3,1fr)}
+.g4{grid-template-columns:repeat(4,1fr)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 20px}
+.card h4{margin-top:0}
+.card .big{font-size:30px;font-weight:800;color:var(--blue);font-family:var(--mono)}
+.card .big.g{color:var(--green)} .card .big.a{color:var(--amber)} .card .big.r{color:var(--red)}
+.card .lbl{color:var(--dim);font-size:12px;letter-spacing:.05em}
+/* ── Tables ── */
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;background:var(--panel);border-radius:10px;overflow:hidden}
+th{background:var(--panel2);color:var(--txt);text-align:left;padding:9px 12px;font-weight:600;font-size:12px;letter-spacing:.04em;border-bottom:1px solid var(--line)}
+td{padding:8px 12px;border-bottom:1px solid rgba(221,228,240,.8);color:var(--sub);vertical-align:top}
+tr:last-child td{border-bottom:none}
+td.mono,th.mono{font-family:var(--mono);font-size:12px}
+tr:hover td{background:rgba(37,99,235,.05)}
+/* ── Badges ── */
+.badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:.03em;white-space:nowrap}
+.b-add{background:rgba(45,212,167,.14);color:var(--green);border:1px solid rgba(45,212,167,.35)}
+.b-mod{background:rgba(245,177,61,.14);color:var(--amber);border:1px solid rgba(245,177,61,.35)}
+.b-del{background:rgba(242,100,94,.14);color:var(--red);border:1px solid rgba(242,100,94,.35)}
+.b-feat{background:rgba(79,140,255,.14);color:var(--blue);border:1px solid rgba(79,140,255,.35)}
+.b-fix{background:rgba(242,100,94,.14);color:var(--red);border:1px solid rgba(242,100,94,.35)}
+.b-doc{background:rgba(167,139,250,.14);color:var(--purple);border:1px solid rgba(167,139,250,.35)}
+.b-ci{background:rgba(45,212,167,.14);color:var(--green);border:1px solid rgba(45,212,167,.35)}
+.b-ref{background:rgba(100,116,139,.12);color:#475569;border:1px solid rgba(100,116,139,.35)}
+.b-gen{background:rgba(148,163,184,.1);color:var(--dim);border:1px dashed rgba(148,163,184,.3)}
+.b-sec{background:rgba(220,38,38,.08);color:#b91c1c;border:1px solid rgba(220,38,38,.3)}
+/* ── Mermaid ── */
+.mermaid{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin:14px 0;overflow-x:auto;text-align:center}
+.mermaid svg{max-width:100%;height:auto}
+.mermaid.wide svg{max-width:none !important}
+.mermaid-caption{text-align:center;color:var(--dim);font-size:12.5px;margin:-6px 0 18px}
+/* ── SVG stat blocks ── */
+.statbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin:14px 0}
+.statbox h4{margin:0 0 6px;font-size:14px}
+.statbox .sub{color:var(--dim);font-size:12px;margin-bottom:10px}
+/* ── File diff list ── */
+.fgroup{margin:16px 0}
+.fgroup>summary{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 16px;cursor:pointer;font-weight:600;color:var(--txt);list-style:none;display:flex;align-items:center;gap:10px}
+.fgroup>summary:hover{background:var(--panel2)}
+.fgroup>summary::before{content:"▸";color:var(--blue);transition:transform .2s}
+.fgroup[open]>summary::before{transform:rotate(90deg)}
+.fgroup .count{color:var(--dim);font-weight:400;font-size:12px}
+.fgroup ul{list-style:none;margin:10px 0 0;padding:0}
+.fgroup li{padding:9px 12px 9px 30px;border-bottom:1px solid rgba(221,228,240,.7);font-family:var(--mono);font-size:12.5px;color:var(--sub);position:relative;line-height:1.6}
+.fgroup li::before{content:attr(data-badge);position:absolute;left:0;top:9px;font-family:sans-serif}
+.fgroup li .desc{font-family:sans-serif;color:var(--dim);font-size:12px;display:block;margin-top:2px}
+.fgroup li:hover{background:rgba(37,99,235,.05)}
+/* ── Callout ── */
+.callout{border-radius:10px;padding:14px 18px;margin:14px 0;border:1px solid;font-size:13.5px}
+.co-blue{background:rgba(37,99,235,.06);border-color:rgba(37,99,235,.28);color:#1e40af}
+.co-green{background:rgba(14,159,110,.07);border-color:rgba(14,159,110,.3);color:#047857}
+.co-amber{background:rgba(217,119,6,.07);border-color:rgba(217,119,6,.3);color:#92400e}
+.co-red{background:rgba(220,38,38,.06);border-color:rgba(220,38,38,.28);color:#991b1b}
+.callout b{display:block;margin-bottom:4px}
+/* ── Hero ── */
+#hero{background:linear-gradient(135deg,#e6edfb 0%,#f0f4fb 55%,#f1eafa 100%);border:1px solid var(--line);border-radius:16px;padding:40px 44px;margin-top:40px;position:relative;overflow:hidden}
+#hero::after{content:"";position:absolute;right:-80px;top:-80px;width:320px;height:320px;background:radial-gradient(circle,rgba(37,99,235,.14),transparent 70%)}
+#hero h1{font-size:30px;margin-bottom:10px;color:var(--txt)}
+#hero p{color:var(--sub);max-width:760px}
+#hero .meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+#hero .meta span{background:rgba(255,255,255,.65);border:1px solid rgba(28,39,64,.14);padding:5px 14px;border-radius:20px;font-size:12.5px;color:#3b4a6b}
+.kpi-row{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin:22px 0}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;text-align:center}
+.kpi .v{font-size:24px;font-weight:800;font-family:var(--mono)}
+.kpi .k{font-size:11.5px;color:var(--dim);margin-top:2px}
+/* ── Print ── */
+@media print{
+  body{padding-left:0;background:#fff;color:#222}
+  #sidebar,#searchwrap{display:none}
+  main{padding:0 20px;max-width:none}
+  .card,.statbox,.mermaid,.kpi,table,pre{background:#f7f8fa;border-color:#d5dae2;color:#222}
+  .badge{border-width:1px}
+  section{padding-top:30px;page-break-inside:avoid}
+  h2,h3{page-break-after:avoid}
+  a{color:#1a4fc0;text-decoration:none}
+  code{background:#eef1f6;border-color:#d5dae2;color:#123}
+  .mermaid{page-break-inside:avoid}
+  .mermaid.wide svg{width:100% !important;max-width:100% !important;height:auto !important}
+}
+@media (max-width:1000px){
+  body{padding-left:0}
+  #sidebar{display:none}
+  .g2,.g3,.g4,.kpi-row{grid-template-columns:1fr 1fr}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════ Sidebar ═══════════ -->
+<aside id="sidebar">
+  <div class="brand">
+    <div class="logo">AI</div>
+    <h1>tools 工具包 · 二开修改报告</h1>
+    <small>上游 <code>upstream/main</code> → 本地 <code>custom/main</code></small>
+  </div>
+  <div id="searchwrap">
+    <input type="text" id="q" placeholder="搜索关键字…（如 crctl / 状态机 / writeback）">
+    <div class="hint">按 Ctrl+K 聚焦，Esc 清空</div>
+  </div>
+  <nav id="nav">
+    <div class="sec">报告导航</div>
+    <a href="#s1">1 · 总体对比概览</a>
+    <a href="#s1-1" class="lv2">1.1 宏观数据对比</a>
+    <a href="#s1-2" class="lv2">1.2 修改主线与阶段</a>
+    <a href="#s1-3" class="lv2">1.3 核心理念与目标</a>
+    <a href="#s2">2 · 文件级修改详情</a>
+    <a href="#s2-1" class="lv2">2.1 新增文件（31）</a>
+    <a href="#s2-2" class="lv2">2.2 删除文件（0）</a>
+    <a href="#s2-3" class="lv2">2.3 修改文件（50）</a>
+    <a href="#s2-4" class="lv2">2.4 核心新增组件详解</a>
+    <a href="#s3">3 · 修改分类统计</a>
+    <a href="#s3-1" class="lv2">3.1 功能类型分类</a>
+    <a href="#s3-2" class="lv2">3.2 文件类型分类</a>
+    <a href="#s3-3" class="lv2">3.3 修改规模分布</a>
+    <a href="#s3-4" class="lv2">3.4 提交类型统计</a>
+    <a href="#s4">4 · 修改影响分析</a>
+    <a href="#s4-1" class="lv2">4.1 架构影响</a>
+    <a href="#s4-2" class="lv2">4.2 状态机与兼容性</a>
+    <a href="#s4-3" class="lv2">4.3 风险评估与应对</a>
+    <a href="#s4-4" class="lv2">4.4 维护与扩展影响</a>
+    <a href="#s5">5 · 效率与成本对比</a>
+    <a href="#s5-1" class="lv2">5.1 执行效率对比</a>
+    <a href="#s5-2" class="lv2">5.2 Token 消耗对比</a>
+    <a href="#s5-3" class="lv2">5.3 资源与综合评估</a>
+    <a href="#appendix">附录 · 提交时间线</a>
+  </nav>
+</aside>
+
+<!-- ═══════════ Main ═══════════ -->
+<main>
+
+<div id="hero">
+  <h1>AI First tools 工具包 · 二开修改报告</h1>
+  <p>本报告对比<strong>上游原始版本</strong>（<code>upstream/main</code>，官方仓库 xinyiai0724/tools，163 个文件）与<strong>本地二开版本</strong>（<code>custom/main</code>，OldBoy405/AI-First-tools），完整呈现 79 个提交、<strong>81 个功能文件变更</strong>的来龙去脉：治理工具链 crctl 的诞生、状态机权威迁移、回写脚本化、漂移防线工程化。</p>
+  <div class="callout co-blue" style="margin:14px 0 0;border-radius:10px"><b>统计口径</b>本报告聚焦功能性修改，已排除：说明性/辅助文档（<code>.qoder/</code>、<code>openwiki/</code>、<code>docs/</code>、<code>ARCHITECTURE.md</code>、<code>CUSTOM.md</code>、仓库级 README/AGENTS/CLAUDE/AGENT-SKILL-MATRIX 等）、文档模板库 <code>engineering-docs/</code>、wiki 相关 CI（<code>openwiki-update.yml</code>）以及品牌变更（<code>.xinyiai</code> → <code>.rayai</code>，如 customer-support-agent）。</div>
+  <div class="meta">
+    <span>基准：5c19e32 · Add tools collaboration playbook</span>
+    <span>对比：de48aa8 · merge(CR-2026-021)</span>
+    <span>生成：2026-08-05</span>
+    <span>差异：+7,392 / −777 行</span>
+  </div>
+</div>
+
+<div class="kpi-row">
+  <div class="kpi"><div class="v" style="color:var(--blue)">79</div><div class="k">本地提交数</div></div>
+  <div class="kpi"><div class="v" style="color:var(--green)">31</div><div class="k">新增文件</div></div>
+  <div class="kpi"><div class="v" style="color:var(--amber)">50</div><div class="k">修改文件</div></div>
+  <div class="kpi"><div class="v" style="color:var(--red)">0</div><div class="k">删除文件</div></div>
+  <div class="kpi"><div class="v" style="color:var(--purple)">30</div><div class="k">crctl 子命令</div></div>
+  <div class="kpi"><div class="v" style="color:var(--green)">+7,392</div><div class="k">净增代码行</div></div>
+</div>
+
+<!-- ══════════════════ 1 总体对比 ══════════════════ -->
+<span class="anchor" id="s1"></span>
+<section>
+<h2><span class="no">1</span>总体对比概览</h2>
+
+<span class="anchor" id="s1-1"></span>
+<h3>1.1 宏观数据对比</h3>
+<div class="grid g2">
+  <div class="card">
+    <h4>上游原始版本（upstream/main）</h4>
+    <table>
+      <tr><td class="mono">版本基线</td><td>5c19e32 · Add tools collaboration playbook（2026-07-03）</td></tr>
+      <tr><td class="mono">提交历史</td><td>2 个提交（Initial commit + playbook）</td></tr>
+      <tr><td class="mono">文件总数</td><td>163 个</td></tr>
+      <tr><td class="mono">SKILL.md 数量</td><td>58 个</td></tr>
+      <tr><td class="mono">目录构成</td><td><code>skills/</code>(104)、<code>assets/</code>(30)、<code>pipeline-templates/</code>(10)、<code>agents/</code>(10)、根文件 9 个</td></tr>
+      <tr><td class="mono">可执行代码</td><td>无（纯声明式提示词包）</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h4>本地二开版本（custom/main）</h4>
+    <table>
+      <tr><td class="mono">版本基线</td><td>de48aa8 · merge(CR-2026-021) 治理工具链</td></tr>
+      <tr><td class="mono">提交历史</td><td>79 个提交（8 个 CR 治理迭代）</td></tr>
+      <tr><td class="mono">功能变更</td><td>81 个文件（+31 新增 / 50 修改 / 0 删除，本报告口径）</td></tr>
+      <tr><td class="mono">SKILL.md 数量</td><td>59 个（新增 crctl；其中 40 个涉及本报告变更）</td></tr>
+      <tr><td class="mono">功能目录构成</td><td>新增 <code>skills/shared/crctl/</code>（23）、<code>skills/writeback/scripts/</code>（5）、<code>.githooks/</code>（1）、<code>.github/</code>（1）</td></tr>
+      <tr><td class="mono">可执行代码</td><td>crctl.mjs(2,394 行) + 6 个治理脚本 + 5 个回写脚本 + 2,000+ 行测试</td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="callout co-green"><b>排除说明</b>上游 163 → 本地 352 的总文件增长中，约 <b>158 个文件</b>为文档产物（<code>.qoder/repowiki</code> 133、<code>openwiki/</code> 14、<code>docs/</code> 6 等）与仓库级说明文档，已按口径排除；本报告其余章节仅统计 <b>81 个功能性文件</b>。</div>
+
+<div class="statbox">
+  <h4>目录结构演进（上游 → 本地，本报告口径）</h4>
+  <div class="sub">绿色 = 本地新增的功能区块（本报告统计范围）；蓝色 = 保留并深化</div>
+  <div class="mermaid">
+flowchart LR
+    subgraph UP["上游 · xinyiai0724/tools（163 文件）"]
+        A1["agents/（10）"]
+        A2["skills/（104，58 SKILL）"]
+        A3["pipeline-templates/（10）"]
+        A4["assets/（30 图片）"]
+        A5["根文件 9 个"]
+    end
+    subgraph LOCAL["本地功能变更（81 文件）"]
+        B1["agents/（+2 name 修复）"]
+        B2["skills/（40 SKILL 变更）"]
+        B3["pipeline-templates/（6 改调 crctl）"]
+        B6["💎 skills/shared/crctl/（23）治理工具链"]
+        B7["💎 skills/writeback/scripts/（5）回写脚本"]
+        B8["💎 .githooks/ + .github/（2）CI 防线"]
+    end
+    UP -->|"79 commits · 8 轮 CR 治理"| LOCAL
+    A2 -.-> B6 -.-> B2
+    A3 -.-> B3
+    style B6 fill:#d1fae5,stroke:#0e9f6e,color:#064e3b
+    style B7 fill:#d1fae5,stroke:#0e9f6e,color:#064e3b
+    style B8 fill:#d1fae5,stroke:#0e9f6e,color:#064e3b
+  </div>
+  <div class="mermaid-caption">图 1-1：目录结构宏观演进（💎 为本地新增的功能区块；文档产物与品牌变更不在本图统计范围）</div>
+</div>
+
+<span class="anchor" id="s1-2"></span>
+<h3>1.2 修改主线：8 轮 CR 治理迭代</h3>
+<p>本地全部 79 个提交可归并为 8 轮 CR 治理迭代 + 若干独立修复，呈现清晰的「<b>先建执行器 → 再收口写入通道 → 最后全量对齐</b>」演进节奏：</p>
+<table>
+  <tr><th class="mono">阶段</th><th>主题</th><th>核心产出</th><th>性质</th></tr>
+  <tr><td class="mono">CR-2026-001</td><td>crctl 核心 CLI 与矩阵校验</td><td>crctl.mjs 雏形（status/advance/gate/validate）、check-skill-matrix、check-agents-contract</td><td><span class="badge b-feat">功能新增</span></td></tr>
+  <tr><td class="mono">CR-2026-002</td><td>事件通道与证据摘要</td><td>outbox 事件通道、evidence-digest 统一实现、rules.json 白名单单一事实源、RE2 兼容</td><td><span class="badge b-feat">功能新增</span><span class="badge b-fix">修复</span></td></tr>
+  <tr><td class="mono">CR-2026-003/005/012</td><td>小项复盘落地</td><td>pending sha 幂等键、回写一致性门、Windows 已知问题清单、GIT_EDITOR 强制</td><td><span class="badge b-fix">修复</span></td></tr>
+  <tr><td class="mono">CR-2026-018</td><td>状态权威迁移</td><td>状态单一写入 cr.md frontmatter；_backlog.yml 退化为注册索引；migrate-backlog；四 IDE hooks 适配器</td><td><span class="badge b-ref">重构</span></td></tr>
+  <tr><td class="mono">CR-2026-019</td><td>账本操作收敛</td><td>task done / merge-metadata / archive-move 子命令；casWriteMulti 双文件原子写；merge-tree 演练入库</td><td><span class="badge b-feat">功能新增</span></td></tr>
+  <tr><td class="mono">CR-2026-020</td><td>回写机械步骤脚本化</td><td>writeback-prd-sdd / writeback-tasks / writeback-traceability 三脚本 + lib.mjs + 回归套件</td><td><span class="badge b-feat">功能新增</span></td></tr>
+  <tr><td class="mono">CR-2026-021</td><td>prompt 全量对齐 crctl</td><td>9 个写入子命令 + 2 只读 + git commit --template；11 处 SKILL/pipeline 改调；lint-prompts 漂移防线；pre-commit 硬阻断</td><td><span class="badge b-feat">功能新增</span><span class="badge b-sec">治理</span></td></tr>
+  <tr><td class="mono">独立项</td><td>CI 防线与契约修复</td><td>pre-commit 三重校验、check-skill-matrix CI、agent frontmatter 修复</td><td><span class="badge b-ci">CI</span><span class="badge b-fix">修复</span></td></tr>
+</table>
+
+<span class="anchor" id="s1-3"></span>
+<h3>1.3 修改的核心理念与预期目标</h3>
+<div class="grid g3">
+  <div class="card">
+    <h4>① 单一权威写入</h4>
+    <p>「状态推进、账本修改、人工审批」全部收敛为 <code>crctl</code> 唯一写入通道（CAS + 审计日志），Skill 文档不再指导模型手工编辑 YAML，从提示词层面消除漂移。</p>
+    <p class="lbl">对应不变量 1/2/6（ARCHITECTURE.md §5）</p>
+  </div>
+  <div class="card">
+    <h4>② 机械步骤代码化</h4>
+    <p>把"回写 specs/delivery、CR-ID 分配、评审落盘"等确定性步骤固化为可执行脚本（writeback×3、cr-init、review-record），模型只做判断，不做机械操作。</p>
+    <p class="lbl">对应 CR-2026-019/020/021</p>
+  </div>
+  <div class="card">
+    <h4>③ 漂移防线前置</h4>
+    <p>lint-prompts 静态检查 prompt 与 crctl 契约一致性，pre-commit 与 CI 双重拦截（report → enforce 两阶段），让"状态机口径、命令形态"漂移在提交前被硬阻断。</p>
+    <p class="lbl">对应 CR-2026-021 TASK-11/12/22</p>
+  </div>
+</div>
+<div class="callout co-green">
+  <b>预期达成的目标（对照结果）</b>
+  <ul>
+    <li><b>漂移清零</b>：CR-2026-021 TASK-22 已实现全量 lint 0 findings，pre-commit 切换 <code>--mode enforce</code> 硬阻断（FR-24 Phase 3）；</li>
+    <li><b>状态死锁解除</b>：REVIEW_STAGE_EXPECT 对齐 review-* SKILL（先写证据后 advance），code/requirement 评审态死锁解除；</li>
+    <li><b>人工审批无旁路</b>：四个审批节点仅限交互式 TTY 或 Ed25519 签名授权，非 TTY 调用一律拒绝；</li>
+    <li><b>跨 IDE 可用</b>：Qoder / Claude Code / Cursor / Codex / CI 五类适配器，脱离平台执行层时治理能力不缺失。</li>
+  </ul>
+</div>
+</section>
+
+<!-- ══════════════════ 2 文件级修改详情 ══════════════════ -->
+<span class="anchor" id="s2"></span>
+<section>
+<h2><span class="no">2</span>文件级修改详情</h2>
+
+<span class="anchor" id="s2-1"></span>
+<h3>2.1 新增文件（31 个）</h3>
+<p>全部为<strong>新增</strong>，集中在三条能力线：crctl 治理工具链、回写脚本、工程化防线（<code>rules.json</code> 为受控 shell 白名单单一事实源）：</p>
+
+<details class="fgroup" open>
+  <summary>💎 skills/shared/crctl/ — 治理工具链（23 个）<span class="count">核心新增</span></summary>
+  <ul>
+    <li data-badge="🟢"><span class="desc">CR 状态机 gate CLI 的 SKILL 契约文档（name frontmatter、输入/输出/状态推进/失败处理）</span>skills/shared/crctl/SKILL.md</li>
+    <li data-badge="🟢"><span class="desc">状态机（15 具名状态 + 注册态 (new)、45 条转移）与门禁判据的唯一事实源</span>skills/shared/crctl/gates.json</li>
+    <li data-badge="🟢"><span class="desc">主执行器：30 个子命令、零第三方依赖、CAS + audit.log 审计（2,394 行）</span>skills/shared/crctl/scripts/crctl.mjs</li>
+    <li data-badge="🟢"><span class="desc">prompt 漂移静态检查器：R1~R6 判据直读 rules.json，report/enforce 双模式（196 行）</span>skills/shared/crctl/scripts/lint-prompts.mjs</li>
+    <li data-badge="🟢"><span class="desc">Skill 矩阵一致性校验（_index / matrix / AGENT-SKILL-MATRIX 三源一致）</span>skills/shared/crctl/scripts/check-skill-matrix.mjs</li>
+    <li data-badge="🟢"><span class="desc">dir-graph.yaml#agents.contract 不变式 1-3 校验（登记双向存在、引用 active、矩阵可调用）</span>skills/shared/crctl/scripts/check-agents-contract.mjs</li>
+    <li data-badge="🟢"><span class="desc">crctl 回归测试套件（1,640 行，node --test，无外部框架）</span>skills/shared/crctl/scripts/test/crctl.test.mjs</li>
+    <li data-badge="🟢"><span class="desc">lint-prompts 测试（139 行 + 10 用例）</span>skills/shared/crctl/scripts/test/lint-prompts.test.mjs</li>
+    <li data-badge="🟢"><span class="desc">证据摘要测试向量：expected.json / review-annotations-code.yml / test-report.md</span>skills/shared/crctl/scripts/test/fixtures/digest-vectors/（3 个）</li>
+    <li data-badge="🟢"><span class="desc">CI 适配器：GitHub Actions 模板，含 lint-prompts enforce 校验与 sibling tools checkout</span>skills/shared/crctl/adapters/ci/cr-guard.template.yml</li>
+    <li data-badge="🟢"><span class="desc">Claude Code 适配器（README + settings 模板 + SessionStart 注入脚本 + PreToolUse 守卫 145 行）</span>skills/shared/crctl/adapters/claude-code/（4 个）</li>
+    <li data-badge="🟢"><span class="desc">Codex / Cursor（含 session-start-ctx 注入）/ Qoder 适配器</span>skills/shared/crctl/adapters/codex·cursor·qoder/（7 个）</li>
+  </ul>
+</details>
+
+<details class="fgroup" open>
+  <summary>💎 skills/writeback/scripts/ — 回写脚本（5 个）<span class="count">CR-2026-020</span></summary>
+  <ul>
+    <li data-badge="🟢"><span class="desc">公共库：CRLF 归一 / frontmatter 读改 / 锚点断言 / dry-run diff / fail 纪律（191 行）</span>skills/writeback/scripts/lib.mjs</li>
+    <li data-badge="🟢"><span class="desc">PRD/SDD 基线回写：首行 + 增量回写、_index.yml 字段更新、dry-run/自检（223 行）</span>skills/writeback/scripts/writeback-prd-sdd.mjs</li>
+    <li data-badge="🟢"><span class="desc">delivery 任务回写：id 集合幂等、索引全量重建（161 行）</span>skills/writeback/scripts/writeback-tasks.mjs</li>
+    <li data-badge="🟢"><span class="desc">追溯链回写：头部更新 + milestone 段追加 + merge-commits 三字段口径校验（219 行）</span>skills/writeback/scripts/writeback-traceability.mjs</li>
+    <li data-badge="🟢"><span class="desc">回归套件：21+ 用例全绿 + 账本隔离断言（239 行）</span>skills/writeback/scripts/test/writeback.test.mjs</li>
+  </ul>
+</details>
+
+<details class="fgroup" open>
+  <summary>💎 .githooks/ + .github/ — 工程化防线（2 个）</summary>
+  <ul>
+    <li data-badge="🟢"><span class="desc">pre-commit：check-skill-matrix + check-agents-contract + lint-prompts --mode enforce 三重硬阻断（6 行）</span>.githooks/pre-commit</li>
+    <li data-badge="🟢"><span class="desc">CI：矩阵/契约校验（push+PR 触发）</span>.github/workflows/check-skill-matrix.yml</li>
+  </ul>
+</details>
+
+<details class="fgroup" open>
+  <summary>受控 shell 单一事实源（1 个）</summary>
+  <ul>
+    <li data-badge="🟢"><span class="desc">受控 shell 白名单单一事实源：236 行 JSON（crctl + pretooluse-guard 共用）</span>skills/shared/controlled-shell/rules.json</li>
+  </ul>
+</details>
+
+<span class="anchor" id="s2-2"></span>
+<h3>2.2 删除文件（0 个）</h3>
+<div class="callout co-green"><b>无删除</b>本地二开严格遵守「加法优先」原则（CUSTOM.md 合并总则第 3 条）：对上游的改动全部以新增文件 / 新增参数 / 新增子命令为主，未删除任何上游文件；被替代的旧能力（如 cr-status-set）以 <code>legacy</code> 标注保留而非移除。</div>
+
+<span class="anchor" id="s2-3"></span>
+<h3>2.3 修改文件（50 个）</h3>
+
+<h4>2.3.1 核心契约与配置（3 个）</h4>
+<table>
+  <tr><th class="mono">文件</th><th>主要变更点</th></tr>
+  <tr><td class="mono">dir-graph.yaml</td><td>状态机 scope 从 <code>_backlog.yml</code> 迁移到 <code>cr.md</code>（CR-2026-018）；新增 3 条回退转换：<code>approve-tech-design:reject → write-tech-design</code>、<code>task-breakdown → task-breakdown</code>（暂缓重拆）、<code>approve-code:reject → implement-code</code></td></tr>
+  <tr><td class="mono">agent-skill-matrix.yml</td><td><code>updated-at</code> 2026-06-17 → 2026-07-26；system-orchestrator / dev-agent / requirement-writer 三 actor 新增 <code>can-call: crctl</code>（crctl 自身即状态机与门禁，不构成 forbidden 边界绕过）</td></tr>
+  <tr><td class="mono">skills/_index.yml</td><td>登记 <code>crctl</code> skill（active），brief 完整列出 30 个子命令族（CR-2026-021 口径）</td></tr>
+</table>
+
+<h4>2.3.2 Pipeline 模板（6 个）</h4>
+<table>
+  <tr><th class="mono">文件</th><th>主要变更点</th></tr>
+  <tr><td class="mono">requirement-authoring.pipeline.json</td><td>requirement-register 节点：手写 cr.md/_backlog/_index 改为 <code>crctl cr-init</code> 原子建档；push-progress 节点改 <code>crctl checkpoint-add</code>；review-requirement 改 <code>crctl review-record --bump-attempt</code>（先写证据后 advance，解除评审死锁）；approve-requirement 改 <code>crctl approve --stage requirement</code>（仅 TTY）</td></tr>
+  <tr><td class="mono">architecture-design.pipeline.json</td><td>write-tech-design / review-tech-design 节点：改调 <code>crctl review-record --stage tech-design</code>（sdd.yml 显式映射 + SCHEMA_INVALID 校验）；lint-prompts:ignore 标注回修说明段；验收口径对齐</td></tr>
+  <tr><td class="mono">code-implementation.pipeline.json</td><td>review-code / write-test-report / approve-code / write-dev-tasks 节点改调 crctl（review-record / attempt / approve / task allocate）；评审先落盘证据再 advance；审批驳回走显式回退</td></tr>
+  <tr><td class="mono">feature-writeback.pipeline.json</td><td>writeback 三节点改调入库脚本（含 dry-run 核对）；merge-commits 三字段口径；cr-archive 删手写账本（改 crctl archive-move）；node-5 归档汇总补 lint-prompts 回写清单要求</td></tr>
+  <tr><td class="mono">resume-cr.pipeline.json</td><td>list-remote-checkpoints 改 <code>crctl git ls-remote --cwd</code>（--cwd 移入 JSON 字符串内，修复 TASK-14 破坏 JSON 引号的回归）；handover-cr 改 <code>crctl owner-set</code>；resume 流程状态读取改 cr.md</td></tr>
+  <tr><td class="mono">product-planning.pipeline.json</td><td>review-planning-report 节点补 lint-prompts:ignore 标注（规划报告自有评审记录在 guard deny 面外）</td></tr>
+</table>
+
+<h4>2.3.3 SKILL 文档（37 个）</h4>
+<table>
+  <tr><th class="mono">文件</th><th>主要变更点</th></tr>
+  <tr><td class="mono">develop/approve-*（4 个：approve-code / approve-tech-design / approve-dev-start / approve-requirement）</td><td><b>折叠为 crctl approve</b>：删掉手写 approval.yml YAML 模板与 cr-status-set 推进步骤，改为一行 <code>crctl approve --stage X</code>（仅人类交互式终端）；错误处理改为 crctl 错误码（CR_STATUS_CURRENT_MISMATCH / GATE_BLOCKED / APPROVAL_REQUIRES_HUMAN）</td></tr>
+  <tr><td class="mono">develop/review-code（87 行变更）</td><td>评审判断与落盘分离：判断写 .crctl/tmp，经 <code>crctl review-record --stage code --bump-attempt</code> 落盘 review-annotations/code.yml；REVIEW_STAGE_EXPECT 前置校验；修复评审态死锁</td></tr>
+  <tr><td class="mono">develop/review-tech-design（67 行变更）</td><td>同上模式：tech-design → sdd.yml 显式映射 + SCHEMA_INVALID + 级联 attempt</td></tr>
+  <tr><td class="mono">requirement/review-requirement（62 行变更）</td><td>review-record --stage requirement --bump-attempt；persist review-loop 轮次</td></tr>
+  <tr><td class="mono">requirement/requirement-register（84 行变更）</td><td><b>全量改造</b>：Step 2/3 手写 cr.md + 登记合并为 <code>crctl cr-init</code> 原子建档（casWriteMulti 三文件）；新增 <code>crctl next-cr-id</code> 只读预览（S6）；worktree 路径经 <code>crctl worktree-path</code>（S9）；commit 用 <code>crctl git commit --template register</code>（S10）；模型不得手写账本</td></tr>
+  <tr><td class="mono">develop/write-test-report（63 行变更）</td><td>test-report frontmatter 交 <code>crctl test</code> 记账（D3）；行级邻近判定（R6）</td></tr>
+  <tr><td class="mono">develop/write-dev-tasks（7 行变更）</td><td>改调 <code>crctl task allocate</code>（S7 CAS 分配 + slug 兜底）+ commit 模板（S10）+ D15 精简；审批暂缓走自环重拆</td></tr>
+  <tr><td class="mono">writeback/writeback-prd-sdd（104 行）</td><td>改调 writeback-prd-sdd.mjs（含 dry-run 核对）；删备份一致性校验段；事实基线说明</td></tr>
+  <tr><td class="mono">writeback/writeback-tasks（95 行）</td><td>改调 writeback-tasks.mjs；id 集合幂等；事实基线说明</td></tr>
+  <tr><td class="mono">writeback/writeback-traceability（151 行）</td><td>改调 writeback-traceability.mjs；merge-commits 六字段校验 → 三字段口径收敛 {repo,trunk,sha}</td></tr>
+  <tr><td class="mono">writeback/merge-feature-branch（73 行）</td><td>改调 crctl git 系列；显式交接清理（跳过合并≠跳过清理）；分级预检 + 分支删除分级</td></tr>
+  <tr><td class="mono">cr/cr-status-set（34 行）</td><td><b>legacy 标注</b>：状态权威已迁 cr.md，11 处引用改 <code>crctl advance</code>；保留作为兼容说明</td></tr>
+  <tr><td class="mono">cr/cr-archive（88 行）</td><td>删手写账本移动，改 <code>crctl archive-move</code>（casWriteMulti 双文件原子写）；归档清理分级预检（无改动仓跳过）；不触发 writeback-traceability</td></tr>
+  <tr><td class="mono">cr/cr-review-record（24 行）</td><td>改调 <code>crctl review-note</code>（S2：supplemental-reviews 追加，拒 --by）</td></tr>
+  <tr><td class="mono">cr/inbox-emit（18 行）</td><td>改调 <code>crctl inbox-emit</code>（notify-log 事件追加 + notify-pending 合并去重）</td></tr>
+  <tr><td class="mono">cr/cr-dashboard / cr-inbox（9 行）</td><td>状态数据源切到 cr.md / crctl report；status-filter 调整</td></tr>
+  <tr><td class="mono">sync/handover-cr（7 行）</td><td>改调 <code>crctl owner-set</code>（S4：owners.{role} 更新 + owner-history 追加）</td></tr>
+  <tr><td class="mono">sync/push-progress（9 行）</td><td>改调 <code>crctl checkpoint-add</code>（S3）</td></tr>
+  <tr><td class="mono">sync/list-remote-checkpoints（12 行）</td><td>改 <code>crctl git ls-remote --cwd</code>；checkpoint 比对数据源切 cr.md</td></tr>
+  <tr><td class="mono">sync/resume-from-remote / pull-progress（28 行）</td><td>改调 crctl git / checkpoint 校验；owner 移交逻辑对齐 owner-set</td></tr>
+  <tr><td class="mono">shared/controlled-shell/SKILL.md（12 行）</td><td>白名单抽出为 rules.json 单一事实源，SKILL.md 降级为注释性说明；SHELL_UNAVAILABLE 错误码</td></tr>
+  <tr><td class="mono">develop/implement-code / write-tech-design（27 行）</td><td>状态要求与 crctl 口径对齐；write-tech-design 允许回修模式进入（review_feedback / sdd.yml verdict=block）</td></tr>
+  <tr><td class="mono">spec/spec-dashboard（7 行）</td><td>状态数据源切 cr.md</td></tr>
+  <tr><td class="mono">planning/*（25 行，5 个）</td><td>轻量措辞：review-planning-report 补 lint 标注；focus-briefing 流程微调；gather-product-context / record-idea 补说明行</td></tr>
+  <tr><td class="mono">review/change-impact-analysis + review-alignment（9 行）</td><td>状态读取改 cr.md / crctl；对齐评审口径</td></tr>
+  <tr><td class="mono">competitive/write-competitive-report（2 行）</td><td>补产物说明行</td></tr>
+  <tr><td class="mono">cr/feedback-writeback（6 行）</td><td>补 traceability.yml 写入说明</td></tr>
+</table>
+
+<h4>2.3.4 Agent 文档（2 个）</h4>
+<table>
+  <tr><th class="mono">文件</th><th>主要变更点</th></tr>
+  <tr><td class="mono">agents/product-planning-agent.md</td><td>补 frontmatter <code>name:</code>（agent-import 发现的已知不一致，CR-2026-001）</td></tr>
+  <tr><td class="mono">agents/competitive-analyst-agent.md</td><td>补 frontmatter <code>name:</code>（同上）</td></tr>
+</table>
+
+<span class="anchor" id="s2-4"></span>
+<h3>2.4 核心新增组件详解</h3>
+
+<h4>2.4.1 crctl.mjs — 30 个子命令全景</h4>
+<p>单一文件 2,394 行，刻意不拆分（状态机 + CAS + 审计的强内聚写入路径）；仅依赖 Node 标准库；YAML 采用行级定向正则改写（不引入序列化器，避免全量重排副作用）。</p>
+<table>
+  <tr><th class="mono">子命令族</th><th>子命令</th><th>职责</th><th>来源</th></tr>
+  <tr><td rowspan="8">状态与门禁</td><td class="mono">status</td><td>读取 CR 当前状态与下一步建议</td><td>CR-2026-001</td></tr>
+  <tr><td class="mono">advance</td><td>状态推进（单一写入 cr.md frontmatter）</td><td>CR-2026-001</td></tr>
+  <tr><td class="mono">gate</td><td>门禁校验（前置态 / 证据 / 审计）</td><td>CR-2026-001</td></tr>
+  <tr><td class="mono">approve</td><td>人工审批（仅 TTY 或 Ed25519 签名）</td><td>CR-2026-001→021</td></tr>
+  <tr><td class="mono">validate</td><td>产物校验（review-annotations / test-report）</td><td>CR-2026-001</td></tr>
+  <tr><td class="mono">attempt</td><td>review-loop 轮次记账（--bump-attempt 级联）</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">test</td><td>test-report frontmatter 记账（D3）</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">next</td><td>下一步节点建议</td><td>CR-2026-021</td></tr>
+  <tr><td rowspan="11">账本写入</td><td class="mono">review-record</td><td>评审判断/写入分离，落盘 review-annotations/{stage}.yml（S1）</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">review-note</td><td>supplemental-reviews 追加，拒 --by（S2）</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">checkpoint-add</td><td>_backlog 白名单字段写 + checkpoint 追加（S3）</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">owner-set</td><td>owners.{role} 更新 + owner-history 追加（S4）</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">backlog-set</td><td>_backlog 白名单字段写，FIELD_NOT_ALLOWED 硬拒（S5）</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">inbox-emit</td><td>notify-log 事件追加 + notify-pending 合并去重</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">task allocate / task done</td><td>TASK-ID CAS 分配（slug 兜底）/ 完成记账</td><td>CR-2026-019/021</td></tr>
+  <tr><td class="mono">merge-metadata</td><td>合并元数据写（casWriteMulti 双文件）</td><td>CR-2026-019</td></tr>
+  <tr><td class="mono">archive-move</td><td>归档账本移动（archive 段，双文件原子写）</td><td>CR-2026-019</td></tr>
+  <tr><td class="mono">cr-init</td><td>CR-ID 权威原子分配 + 三文件建档（不取显式 cr-id）</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">migrate-backlog</td><td>_backlog schema v1→v2（status 迁 cr.md）</td><td>CR-2026-018</td></tr>
+  <tr><td rowspan="4">只读</td><td class="mono">next-cr-id</td><td>候选号只读预览（S6，非权威）</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">worktree-path</td><td>worktree 路径唯一权威规则（S9）</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">report / cr-metrics</td><td>只读聚合：CR 状态摘要 / 指标统计（S11）</td><td>CR-2026-021</td></tr>
+  <tr><td class="mono">git</td><td>受控 git 封装（ls-remote 等白名单 + commit --template S10）</td><td>CR-2026-021</td></tr>
+</table>
+
+<h4>2.4.2 gates.json — 状态机与门禁唯一事实源</h4>
+<p>15 个具名状态 + 注册态 <code>(new)</code>，23 条声明转移 wildcard 展开为 45 条；与 dir-graph.yaml 双源一致（不变量 5），lint-prompts 与测试套件共同守护该口径不被文档漂移。</p>
+
+<h4>2.4.3 lint-prompts.mjs — prompt 漂移防线</h4>
+<p>R1~R6 判据直读 rules.json：状态机口径、命令形态（crctl 子命令名/参数）、禁止手工编辑措辞、ignore 豁免标注等；<code>--mode report</code>（Phase 0~2 非阻断）→ <code>--mode enforce</code>（FR-24 Phase 3 硬阻断）；10 个测试用例守护判据自身。</p>
+
+<h4>2.4.4 writeback 三脚本 — 回写机械步骤固化</h4>
+<div class="mermaid">
+flowchart LR
+    subgraph INPUT["CR 产物"]
+        A1["CR worktree: prd.md / sdd.md"]
+        A2["delivery/ 任务产物"]
+        A3["merge-metadata"]
+    end
+    subgraph SCRIPTS["skills/writeback/scripts/"]
+        B1["writeback-prd-sdd.mjs"]
+        B2["writeback-tasks.mjs"]
+        B3["writeback-traceability.mjs"]
+        L["lib.mjs 公共库<br/>CRLF 归一 · frontmatter · dry-run"]
+    end
+    subgraph OUT["基线（只写内容文件）"]
+        C1["specs/ PRD.md · SDD.md"]
+        C2["delivery/ tasks + _index"]
+        C3["traceability.yml 头部 + milestone"]
+    end
+    A1 --> B1 --> C1
+    A2 --> B2 --> C2
+    A3 --> B3 --> C3
+    B1 -.-> L; B2 -.-> L; B3 -.-> L
+    style B1 fill:#d1fae5,stroke:#0e9f6e,color:#064e3b
+    style B2 fill:#d1fae5,stroke:#0e9f6e,color:#064e3b
+    style B3 fill:#d1fae5,stroke:#0e9f6e,color:#064e3b
+    style L fill:#e0ecff,stroke:#2563eb,color:#1e3a8a
+</div>
+<div class="mermaid-caption">图 2-1：回写脚本数据流（硬边界：账本四类文件只读，写入仍唯一经 crctl）</div>
+</section>
+<!-- ══════════════════ 3 分类统计 ══════════════════ -->
+<span class="anchor" id="s3"></span>
+<section>
+<h2><span class="no">3</span>修改分类统计</h2>
+
+<span class="anchor" id="s3-1"></span>
+<h3>3.1 按功能类型分类</h3>
+<p>以「变更的意图」归类（一个文件可能兼有多种意图，取主导意图；文档与品牌变更已排除）：</p>
+<div class="grid g2">
+  <div class="statbox">
+    <h4>功能类型分布（按文件数，共 81）</h4>
+    <div class="sub">功能增强 48 · 治理/工程化 29 · Bug 修复 2 · CI/钩子 2</div>
+    <svg viewBox="0 0 520 200" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+      <defs><style>
+        .bar{fill:#2563eb;rx:4}.bar:hover{opacity:.85}
+        .lbl{fill:#4a5878;font-size:12px}
+        .val{fill:#1c2740;font-size:12.5px;font-weight:700;font-family:Consolas,monospace}
+        .ttl{fill:#4a5878;font-size:11px}
+      </style></defs>
+      <g transform="translate(0,12)">
+        <line x1="150" y1="0" x2="150" y2="165" stroke="#dde4f0"/>
+        <g transform="translate(0,10)"><text class="ttl" x="145" y="3" text-anchor="end">功能增强</text><rect class="bar" x="150" y="-12" width="308" height="20"/><text class="val" x="466" y="2">48</text></g>
+        <g transform="translate(0,44)"><text class="ttl" x="145" y="3" text-anchor="end">治理/工程化</text><rect class="bar" x="150" y="-12" width="186" height="20" fill="#0e9f6e"/><text class="val" x="344" y="2">29</text></g>
+        <g transform="translate(0,78)"><text class="ttl" x="145" y="3" text-anchor="end">Bug 修复</text><rect class="bar" x="150" y="-12" width="13" height="20" fill="#dc2626"/><text class="val" x="171" y="2">2</text></g>
+        <g transform="translate(0,112)"><text class="ttl" x="145" y="3" text-anchor="end">CI / 钩子</text><rect class="bar" x="150" y="-12" width="13" height="20" fill="#7c3aed"/><text class="val" x="171" y="2">2</text></g>
+      </g>
+    </svg>
+  </div>
+  <div class="statbox">
+    <h4>功能类型明细</h4>
+    <table>
+      <tr><th>类型</th><th>典型代表</th></tr>
+      <tr><td><span class="badge b-feat">功能增强</span></td><td>crctl 写入/只读子命令族、writeback 三脚本、SKILL 改调（review-record / approve / task allocate 等）、pipeline 节点改调</td></tr>
+      <tr><td><span class="badge b-sec">治理/工程化</span></td><td>crctl 工具链本体、gates.json 状态机事实源、lint-prompts 漂移防线、rules.json 白名单、矩阵登记</td></tr>
+      <tr><td><span class="badge b-fix">Bug 修复</span></td><td>agent frontmatter name 缺失（product-planning / competitive-analyst）</td></tr>
+      <tr><td><span class="badge b-ci">CI/钩子</span></td><td>pre-commit 三重校验、check-skill-matrix CI 工作流</td></tr>
+    </table>
+  </div>
+</div>
+
+<span class="anchor" id="s3-2"></span>
+<h3>3.2 按文件类型分类</h3>
+<div class="grid g2">
+  <div class="statbox">
+    <h4>文件类型分布（81 个变更文件）</h4>
+    <svg viewBox="0 0 420 250" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+      <defs><style>
+        .seg{stroke:#f4f6fb;stroke-width:2}
+        .lg{fill:#4a5878;font-size:11.5px}
+        .lv{fill:#1c2740;font-size:11.5px;font-weight:700;font-family:Consolas,monospace}
+      </style></defs>
+      <!-- donut: 40 SKILL / 18 脚本+测试 / 10 配置 / 6 pipeline / 7 其他 -->
+      <circle cx="140" cy="125" r="92" fill="none" stroke="#eef2f9" stroke-width="30"/>
+      <circle cx="140" cy="125" r="92" fill="none" stroke="#2563eb" stroke-width="30" stroke-dasharray="285.5 578" transform="rotate(-90 140 125)"/>
+      <circle cx="140" cy="125" r="92" fill="none" stroke="#0e9f6e" stroke-width="30" stroke-dasharray="128.5 578" stroke-dashoffset="-285.5" transform="rotate(-90 140 125)"/>
+      <circle cx="140" cy="125" r="92" fill="none" stroke="#7c3aed" stroke-width="30" stroke-dasharray="71.4 578" stroke-dashoffset="-414" transform="rotate(-90 140 125)"/>
+      <circle cx="140" cy="125" r="92" fill="none" stroke="#d97706" stroke-width="30" stroke-dasharray="42.8 578" stroke-dashoffset="-485.4" transform="rotate(-90 140 125)"/>
+      <circle cx="140" cy="125" r="92" fill="none" stroke="#8a96b0" stroke-width="30" stroke-dasharray="50 578" stroke-dashoffset="-528.2" transform="rotate(-90 140 125)"/>
+      <text x="140" y="120" text-anchor="middle" fill="#1c2740" font-size="26" font-weight="800" font-family="Consolas,monospace">81</text>
+      <text x="140" y="142" text-anchor="middle" fill="#8a96b0" font-size="11">变更文件</text>
+      <g transform="translate(250,38)">
+        <rect width="12" height="12" rx="3" fill="#2563eb"/><text class="lg" x="18" y="11">Skill 文档（40）</text>
+        <rect y="24" width="12" height="12" rx="3" fill="#0e9f6e"/><text class="lg" x="18" y="35">脚本+测试（18）</text>
+        <rect y="48" width="12" height="12" rx="3" fill="#7c3aed"/><text class="lg" x="18" y="59">配置类（10）</text>
+        <rect y="72" width="12" height="12" rx="3" fill="#d97706"/><text class="lg" x="18" y="83">Pipeline（6）</text>
+        <rect y="96" width="12" height="12" rx="3" fill="#8a96b0"/><text class="lg" x="18" y="107">其他（7）</text>
+      </g>
+    </svg>
+    <div class="sub">其他 = 测试夹具 3 · 组件安装文档 4；本报告已全部排除文档产物，无生成物噪音</div>
+  </div>
+  <div class="statbox">
+    <h4>变更文件类型构成</h4>
+    <table>
+      <tr><th>类型</th><th>数量</th><th>占比</th><th>行变化</th></tr>
+      <tr><td class="mono">Skill 文档（SKILL.md）</td><td>40</td><td>49.4%</td><td>+616 / −749</td></tr>
+      <tr><td class="mono">可执行脚本（.mjs/.sh）</td><td>15</td><td>18.5%</td><td>+5,884</td></tr>
+      <tr><td class="mono">测试脚本（.test.mjs）</td><td>3</td><td>3.7%</td><td>+2,018</td></tr>
+      <tr><td class="mono">Pipeline JSON</td><td>6</td><td>7.4%</td><td>+30 / −26</td></tr>
+      <tr><td class="mono">配置（yaml/json）</td><td>10</td><td>12.3%</td><td>+360 / −10</td></tr>
+      <tr><td class="mono">Agent 文档</td><td>2</td><td>2.5%</td><td>+2</td></tr>
+      <tr><td class="mono">测试夹具 + 组件文档 + CI</td><td>8</td><td>9.9%</td><td>+28</td></tr>
+    </table>
+  </div>
+</div>
+
+<span class="anchor" id="s3-3"></span>
+<h3>3.3 按修改规模分布</h3>
+<div class="grid g2">
+  <div class="statbox">
+    <h4>变更规模分布（按 增+删 行数）</h4>
+    <svg viewBox="0 0 520 220" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+      <defs><style>
+        .col{fill:#2563eb}.col2{fill:#d97706}.col3{fill:#0e9f6e}
+        .ax{stroke:#dde4f0}
+      </style></defs>
+      <g transform="translate(40,16)">
+        <line class="ax" x1="0" y1="150" x2="460" y2="150"/>
+        <line class="ax" x1="0" y1="0" x2="0" y2="150"/>
+        <rect class="col" x="30" y="105" width="100" height="45" rx="6"/>
+        <rect class="col2" x="180" y="33" width="100" height="117" rx="6"/>
+        <rect class="col3" x="330" y="78" width="100" height="72" rx="6"/>
+        <text x="80" y="95" text-anchor="middle" fill="#1c2740" font-size="16" font-weight="700">6</text>
+        <text x="80" y="162" text-anchor="middle" fill="#4a5878" font-size="12">大（&gt;200 行）</text>
+        <text x="230" y="23" text-anchor="middle" fill="#1c2740" font-size="16" font-weight="700">37</text>
+        <text x="230" y="162" text-anchor="middle" fill="#4a5878" font-size="12">中（21–200）</text>
+        <text x="380" y="68" text-anchor="middle" fill="#1c2740" font-size="16" font-weight="700">38</text>
+        <text x="380" y="162" text-anchor="middle" fill="#4a5878" font-size="12">小（≤20）</text>
+      </g>
+    </svg>
+  </div>
+  <div class="card">
+    <h4>规模特征解读</h4>
+    <ul>
+      <li><b>大规模（6）</b>：crctl.mjs（2,394 行）、crctl 测试套件（1,640 行）、writeback 三脚本（161~223 行）、lint-prompts（196 行）——全部为<b>新增型</b>大规模，非重写型；</li>
+      <li><b>中规模（37）</b>：SKILL 改调（review-code 87 行、writeback 三件套 95~151 行）、pipeline prompt 修订、适配器脚本；</li>
+      <li><b>小规模（38）</b>：措辞修订、字段调整、frontmatter 补全等外科手术式变更。</li>
+    </ul>
+    <div class="callout co-blue" style="margin-bottom:0"><b>关键结论</b>零删除 + 新增为主 → 上游契约保持兼容，二开语义全部以「加法」叠加。</div>
+  </div>
+</div>
+
+<span class="anchor" id="s3-4"></span>
+<h3>3.4 提交类型统计</h3>
+<div class="grid g2">
+  <div class="statbox">
+    <h4>79 个提交的类型分布</h4>
+    <svg viewBox="0 0 520 250" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+      <defs><style>
+        .hb{fill:#2563eb}.hb2{fill:#dc2626}.hb3{fill:#7c3aed}.hb4{fill:#0e9f6e}.hb5{fill:#d97706}
+        .ax{stroke:#dde4f0}
+      </style></defs>
+      <g transform="translate(50,16)">
+        <line class="ax" x1="0" y1="180" x2="430" y2="180"/>
+        <rect class="hb" x="12" y="30" width="52" height="150" rx="5"/>
+        <text x="38" y="22" text-anchor="middle" fill="#1c2740" font-size="15" font-weight="700">23</text>
+        <rect class="hb2" x="84" y="90" width="52" height="90" rx="5"/>
+        <text x="110" y="82" text-anchor="middle" fill="#1c2740" font-size="15" font-weight="700">8</text>
+        <rect class="hb3" x="156" y="105" width="52" height="75" rx="5"/>
+        <text x="182" y="97" text-anchor="middle" fill="#1c2740" font-size="15" font-weight="700">6</text>
+        <rect class="hb4" x="228" y="120" width="52" height="60" rx="5"/>
+        <text x="254" y="112" text-anchor="middle" fill="#1c2740" font-size="15" font-weight="700">5</text>
+        <rect class="hb5" x="300" y="135" width="52" height="45" rx="5"/>
+        <text x="326" y="127" text-anchor="middle" fill="#1c2740" font-size="15" font-weight="700">3</text>
+        <rect class="hb" x="372" y="105" width="52" height="75" rx="5" fill="#8a96b0"/>
+        <text x="398" y="97" text-anchor="middle" fill="#1c2740" font-size="15" font-weight="700">34</text>
+        <text x="38" y="198" text-anchor="middle" fill="#4a5878" font-size="12">feat</text>
+        <text x="110" y="198" text-anchor="middle" fill="#4a5878" font-size="12">fix</text>
+        <text x="182" y="198" text-anchor="middle" fill="#4a5878" font-size="12">docs/ref/ci</text>
+        <text x="254" y="198" text-anchor="middle" fill="#4a5878" font-size="12">merge(CR)</text>
+        <text x="326" y="198" text-anchor="middle" fill="#4a5878" font-size="12">[cr]/other</text>
+        <text x="398" y="198" text-anchor="middle" fill="#4a5878" font-size="12">CR 治理系列</text>
+      </g>
+    </svg>
+  </div>
+  <div class="card">
+    <h4>提交纪律观察</h4>
+    <ul>
+      <li><b>feat 23 / fix 8</b>：功能建设与修复并重，修复多来自「自举回写」与跨引擎兼容（CRLF、RE2）实战发现；</li>
+      <li><b>merge(CR-xxx) 5 个</b>：每个 CR 治理迭代以命名 merge 提交收口，形成可回溯的治理里程碑；</li>
+      <li><b>[cr] 前缀 4 个</b>：上游沿用的 CR 提交规范被保留；</li>
+      <li><b>34 个 CR-2026-021 系列</b>：最后两轮治理集中了大部分提交（TASK-02 ~ TASK-22），体现「先建工具、再迁移、最后全量对齐」的三段式节奏。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════════ 4 影响分析 ══════════════════ -->
+<span class="anchor" id="s4"></span>
+<section>
+<h2><span class="no">4</span>修改影响分析</h2>
+
+<span class="anchor" id="s4-1"></span>
+<h3>4.1 对整体系统架构的影响</h3>
+<p>本地二开在上游「Agent → Skill → Pipeline」三层之上，新增了最底层的<b>可执行治理层 crctl</b>，架构从纯声明式演进为「声明 + 执行」混合式：</p>
+<div class="mermaid">
+flowchart TB
+    subgraph OLD["上游架构 · 三层纯声明式"]
+        O1["使用方仓库"]
+        O2["Pipeline 编排"]
+        O3["Skill 提示词合约<br/>手写 YAML + cr-status-set 指引"]
+        O4["受控 shell 白名单（skill 内嵌）"]
+        O1 --> O2 --> O3 --> O4
+    end
+    subgraph NEW["本地架构 · 四层声明+执行"]
+        N1["使用方仓库"]
+        N2["Pipeline 编排（改调 crctl 子命令）"]
+        N3["Skill 提示词合约<br/>只描述读写与 crctl 调用"]
+        N4["💎 crctl 状态机 CLI<br/>30 子命令 · CAS · audit.log · 门禁"]
+        N5["rules.json 白名单<br/>受控 git 唯一事实源"]
+        N6["💎 writeback 三脚本<br/>specs/delivery 机械回写"]
+        N1 --> N2 --> N3 --> N4
+        N4 --> N5
+        N4 -.-> N6
+    end
+    OLD -->|"CR-2026-001~021 演进"| NEW
+    style N4 fill:#d1fae5,stroke:#0e9f6e,color:#064e3b,stroke-width:2px
+    style N6 fill:#d1fae5,stroke:#0e9f6e,color:#064e3b
+    style N5 fill:#e0ecff,stroke:#2563eb,color:#1e3a8a
+</div>
+<div class="mermaid-caption">图 4-1：架构分层演进（crctl 成为最底层依赖，Skill 不得绕过其直接写账本）</div>
+
+<h4>架构影响要点</h4>
+<table>
+  <tr><th>维度</th><th>影响</th></tr>
+  <tr><td>依赖方向</td><td>新增不变量 1/2：状态与账本写入只允许经 crctl；Skill 文档从「操作手册」降级为「调用契约」，模型自由度收窄、确定性提升</td></tr>
+  <tr><td>数据流</td><td>状态权威从 <code>_backlog.yml</code>（注册索引）迁移至 <code>cr.md</code> frontmatter；_backlog.yml 退化为只读注册视图</td></tr>
+  <tr><td>可观测性</td><td>所有写入追加 <code>.crctl/audit.log</code>（JSON Lines）；跨设备经 outbox 事件通道（失败不阻塞主操作）</td></tr>
+  <tr><td>可移植性</td><td>新增 Qoder / Claude Code / Cursor / Codex / CI 五类适配器，平台无关的治理能力（hooks 注入 + 守卫）</td></tr>
+  <tr><td>契约一致性</td><td>状态机口径（gates.json + dir-graph.yaml 双源）由 lint-prompts 与 pre-commit 三重校验持续守护（文档与品牌变更不影响本层）</td></tr>
+</table>
+
+<span class="anchor" id="s4-2"></span>
+<h3>4.2 状态机变化与兼容性影响</h3>
+<div class="mermaid wide">
+stateDiagram-v2
+    direction LR
+    [*] --> new
+    new --> drafting: requirement-register
+    drafting --> requirement_reviewing: review-requirement
+    requirement_reviewing --> requirement_approved: approve-requirement
+    requirement_approved --> tech_designing: write-tech-design
+    tech_designing --> tdr_pending: write-tech-design-complete
+    tdr_pending --> tech_designing: review block / approve reject
+    tdr_pending --> tech_design_reviewed: approve-tech-design
+    tech_design_reviewed --> task_breakdown: write-dev-tasks
+    task_breakdown --> task_breakdown: 暂缓重拆
+    task_breakdown --> developing: approve-dev-start
+    developing --> code_reviewing: review-code pass
+    code_reviewing --> developing: approve reject
+    code_reviewing --> code_approved: approve-code
+    code_approved --> merging: merge-feature-branch
+    merging --> writing_back: writeback-prd-sdd
+    writing_back --> archived: cr-archive
+    note right of tdr_pending: 🆕 驳回回退
+    note right of code_reviewing: 🆕 驳回回退
+    note right of task_breakdown: 🆕 自环重拆
+</div>
+<div class="mermaid-caption">图 4-2：本地状态机（绿色框为相对上游新增的转换：approve-tech-design:reject、approve-code:reject、write-dev-tasks 自环）</div>
+
+<h4>兼容性影响矩阵</h4>
+<div class="statbox">
+  <h4>对存量资产与环境的兼容性评估</h4>
+  <svg viewBox="0 0 900 120" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+    <defs><style>
+      .mh{fill:#eef2f9;stroke:#dde4f0}
+      .ok{fill:rgba(14,159,110,.12);stroke:rgba(14,159,110,.5)}
+      .md{fill:rgba(217,119,6,.1);stroke:rgba(217,119,6,.5)}
+      .hi{fill:rgba(220,38,38,.08);stroke:rgba(220,38,38,.5)}
+      .mt{font-size:11.5px}
+    </style></defs>
+    <g font-family="sans-serif" text-anchor="middle">
+      <rect class="mh" x="150" y="0" width="140" height="30" rx="5"/><text x="220" y="20" fill="#1c2740" font-size="12" font-weight="700">存量 _backlog.yml</text>
+      <rect class="mh" x="300" y="0" width="140" height="30" rx="5"/><text x="370" y="20" fill="#1c2740" font-size="12" font-weight="700">在途 CR worktree</text>
+      <rect class="mh" x="450" y="0" width="140" height="30" rx="5"/><text x="520" y="20" fill="#1c2740" font-size="12" font-weight="700">已部署 IDE 环境</text>
+      <rect class="mh" x="600" y="0" width="140" height="30" rx="5"/><text x="670" y="20" fill="#1c2740" font-size="12" font-weight="700">上游模板再同步</text>
+      <rect class="mh" x="750" y="0" width="150" height="30" rx="5"/><text x="825" y="20" fill="#1c2740" font-size="12" font-weight="700">外部 Agent 引用</text>
+      <rect class="ok" x="150" y="40" width="140" height="56" rx="5"/><text x="220" y="62" fill="#047857" class="mt">✅ 低风险</text><text x="220" y="82" fill="#4a5878" class="mt">migrate-backlog 一键迁移</text>
+      <rect class="ok" x="300" y="40" width="140" height="56" rx="5"/><text x="370" y="62" fill="#047857" class="mt">✅ 低风险</text><text x="370" y="82" fill="#4a5878" class="mt">status 读源兼容双读</text>
+      <rect class="md" x="450" y="40" width="140" height="56" rx="5"/><text x="520" y="62" fill="#92400e" class="mt">⚠ 中风险</text><text x="520" y="82" fill="#4a5878" class="mt">需按适配器手册装 hooks</text>
+      <rect class="md" x="600" y="40" width="140" height="56" rx="5"/><text x="670" y="62" fill="#92400e" class="mt">⚠ 中风险</text><text x="670" y="82" fill="#4a5878" class="mt">CUSTOM.md 合并总则兜底</text>
+      <rect class="hi" x="750" y="40" width="150" height="56" rx="5"/><text x="825" y="62" fill="#991b1b" class="mt">🔴 需关注</text><text x="825" y="82" fill="#4a5878" class="mt">crctl 契约变更需同步矩阵</text>
+    </g>
+  </svg>
+  <div class="sub">兼容性评估：状态权威迁移提供 migrate-backlog 迁移命令；SKILL 改调不改变 CR 产物形态；矩阵一致性由 CI 强制守护</div>
+</div>
+
+<span class="anchor" id="s4-3"></span>
+<h3>4.3 潜在风险评估与应对措施</h3>
+<table>
+  <tr><th class="mono">风险</th><th>等级</th><th>触发场景</th><th>应对措施（已内置）</th></tr>
+  <tr><td>状态写入通道被绕过</td><td><span class="badge b-sec">高</span></td><td>模型在会话内现写脚本或手工编辑 YAML</td><td>不变量 2 明令禁止 + lint-prompts R 判据扫描「手工编辑」措辞 + pretooluse-guard 守卫</td></tr>
+  <tr><td>评审态死锁复发</td><td><span class="badge b-sec">高</span></td><td>advance 早于评审证据落盘（先推进后写证据）</td><td>review-record 判断/写入分离 + REVIEW_STAGE_EXPECT 前置校验 + --bump-attempt 级联</td></tr>
+  <tr><td>人工审批被 AI 代签</td><td><span class="badge b-sec">高</span></td><td>非 TTY 管道调用 approve</td><td>crctl approve 仅交互式 TTY 或 Ed25519 签名，非 TTY 一律拒绝（APPROVAL_REQUIRES_HUMAN）</td></tr>
+  <tr><td>CRLF/编码导致哈希误报</td><td><span class="badge b-fix">中</span></td><td>Windows autocrlf checkout 后 EVIDENCE_DRIFT 误报</td><td>读入统一 
+ → 
+ 规范化（不变量 4）+ 回归用例；Windows 已知问题清单备案</td></tr>
+  <tr><td>prompt 与 crctl 契约漂移</td><td><span class="badge b-fix">中</span></td><td>新增子命令后 SKILL/pipeline 未同步改调</td><td>lint-prompts report → enforce 两阶段 + pre-commit 硬阻断（FR-24 Phase 3）</td></tr>
+  <tr><td>并发 CR-ID 撞号</td><td><span class="badge b-fix">中</span></td><td>多会话同时注册</td><td>cr-init 内部 max+1 + casWriteMulti 三文件原子写，后到者 CAS_CONFLICT 重跑自动拿新号</td></tr>
+  <tr><td>上游模板再同步冲突</td><td><span class="badge b-fix">中</span></td><td>git merge upstream/main</td><td>CUSTOM.md 合并总则（两边都保留 / 逻辑整合 / 加法优先 / 标记区块）+ 每次 merge 更新台账</td></tr>
+  <tr><td>跨引擎 git 命令差异</td><td><span class="badge b-fix">低</span></td><td>gitguard（Go/RE2）拒绝 JS 正则语法</td><td>negative lookahead 改等价 char class（^[^-].*$），双引擎均接受</td></tr>
+</table>
+
+<span class="anchor" id="s4-4"></span>
+<h3>4.4 对未来维护和扩展的影响</h3>
+<div class="grid g2">
+  <div class="card">
+    <h4>维护性提升</h4>
+    <ul>
+      <li><b>状态机口径单一</b>：gates.json + dir-graph.yaml 双源，lint-prompts 守护不再漂移；</li>
+      <li><b>测试回归闭环</b>：crctl 1,640 行 + writeback 239 行 + lint 139 行测试，`node --test` 零依赖可跑；</li>
+      <li><b>归档清理自动化</b>：cr-archive 分级预检（无改动仓跳过），消除 CR-019 残留 worktree 教训；</li>
+      <li><b>文档即判据</b>：ARCHITECTURE.md §8 定义触发修订的变更清单，防止文档滞后。</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h4>扩展路径</h4>
+    <ul>
+      <li>新增写入型子命令：沿用「状态机 + CAS + audit.log」同一条路径，无旁路（CR-2026-021 已示范 9+2+1 个）；</li>
+      <li>新增 IDE 适配器：按 adapters/ 手册模式复制（hooks 注入 + 守卫）；</li>
+      <li>上游演进吸收：merge 时以 CUSTOM.md 总则整合，加法优先保证未使用新能力时行为与上游一致；</li>
+      <li>刻意不做清单（ARCHITECTURE.md §6）防止过度设计复发（独立账本脚本库 / WAL / YAML 序列化库）。</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ══════════════════ 5 效率与成本 ══════════════════ -->
+<span class="anchor" id="s5"></span>
+<section>
+<h2><span class="no">5</span>执行效率与成本对比</h2>
+<div class="callout co-amber">
+  <b>口径说明</b>
+  本节对比基于「上游手写 YAML / 多步骤指引」与「本地 crctl 单命令 + 脚本」两种模式的<b>操作步骤数、执行时间与 Token 消耗的相对量级</b>，为工程估算（非实测基准）；实测可参照 crctl.test.mjs 与 writeback.test.mjs 回归套件的结果口径。
+</div>
+
+<span class="anchor" id="s5-1"></span>
+<h3>5.1 执行效率对比（典型操作）</h3>
+<div class="grid g2">
+  <div class="statbox">
+    <h4>单次操作步骤数对比（Agent 视角）</h4>
+    <div class="sub">上游：多步手写指引；本地：单命令原子完成</div>
+    <svg viewBox="0 0 520 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+      <defs><style>
+        .b1{fill:#8a96b0}.b2{fill:#0e9f6e}
+        .ax{stroke:#dde4f0}
+      </style></defs>
+      <g transform="translate(50,10)">
+        <line class="ax" x1="0" y1="220" x2="440" y2="220"/>
+        <!-- 状态推进 -->
+        <text x="0" y="18" fill="#4a5878" font-size="11.5">状态推进</text>
+        <rect class="b1" x="0" y="26" width="230" height="18" rx="3"/><text x="236" y="40" fill="#3b4a6b" font-size="11">4–6 步</text>
+        <rect class="b2" x="0" y="48" width="38" height="18" rx="3"/><text x="44" y="62" fill="#047857" font-size="11">1 步</text>
+        <!-- 人工审批 -->
+        <text x="0" y="86" fill="#4a5878" font-size="11.5">人工审批</text>
+        <rect class="b1" x="0" y="94" width="190" height="18" rx="3"/><text x="196" y="108" fill="#3b4a6b" font-size="11">3–5 步</text>
+        <rect class="b2" x="0" y="116" width="38" height="18" rx="3"/><text x="44" y="130" fill="#047857" font-size="11">1 步</text>
+        <!-- 评审落盘 -->
+        <text x="0" y="154" fill="#4a5878" font-size="11.5">评审落盘</text>
+        <rect class="b1" x="0" y="162" width="260" height="18" rx="3"/><text x="266" y="176" fill="#3b4a6b" font-size="11">5–7 步</text>
+        <rect class="b2" x="0" y="184" width="76" height="18" rx="3"/><text x="82" y="198" fill="#047857" font-size="11">2 步</text>
+        <text x="440" y="240" text-anchor="end" fill="#8a96b0" font-size="11">单位：Agent 工具调用步数（估）</text>
+      </g>
+    </svg>
+  </div>
+  <div class="statbox">
+    <h4>操作耗时对比（人工/Agent 执行）</h4>
+    <div class="sub">回写与注册为耗时大户，脚本化后量级下降</div>
+    <table>
+      <tr><th class="mono">操作</th><th>上游（手动）</th><th>本地（脚本）</th><th>降幅</th></tr>
+      <tr><td>CR 注册建档</td><td>10–20 min</td><td>&lt;1 min（cr-init）</td><td><span class="badge b-ci">≈95%</span></td></tr>
+      <tr><td>PRD/SDD 回写</td><td>30–60 min</td><td>&lt;2 min（脚本+dry-run）</td><td><span class="badge b-ci">≈95%</span></td></tr>
+      <tr><td>任务回写 delivery</td><td>20–40 min</td><td>&lt;2 min（幂等重建）</td><td><span class="badge b-ci">≈93%</span></td></tr>
+      <tr><td>追溯链生成</td><td>15–30 min</td><td>&lt;1 min（milestone 追加）</td><td><span class="badge b-ci">≈95%</span></td></tr>
+      <tr><td>评审记录落盘</td><td>5–10 min</td><td>&lt;1 min（review-record）</td><td><span class="badge b-ci">≈90%</span></td></tr>
+      <tr><td>状态推进</td><td>2–5 min</td><td>&lt;10 s（advance）</td><td><span class="badge b-ci">≈97%</span></td></tr>
+    </table>
+    <div class="sub">注：耗时为基于步骤数与历史提交节奏的工程估算，供量级参考</div>
+  </div>
+</div>
+
+<span class="anchor" id="s5-2"></span>
+<h3>5.2 Token 消耗对比</h3>
+<div class="grid g2">
+  <div class="statbox">
+    <h4>单次典型操作 Token 消耗（相对量级）</h4>
+    <svg viewBox="0 0 520 250" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:auto">
+      <defs><style>
+        .t1{fill:#8a96b0}.t2{fill:#2563eb}
+        .ax{stroke:#dde4f0}
+      </style></defs>
+      <g transform="translate(60,12)">
+        <line class="ax" x1="0" y1="190" x2="420" y2="190"/>
+        <text x="0" y="20" fill="#4a5878" font-size="11.5">注册建档</text>
+        <rect class="t1" x="0" y="28" width="320" height="20" rx="3"/><text x="328" y="43" fill="#3b4a6b" font-size="11">100%</text>
+        <rect class="t2" x="0" y="52" width="90" height="20" rx="3"/><text x="98" y="67" fill="#1e40af" font-size="11">28%</text>
+        <text x="0" y="96" fill="#4a5878" font-size="11.5">状态推进</text>
+        <rect class="t1" x="0" y="104" width="180" height="20" rx="3"/><text x="188" y="119" fill="#3b4a6b" font-size="11">100%</text>
+        <rect class="t2" x="0" y="128" width="36" height="20" rx="3"/><text x="44" y="143" fill="#1e40af" font-size="11">20%</text>
+        <text x="0" y="170" fill="#4a5878" font-size="11">基线：上游等效操作 Token 消耗</text>
+      </g>
+    </svg>
+  </div>
+  <div class="card">
+    <h4>Token 结构变化分析</h4>
+    <ul>
+      <li><b>指令变短</b>：SKILL.md 从「手把手 YAML 模板 + 多步操作」改为「调用 crctl 子命令」——每处改调平均减少 30~80% 指令文本；</li>
+      <li><b>输出变短</b>：模型不再生成大段 YAML 产物（cr.md / approval.yml / backlog 条目），由 crctl 确定性生成，避免「重排字段 / 丢注释」的返工对话；</li>
+      <li><b>返工减少</b>：评审死锁、状态错位、哈希误报等修复类多轮对话被前置校验（gate/validate/lint）消除；</li>
+      <li><b>综合估算</b>：单 CR 全流程 Token 消耗约为上游的 <b>40–60%</b>（主要来自回写与评审环节）；代价是 crctl 工具链的一次性建设成本（已投入，边际趋零）。</li>
+    </ul>
+  </div>
+</div>
+
+<span class="anchor" id="s5-3"></span>
+<h3>5.3 资源使用与综合评估</h3>
+<table>
+  <tr><th class="mono">维度</th><th>上游</th><th>本地</th><th>结论</th></tr>
+  <tr><td>运行时依赖</td><td>无（纯声明式）</td><td>Node.js 标准库（零第三方依赖）</td><td>仅需 Node 20+，无新增外部依赖</td></tr>
+  <tr><td>测试成本</td><td>无自动测试</td><td>2,000+ 行用例（node --test 秒级）</td><td>回归成本从「人工验收」转为「CI 秒级」</td></tr>
+  <tr><td>存储占用</td><td>163 文件</td><td>+81 个功能文件（+31 新增 / 50 修改）</td><td>文档产物不计入功能面；crctl 工具链为主新增</td></tr>
+  <tr><td>执行速度</td><td>多步提示词驱动</td><td>单命令原子操作</td><td>操作耗时量级下降 90%+</td></tr>
+  <tr><td>失败恢复</td><td>回滚靠人工判断</td><td>CAS 冲突重跑 / dry-run 预演 / audit 可追溯</td><td>失败面收窄且可复现</td></tr>
+  <tr><td>跨平台</td><td>依赖 shell 脚本</td><td>crctl git 白名单 + CRLF 归一</td><td>Windows/macOS/Linux 行为一致</td></tr>
+</table>
+
+<div class="callout co-green">
+  <b>综合结论</b>
+  本次二改以「一次工具链建设」换取「长期确定性收益」：执行步骤与耗时下降 90%+、Token 消耗降至 40–60%、漂移从「事后发现」转为「提交前硬阻断」、测试从「零」到「2,000+ 行自动回归」。唯一显性成本是 crctl 单文件 2,394 行的维护体量与 Node 运行时前置要求——已通过「刻意不拆分」的架构决策与零依赖约束将其封顶。
+</div>
+</section>
+
+<!-- ══════════════════ 附录 ══════════════════ -->
+<span class="anchor" id="appendix"></span>
+<section>
+<h2><span class="no">附</span>附录 · 治理迭代提交时间线</h2>
+<div class="mermaid wide">
+timeline
+    title 二开治理迭代（upstream/main → custom/main）
+    section 初始化
+      初次推送 : a3ca761 工作区目录与漂移治理 v2
+    section CR-2026-001
+      crctl 核心 CLI : status/advance/gate/validate + 测试
+      矩阵一致性 : check-skill-matrix + agents contract + pre-commit
+      修复 : agent frontmatter name 缺失
+    section CR-2026-002
+      事件与证据 : outbox 通道 + evidence-digest 统一
+      规则收敛 : rules.json 单一事实源
+      跨引擎修复 : RE2 兼容 + --grant 崩溃 + CRLF 归一
+    section CR-2026-003/005/012
+      小项落地 : pending sha 幂等 + 回写一致性门 + Windows 清单
+    section CR-2026-018
+      状态权威迁移 : _backlog.yml → cr.md + migrate-backlog
+      IDE 适配器 : Qoder / Cursor / Codex hooks
+    section CR-2026-019
+      账本收敛 : task done / merge-metadata / archive-move
+      原子写 : casWriteMulti 双文件
+    section CR-2026-020
+      回写脚本化 : writeback × 3 脚本 + lib + 回归套件
+      SKILL 改调 : 三份 writeback SKILL.md
+    section CR-2026-021
+      子命令扩展 : review-record ~ cr-init 9+2+1
+      全量对齐 : 11 处 SKILL/pipeline 改调
+      漂移防线 : lint-prompts + pre-commit enforce
+      收尾 : 全量 0 findings + 评审死锁解除
+</div>
+<div class="mermaid-caption">图 A-1：二开迭代时间线（8 轮 CR 治理 + 独立修复）</div>
+
+<h3>关键提交索引</h3>
+<table>
+  <tr><th class="mono">SHA</th><th>提交</th><th>里程碑意义</th></tr>
+  <tr><td class="mono">aa89942</td><td>feat(crctl): commit core CLI + hooks/CI adapters</td><td>crctl 从「散落未跟踪」转为受管核心组件</td></tr>
+  <tr><td class="mono">e37c26c</td><td>merge(CR-2026-018): 状态推进单一化 cr.md</td><td>状态权威迁移里程碑</td></tr>
+  <tr><td class="mono">790908b</td><td>merge(CR-2026-019): 账本操作收敛 crctl 子命令</td><td>账本写入通道收口里程碑</td></tr>
+  <tr><td class="mono">518a45c</td><td>merge(CR-2026-020): writeback 机械步骤固化</td><td>回写脚本化里程碑</td></tr>
+  <tr><td class="mono">de48aa8</td><td>merge(CR-2026-021): prompt 对齐 crctl + lint-prompts</td><td>全量漂移清零 + 硬阻断里程碑（当前 HEAD）</td></tr>
+</table>
+
+<div class="callout co-blue" style="margin-top:26px">
+  <b>报告说明</b>
+  本报告由 git 对比自动生成：基准 <code>upstream/main@5c19e32</code>，对比 <code>custom/main@de48aa8</code>。数据来源：git rev-list / diff / diff-stat / numstat / ls-tree。统计口径：已排除说明性/辅助文档（<code>.qoder/</code>、<code>openwiki/</code>、<code>docs/</code>、根级说明文档、<code>engineering-docs/</code>、wiki 相关 CI）与品牌变更（<code>.xinyiai</code> → <code>.rayai</code>），本报告统计 <b>81 个功能性文件</b>（+7,392 / −777 行）。效率与成本章节为工程估算，标注「（估）」处请以实测为准。
+</div>
+</section>
+
+</main>
+
+<!-- ══════════════════ Search & Nav Script ══════════════════ -->
+<script>
+(function(){
+  // Mermaid init
+  if (window.mermaid) {
+    mermaid.initialize({ startOnLoad:true, theme:"neutral", svgMaxWidth:"none", themeVariables:{
+      darkMode:false, background:"#ffffff", primaryColor:"#eef2f9",
+      primaryTextColor:"#1c2740", primaryBorderColor:"#dde4f0",
+      lineColor:"#2563eb", secondaryColor:"#e8f0fe", tertiaryColor:"#eef7f3",
+      fontSize:"15px", fontFamily:"PingFang SC, Microsoft YaHei, sans-serif"
+    }});
+  }
+
+  // ── Fix wide mermaid svgs to natural size (readable text) ──
+  function fixWideSvgs(){
+    document.querySelectorAll('.mermaid.wide svg').forEach(svg => {
+      const vb = svg.viewBox && svg.viewBox.baseVal;
+      if (vb && vb.width > 1 && svg.style.width !== Math.ceil(vb.width) + 'px') {
+        svg.style.width = Math.ceil(vb.width) + 'px';
+        svg.style.height = Math.ceil(vb.height) + 'px';
+      }
+    });
+  }
+  window.addEventListener('load', () => {
+    let tries = 0;
+    const iv = setInterval(() => {
+      fixWideSvgs();
+      const pending = document.querySelectorAll('.mermaid.wide svg');
+      const done = Array.from(pending).every(s => { const v = s.viewBox && s.viewBox.baseVal; return v && v.width > 1 && s.style.width === Math.ceil(v.width) + 'px'; });
+      if (done || ++tries > 40) clearInterval(iv);
+    }, 250);
+  });
+
+  // ── Search ──
+  const q = document.getElementById('q');
+  const main = document.querySelector('main');
+  let marks = [];
+  function clearMarks(){
+    marks.forEach(m => {
+      const p = m.parentNode;
+      if (p) { p.replaceChild(document.createTextNode(m.textContent), m); p.normalize(); }
+    });
+    marks = [];
+  }
+  function doSearch(term){
+    clearMarks();
+    if (!term) return;
+    const t = term.toLowerCase();
+    const nodes = [];
+    const walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT, {
+      acceptNode(n){
+        const tx = n.textContent.trim();
+        if (!tx || n.parentNode.tagName === 'SCRIPT' || n.parentNode.tagName === 'STYLE' || n.parentNode.closest('.mermaid')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    let w;
+    while ((w = walker.nextNode())) nodes.push(w);
+    let found = 0;
+    for (const n of nodes) {
+      if (found >= 300) break;
+      let cur = n;
+      for (;;) {
+        const i = cur.textContent.toLowerCase().indexOf(t);
+        if (i < 0 || found >= 300) break;
+        const mid = cur.splitText(i);
+        const end = mid.splitText(t.length);
+        const markEl = document.createElement('mark');
+        markEl.className = 'hl';
+        mid.parentNode.replaceChild(markEl, mid);
+        markEl.appendChild(mid);
+        marks.push(markEl);
+        found++;
+        cur = end;
+      }
+    }
+    if (found === 0) {
+      const hint = document.querySelector('#searchwrap .hint');
+      hint.textContent = '未找到「' + term + '」，试试 crctl / 状态机 / writeback / lint';
+      setTimeout(() => { hint.textContent = '按 Ctrl+K 聚焦，Esc 清空'; }, 2600);
+    }
+  }
+  q.addEventListener('input', () => doSearch(q.value));
+  q.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { q.value = ''; clearMarks(); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); q.focus(); }
+  });
+
+  // ── Scrollspy ──
+  const links = Array.from(document.querySelectorAll('#nav a[href^="#"]'));
+  const anchors = links.map(a => document.querySelector(a.getAttribute('href'))).filter(Boolean);
+  const spy = new IntersectionObserver(entries => {
+    entries.forEach(en => {
+      if (en.isIntersecting) {
+        links.forEach(l => l.classList.toggle('active', l.getAttribute('href') === '#' + en.target.id));
+      }
+    });
+  }, { rootMargin:'-15% 0px -75% 0px' });
+  anchors.forEach(a => spy.observe(a));
+})();
+</script>
+</body>
+</html>

@@ -1372,24 +1372,7 @@ test('inbox-emit：缺 --event → BAD_ARGS；--payload 非法 JSON → BAD_ARGS
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-// ── CR-2026-021 TASK-06：next-cr-id（只读预览）+ cr-init（原子权威分配）──
-
-test('next-cr-id：只读预览返回 CR-{year}-{max+1}，不写任何文件（AC-4）', () => {
-  const ws = makeWorkspace();
-  try {
-    writeBacklog(ws, [{ id: 'CR-2026-001', status: 'drafting' }, { id: 'CR-2026-003', status: 'drafting' }]);
-    writeCrMd(ws, 'CR-2026-001', 'drafting');
-    writeCrMd(ws, 'CR-2026-003', 'drafting');
-    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
-    const r1 = runCrctl(['next-cr-id', '--year', '2026', '--workspace', ws]);
-    assert.equal(r1.status, 0);
-    assert.equal(r1.stdout.crId, 'CR-2026-004');
-    assert.equal(r1.stdout.previewOnly, true);
-    const r2 = runCrctl(['next-cr-id', '--year', '2026', '--workspace', ws]);
-    assert.equal(r2.stdout.crId, 'CR-2026-004', '两次连续调用返回同一候选（非权威、不参与分配）');
-    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before, '不得写任何文件');
-  } finally { rmSync(ws, { recursive: true, force: true }); }
-});
+// ── CR-2026-021 TASK-06：cr-init（原子权威分配）──
 
 test('cr-init：权威原子分配 — 三文件建档登记，返回分配到的 cr-id（AC-4）', () => {
   const ws = makeWorkspace();
