@@ -38,18 +38,9 @@ scope: change-request-lifecycle
 ## 操作步骤
 
 1. 读 `change-requests/{CR-ID}/cr.md`
-2. **写入 / 更新** `change-requests/{CR-ID}/approval.yml` 的 `supplemental-reviews` 段：
-   ```yaml
-   cr-id: {CR-ID}
-   type: {cr.type}
-   supplemental-reviews:
-     - reviewer: {reviewer}
-       recorded-at: "YYYY-MM-DDTHH:mm:ss+HH:mm"
-       decision: {decision}
-       status-at-record: {current-status}
-       conditions: {conditions}
-       notes: "{notes}"
-   ```
+2. 运行 `crctl review-note {CR-ID} --stage {stage} --note "{notes}" --workspace <worktree>`（S2）：向 `approval.yml#supplemental-reviews[]` **追加**一条补充审查记录（CAS+审计，操作者身份由 crctl 生成，不接受 --by）。模型**不得**直接 Write `approval.yml` 的 supplemental-reviews 段（guard deny + crctl 独占写）。
+   - 记录含 `decision={decision}`、`status-at-record`（crctl 读取当前 status）、`notes`。
+   - 四段审批本体（#requirement/#tech-design/#dev-start/#code）绝不触碰——那仍只经 `crctl approve` TTY。
 3. 若 `decision=reject`：调用 `crctl advance --to rejected，`trigger=cr-review-record:reject`）将 status 推进到 `rejected`，并写明 reject reason。
 4. 若 `decision=withdraw`：调用 `crctl advance --to withdrawn，`trigger=cr-review-record:withdraw`）将 status 推进到 `withdrawn`，并写明 withdraw reason。
 5. 若 `decision=note`：不改变 status。

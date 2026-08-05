@@ -1,6 +1,6 @@
 ---
 name: handover-cr
-description: 正式移交 CR 某一角色 owner：先 push-progress 确保远端最新，再变更 cr.md owners.{role}，记录 assigned-at，并向新 owner 发送 inbox 事件。
+description: 正式移交 CR 某一角色 owner：先 push-progress 确保远端最新，再经 crctl owner-set 变更 _backlog owners.{role}（S4），并向新 owner 发送 inbox 事件。
 ---
 
 # Skill: handover-cr

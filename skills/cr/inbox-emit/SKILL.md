@@ -48,17 +48,11 @@ Pipeline 所有关键节点的 inbox 写入**单一入口**：
 
 ## 操作步骤
 
-1. 在 `_backlog.yml` 目标 CR 条目中追加 `notify-log` 条目：
-   ```yaml
-   notify-log:
-     - at: "YYYY-MM-DDTHH:mm:ss+HH:mm"    # ISO8601 带时分秒和时区，例 2026-05-05T14:30:00+08:00
-       event: {event}
-       to: {to}
-       payload: {payload}
-       handled: false
-   ```
-2. 将 `to` 列表合并进 `notify-pending`（已在列表中的不重复添加）
-3. Commit：`[cr] inbox-emit {CR-ID} event={event} to={to}`
+1. 运行 `crctl inbox-emit {cr-id} --event {event} --to {to} [--payload {payload}] --workspace <worktree>`：
+   - crctl 以 CAS 追加 `_backlog.yml` 条目 `notify-log[]`（`{at, event, to, payload, handled:false}`，时间戳 crctl 生成）
+   - 同步合并 `notify-pending`（去重）
+2. 模型**不得**直接 Write `_backlog.yml` 的 notify-log/notify-pending 段（guard deny + crctl 独占写）。
+3. Commit：`[cr] inbox-emit {CR-ID} event={event} to={to}`（经 `crctl git commit`）。
 
 ## 不做
 

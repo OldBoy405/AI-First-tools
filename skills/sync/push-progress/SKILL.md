@@ -1,6 +1,6 @@
 ---
 name: push-progress
-description: "按 dir-graph.yaml repositories 遍历所有 active repo，将 CR worktree 未提交变更打包为 wip checkpoint 并推送 origin 同名分支，更新 _backlog.yml 的 remote/ref/checkpoints 字段。"
+description: "按 dir-graph.yaml repositories 遍历所有 active repo，将 CR worktree 未提交变更打包为 wip checkpoint 并推送 origin 同名分支，经 crctl checkpoint-add 更新 _backlog.yml 的 remote-ref/last-push/checkpoints 字段（S3）。"
 ---
 
 # Skill: push-progress

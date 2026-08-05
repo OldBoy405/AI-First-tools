@@ -86,7 +86,7 @@ Commit：`feat({cr_id}): draft PRD - {title}`
 
 ### Step 5 — 更新 _backlog.yml
 
-将 `change-requests/_backlog.yml` 中 `{cr_id}` 条目的 `prd-path` 字段更新为 `change-requests/{cr_id}/prd.md`。
+运行 `crctl backlog-set {cr_id} --field prd-path --value change-requests/{cr_id}/prd.md --workspace <worktree>`（S5：白名单字段写，模型不得直接编辑 `_backlog.yml`）。
 
 ### Step 6 — 输出摘要
 
