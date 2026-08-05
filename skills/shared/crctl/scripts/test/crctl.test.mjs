@@ -1477,3 +1477,52 @@ test('cr-init：缺 --title / --owner-requirement → BAD_ARGS', () => {
     assert.equal(r2.stderr.error.code, 'BAD_ARGS');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-021 TASK-07：task allocate（S7，TASK-ID CAS 分配）──
+
+test('task allocate：顺序分配 TASK-ID + slug 兜底命名（AC-5）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    const dir = path.join(ws, 'change-requests', 'CR-T1', 'tasks');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, '_index.yml'), 'cr-id: CR-T1\ntasks:\n  - id: CR-T1-TASK-01\n    title: x\n    status: pending\n    estimate: 1h\n    depends-on: []\n');
+    const r1 = runCrctl(['task', 'allocate', 'CR-T1', '--workspace', ws]);
+    assert.equal(r1.status, 0);
+    assert.equal(r1.stdout.task, 'CR-T1-TASK-02');
+    assert.equal(r1.stdout.slug, 'task-02', 'slug 缺失回退 task-{NN}');
+    const r2 = runCrctl(['task', 'allocate', 'CR-T1', '--slug', 'fix-bug', '--workspace', ws]);
+    assert.equal(r2.status, 0);
+    assert.equal(r2.stdout.task, 'CR-T1-TASK-03');
+    assert.equal(r2.stdout.slug, 'fix-bug');
+    const out = readFileSync(path.join(dir, '_index.yml'), 'utf8');
+    assert.ok(out.includes('- id: CR-T1-TASK-02') && out.includes('- id: CR-T1-TASK-03'), '两条新任务登记');
+    assert.ok(out.includes('slug: task-02') && out.includes('slug: fix-bug'), 'slug 写入');
+    assert.ok(out.includes('status: pending'), '最小条目 status: pending');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('task allocate：非法前置态（drafting）→ ILLEGAL_LEDGER_STATE 零写', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const dir = path.join(ws, 'change-requests', 'CR-T1', 'tasks');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, '_index.yml'), 'cr-id: CR-T1\ntasks: []\n');
+    const before = readFileSync(path.join(dir, '_index.yml'), 'utf8');
+    const r = runCrctl(['task', 'allocate', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.equal(readFileSync(path.join(dir, '_index.yml'), 'utf8'), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('task allocate：tasks/_index.yml 缺失 → TASK_INDEX_NOT_FOUND', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    const r = runCrctl(['task', 'allocate', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'TASK_INDEX_NOT_FOUND');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

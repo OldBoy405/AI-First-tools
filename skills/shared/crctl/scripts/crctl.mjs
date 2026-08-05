@@ -1835,6 +1835,57 @@ function cmdCrInit(ws, gates, flags) {
   ok({ op: 'cr-init', cr, title: flags.title, status: 'drafting', files: { crMd: path.join('change-requests', cr, 'cr.md'), backlog: bp, index: ip } });
 }
 
+/* ────────────────────────── task allocate（S7，CR-2026-021 TASK-07） ──────────────────────────
+ * 扩展现有 task 子命令族：CAS 保护的 TASK-ID 分配（SDD §2.3）。
+ * 分配即写、不接受调用方传入编号：内部扫 tasks/_index.yml 现有 max → {cr}-TASK-{NN+1}，
+ * slug 缺失回退 task-{NN}（与 writeback-tasks.mjs 的 slug 兜底风格对齐）。唯一并发冲突码 CAS_CONFLICT。
+ */
+function scanMaxTaskNumber(text, cr) {
+  const re = new RegExp('- id:\\s*["\']?' + cr + '-TASK-(\\d+)', 'g');
+  let max = 0;
+  for (const m of text.matchAll(re)) max = Math.max(max, Number(m[1]));
+  return max;
+}
+
+/** tasks/_index.yml 追加最小条目 {id, slug, status: pending}（title/estimate/depends-on 由 write-dev-tasks 后续填充）。 */
+function appendTaskEntry(text, cr, taskId, slug) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const lines = norm.split('\n');
+  const idx = lines.findIndex((l) => /^tasks:/.test(l));
+  if (idx === -1) fail('TASK_INDEX_SHAPE', 'tasks/_index.yml 缺少 tasks: 段，结构异常');
+  if (lines.some((l) => new RegExp('- id:\\s*["\']?' + taskId + '["\']?\\s*$').test(l))) {
+    fail('TASK_ALREADY_EXISTS', `${taskId} 已存在于 tasks/_index.yml`);
+  }
+  const segEnd = lines.length;
+  const entry = `  - id: ${taskId}\n    slug: ${slug}\n    status: pending`;
+  // 定位 tasks: 段尾（下一个顶层键或 EOF）
+  let tail = lines.length;
+  for (let i = idx + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^[ \t]*/)[0];
+    if (m.length === 0 && /^[A-Za-z0-9_-]+:/.test(lines[i])) { tail = i; break; }
+  }
+  lines.splice(tail, 0, entry);
+  void segEnd;
+  return norm.slice(0, 0) === '' ? lines.join('\n') : lines.join('\n');
+}
+
+function cmdTaskAllocate(ws, cr, gates, flags) {
+  const state = resolveCrState(ws, cr);
+  const LEGAL = ['task-breakdown', 'developing'];
+  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `task allocate 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
+  const p = path.join(crDir(ws, cr), 'tasks', '_index.yml');
+  const text = readFileChecked(p);
+  if (text == null) fail('TASK_INDEX_NOT_FOUND', `缺少 ${p}（请先由 write-dev-tasks 创建 tasks/_index.yml 骨架）`);
+  const n = scanMaxTaskNumber(text, cr) + 1;
+  const nn = String(n).padStart(2, '0');
+  const taskId = `${cr}-TASK-${nn}`;
+  const slug = flags.slug || `task-${nn}`;
+  const newText = appendTaskEntry(text, cr, taskId, slug);
+  casWrite(p, sha256(text), newText);
+  auditLog(ws, { kind: 'ledger', op: 'task-allocate', cr, actor: identity(ws), task: taskId, slug });
+  ok({ op: 'task-allocate', cr, task: taskId, slug, file: p });
+}
+
 /** 行级追加 supplemental-reviews 段条目（硬失败：无该段则创建，段结构异常则报错）。 */
 function appendSupplementalReview(text, entry) {
   const norm = text.replaceAll('\r\n', '\n');
@@ -2148,6 +2199,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl migrate-backlog                          _backlog.yml v1->v2 迁移（撤出 status/updated-at，升 schema）
   crctl git     <sub> [args...] [--cwd <p>] [--caller <skill>]   controlled-shell 白名单执行
   crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
+  crctl task allocate <cr_id> [--slug <s>]   tasks/_index.yml CAS 分配 TASK-ID（task-breakdown/developing 态）
   crctl merge-metadata <cr_id> --repo <r> --trunk <t> --sha <sha>
                                                 _backlog.yml merge-commits[] 追加（merging/writing-back 态）
   crctl archive-move <cr_id> --final-status <s> [--archive-reason <r>] [--spec-id <id>]
@@ -2210,8 +2262,9 @@ function main() {
     case 'next-cr-id': return cmdNextCrId(ws, gates, flags);
     case 'cr-init': return cmdCrInit(ws, gates, flags);
     case 'task': {
-      if (positional[0] !== 'done') fail('BAD_ARGS', 'task 仅支持子命令 done：crctl task done <CR-ID> --task <TASK-ID>');
-      return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
+      if (positional[0] === 'done') return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
+      if (positional[0] === 'allocate') return cmdTaskAllocate(ws, requireCr(positional.slice(1)), gates, flags);
+      fail('BAD_ARGS', 'task 仅支持子命令 done/allocate：crctl task done <CR-ID> --task <TASK-ID> | crctl task allocate <CR-ID> [--slug <s>]');
     }
     case 'merge-metadata': return cmdMergeMetadata(ws, requireCr(positional), gates, flags);
     case 'archive-move': return cmdArchiveMove(ws, requireCr(positional), gates, flags);
