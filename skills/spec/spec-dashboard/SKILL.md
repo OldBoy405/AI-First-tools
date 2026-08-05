@@ -31,7 +31,7 @@ description: "Spec/CR 全局看板，展示 baseline 版本分组、在途 CR �
 
 1. 读取 `specs/_index.yml` → 已回写 baseline 列表。
 2. 读取 `specs/_history.yml` → 历史 baseline / GA 记录。
-3. 扫描 `change-requests/{CR-ID}/cr.md` frontmatter → 在途 CR 列表与状态分布。
+3. 运行 `crctl report --workspace <ws>`（S11：跨 CR 聚合，只读）
 4. 对每个 baseline spec，若其目录下存在 `traceability.yml`，则读取 `traceability.summary`。
 
 ### Step 2 — 计算指标
