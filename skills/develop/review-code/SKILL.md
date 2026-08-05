@@ -83,7 +83,7 @@ Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项
    dimensions: {评审维度: 结论, ...}   # 该 stage 门禁要求的维度齐全
    suggestions: []       # 可选
    ```
-2. 运行 `crctl review-record {cr_id} --stage code --from .crctl/tmp/review-code.yml --bump-attempt --workspace <worktree>`，crctl 自动完成**确定性部分**：
+2. 运行 `crctl review-record {cr_id} --stage code --bump-attempt --workspace <worktree>`（`--from` 缺省即 `.crctl/tmp/review-code.yml`，无需显式指定），crctl 自动完成**确定性部分**：
    - schema 校验（verdict 枚举/blockers 列表/dimensions 齐全；失败 `SCHEMA_INVALID` 不写）
    - stage→文件名显式映射（code→code.yml）
    - 注入 reviewer=identity(ws)/reviewed-at=nowIso()，CAS 写入 canonical `review-annotations/code.yml`

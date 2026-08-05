@@ -8,7 +8,7 @@
  * 不经过任何派生快照（SDD §4.0：与 crctl capabilities 解耦）。
  *
  * 用法：
- *   node skills/shared/crctl/scripts/lint-prompts.mjs [--mode report|enforce] [--json] [--root <dir>]
+ *   node skills/shared/crctl/scripts/lint-prompts.mjs [--mode report|enforce] [--root <dir>]
  *   --mode report（默认）：输出 file:line + 规则 + 级别，退出 0（不阻断提交）
  *   --mode enforce：命中 CONTRADICTS/STALE-REF 即退出 1（LINT_DRIFT）
  *   段落级豁免：命中处附近有 <!-- lint-prompts:ignore --> 则跳过该段
@@ -28,11 +28,10 @@ const RULES_PATH = process.env.CRCTL_RULES_PATH || path.resolve(__dirname, '..',
 
 function loadJudgements() {
   const j = JSON.parse(fs.readFileSync(RULES_PATH, 'utf8'));
-  const denyFiles = (j.protectedPaths?.deny || []).map((re) => new RegExp(re, 'i'));
   // R1 行内匹配用无锚版本：deny 正则的 ^$ 锚只对整文件路径成立，prompt 行内目标文件后常跟其他文本
   const denyFilesLoose = (j.protectedPaths?.deny || []).map((re) => new RegExp(re.replace(/^\^/, '').replace(/\$/, ''), 'i'));
   const gitSubs = new Set((j.git || []).map((e) => e.sub));
-  return { denyFiles, denyFilesLoose, gitSubs };
+  return { denyFilesLoose, gitSubs };
 }
 
 const LITERAL_BLACKLIST = {
@@ -167,7 +166,6 @@ function main() {
   const flags = {};
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--mode') flags.mode = argv[++i];
-    else if (argv[i] === '--json') flags.json = true;
     else if (argv[i] === '--root') flags.root = argv[++i];
   }
   const mode = flags.mode || 'report';
@@ -187,12 +185,8 @@ function main() {
   // 按 file:line 排序
   findings.sort((a, b) => (a.file + String(a.line)).localeCompare(b.file + String(b.line)));
   const hasBlocking = findings.some((f) => f.level === 'CONTRADICTS' || f.level === 'STALE-REF');
-  if (flags.json) {
-    process.stdout.write(JSON.stringify({ mode, files: walkFiles(root).length, findings, drift: hasBlocking }, null, 2) + '\n');
-  } else {
-    for (const f of findings) process.stdout.write(`${f.file}:${f.line} [${f.level}] ${f.rule}: ${f.why}\n`);
-    if (!findings.length) process.stdout.write(`lint-prompts ${mode}: 0 findings（prompt 与 crctl 无漂移）\n`);
-  }
+  for (const f of findings) process.stdout.write(`${f.file}:${f.line} [${f.level}] ${f.rule}: ${f.why}\n`);
+  if (!findings.length) process.stdout.write(`lint-prompts ${mode}: 0 findings（prompt 与 crctl 无漂移）\n`);
   if (mode === 'enforce' && hasBlocking) {
     process.stderr.write(JSON.stringify({ error: { code: 'LINT_DRIFT', message: `lint-prompts enforce 检出 ${findings.filter((f) => f.level === 'CONTRADICTS' || f.level === 'STALE-REF').length} 处 CONTRADICTS/STALE-REF，拒绝通过` } }, null, 2) + '\n');
     process.exit(1);

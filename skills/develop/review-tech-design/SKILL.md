@@ -58,7 +58,7 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
    dimensions: {评审维度: 结论, ...}   # 该 stage 门禁要求的维度齐全
    suggestions: []       # 可选
    ```
-2. 运行 `crctl review-record {cr_id} --stage tech-design --from .crctl/tmp/review-tech-design.yml --bump-attempt --workspace <worktree>`，crctl 自动完成**确定性部分**：
+2. 运行 `crctl review-record {cr_id} --stage tech-design --bump-attempt --workspace <worktree>`（`--from` 缺省即 `.crctl/tmp/review-tech-design.yml`，无需显式指定），crctl 自动完成**确定性部分**：
    - schema 校验（verdict 枚举/blockers 列表/dimensions 齐全；失败 `SCHEMA_INVALID` 不写）
    - stage→文件名显式映射（tech-design→sdd.yml 非同名）
    - 注入 reviewer=identity(ws)/reviewed-at=nowIso()，CAS 写入 canonical `review-annotations/sdd.yml`
