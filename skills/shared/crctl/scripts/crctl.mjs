@@ -1340,6 +1340,79 @@ function cmdAttempt(ws, cr, gates, flags) {
   ok(r);
 }
 
+/* ────────────────────────── review-record（S1，CR-2026-021 TASK-02） ──────────────────────────
+ * 判断/写入分离（SDD §4.1）：agent 把评审判断写进非受控临时 payload（默认 .crctl/tmp/review-{stage}.yml，
+ * 已被 .crctl/.gitignore 的 `*` 规则忽略），crctl 只做确定性部分——schema 校验 → stage→文件名显式映射
+ * （tech-design→sdd.yml 非同名，与门禁读取口径对齐）→ 注入 reviewer/reviewed-at → casWrite canonical →
+ * 可选级联 attempt → 删除临时 payload。
+ */
+const REVIEW_STAGE_FILES = { requirement: 'requirement.yml', 'tech-design': 'sdd.yml', code: 'code.yml' };
+const REVIEW_STAGE_LOOPS = { requirement: 'review-requirement', 'tech-design': 'review-tech-design', code: 'review-code' };
+const REVIEW_STAGE_EXPECT = { requirement: ['requirement-reviewing'], 'tech-design': ['tech-design-review-pending'], code: ['code-reviewing'] };
+
+function cmdReviewRecord(ws, cr, gates, flags) {
+  const stage = flags.stage;
+  const fileName = REVIEW_STAGE_FILES[stage];
+  if (!fileName) fail('STAGE_UNKNOWN', `--stage 必须是 ${Object.keys(REVIEW_STAGE_FILES).join(' | ')}`);
+  const expect = REVIEW_STAGE_EXPECT[stage];
+  const state = resolveCrState(ws, cr);
+  if (!expect.includes(state.status)) {
+    fail('ILLEGAL_LEDGER_STATE', `review-record --stage ${stage} 仅允许在前置态 ${expect.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect });
+  }
+  // 读取临时 payload（CRLF 归一，纪律 #1；解析失败硬失败不静默）
+  const fromRel = flags.from || path.join('.crctl', 'tmp', `review-${stage}.yml`);
+  const fromPath = path.isAbsolute(fromRel) ? fromRel : path.join(ws, fromRel);
+  const raw = readFileChecked(fromPath);
+  if (raw == null) fail('PAYLOAD_NOT_FOUND', `临时评审 payload 不存在: ${fromPath}（agent 应先把判断写到该非受控路径）`);
+  const payload = parseYaml(raw.replaceAll('\r\n', '\n'));
+  // schema 校验（判断是 agent 的、格式是机械的——这里只校验格式，不替 agent 判断）
+  if (!payload || typeof payload !== 'object') fail('SCHEMA_INVALID', 'payload 顶层必须是映射');
+  if (!['pass', 'block'].includes(payload.verdict)) fail('SCHEMA_INVALID', `verdict=${JSON.stringify(payload.verdict)} 不在枚举 [pass, block]`);
+  if (!Array.isArray(payload.blockers)) fail('SCHEMA_INVALID', 'blockers 必须是列表（可空）');
+  if (!payload.dimensions || typeof payload.dimensions !== 'object' || Array.isArray(payload.dimensions)) {
+    fail('SCHEMA_INVALID', 'dimensions 缺失或不是映射（该 stage 门禁要求的维度必须齐全）');
+  }
+  // --bump-attempt：先检查未 exhausted（避免 canonical 已写而记账失败产生半状态）
+  if (flags['bump-attempt']) {
+    const a = readAttempts(ws, cr, REVIEW_STAGE_LOOPS[stage], gates);
+    if (a.exhausted) fail('LOOP_EXHAUSTED', `${REVIEW_STAGE_LOOPS[stage]} 已达 maxAttempts=${a.max}，不得继续自修复；请人工处理剩余 blocker`, { current: a.current });
+  }
+  // canonical 写入（crctl 独占写：首次创建无 CAS 冲突面；已存在走 casWrite 防并发覆盖）
+  const target = path.join(crDir(ws, cr), 'review-annotations', fileName);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const existing = readFileChecked(target);
+  const yamlOf = (v) => (typeof v === 'string' ? `"${String(v).replaceAll('"', '\\"')}"` : JSON.stringify(v));
+  const lines = [
+    `cr-id: ${cr}`,
+    `review-type: ${stage}`,
+    `reviewer: "${identity(ws)}"`,
+    `reviewed-at: "${nowIso()}"`,
+    `verdict: ${payload.verdict}`,
+    payload.blockers.length === 0 ? 'blockers: []' : 'blockers:',
+    ...payload.blockers.map((b) => `  - ${yamlOf(b)}`),
+    'dimensions:',
+    ...Object.entries(payload.dimensions).map(([k, v]) => `  ${k}: ${yamlOf(v)}`),
+    ...(payload.suggestions && payload.suggestions.length
+      ? ['suggestions:', ...payload.suggestions.map((s) => `  - ${yamlOf(s)}`)]
+      : ['suggestions: []']),
+    '',
+  ];
+  const newText = lines.join('\n');
+  if (existing == null) fs.writeFileSync(target, newText, 'utf8');
+  else casWrite(target, sha256(existing), newText);
+  // 级联 attempt 记账（复用既有 bumpAttempt，不重写）
+  let attempt = null;
+  if (flags['bump-attempt']) attempt = bumpAttempt(ws, cr, REVIEW_STAGE_LOOPS[stage], gates);
+  // 删除临时 payload（避免残留误提交或跨 CR 串味）
+  try { fs.rmSync(fromPath, { force: true }); } catch { /* 删除失败不阻塞主结果 */ }
+  auditLog(ws, { kind: 'ledger', op: 'review-record', cr, stage, verdict: payload.verdict, actor: identity(ws), file: target });
+  emitOutboxEvent(ws, {
+    event_kind: 'review', cr_id: cr, actor: identity(ws),
+    payload: { stage, verdict: payload.verdict, blockerCount: (payload.blockers || []).length },
+  });
+  ok({ op: 'review-record', cr, stage, file: target.replaceAll('\\', '/'), verdict: payload.verdict, ...(attempt ? { attempt: attempt.current } : {}) });
+}
+
 function cmdTest(ws, cr, gates, flags) {
   const cmds = flags.cmdList || [];
   if (cmds.length === 0) fail('BAD_ARGS', 'test 需要至少一个 --cmd "<command>"');
@@ -1611,6 +1684,8 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
                         [--approver <id>] [--spec-id <id>]   仅限交互式终端（人类在环）
   crctl validate <file>                          受控产物 schema 校验（validate-doc 代码化）
   crctl attempt <cr_id> --loop <ref>             review-loop 轮次唯一记账点；超限返回 LOOP_EXHAUSTED
+  crctl review-record <cr_id> --stage <requirement|tech-design|code> --from <payload.yml> [--bump-attempt]
+                                                schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
@@ -1670,6 +1745,7 @@ function main() {
       return cmdValidate(ws, positional[0], gates);
     }
     case 'attempt': return cmdAttempt(ws, requireCr(positional), gates, flags);
+    case 'review-record': return cmdReviewRecord(ws, requireCr(positional), gates, flags);
     case 'task': {
       if (positional[0] !== 'done') fail('BAD_ARGS', 'task 仅支持子命令 done：crctl task done <CR-ID> --task <TASK-ID>');
       return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);

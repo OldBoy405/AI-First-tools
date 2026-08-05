@@ -1084,3 +1084,96 @@ test('FR-2 回退：非 git workspace 的 status 不触发 STATUS_DIVERGED、不
     assert.ok(!existsSync(path.join(ws, '.crctl', 'audit.log')), 'status 在非 git 工作区不应写 audit.log（.git 门控命中，未触达 controlledGit）');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-021 TASK-02：review-record（S1，判断/写入分离）──────────────
+
+function writeReviewPayload(ws, cr, stage, content) {
+  const dir = path.join(ws, '.crctl', 'tmp');
+  mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, 'review-' + stage + '.yml');
+  writeFileSync(p, content);
+  return p;
+}
+
+test('review-record：tech-design stage 写入 sdd.yml（非 tech-design.yml）+ payload 删除 + 元数据 crctl 生成（AC-1）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-review-pending');
+    const payload = writeReviewPayload(ws, 'CR-T1', 'tech-design',
+      'verdict: pass\nblockers: []\ndimensions:\n  structure: ok\n  consistency: ok\nsuggestions:\n  - "abc"\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.op, 'review-record');
+    assert.ok(r.stdout.file.replaceAll('\\', '/').endsWith('review-annotations/sdd.yml'), '应写 sdd.yml（非 tech-design.yml）: ' + r.stdout.file);
+    assert.equal(existsSync(payload), false, '临时 payload 应被删除');
+    const out = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'sdd.yml'), 'utf8');
+    assert.ok(out.includes('verdict: pass'), 'verdict 写入');
+    assert.ok(out.includes('blockers: []'), '空 blockers 用 flow 空数组');
+    assert.ok(out.includes('structure: "ok"'), 'dimensions 写入');
+    assert.ok(out.includes('reviewer:'), 'reviewer 由 crctl 生成');
+    assert.ok(out.includes('reviewed-at:'), 'reviewed-at 由 crctl 生成');
+    assert.ok(out.includes('suggestions:') && out.includes('abc'), 'suggestions 写入');
+    assert.ok(out.includes('review-type: tech-design'), 'review-type 写入');
+    assert.ok(out.includes('cr-id: CR-T1'), 'cr-id 写入');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-record：verdict 非法 → SCHEMA_INVALID，不写 canonical、payload 保留', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'requirement-reviewing');
+    const payload = writeReviewPayload(ws, 'CR-T1', 'requirement', 'verdict: maybe\nblockers: []\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'requirement', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'SCHEMA_INVALID');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'requirement.yml')), false, '不得写入 canonical');
+    assert.equal(existsSync(payload), true, '非法 payload 不得被删除');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-record：前置态非法（drafting）→ ILLEGAL_LEDGER_STATE，文件零变更（§0 范式）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const payload = writeReviewPayload(ws, 'CR-T1', 'code', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'code', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'code.yml')), false, '前置态非法不得写文件');
+    assert.equal(existsSync(payload), true, '前置态非法不得消费 payload');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-record：未知 stage → STAGE_UNKNOWN', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'requirement-reviewing');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'bogus', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'STAGE_UNKNOWN');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-record：--bump-attempt 级联 attempt 记账（复用既有 bumpAttempt）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'code-reviewing');
+    writeReviewPayload(ws, 'CR-T1', 'code', 'verdict: block\nblockers:\n  - "bug A"\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'code', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.attempt, 1, 'attempt 级联为 1');
+    const loop = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-loop.yml'), 'utf8');
+    assert.ok(loop.includes('current-attempt: 1'), 'review-loop.yml 记账');
+    assert.ok(loop.includes('review-code'), 'loop ref = review-code');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-record：payload 缺失 → PAYLOAD_NOT_FOUND', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'requirement-reviewing');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'requirement', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'PAYLOAD_NOT_FOUND');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
