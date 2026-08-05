@@ -1957,6 +1957,44 @@ function cmdCrMetrics(ws, gates, flags) {
   return cmdReport(ws, gates, { ...flags, period });
 }
 
+/* ────────────────────────── git commit --template（S10，CR-2026-021 TASK-09） ──────────────────────────
+ * 给既有 git commit 分支加格式化模板（不是新顶层子命令）：
+ *   register:        [cr] register {cr}: {subject}
+ *   task-breakdown:  feat({cr}): task breakdown ({subject})
+ *   writeback:       writeback({cr}): {subject}
+ * cr 从 --cwd 当前分支名 requirement/{cr} 提取（提取不到则要求 subject 自带 CR 前缀）。
+ * 不改变现有 -m 直传路径的白名单校验（--template 是新增可选分支）。
+ */
+const COMMIT_TEMPLATES = {
+  register: (cr, subject) => `[cr] register ${cr}: ${subject}`,
+  'task-breakdown': (cr, subject) => `feat(${cr}): task breakdown (${subject})`,
+  writeback: (cr, subject) => `writeback(${cr}): ${subject}`,
+};
+
+function resolveTemplateCr(ws, cwd, subject) {
+  const r = controlledGit(ws, 'branch', ['--show-current'], cwd, 'crctl-commit-template');
+  if (r.ok && r.stdout) {
+    const m = r.stdout.trim().match(/requirement\/(CR-[\w-]+)/); // 兼容 CR-YYYY-NNN 与测试短 ID
+    if (m) return m[1];
+  }
+  const sm = subject.match(/CR-\d{4}-\d{3}/);
+  if (sm) return sm[0];
+  fail('BAD_ARGS', 'git commit --template 无法确定 cr：--cwd 分支非 requirement/CR-* 且 subject 不含 CR 编号');
+}
+
+function applyCommitTemplate(ws, argv, flags) {
+  const kind = flags.template;
+  const tpl = COMMIT_TEMPLATES[kind];
+  if (!tpl) fail('BAD_ARGS', `--template 必须是 ${Object.keys(COMMIT_TEMPLATES).join(' | ')}（当前 ${kind}）`);
+  const mi = argv.indexOf('-m');
+  if (mi === -1) fail('BAD_ARGS', 'git commit --template 需要同时提供 -m <subject>（作为模板的 subject 部分）');
+  const subject = String(argv[mi + 1] || '').trim();
+  if (!subject) fail('BAD_ARGS', '-m subject 为空');
+  const cr = resolveTemplateCr(ws, flags.cwd ? path.resolve(flags.cwd) : ws, subject);
+  argv[mi + 1] = tpl(cr, subject);
+  return argv;
+}
+
 /** 行级追加 supplemental-reviews 段条目（硬失败：无该段则创建，段结构异常则报错）。 */
 function appendSupplementalReview(text, entry) {
   const norm = text.replaceAll('\r\n', '\n');
@@ -2216,7 +2254,9 @@ function cmdNext(ws, cr, gates, flags) {
 function cmdGit(ws, argv, flags) {
   const sub = argv[0];
   if (!sub) fail('BAD_ARGS', 'git 需要子命令，如 crctl git status --short --cwd <path>');
-  const args = argv.slice(1);
+  let args = argv.slice(1);
+  // S10（CR-2026-021 TASK-09）：git commit --template <kind> 生成规范 message（可选分支，不影响 -m 直传白名单校验）
+  if (sub === 'commit' && flags.template) args = applyCommitTemplate(ws, args, flags);
   const r = controlledGit(ws, sub, args, flags.cwd ? path.resolve(flags.cwd) : ws, flags.caller);
   if (r.code === 'FORBIDDEN_SUBCOMMAND') fail('FORBIDDEN_SUBCOMMAND', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   if (r.code === 'SHELL_UNAVAILABLE') fail('SHELL_UNAVAILABLE', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
@@ -2271,6 +2311,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
   crctl migrate-backlog                          _backlog.yml v1->v2 迁移（撤出 status/updated-at，升 schema）
   crctl git     <sub> [args...] [--cwd <p>] [--caller <skill>]   controlled-shell 白名单执行
+                （git commit 可加 --template <register|task-breakdown|writeback> 生成规范 message）
   crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
   crctl task allocate <cr_id> [--slug <s>]   tasks/_index.yml CAS 分配 TASK-ID（task-breakdown/developing 态）
   crctl merge-metadata <cr_id> --repo <r> --trunk <t> --sha <sha>
@@ -2300,7 +2341,7 @@ function parseArgs(argv) {
 
 /** git 子命令专用解析：只抽取 crctl 自己的旗标，git 的旗标（--short 等）原样透传 */
 function parseGitArgs(argv) {
-  const CRCTL_FLAGS = ['--cwd', '--caller', '--workspace'];
+  const CRCTL_FLAGS = ['--cwd', '--caller', '--workspace', '--template']; // --template 是 crctl 的 commit 模板旗标，不透传给 git
   const flags = {};
   const positional = [];
   for (let i = 0; i < argv.length; i++) {

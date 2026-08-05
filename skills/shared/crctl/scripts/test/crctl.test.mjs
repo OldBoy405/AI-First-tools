@@ -1566,3 +1566,45 @@ test('report/cr-metrics：状态直方图 + 周期活动计数（AC-6）', () =>
     assert.equal(r2.stdout.total, 3);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-021 TASK-09：git commit --template（S10）──
+
+function initGitWs(ws, branch) {
+  const git = (args) => {
+    const r = spawnSync('git', ['-C', ws, ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')} 失败: ${r.stderr}`);
+    return (r.stdout || '').trim();
+  };
+  git(['init', '-b', branch]);
+  git(['config', 'user.email', 't@t']);
+  git(['config', 'user.name', 'tester']);
+  return git;
+}
+
+test('git commit --template register：生成规范 message（AC-8 对应）', () => {
+  const ws = makeWorkspace();
+  try {
+    const git = initGitWs(ws, 'requirement/CR-T1');
+    writeFileSync(path.join(ws, 'a.txt'), 'x');
+    git(['add', 'a.txt']);
+    const r = runCrctl(['git', 'commit', '--template', 'register', '-m', '新需求', '--cwd', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    const msg = git(['log', '--oneline', '-1']);
+    assert.ok(msg.includes('[cr] register CR-T1: 新需求'), `message=${msg}`); // git log --oneline 带 SHA 前缀
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('git commit --template：未知 kind → BAD_ARGS；无法确定 cr → BAD_ARGS', () => {
+  const ws = makeWorkspace();
+  try {
+    const git = initGitWs(ws, 'master');
+    writeFileSync(path.join(ws, 'a.txt'), 'x');
+    git(['add', 'a.txt']);
+    const r1 = runCrctl(['git', 'commit', '--template', 'bogus', '-m', 'x', '--cwd', ws]);
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'BAD_ARGS');
+    const r2 = runCrctl(['git', 'commit', '--template', 'register', '-m', '无CR编号', '--cwd', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'BAD_ARGS');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
