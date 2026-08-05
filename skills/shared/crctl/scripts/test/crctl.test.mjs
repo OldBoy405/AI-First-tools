@@ -1559,11 +1559,41 @@ test('report/cr-metrics：状态直方图 + 周期活动计数（AC-6）', () =>
     assert.equal(r.stdout.statusHistogram.developing, 1);
     assert.equal(r.stdout.statusHistogram.drafting, 1);
     assert.equal(r.stdout.statusHistogram.archived, 1);
+    assert.equal(r.stdout.period, null, '未传 --period 时回显 null');
     assert.equal(r.stdout.periodActivity.byDay['2026-08-03'], 1, '按日活动计数');
     assert.equal(r.stdout.periodActivity.byMonth['2026-08'], 1, '按月活动计数');
     const r2 = runCrctl(['cr-metrics', '--period', '30d', '--workspace', ws]);
     assert.equal(r2.status, 0);
     assert.equal(r2.stdout.total, 3);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('report --period：真正按窗口过滤 periodActivity（窗口外不计入，累计总数不受影响，AC-6）', () => {
+  const ws = makeWorkspace();
+  try {
+    // 本地日历日（与 crctl.mjs periodCutoffDay 的 getFullYear/getMonth/getDate 口径一致，避免 UTC/本地时区错位导致的边界闪烁）
+    const fmt = (d) => {
+      const pad = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    };
+    const today = new Date();
+    const recent = fmt(today); // 窗口内
+    const old = fmt(new Date(today.getTime() - 400 * 86400000)); // 远早于任何 <90d 窗口
+    writeFileSync(path.join(ws, 'change-requests', '_history.yml'),
+      `history:\n  - id: CR-OLD\n    final-status: archived\n    archived-at: "${old}T10:00:00+08:00"\n` +
+      `  - id: CR-NEW\n    final-status: archived\n    archived-at: "${recent}T10:00:00+08:00"\n`);
+    const rNoPeriod = runCrctl(['report', '--workspace', ws]);
+    assert.equal(rNoPeriod.stdout.archived, 2, '无 --period 时累计总数含全部历史');
+    assert.equal(rNoPeriod.stdout.periodActivity.byDay[old], 1, '无 --period 时窗口外的一天也计入 periodActivity');
+    const rPeriod = runCrctl(['report', '--period', '7d', '--workspace', ws]);
+    assert.equal(rPeriod.status, 0);
+    assert.equal(rPeriod.stdout.period, '7d');
+    assert.equal(rPeriod.stdout.archived, 2, '--period 不影响累计总数（SLA/直方图口径）');
+    assert.equal(rPeriod.stdout.periodActivity.byDay[recent], 1, '窗口内的一天计入 periodActivity');
+    assert.equal(rPeriod.stdout.periodActivity.byDay[old], undefined, '窗口外的一天被 --period 过滤，不再计入 periodActivity');
+    const rBad = runCrctl(['report', '--period', 'not-a-period', '--workspace', ws]);
+    assert.equal(rBad.status, 1);
+    assert.equal(rBad.stderr.error.code, 'BAD_ARGS', '非法 --period 格式硬拒，而非静默忽略');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 

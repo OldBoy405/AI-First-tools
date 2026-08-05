@@ -1458,6 +1458,42 @@ function cmdReviewNote(ws, cr, gates, flags) {
  * 时间戳/操作者身份一律 crctl 生成；owner-set 的 --id 是被指派人业务身份（可调用方传入）。
  */
 
+/** 从 keyLineIdx 行开始向后扫，返回该 YAML 段的结尾行号（下一个同级或更浅缩进的顶层键，或 EOF）。 */
+function findBlockEnd(lines, keyLineIdx) {
+  const keyIndent = lines[keyLineIdx].match(/^[ \t]*/)[0].length;
+  for (let i = keyLineIdx + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^[ \t]*/)[0];
+    if (m.length <= keyIndent && /^[A-Za-z0-9_-]+:/.test(lines[i])) return i;
+  }
+  return lines.length;
+}
+
+/**
+ * 在 lines（原地不改，返回新数组）中把 itemText 追加为 keyName: 块序列的最后一项。
+ * key 不存在则新建（fieldIndent 为新键行缩进）；key 存在但值为空 flow `[]` 先展开为块序列。
+ */
+function appendToBlockSequence(lines, keyName, itemText, fieldIndent) {
+  const keyRe = new RegExp('^[ \\t]*' + keyName + ':');
+  const idx = lines.findIndex((l) => keyRe.test(l));
+  if (idx === -1) return [...lines, `${fieldIndent}${keyName}:`, itemText];
+  const out = [...lines];
+  if (new RegExp('^[ \\t]*' + keyName + ':\\s*\\[\\]\\s*$').test(out[idx])) {
+    out[idx] = out[idx].replace(/:\s*\[\]\s*$/, ':');
+  }
+  const segEnd = findBlockEnd(out, idx);
+  let lastItem = -1;
+  for (let i = segEnd - 1; i > idx; i--) {
+    if (/^[ \t]*- /.test(out[i])) { lastItem = i; break; }
+  }
+  let insAt = lastItem === -1 ? idx + 1 : lastItem + 1;
+  if (lastItem !== -1) {
+    const itemInd = out[lastItem].match(/^[ \t]*/)[0].length;
+    while (insAt < segEnd && out[insAt].match(/^[ \t]*/)[0].length > itemInd) insAt++;
+  }
+  out.splice(insAt, 0, itemText);
+  return out;
+}
+
 /** checkpoint-add：块内 checkpoints[] 追加 + remote-ref/last-push-at/last-push-by 更新（SDD §3.1）。 */
 function editCheckpointAdd(text, cr, meta) {
   const norm = text.replaceAll('\r\n', '\n');
@@ -1468,7 +1504,6 @@ function editCheckpointAdd(text, cr, meta) {
   const itemIndent = ' '.repeat(block.indent + 4);
   const subIndent = ' '.repeat(block.indent + 6);
   // 1) checkpoints[] 追加（无键则创建；空 flow [] 展开为块序列）
-  const cpIdx = lines.findIndex((l) => /^[ \t]*checkpoints:/.test(l));
   const cpItem = [
     `${itemIndent}- repo: ${meta.repo}`,
     `${subIndent}sha: ${meta.sha}`,
@@ -1476,30 +1511,7 @@ function editCheckpointAdd(text, cr, meta) {
     `${subIndent}pushed-at: "${nowIso()}"`,
     `${subIndent}by: "${meta.by}"`,
   ].filter(Boolean).join('\n');
-  let result;
-  if (cpIdx === -1) {
-    lines.push(`${fieldIndent}checkpoints:`, cpItem);
-    result = lines;
-  } else {
-    if (/^[ \t]*checkpoints:\s*\[\]\s*$/.test(lines[cpIdx])) lines[cpIdx] = lines[cpIdx].replace(/:\s*\[\]\s*$/, ':');
-    const cpIndent = lines[cpIdx].match(/^[ \t]*/)[0].length;
-    let segEnd = lines.length;
-    for (let i = cpIdx + 1; i < lines.length; i++) {
-      const m = lines[i].match(/^[ \t]*/)[0];
-      if (m.length <= cpIndent && /^[A-Za-z0-9_-]+:/.test(lines[i])) { segEnd = i; break; }
-    }
-    let lastItem = -1;
-    for (let i = segEnd - 1; i > cpIdx; i--) {
-      if (/^[ \t]*- /.test(lines[i])) { lastItem = i; break; }
-    }
-    let insAt = lastItem === -1 ? cpIdx + 1 : lastItem + 1;
-    if (lastItem !== -1) {
-      const itemInd = lines[lastItem].match(/^[ \t]*/)[0].length;
-      while (insAt < segEnd && lines[insAt].match(/^[ \t]*/)[0].length > itemInd) insAt++;
-    }
-    lines.splice(insAt, 0, cpItem);
-    result = lines;
-  }
+  let result = appendToBlockSequence(lines, 'checkpoints', cpItem, fieldIndent);
   // 2) remote-ref / last-push-at / last-push-by 更新（无则插入到条目块尾部）
   const setField = (key, value) => {
     const hit = result.some((l) => new RegExp('^[ \\t]*' + key + ':').test(l));
@@ -1527,12 +1539,7 @@ function editOwnerSet(text, cr, role, id) {
   const subIndent = ' '.repeat(block.indent + 6);
   const lines = block.text.split('\n');
   const roleIdx = lines.findIndex((l) => new RegExp('^[ \\t]*' + role + ':').test(l));
-  const roleIndent = lines[roleIdx].match(/^[ \t]*/)[0].length;
-  let endIdx = lines.length;
-  for (let i = roleIdx + 1; i < lines.length; i++) {
-    const mi = lines[i].match(/^[ \t]*/)[0];
-    if (mi.length <= roleIndent && /^[A-Za-z0-9_-]+:/.test(lines[i])) { endIdx = i; break; }
-  }
+  const endIdx = findBlockEnd(lines, roleIdx);
   const seg = lines.slice(roleIdx + 1, endIdx);
   const hasId = seg.some((l) => /^\s*id:/.test(l));
   const hasAt = seg.some((l) => /^\s*assigned-at:/.test(l));
@@ -1631,31 +1638,7 @@ function editInboxEmit(text, cr, meta) {
     `${subIndent}handled: false`,
   ].join('\n');
   // notify-log 追加（无键则创建）
-  const nlIdx = lines.findIndex((l) => /^[ \t]*notify-log:/.test(l));
-  let result;
-  if (nlIdx === -1) {
-    lines.push(`${fieldIndent}notify-log:`, logItem);
-    result = lines;
-  } else {
-    if (/^[ \t]*notify-log:\s*\[\]\s*$/.test(lines[nlIdx])) lines[nlIdx] = lines[nlIdx].replace(/:\s*\[\]\s*$/, ':');
-    const nlIndent = lines[nlIdx].match(/^[ \t]*/)[0].length;
-    let segEnd = lines.length;
-    for (let i = nlIdx + 1; i < lines.length; i++) {
-      const m = lines[i].match(/^[ \t]*/)[0];
-      if (m.length <= nlIndent && /^[A-Za-z0-9_-]+:/.test(lines[i])) { segEnd = i; break; }
-    }
-    let lastItem = -1;
-    for (let i = segEnd - 1; i > nlIdx; i--) {
-      if (/^[ \t]*- /.test(lines[i])) { lastItem = i; break; }
-    }
-    let insAt = lastItem === -1 ? nlIdx + 1 : lastItem + 1;
-    if (lastItem !== -1) {
-      const itemInd = lines[lastItem].match(/^[ \t]*/)[0].length;
-      while (insAt < segEnd && lines[insAt].match(/^[ \t]*/)[0].length > itemInd) insAt++;
-    }
-    lines.splice(insAt, 0, logItem);
-    result = lines;
-  }
+  const result = appendToBlockSequence(lines, 'notify-log', logItem, fieldIndent);
   // notify-pending 合并（去重；无键则创建）
   const npIdx = result.findIndex((l) => /^[ \t]*notify-pending:/.test(l));
   const npFlow = /^[ \t]*notify-pending:\s*\[[^\]]*\]\s*$/.exec(npIdx === -1 ? '' : result[npIdx]);
@@ -1665,18 +1648,14 @@ function editInboxEmit(text, cr, meta) {
     let items = [];
     const inner = npFlow[0].replace(/^[ \t]*notify-pending:\s*\[/, '').replace(/\]\s*$/, '').trim();
     if (inner) {
-      try { items = JSON.parse('[' + inner + ']'); } catch { /* 结构异常走保守合并 */ }
+      try { items = JSON.parse('[' + inner + ']'); } catch { fail('LEDGER_PARSE_FAILED', `notify-pending 现有内容不是合法 JSON 数组: ${inner}`); }
+      if (!Array.isArray(items)) fail('LEDGER_PARSE_FAILED', `notify-pending 现有内容解析结果非数组: ${inner}`);
     }
-    const merged = [...new Set([...(Array.isArray(items) ? items : []), ...meta.to])];
+    const merged = [...new Set([...items, ...meta.to])];
     result[npIdx] = result[npIdx].replace(/^([ \t]*)notify-pending:.*$/, `$1notify-pending: ${JSON.stringify(merged)}`);
   } else {
     // 块序列形态：解析现有元素后整段重写为 flow（crctl 独占写，无并发面）
-    const npIndent = result[npIdx].match(/^[ \t]*/)[0].length;
-    let npEnd = result.length;
-    for (let i = npIdx + 1; i < result.length; i++) {
-      const m = result[i].match(/^[ \t]*/)[0];
-      if (m.length <= npIndent && /^[A-Za-z0-9_-]+:/.test(result[i])) { npEnd = i; break; }
-    }
+    const npEnd = findBlockEnd(result, npIdx);
     const seg = result.slice(npIdx + 1, npEnd).map((l) => l.trim().replace(/^- /, '').replace(/^["']|["']$/g, '')).filter(Boolean);
     const merged = [...new Set([...seg, ...meta.to])];
     result.splice(npIdx, npEnd - npIdx, `${fieldIndent}notify-pending: ${JSON.stringify(merged)}`);
@@ -1856,7 +1835,6 @@ function appendTaskEntry(text, cr, taskId, slug) {
   if (lines.some((l) => new RegExp('- id:\\s*["\']?' + taskId + '["\']?\\s*$').test(l))) {
     fail('TASK_ALREADY_EXISTS', `${taskId} 已存在于 tasks/_index.yml`);
   }
-  const segEnd = lines.length;
   const entry = `  - id: ${taskId}\n    slug: ${slug}\n    status: pending`;
   // 定位 tasks: 段尾（下一个顶层键或 EOF）
   let tail = lines.length;
@@ -1865,8 +1843,7 @@ function appendTaskEntry(text, cr, taskId, slug) {
     if (m.length === 0 && /^[A-Za-z0-9_-]+:/.test(lines[i])) { tail = i; break; }
   }
   lines.splice(tail, 0, entry);
-  void segEnd;
-  return norm.slice(0, 0) === '' ? lines.join('\n') : lines.join('\n');
+  return lines.join('\n');
 }
 
 function cmdTaskAllocate(ws, cr, gates, flags) {
@@ -1890,9 +1867,10 @@ function cmdTaskAllocate(ws, cr, gates, flags) {
  * 两个只读子命令（SDD §3.2）：不写任何文件、无 CAS。
  * - worktree-path <cr> --repo <r>：唯一权威拼接规则（从 requirement-register 等 4+ 处 SKILL prose 提炼）：
  *   bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id；path = {ws}/.rayai-worktrees/{bucket}/requirement/{cr}
- * - report / cr-metrics [--period P]：跨 CR 聚合（对齐 cr-dashboard Step 2 口径）——
- *   状态直方图（在途 cr.md frontmatter + _history.yml 归档 final-status）、周期活动计数（archived-at）、
- *   SLA 阈值比较（change-requests/_config.yml#sla，缺省跳过）。
+ * - report / cr-metrics [--period <N>d]：跨 CR 聚合（对齐 cr-dashboard Step 2 口径）——
+ *   状态直方图（在途 cr.md frontmatter + _history.yml 归档 final-status，累计口径，不受 --period 影响）、
+ *   周期活动计数 periodActivity（按 archived-at，仅当传 --period 时按窗口过滤，格式仅支持 <N>d 如 7d/30d，
+ *   非法格式 BAD_ARGS 硬拒而非静默忽略）、SLA 阈值比较（change-requests/_config.yml#sla，缺省跳过，累计口径）。
  */
 
 function cmdWorktreePath(ws, cr, gates, flags) {
@@ -1902,7 +1880,17 @@ function cmdWorktreePath(ws, cr, gates, flags) {
   ok({ op: 'worktree-path', cr, repo: flags.repo, bucket, path: p });
 }
 
+/** 解析 --period（仅支持 <N>d，如 7d/30d），返回该窗口起始的日期字符串（YYYY-MM-DD）；无 period 输入返回 null。 */
+function periodCutoffDay(period) {
+  const m = /^(\d+)d$/.exec(String(period).trim());
+  if (!m) fail('BAD_ARGS', `--period 格式不支持: ${period}（仅支持 <N>d，如 7d/30d）`);
+  const cutoff = new Date(Date.now() - Number(m[1]) * 86400000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${cutoff.getFullYear()}-${pad(cutoff.getMonth() + 1)}-${pad(cutoff.getDate())}`;
+}
+
 function cmdReport(ws, gates, flags) {
+  const cutoffDay = flags.period !== undefined ? periodCutoffDay(flags.period) : null;
   const statusHistogram = {};
   const active = [];
   // 在途：扫描 change-requests/*/cr.md frontmatter status
@@ -1930,8 +1918,10 @@ function cmdReport(ws, gates, flags) {
       if (e['archived-at']) {
         archived++;
         const d = String(e['archived-at']).slice(0, 10);
-        periodActivity.byDay[d] = (periodActivity.byDay[d] || 0) + 1;
-        periodActivity.byMonth[d.slice(0, 7)] = (periodActivity.byMonth[d.slice(0, 7)] || 0) + 1;
+        if (cutoffDay === null || d >= cutoffDay) {
+          periodActivity.byDay[d] = (periodActivity.byDay[d] || 0) + 1;
+          periodActivity.byMonth[d.slice(0, 7)] = (periodActivity.byMonth[d.slice(0, 7)] || 0) + 1;
+        }
       }
     }
   }
@@ -1947,6 +1937,7 @@ function cmdReport(ws, gates, flags) {
     active: active.length,
     archived,
     statusHistogram,
+    period: flags.period !== undefined ? flags.period : null,
     periodActivity,
     ...(sla ? { sla } : {}),
   });
@@ -2005,11 +1996,7 @@ function appendSupplementalReview(text, entry) {
     return tail + '\n' + (tail.endsWith(':') ? '' : 'supplemental-reviews:\n') + entry + '\n';
   }
   const keyIndent = lines[idx].match(/^[ \t]*/)[0].length;
-  let segEnd = lines.length;
-  for (let i = idx + 1; i < lines.length; i++) {
-    const m = lines[i].match(/^[ \t]*/)[0];
-    if (m.length <= keyIndent && /^[A-Za-z0-9_-]+:/.test(lines[i])) { segEnd = i; break; }
-  }
+  const segEnd = findBlockEnd(lines, idx);
   const seg = lines.slice(idx + 1, segEnd);
   // 段结构检查只针对列表项层级（缩进 ≤ 键缩进+2 的非空行）：子字段行（更深缩进）不算异常
   const badLine = seg.find((l) => {
@@ -2017,8 +2004,7 @@ function appendSupplementalReview(text, entry) {
     return ind > 0 && ind <= keyIndent + 2 && /^\S/.test(l.trimStart()) && !/^-/.test(l.trimStart());
   });
   if (badLine) fail('APPROVAL_SHAPE', `supplemental-reviews 段包含非列表行（${badLine.trim()}），结构异常，拒绝追加`);
-  const insertAt = segEnd === lines.length ? lines.length : segEnd;
-  lines.splice(insertAt, 0, entry);
+  lines.splice(segEnd, 0, entry);
   return lines.join('\n');
 }
 
@@ -2305,7 +2291,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl next-cr-id  [--year Y]                          只读预览下一个 CR-ID（不写、非权威）
   crctl cr-init     --title <t> --owner-requirement <id> [--year Y]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记
   crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
-  crctl report | crctl cr-metrics [--period P]   跨 CR 聚合：状态直方图/SLA/周期活动（只读）
+  crctl report | crctl cr-metrics [--period <N>d]   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
