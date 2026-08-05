@@ -1246,3 +1246,84 @@ test('review-note：同一文件二次追加 → 两条记录共存（数组追�
     assert.equal(count, 2, '两条补充审查记录共存');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-021 TASK-04：checkpoint-add / owner-set / backlog-set（S3/S4/S5）──
+
+test('checkpoint-add：追加 checkpoints[] + remote-ref/last-push 元数据（AC-3）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r = runCrctl(['checkpoint-add', 'CR-T1', '--repo', 'ai-first-platform-docs', '--sha', 'abc123', '--remote-ref', 'refs/heads/master', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.op, 'checkpoint-add');
+    const out = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(out.includes('checkpoints:'), 'checkpoints 段创建');
+    assert.ok(out.includes('- repo: ai-first-platform-docs'), 'checkpoint 条目');
+    assert.ok(out.includes('sha: abc123'), 'sha 写入');
+    assert.ok(out.includes('remote-ref: "refs/heads/master"'), 'remote-ref 写入');
+    assert.ok(out.includes('last-push-at:') && out.includes('last-push-by:'), '推送元数据由 crctl 生成');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('checkpoint-add：非 developing~writing-back 态 → ILLEGAL_LEDGER_STATE 零写', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r = runCrctl(['checkpoint-add', 'CR-T1', '--repo', 'r', '--sha', 's', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('owner-set：更新 owners.{role}.id + assigned-at（AC-3）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const r = runCrctl(['owner-set', 'CR-T1', '--role', 'development', '--id', 'Alice', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const out = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(out.includes('id: Alice'), '新负责人写入');
+    assert.ok(out.match(/assigned-at: "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00"/), 'assigned-at 由 crctl 生成');
+    assert.ok(out.includes('id: Ray'), '其他角色 owner 不受影响');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('owner-set：非法 role → BAD_ARGS；终态 → ILLEGAL_LEDGER_STATE', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const r1 = runCrctl(['owner-set', 'CR-T1', '--role', 'bogus', '--id', 'X', '--workspace', ws]);
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'BAD_ARGS');
+    writeCrEntry(ws, 'CR-T2', 'archived');
+    const r2 = runCrctl(['owner-set', 'CR-T2', '--role', 'requirement', '--id', 'X', '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('backlog-set：prd-path 白名单写入（AC-3）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const r = runCrctl(['backlog-set', 'CR-T1', '--field', 'prd-path', '--value', 'change-requests/CR-T1/prd.md', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const out = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(out.includes('prd-path: "change-requests/CR-T1/prd.md"'), 'prd-path 写入');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('backlog-set：status 硬拒 → FIELD_NOT_ALLOWED（AC-3）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r = runCrctl(['backlog-set', 'CR-T1', '--field', 'status', '--value', 'archived', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'FIELD_NOT_ALLOWED');
+    assert.ok(String(r.stderr.error.message).includes('advance'), '提示改用 advance');
+    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
