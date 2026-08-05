@@ -52,8 +52,8 @@ node tools/skills/writeback/scripts/writeback-tasks.mjs \
 去掉 `--dry-run` 重跑。脚本末尾自检（新增 id 在索引中恰 1 条、frontmatter 注入齐全、全文件无 CRLF），失败输出 `SELF_CHECK_FAILED` 非零退出。成功后提交：
 
 ```bash
-git add delivery/task/
-git commit -m "writeback({cr_id}): 任务回写 delivery/task {N} 项（{version}）"
+crctl git add delivery/task/ --cwd <knowledge-base worktree>
+crctl git commit --template writeback -m "任务回写 delivery/task {N} 项（{version}）" --cwd <knowledge-base worktree>
 ```
 
 ### Step 4 — 输出摘要

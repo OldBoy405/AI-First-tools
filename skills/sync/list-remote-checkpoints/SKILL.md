@@ -79,4 +79,4 @@ await runGit({ subcommand: "ls-remote", args: ["--heads", "origin", "requirement
 |------|------|
 | 所有 active repo origin 均无 `requirement/*` 分支 | 输出"暂无远端在途 CR checkpoint" |
 | `_backlog.yml` 或 cr.md 读取失败 | 仅展示远端分支列表，不附加元数据，输出警告 |
-| 单个 repo git fetch 失败 | 标记该 repo 为 `unavailable`；其他 repo 继续展示，但 resume 前必须修复 |
+| 单个 repo 的 fetch 失败 | 标记该 repo 为 `unavailable`；其他 repo 继续展示，但 resume 前必须修复 |

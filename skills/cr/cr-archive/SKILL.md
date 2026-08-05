@@ -125,7 +125,7 @@ payload:
 4. 通过 `controlled-shell` 清理本地 worktree：
    - knowledge-base: `.rayai-worktrees/knowledge-base/requirement/{cr_id}`
    - 独立代码仓: `.rayai-worktrees/{repo.id}/requirement/{cr_id}`
-   - **Windows 环境**：`git worktree remove` 可能因 `Filename too long` 失败。兜底清理链按顺序执行，三步缺一不可：`git worktree remove --force` → `Remove-Item -Recurse -Force` → `git worktree prune`（漏掉最后一步会残留 `.git/worktrees/<name>` 元数据，挡下一个同名 CR 的 `worktree add`）。根治方式是一次性配置 `git config --global core.longpaths true`。详见 `docs/Windows-已知问题清单.md`。
+   - **Windows 环境**：`git worktree remove` 可能因 `Filename too long` 失败。兜底清理链按顺序执行，三步缺一不可：`crctl git worktree remove --force` → `Remove-Item -Recurse -Force` → `git worktree prune`（漏掉最后一步会残留 `.git/worktrees/<name>` 元数据，挡下一个同名 CR 的 `worktree add`）。根治方式是一次性配置 `git config --global core.longpaths true`。详见 `docs/Windows-已知问题清单.md`。
 5. worktree 不存在时视为已清理，记录为 `skipped-missing`，不得让归档失败。
 6. 预检通过后删除远端 `requirement/{cr_id}` 分支：
    - 有 `merge-commits[]` 的仓：预检通过后按下方 runGit 序列删除。

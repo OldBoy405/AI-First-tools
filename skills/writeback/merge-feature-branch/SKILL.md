@@ -40,7 +40,9 @@ description: 按 dir-graph.yaml repositories 动态解析参与仓，通过 dry-
 
 本 Skill 的所有 git 命令必须能在非交互（非 TTY）环境下完成，禁止任何会打开编辑器或等待stdin 的形态：
 
-- 所有 `git commit` 必须带 `-m`（本 Skill 步骤中已强制）；`git merge` 若需直接完成提交必须带 `--no-edit` 或先 `--no-commit` 再 `commit -m`。
+<!-- lint-prompts:ignore --> 约束说明：描述 crctl git 层的行为约束
+- 所有经 `crctl git commit` 的提交必须带 `-m`（本 Skill 步骤中已强制）；`git merge` 若需直接完成提交必须带 `--no-edit` 或先 `--no-commit` 再 `commit -m`。
+<!-- lint-prompts:ignore --> 反例说明：rebase 在非 TTY 挂起
 - `git rebase --continue` / `git rebase` 在非 TTY 下会挂起等编辑器——**本 Skill 不使用 rebase**（见下文"_backlog.yml / cr.md 冲突的确定性解法"），若执行者自行改用 rebase 导致挂起，责任在执行者。
 - 经 crctl `git` 子命令执行的 git 已由 crctl 强制注入 `GIT_EDITOR=true` / `GIT_TERMINAL_PROMPT=0`（代码级保证）；Agent 绕过 crctl 直跑裸 git 时，必须自行在环境变量中设置 `GIT_EDITOR=true`、`GIT_TERMINAL_PROMPT=0`，或确保所有命令形态本身不触发编辑器。
 

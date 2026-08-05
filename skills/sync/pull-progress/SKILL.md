@@ -32,7 +32,7 @@ description: 按 dir-graph.yaml repositories 遍历所有 active repo，在已�
 2. 解析所有 `active != false` 的 repo，计算 bucket 与 worktreePath：
    - `bucket = knowledge-base`（当 `repo.role=knowledge-base`）或 `repo.id`
    - `worktreePath = {workspaceRoot}/.rayai-worktrees/{bucket}/requirement/{cr_id}`
-3. 确认每个 active repo 都存在本地 worktree 分支 `requirement/{cr_id}`（通过 `git worktree list` 或等价受控查询检查）。
+3. 确认每个 active repo 都存在本地 worktree 分支 `requirement/{cr_id}`（通过 `crctl git worktree list --cwd <worktree>` 或等价受控查询检查）。
 4. 若任一 worktree 不存在，返回 `WORKTREE_MISSING` 并提示使用 `resume-from-remote` 代替；不得只拉取部分 repo。
 
 > **执行方式**：所有 git 命令必须通过受控 shell 执行（见 `skills/shared/controlled-shell/SKILL.md`）。**禁止**回退到手工指引文本。

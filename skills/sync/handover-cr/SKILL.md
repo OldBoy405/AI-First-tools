@@ -38,6 +38,7 @@ description: 正式移交 CR 某一角色 owner：先 push-progress 确保远端
 
 ### Step 2 — 推送最新进度（除非 skip_push=true）
 
+<!-- lint-prompts:ignore --> 描述性文本：push 由 push-progress 内部经受控 shell 执行
 委托 `push-progress` skill（内部已通过受控 shell 执行 git push，详见 `skills/shared/controlled-shell/SKILL.md`）：
 ```
 push-progress(cr_id={cr_id})

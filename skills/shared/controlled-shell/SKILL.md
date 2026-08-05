@@ -72,7 +72,8 @@ description: 受控 shell 执行规范（方案 a）。所有 sync/requirement �
   "error": {
     "code": "SHELL_UNAVAILABLE" | "FORBIDDEN_SUBCOMMAND" | "EXEC_FAILED" | "UNEXPECTED",
     "message": "人类可读错误",
-    "attempted_command": "git worktree add -b ...",
+    <!-- lint-prompts:ignore --> 反例示例：被拒绝的 attempted_command 形态
+"attempted_command": "git worktree add -b ...",
     "cwd": "/abs/path/or/relative",
     "stdout": "...",
     "stderr": "..."

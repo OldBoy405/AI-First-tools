@@ -14,6 +14,7 @@ description: 读取 CR 代码 worktree 的代码 diff、验证日志、change-re
 
 在开发者完成编码并推送统一 checkpoint 后，基于 CR 代码 worktree 的只读 diff、验证日志与 CR 设计文档执行代码评审。评审通过时推进 CR status 到 `code-reviewing`，等待 `approve-code` 做人工审批；有 blocker 或 `test-report.status=block` 时回退到 `developing`，并由 pipeline `reviewLoop` 自动回到 `implement-code` 修复。blocker 未清空前不得进入 `human_approval`。
 
+<!-- lint-prompts:ignore --> 反例说明：仅凭统计信息不足
 > **证据要求**：仅有 `git diff --stat` 或 commit log 不足以支撑代码评审。必须读取实际 diff、变更文件、lint/test/build 输出或明确的不适用说明。
 
 ---
@@ -35,10 +36,10 @@ description: 读取 CR 代码 worktree 的代码 diff、验证日志、change-re
 
 在各参与代码仓的 CR worktree 中解析 trunk，并执行只读命令。不要用已推送的 `origin/requirement/{cr_id}...HEAD` 作为唯一 diff range；checkpoint 推送后该范围可能为空。应比较 trunk merge-base 到当前 HEAD：
 ```bash
-git merge-base origin/{trunk} HEAD
-git diff --name-only {merge-base}...HEAD
-git diff --unified=80 {merge-base}...HEAD
-git log --oneline {merge-base}..HEAD
+crctl git merge-base origin/{trunk} HEAD --cwd <worktree>
+crctl git diff --name-only {merge-base}...HEAD --cwd <worktree>
+crctl git diff --unified=80 {merge-base}...HEAD --cwd <worktree>
+crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 ```
 
 同时读取 `implement-code` 节点输出中的验证命令与结果；若缺失，必须重新运行或要求补齐：

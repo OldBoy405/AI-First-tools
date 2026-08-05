@@ -71,8 +71,8 @@ node tools/skills/writeback/scripts/writeback-traceability.mjs \
 去掉 `--dry-run` 重跑。脚本末尾自检（`- cr: {cr_id}` 段恰 1 处、merge-commits 数与提取结果一致、既有段逐字节保留、无 CRLF），失败输出 `SELF_CHECK_FAILED` 非零退出。成功后提交：
 
 ```bash
-git add specs/{spec_id}/traceability.yml
-git commit -m "writeback({cr_id}): specs/{spec_id} traceability.yml 累积 milestone {milestone}"
+crctl git add specs/{spec_id}/traceability.yml --cwd <knowledge-base worktree>
+crctl git commit --template writeback -m "specs/{spec_id} traceability.yml 累积 milestone {milestone}" --cwd <knowledge-base worktree>
 ```
 
 ### Step 5 — 输出归档前置证据

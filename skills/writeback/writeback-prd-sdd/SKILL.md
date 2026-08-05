@@ -15,7 +15,7 @@ description: 将 change-requests/{CR-ID}/prd.md 和 sdd.md 回写到 specs/{spec
 
 将需求期与开发期在 `change-requests/` 目录下生产的 PRD 和 SDD 文档正式回写到 `specs/{spec_id}/` 知识库，若该 spec 目录不存在则新建，同时维护 `specs/_index.yml` 元数据。回写完成后推进 CR status 到 `writing-back`。
 
-**机械步骤由入库脚本执行（CR-2026-020 起）**：本 skill 不再描述逐文件手工操作；执行者只做「调脚本 → 核对 dry-run diff → 实跑 → 提交」。脚本位于 `tools/skills/writeback/scripts/writeback-prd-sdd.mjs`（版本化、可测试，回归套件 `tools/skills/writeback/scripts/test/writeback.test.mjs`）。脚本不再执行回写前旧版备份步骤——回写本身是一次 git commit，旧版本由 git 历史承载（CR-2026-020 FR-6）。
+**机械步骤由入库脚本执行（CR-2026-020 起）**：本 skill 不再描述逐文件手工操作；执行者只做「调脚本 → 核对 dry-run diff → 实跑 → 提交」。脚本位于 `tools/skills/writeback/scripts/writeback-prd-sdd.mjs`（版本化、可测试，回归套件 `tools/skills/writeback/scripts/test/writeback.test.mjs`）。脚本不再执行回写前旧版备份步骤——回写本身是一次提交，旧版本由 git 历史承载（CR-2026-020 FR-6）。
 
 ---
 
@@ -54,11 +54,11 @@ node tools/skills/writeback/scripts/writeback-prd-sdd.mjs \
 
 ### Step 3 — 实跑 + 自检 + 提交
 
-去掉 `--dry-run` 重跑。脚本末尾自检（里程碑标题恰 1 次、_index 条目字段齐全、全文件无 CRLF），失败输出 `SELF_CHECK_FAILED` 非零退出（已写入内容留在 git 工作区，`git checkout --` 可复原）。成功后提交：
+去掉 `--dry-run` 重跑。脚本末尾自检（里程碑标题恰 1 次、_index 条目字段齐全、全文件无 CRLF），失败输出 `SELF_CHECK_FAILED` 非零退出（已写入内容留在 git 工作区，`crctl git checkout -- --cwd <worktree>` 可复原）。成功后提交：
 
 ```bash
-git add specs/{spec_id}/PRD.md specs/{spec_id}/SDD.md specs/_index.yml
-git commit -m "writeback({cr_id}): PRD/SDD 增量回写 specs/{spec_id} v{target_version}"
+crctl git add specs/{spec_id}/PRD.md specs/{spec_id}/SDD.md specs/_index.yml --cwd <knowledge-base worktree>
+crctl git commit --template writeback -m "PRD/SDD 增量回写 specs/{spec_id} v{target_version}" --cwd <knowledge-base worktree>
 ```
 
 ### Step 4 — 更新 CR status

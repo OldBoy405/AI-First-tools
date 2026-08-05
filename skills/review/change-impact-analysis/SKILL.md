@@ -26,7 +26,7 @@ readonly: false
 
 1. 读 `dir-graph.yaml#agent_hints.skill_context.change-impact-analysis`
 2. 读 `specs/{feature-id}/traceability.yml` — 当前对齐状态
-3. 读被变更文件的 git diff（`git diff HEAD~1 -- {changed-file}`）
+3. 读被变更文件的 git diff（`crctl git diff HEAD~1 -- {changed-file} --cwd <worktree>`）
 4. 若由 `write-*` 自动触发，上游已传入 `changed-file` 与 `feature-id`
 
 ## 输入参数
