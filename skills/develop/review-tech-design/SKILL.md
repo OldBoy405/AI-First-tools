@@ -92,7 +92,7 @@ fr-coverage:
 
 - 在 `change-requests/{cr_id}/traceability.yml` 写入 `reviews.tech-design`，并持久化 `review-loop.current-attempt` 与 `review-loop.attempts[]`
 - 通过评审（无 blocker）→ 保持 status=`tech-design-review-pending`，允许进入 `human_approval`
-- 有 blocker → 调用 `cr-status-set`（`next_status=tech-designing`，`trigger=review-tech-design:block -> write-tech-design`，`expected_current_status=tech-design-review-pending`），输出 `repair-target=write-tech-design`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到 SDD 修订节点；不得进入 `human_approval`
+- 有 blocker → 调用 `crctl advance --to tech-designing，`trigger=review-tech-design:block -> write-tech-design`，`expected_current_status=tech-design-review-pending`），输出 `repair-target=write-tech-design`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到 SDD 修订节点；不得进入 `human_approval`
 
 ### Step 5 — 输出摘要
 

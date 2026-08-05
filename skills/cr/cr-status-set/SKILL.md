@@ -1,7 +1,11 @@
 ---
 name: cr-status-set
+status: legacy/deprecated
 description: CR Status Set（原子）：按 dir-graph.yaml 新四阶段状态机更新 change-requests/{CR-ID}/cr.md frontmatter 的 status。
 ---
+<!-- lint-prompts:ignore --> legacy skill 自身说明（R3 豁免）
+
+> **legacy/deprecated（CR-2026-021 TASK-16）**：状态推进请改用 `crctl advance --to <status> --trigger <trigger> --expect <current>`——它会跑门禁、写 cr.md、发审计与 outbox 事件。本 Skill 保留仅为历史兼容与文档引用，**新流程不得调用**。
 <!-- meta
 id: cr-status-set
 title: CR Status Set（原子）

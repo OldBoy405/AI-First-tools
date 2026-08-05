@@ -12,6 +12,7 @@ description: "归档新四阶段 CR：以 cr.md frontmatter status 为 final-sta
 
 ## 用途
 
+<!-- lint-prompts:ignore --> 描述性说明：归档流程历史引用
 将新四阶段 CR 从 `change-requests/_backlog.yml` 移出，追加到 `change-requests/_history.yml`。成功回写场景必须通过 `cr-status-set commit_mode=embedded` 校验 `writing-back → archived`，并在同一个归档账本 commit 中同步 `cr.md`、`_backlog.yml`、`_history.yml` 与 `_index.yml`。主动撤回或拒绝场景可保留 `withdrawn` / `rejected` 作为 final-status 归档。
 
 ---
@@ -51,7 +52,7 @@ description: "归档新四阶段 CR：以 cr.md frontmatter status 为 final-sta
 4. 若 status=`writing-back`：
    - 确认 `spec_id` 存在
    - 确认 `specs/{spec_id}/traceability.yml` 存在
-   - 调用 `cr-status-set`，参数为 `next_status=archived`、`trigger=cr-archive`、`expected_current_status=writing-back`、`commit_mode=embedded`，只获取已校验的 status patch，不单独 commit
+   - 调用 `crctl advance --to archived、`trigger=cr-archive`、`expected_current_status=writing-back`、`commit_mode=embedded`，只获取已校验的 status patch，不单独 commit
    - 设置 `final-status=archived`
 5. 若 status=`archived` 且仍在 `_backlog.yml` 中：
    - 视为旧版或上次本地归档发布失败留下的 `archive-repair` 状态，允许继续执行 Step 2-6，将 backlog 条目移入 history
@@ -78,19 +79,10 @@ payload:
 
 1. 调用 `crctl archive-move <CR-ID> --final-status {final-status} [--archive-reason "{archive_reason 或系统推导}"] [--spec-id {spec_id}] --workspace {knowledgeBaseRepo.path}`
 2. archive-move 原子完成：`_backlog.yml` 删除该条目 + `_history.yml` 追加富化条目（原条目字段 + `final-status` / `archive-reason` / `writeback-spec-id` / `archived-at`），双文件 CAS 快照（任一侧读后被改则整体 `CAS_CONFLICT` 中止、两侧均不落盘），并写 `.crctl/audit.log`
-3. 前置守卫：CR status 必须为 `archived`（由 Step 1 的 cr-status-set embedded patch 推进）；重复归档（history 已含该 CR）返回 `ENTRY_ALREADY_IN_HISTORY`
+3. 前置守卫：CR status 必须为 `archived`（由 Step 1 的 crctl advance --embedded 推进）；重复归档（history 已含该 CR）返回 `ENTRY_ALREADY_IN_HISTORY`
 4. **禁止会话内手写/现写脚本编辑 `_backlog.yml` / `_history.yml`**（纪律 #7）：归档账本唯一写入通道是 `crctl archive-move`
 
-### Step 5 — 更新 _index.yml
-
-1. 读取 `change-requests/_index.yml`
-2. 在顶级字段 `change-requests[]` 中找到 `id: {cr_id}` 的条目
-3. 更新字段：
-   - `status` → `{final-status}`
-   - `archived-at` → 当前时间（格式 YYYY-MM-DDTHH:mm:ss+HH:mm）
-   - `writeback_spec_id` → `{spec_id 或 N/A}`
-4. 同步更新 `change-requests/{cr_id}/cr.md` frontmatter 的 `status` 为 `{final-status}`（权威写入点）；若为成功回写归档，同时写入 `archived-at` 与 `writeback_spec_id`
-5. 写回 `_index.yml`
+### Step 5 —（已并入 Step 3：`crctl archive-move` 一并更新 _index.yml，本步不再手写账本）
 
 ### Step 6 — 提交并推送归档记录
 

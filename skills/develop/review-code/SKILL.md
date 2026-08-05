@@ -132,8 +132,8 @@ evidence:
 ### Step 5 — 更新 traceability.yml 并推进 status
 
 - 在 `change-requests/{cr_id}/traceability.yml` 写入 `reviews.code`，并持久化 `review-loop.current-attempt` 与 `review-loop.attempts[]`
-- verdict=pass 且 blockers 为空且 `test-report.status=pass` → 调用 `cr-status-set`（`next_status=code-reviewing`，`trigger=review-code`，`expected_current_status=developing`），允许进入 `human_approval`
-- verdict=block、blockers 非空或 `test-report.status=block` → 调用 `cr-status-set`（`next_status=developing`，`trigger=review-code:block -> implement-code`，`expected_current_status=developing`），输出 `repair-target=implement-code`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到代码实现节点；不得进入 `human_approval`
+- verdict=pass 且 blockers 为空且 `test-report.status=pass` → 调用 `crctl advance --to code-reviewing，`trigger=review-code`，`expected_current_status=developing`），允许进入 `human_approval`
+- verdict=block、blockers 非空或 `test-report.status=block` → 调用 `crctl advance --to developing，`trigger=review-code:block -> implement-code`，`expected_current_status=developing`），输出 `repair-target=implement-code`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到代码实现节点；不得进入 `human_approval`
 
 ### Step 6 — 输出摘要
 

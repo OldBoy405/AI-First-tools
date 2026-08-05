@@ -1587,7 +1587,7 @@ test('git commit --template register：生成规范 message（AC-8 对应）', (
     const git = initGitWs(ws, 'requirement/CR-T1');
     writeFileSync(path.join(ws, 'a.txt'), 'x');
     git(['add', 'a.txt']);
-    const r = runCrctl(['git', 'commit', '--template', 'register', '-m', '新需求', '--cwd', ws]);
+    const r = runCrctl(['git', 'commit', '--template', 'register', '-m', '新需求', '--cwd', ws, '--workspace', ws]);
     assert.equal(r.status, 0, r.rawStderr);
     const msg = git(['log', '--oneline', '-1']);
     assert.ok(msg.includes('[cr] register CR-T1: 新需求'), `message=${msg}`); // git log --oneline 带 SHA 前缀
@@ -1600,10 +1600,10 @@ test('git commit --template：未知 kind → BAD_ARGS；无法确定 cr → BAD
     const git = initGitWs(ws, 'master');
     writeFileSync(path.join(ws, 'a.txt'), 'x');
     git(['add', 'a.txt']);
-    const r1 = runCrctl(['git', 'commit', '--template', 'bogus', '-m', 'x', '--cwd', ws]);
+    const r1 = runCrctl(['git', 'commit', '--template', 'bogus', '-m', 'x', '--cwd', ws, '--workspace', ws]);
     assert.equal(r1.status, 1);
     assert.equal(r1.stderr.error.code, 'BAD_ARGS');
-    const r2 = runCrctl(['git', 'commit', '--template', 'register', '-m', '无CR编号', '--cwd', ws]);
+    const r2 = runCrctl(['git', 'commit', '--template', 'register', '-m', '无CR编号', '--cwd', ws, '--workspace', ws]);
     assert.equal(r2.status, 1);
     assert.equal(r2.stderr.error.code, 'BAD_ARGS');
   } finally { rmSync(ws, { recursive: true, force: true }); }

@@ -50,8 +50,8 @@ scope: change-request-lifecycle
        conditions: {conditions}
        notes: "{notes}"
    ```
-3. 若 `decision=reject`：调用 `cr-status-set`（`next_status=rejected`，`trigger=cr-review-record:reject`）将 status 推进到 `rejected`，并写明 reject reason。
-4. 若 `decision=withdraw`：调用 `cr-status-set`（`next_status=withdrawn`，`trigger=cr-review-record:withdraw`）将 status 推进到 `withdrawn`，并写明 withdraw reason。
+3. 若 `decision=reject`：调用 `crctl advance --to rejected，`trigger=cr-review-record:reject`）将 status 推进到 `rejected`，并写明 reject reason。
+4. 若 `decision=withdraw`：调用 `crctl advance --to withdrawn，`trigger=cr-review-record:withdraw`）将 status 推进到 `withdrawn`，并写明 withdraw reason。
 5. 若 `decision=note`：不改变 status。
 6. Commit：`[cr] review {CR-ID} decision={decision} by={reviewer}`
 

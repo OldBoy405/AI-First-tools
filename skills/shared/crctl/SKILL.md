@@ -1,5 +1,6 @@
 ---
 name: crctl
+<!-- lint-prompts:ignore --> 描述性说明：历史契约引用（cr-status-set）
 description: CR 状态机 gate CLI（漂移治理 v2 组件 A）：在 IDE 单独使用本 tools 包时，作为 cr-status-set / controlled-shell / validate-doc 的代码化执行器，把状态推进、门禁校验、人工审批、git 白名单从「模型自觉」变成「代码强制」。
 ---
 <!-- meta
@@ -19,8 +20,8 @@ scope: drift-governance
 
 | 子命令 | 作用 | 是现有哪个契约的代码化 |
 |---|---|---|
-| `status` | 确定性读 `change-requests/{CR-ID}/cr.md` frontmatter + `dir-graph.yaml#state_machine`，输出当前 status、合法下一步与门禁缺口。模型不得自报 status | `cr-status-set` 读取契约 |
-| `advance` | 校验 `(current, next, trigger)` 合法转换 + 目标状态门禁，全过才写 `cr.md` frontmatter 并 commit；否则非零退出且**不写文件**。支持 `--embedded`（对应 `cr-status-set` 的 `commit_mode=embedded`） | `cr-status-set` |
+| `status` | 确定性读 `change-requests/{CR-ID}/cr.md` frontmatter + `dir-graph.yaml#state_machine`，输出当前 status、合法下一步与门禁缺口。模型不得自报 status | 状态读取契约（读路径与历史一致） |
+| `advance` | 校验 `(current, next, trigger)` 合法转换 + 目标状态门禁，全过才写 `cr.md` frontmatter 并 commit；否则非零退出且**不写文件**。支持 `--embedded`（历史 commit_mode=embedded 语义） | crctl advance |
 | `gate` | 只校验不写，供预检与 CI 复用 | pipeline JSON `passCondition` |
 | `approve` | **仅限交互式终端**的人工审批：展示证据摘要 → 人类确认 → 写 `approval.yml`（`via: crctl-approve`）→ 级联 advance。非 TTY 调用一律返回 `APPROVAL_REQUIRES_HUMAN`，无任何旁路参数或环境变量 | `human_approval` + `approve-*` |
 | `validate` | 受控产物 schema 校验：cr.md / _backlog.yml 的 owners 三角色（id + assigned-at）、review-annotations 的 verdict 枚举与 blockers 结构、test-report / approval / traceability | `validate-doc` |
@@ -62,8 +63,8 @@ node tools/skills/shared/crctl/scripts/crctl.mjs git status --short --cwd <workt
 
 ## 与现有 Skill 的关系
 
-- 本 Skill 是执行层，不新增编排语义；`cr-status-set`、`controlled-shell`、`validate-doc` 的契约仍是行为规范的事实源。
-- Agent 在 IDE 环境应把「调用 cr-status-set」理解为「执行 `crctl advance`」，把「经 controlled-shell 执行 git」理解为「执行 `crctl git`」。
+- 本 Skill 是执行层，不新增编排语义；`controlled-shell`、`validate-doc` 的契约仍是行为规范的事实源（状态推进契约已由 `crctl advance` 承接）。
+- Agent 在 IDE 环境的状态推进一律执行 `crctl advance`；git 操作一律经 `crctl git`（受控 shell）。
 - 诚实边界（`docs/漂移治理_v2.md` §7）：本工具校验证据的存在与形状，不校验真伪与质量；approve 保证有人按键，不保证人认真看过。
 
 ## 版本历史

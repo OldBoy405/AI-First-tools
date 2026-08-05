@@ -35,6 +35,7 @@ description: 受控 shell 执行规范（方案 a）。所有 sync/requirement �
 | `pull` | `pull --ff-only` | pull-progress |
 | `push` | `push -u origin <branch>` / `push origin <trunk>` / `push origin --delete <branch>` | push-progress, handover-cr, merge-feature-branch, cr-archive |
 | `add` | `add -A` / `add <path...>` | requirement-register, push-progress, merge-feature-branch, cr-archive |
+<!-- lint-prompts:ignore --> 描述性说明：历史契约引用（cr-status-set）
 | `commit` | `commit -m "wip: ..."` / `commit -m "[cr] ..."` / `commit -m "merge(CR-...): ..."` | requirement-register, push-progress, cr-status-set, inbox-emit, cr-review-record, merge-feature-branch, cr-archive |
 | `status` | `status --short` | pull-progress, cr-archive |
 | `diff` | `diff --cached --quiet` / `--stat` / `--name-only <range>` / `--unified=N <range>` | push-progress, review-code |
