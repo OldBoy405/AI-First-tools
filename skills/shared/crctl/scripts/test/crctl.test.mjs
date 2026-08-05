@@ -1327,3 +1327,47 @@ test('backlog-set：status 硬拒 → FIELD_NOT_ALLOWED（AC-3）', () => {
     assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-021 TASK-05：inbox-emit（notify-log 事件追加）──
+
+test('inbox-emit：notify-log 追加 + notify-pending 合并去重（AC-5 对应）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r1 = runCrctl(['inbox-emit', 'CR-T1', '--event', 'code-reviewing', '--to', '["Ray","Alice"]', '--workspace', ws]);
+    assert.equal(r1.status, 0);
+    const r2 = runCrctl(['inbox-emit', 'CR-T1', '--event', 'code-approved', '--to', 'Alice,Bob', '--payload', '{"decision":"approve"}', '--workspace', ws]);
+    assert.equal(r2.status, 0);
+    const out = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(out.includes('notify-log:'), 'notify-log 段创建');
+    assert.equal((out.match(/handled: false/g) || []).length, 2, '两条 notify-log 条目');
+    assert.ok(out.includes('event: code-reviewing') && out.includes('event: code-approved'), '事件写入');
+    assert.ok(out.includes('payload: {"decision":"approve"}'), 'payload 写入');
+    assert.ok(out.includes('notify-pending: ["Ray","Alice","Bob"]'), 'notify-pending 合并且去重');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('inbox-emit：终态（archived）→ ILLEGAL_LEDGER_STATE 零写', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'archived');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r = runCrctl(['inbox-emit', 'CR-T1', '--event', 'archived', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('inbox-emit：缺 --event → BAD_ARGS；--payload 非法 JSON → BAD_ARGS', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r1 = runCrctl(['inbox-emit', 'CR-T1', '--workspace', ws]);
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'BAD_ARGS');
+    const r2 = runCrctl(['inbox-emit', 'CR-T1', '--event', 'x', '--payload', 'not-json', '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'BAD_ARGS');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

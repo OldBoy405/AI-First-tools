@@ -1609,6 +1609,106 @@ function cmdBacklogSet(ws, cr, gates, flags) {
   ok({ op: 'backlog-set', cr, field: flags.field, value: flags.value, file: snap.path });
 }
 
+/* ────────────────────────── inbox-emit（CR-2026-021 TASK-05） ──────────────────────────
+ * 专命令追加 _backlog 条目 notify-log[]（事件追加语义，比标量 set 重，不复用 backlog-set）。
+ * 同时把 to 列表合并进 notify-pending（去重）。事件 payload 结构与 inbox-emit SKILL 既有
+ * 消费逻辑对齐：{at, event, to, payload, handled:false}。时间戳/身份由 crctl 生成。
+ */
+function editInboxEmit(text, cr, meta) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, cr);
+  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
+  const lines = block.text.split('\n');
+  const fieldIndent = ' '.repeat(block.indent + 2);
+  const itemIndent = ' '.repeat(block.indent + 4);
+  const subIndent = ' '.repeat(block.indent + 6);
+  const payloadJson = meta.payload ? ` ${JSON.stringify(meta.payload)}` : '';
+  const logItem = [
+    `${itemIndent}- at: "${nowIso()}"`,
+    `${subIndent}event: ${meta.event}`,
+    `${subIndent}to: ${JSON.stringify(meta.to)}`,
+    `${subIndent}payload:${payloadJson || ' {}'}`,
+    `${subIndent}handled: false`,
+  ].join('\n');
+  // notify-log 追加（无键则创建）
+  const nlIdx = lines.findIndex((l) => /^[ \t]*notify-log:/.test(l));
+  let result;
+  if (nlIdx === -1) {
+    lines.push(`${fieldIndent}notify-log:`, logItem);
+    result = lines;
+  } else {
+    if (/^[ \t]*notify-log:\s*\[\]\s*$/.test(lines[nlIdx])) lines[nlIdx] = lines[nlIdx].replace(/:\s*\[\]\s*$/, ':');
+    const nlIndent = lines[nlIdx].match(/^[ \t]*/)[0].length;
+    let segEnd = lines.length;
+    for (let i = nlIdx + 1; i < lines.length; i++) {
+      const m = lines[i].match(/^[ \t]*/)[0];
+      if (m.length <= nlIndent && /^[A-Za-z0-9_-]+:/.test(lines[i])) { segEnd = i; break; }
+    }
+    let lastItem = -1;
+    for (let i = segEnd - 1; i > nlIdx; i--) {
+      if (/^[ \t]*- /.test(lines[i])) { lastItem = i; break; }
+    }
+    let insAt = lastItem === -1 ? nlIdx + 1 : lastItem + 1;
+    if (lastItem !== -1) {
+      const itemInd = lines[lastItem].match(/^[ \t]*/)[0].length;
+      while (insAt < segEnd && lines[insAt].match(/^[ \t]*/)[0].length > itemInd) insAt++;
+    }
+    lines.splice(insAt, 0, logItem);
+    result = lines;
+  }
+  // notify-pending 合并（去重；无键则创建）
+  const npIdx = result.findIndex((l) => /^[ \t]*notify-pending:/.test(l));
+  const npFlow = /^[ \t]*notify-pending:\s*\[[^\]]*\]\s*$/.exec(npIdx === -1 ? '' : result[npIdx]);
+  if (npIdx === -1) {
+    result.push(`${fieldIndent}notify-pending: ${JSON.stringify(meta.to)}`);
+  } else if (npFlow) {
+    let items = [];
+    const inner = npFlow[0].replace(/^[ \t]*notify-pending:\s*\[/, '').replace(/\]\s*$/, '').trim();
+    if (inner) {
+      try { items = JSON.parse('[' + inner + ']'); } catch { /* 结构异常走保守合并 */ }
+    }
+    const merged = [...new Set([...(Array.isArray(items) ? items : []), ...meta.to])];
+    result[npIdx] = result[npIdx].replace(/^([ \t]*)notify-pending:.*$/, `$1notify-pending: ${JSON.stringify(merged)}`);
+  } else {
+    // 块序列形态：解析现有元素后整段重写为 flow（crctl 独占写，无并发面）
+    const npIndent = result[npIdx].match(/^[ \t]*/)[0].length;
+    let npEnd = result.length;
+    for (let i = npIdx + 1; i < result.length; i++) {
+      const m = result[i].match(/^[ \t]*/)[0];
+      if (m.length <= npIndent && /^[A-Za-z0-9_-]+:/.test(result[i])) { npEnd = i; break; }
+    }
+    const seg = result.slice(npIdx + 1, npEnd).map((l) => l.trim().replace(/^- /, '').replace(/^["']|["']$/g, '')).filter(Boolean);
+    const merged = [...new Set([...seg, ...meta.to])];
+    result.splice(npIdx, npEnd - npIdx, `${fieldIndent}notify-pending: ${JSON.stringify(merged)}`);
+  }
+  return norm.slice(0, block.start) + result.join('\n') + norm.slice(block.end);
+}
+
+function cmdInboxEmit(ws, cr, gates, flags) {
+  if (!flags.event) fail('BAD_ARGS', 'inbox-emit 需要 --event <event> [--to <a,b>] [--payload <json>]');
+  const state = resolveCrState(ws, cr);
+  const { sm } = loadStateMachine(ws);
+  if ((sm.terminal || []).includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `inbox-emit 不允许在终态 ${state.status} 追加通知`, { current: state.status, expect: '非终态' });
+  let to = [];
+  if (flags.to) {
+    try { to = JSON.parse(flags.to); } catch { to = String(flags.to).split(',').map((s) => s.trim()).filter(Boolean); }
+    if (!Array.isArray(to)) to = [String(to)];
+  }
+  let payload = null;
+  if (flags.payload) {
+    try { payload = JSON.parse(flags.payload); } catch { fail('BAD_ARGS', `--payload 不是合法 JSON: ${flags.payload}`); }
+  }
+  const snap = loadBacklogEntry(ws, cr);
+  const newText = editInboxEmit(snap.text, cr, { event: flags.event, to, payload });
+  casWrite(snap.path, snap.hash, newText);
+  auditLog(ws, { kind: 'ledger', op: 'inbox-emit', cr, actor: identity(ws), event: flags.event, to });
+  emitOutboxEvent(ws, {
+    event_kind: 'inbox-emit', cr_id: cr, actor: identity(ws),
+    payload: { event: flags.event, to },
+  });
+  ok({ op: 'inbox-emit', cr, event: flags.event, to, file: snap.path });
+}
+
 /** 行级追加 supplemental-reviews 段条目（硬失败：无该段则创建，段结构异常则报错）。 */
 function appendSupplementalReview(text, entry) {
   const norm = text.replaceAll('\r\n', '\n');
@@ -1913,6 +2013,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl checkpoint-add <cr_id> --repo <r> --sha <sha> [--remote-ref <ref>]   _backlog checkpoints[] 追加 + 推送元数据（developing~writing-back）
   crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   _backlog owners.{role} 指派（非终态）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
+  crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
@@ -1977,6 +2078,7 @@ function main() {
     case 'checkpoint-add': return cmdCheckpointAdd(ws, requireCr(positional), gates, flags);
     case 'owner-set': return cmdOwnerSet(ws, requireCr(positional), gates, flags);
     case 'backlog-set': return cmdBacklogSet(ws, requireCr(positional), gates, flags);
+    case 'inbox-emit': return cmdInboxEmit(ws, requireCr(positional), gates, flags);
     case 'task': {
       if (positional[0] !== 'done') fail('BAD_ARGS', 'task 仅支持子命令 done：crctl task done <CR-ID> --task <TASK-ID>');
       return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
