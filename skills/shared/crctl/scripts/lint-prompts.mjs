@@ -130,7 +130,7 @@ function runRules(para, ctx) {
     while ((m = re.exec(t))) {
       const lineNo = lineOf(t, m.index);
       const lineText = (t.split('\n')[lineNo - 1] || '').trim();
-      if (/crctl\s+git/.test(lineText) || /crctl git/.test(t)) break; // 已迁移形态
+      if (/crctl[.\w-]*\s+git/.test(lineText)) continue; // 已迁移形态（crctl git / crctl.mjs git / node ...crctl.mjs git）
       findings.push({ rule: 'R2', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + lineNo - 1, why: `裸 git 命令：${m[2]}` });
     }
   }
