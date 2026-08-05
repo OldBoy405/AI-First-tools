@@ -37,7 +37,7 @@
       "kind": "skill",
       "label": "核对远端 checkpoint",
       "ref": "list-remote-checkpoints",
-      "prompt": "读取 dir-graph.yaml repositories[*]（active≠false），对每个 active repo 执行 `crctl git ls-remote --heads origin 'requirement/{{inputs.cr_id}}'` 并与 change-requests/_backlog.yml 中的 remote-ref / last-push-at / checkpoints[] 比对：\n- 若任一 active repo 远端不存在分支：abort，提示原 owner 先执行 push-progress\n- 若 checkpoints[] 中 repo SHA 与远端不一致：输出警告但允许继续（由用户决定）\n\n在 node-1.md 输出各 repo 最新 checkpoint SHA、last-push-at、last-push-by。", --cwd <repo>
+      "prompt": "读取 dir-graph.yaml repositories[*]（active≠false），对每个 active repo 执行 `crctl git ls-remote --heads origin 'requirement/{{inputs.cr_id}}' --cwd <repo>` 并与 change-requests/_backlog.yml 中的 remote-ref / last-push-at / checkpoints[] 比对：\n- 若任一 active repo 远端不存在分支：abort，提示原 owner 先执行 push-progress\n- 若 checkpoints[] 中 repo SHA 与远端不一致：输出警告但允许继续（由用户决定）\n\n在 node-1.md 输出各 repo 最新 checkpoint SHA、last-push-at、last-push-by。",
       "onFail": "abort",
       "timeoutMinutes": 5
     },
