@@ -1,7 +1,8 @@
 ---
 name: review-requirement
-description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审意见写入 review-annotations/requirement.yml；未通过时回到 write-requirement-prd 自修复，通过后推进到 requirement-reviewing。
+description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审意见记录为 review-annotations 评审记录（经 crctl review-record 落盘）；未通过时回到 write-requirement-prd 自修复，通过后推进到 requirement-reviewing。
 ---
+<!-- lint-prompts:ignore --> 描述性说明：评审结论写入 review-annotations（实际写入走 crctl review-record）
 
 # Skill: review-requirement
 
@@ -12,7 +13,7 @@ description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审�
 
 ## 用途
 
-对 PRD 文档执行结构化质量评审：完整性检查、可测试性验证、范围合理性判断。将评审结论写入 `change-requests/{CR-ID}/review-annotations/requirement.yml`，同时更新 `traceability.yml`。只有 `verdict=pass` 且 `blockers=[]` 时，才将 CR status 推进到 `requirement-reviewing` 并允许进入人工审批；有 blocker 时保持或回到 `drafting`，由 pipeline `reviewLoop` 自动回到 `write-requirement-prd` 修复。
+对 PRD 文档执行结构化质量评审：完整性检查、可测试性验证、范围合理性判断。将评审结论记录为 `review-annotations` 评审记录（经 `crctl review-record` 落盘），并更新 `traceability.yml`。只有 `verdict=pass` 且 `blockers=[]` 时，才将 CR status 推进到 `requirement-reviewing` 并允许进入人工审批；有 blocker 时保持或回到 `drafting`，由 pipeline `reviewLoop` 自动回到 `write-requirement-prd` 修复。
 
 ---
 
@@ -45,47 +46,26 @@ description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审�
 | **与规划对齐** | 若有 source 规划报告，FR 是否覆盖规划建议的核心诉求 |
 | **依赖识别** | 是否识别了对其他 CR / 特性的依赖 |
 
-### Step 3 — 写评审批注
+### Step 3 — 写评审批注 — 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
 
-创建或更新 `change-requests/{cr_id}/review-annotations/requirement.yml`：
-
-```yaml
-cr-id: {cr_id}
-review-type: requirement
-reviewer: {reviewer}
-reviewed-at: {YYYY-MM-DDTHH:mm:ss+08:00}
-verdict: pass | block
-blockers:
-  - id: REQ-BLOCK-001
-    location: "FR-3"
-    issue: "验收标准不可量化"
-    suggestion: "补充具体的数值边界"
-repair-target: write-requirement-prd
-repair-instructions:
-  - "补充 FR-3 对应的可量化 AC，明确输入、动作、预期结果与边界值"
-review-loop:
-  pass-condition:
-    allOf:
-      - path: verdict
-        equals: pass
-      - path: blockers
-        isEmpty: true
-  on-block: route-to-repair-node
-  max-attempts: 3
-  current-attempt: {self_repair_attempt 或 0}
-  attempts:
-    - attempt: {self_repair_attempt 或 0}
-      reviewed-at: {YYYY-MM-DDTHH:mm:ss+08:00}
-      result: pass | block
-      blocker-count: {N}
-      repair-target: write-requirement-prd
-suggestions:
-  - "建议补充非功能需求中的响应时间要求"
-```
+1. 完成上述评审后，把**判断**写入非受控临时 payload `.crctl/tmp/review-requirement.yml`（该路径不在 guard deny 面，且已被 `.crctl/.gitignore` 忽略）：
+   ```yaml
+   verdict: pass | block
+   blockers: []          # block 时列出 blocker（字符串列表）
+   dimensions: {评审维度: 结论, ...}   # 该 stage 门禁要求的维度齐全
+   suggestions: []       # 可选
+   ```
+2. 运行 `crctl review-record {cr_id} --stage requirement --from .crctl/tmp/review-requirement.yml --bump-attempt --workspace <worktree>`，crctl 自动完成**确定性部分**：
+   - schema 校验（verdict 枚举/blockers 列表/dimensions 齐全；失败 `SCHEMA_INVALID` 不写）
+   - stage→文件名显式映射（requirement→requirement.yml，tech-design→sdd.yml 非同名）
+   - 注入 reviewer=identity(ws)/reviewed-at=nowIso()，CAS 写入 canonical `review-annotations/requirement.yml`
+   - `--bump-attempt` 级联 `crctl attempt` 记账（review-loop.yml，crctl 独占）
+   - 成功后删除临时 payload（避免残留/跨 CR 串味）
+3. **模型不得直接 Write `review-annotations/requirement.yml` 或手写 review-loop**（guard deny + crctl 独占写）。
 
 ### Step 4 — 更新 traceability.yml
 
-在 `change-requests/{cr_id}/traceability.yml` 中写入（若文件不存在则新建）：
+向 `change-requests/{cr_id}/traceability.yml` 写入 `reviews.requirement` 引用（review-loop 轮次记账已由 `crctl review-record --bump-attempt` 级联完成，见 Step 3）
 
 ```yaml
 cr-id: {cr_id}
