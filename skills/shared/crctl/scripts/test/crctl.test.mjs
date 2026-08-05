@@ -1177,3 +1177,72 @@ test('review-record：payload 缺失 → PAYLOAD_NOT_FOUND', () => {
     assert.equal(r.stderr.error.code, 'PAYLOAD_NOT_FOUND');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-021 TASK-03：review-note（S2，supplemental-reviews 追加）─────
+
+test('review-note：无 approval.yml 时创建文件并写入 supplemental-reviews（AC-2）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r = runCrctl(['review-note', 'CR-T1', '--stage', 'code', '--note', '补充意见', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.op, 'review-note');
+    const out = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml'), 'utf8');
+    assert.ok(out.includes('supplemental-reviews:'), '创建 supplemental-reviews 段');
+    assert.ok(out.includes('decision: note'), 'decision=note');
+    assert.ok(out.includes('notes: "补充意见"'), 'notes 写入');
+    assert.ok(out.includes('status-at-record: developing'), 'status-at-record 写入');
+    assert.ok(out.includes('reviewer:') && out.includes('recorded-at:'), '身份/时间戳由 crctl 生成');
+    assert.ok(!out.includes('requirement:'), '不得写入审批段');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-note：已有四审批段时追加，四段本体零改动（安全边界）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeApprovalYml(ws, 'CR-T1', 'code', { approver: 'Human', 'approved-at': '2026-08-04T12:00:00+08:00', via: 'crctl-approve' });
+    const before = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml'), 'utf8');
+    const r = runCrctl(['review-note', 'CR-T1', '--note', '追加意见', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const after = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml'), 'utf8');
+    assert.ok(after.includes('supplemental-reviews:'), '追加 supplemental-reviews 段');
+    assert.ok(after.includes('追加意见'), 'notes 存在');
+    assert.ok(after.includes('code:\n  approver: "Human"'), 'code 审批段本体不变');
+    assert.ok(after.startsWith(before.trimEnd()), '既有内容原样保留（追加在尾部）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-note：--by 传入 → BAD_ARGS 拒绝（非静默忽略，AC-2）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r = runCrctl(['review-note', 'CR-T1', '--note', 'x', '--by', 'Someone', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'BAD_ARGS');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml')), false, '拒绝后不得写文件');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-note：终态（archived）→ ILLEGAL_LEDGER_STATE，文件零变更', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'archived');
+    const r = runCrctl(['review-note', 'CR-T1', '--note', 'x', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml')), false);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review-note：同一文件二次追加 → 两条记录共存（数组追加语义）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    assert.equal(runCrctl(['review-note', 'CR-T1', '--note', '意见一', '--workspace', ws]).status, 0);
+    assert.equal(runCrctl(['review-note', 'CR-T1', '--note', '意见二', '--workspace', ws]).status, 0);
+    const out = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'approval.yml'), 'utf8');
+    const count = (out.match(/decision: note/g) || []).length;
+    assert.equal(count, 2, '两条补充审查记录共存');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

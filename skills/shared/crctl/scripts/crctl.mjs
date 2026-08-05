@@ -1412,6 +1412,72 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   });
   ok({ op: 'review-record', cr, stage, file: target.replaceAll('\\', '/'), verdict: payload.verdict, ...(attempt ? { attempt: attempt.current } : {}) });
 }
+/* ────────────────────────── review-note（S2，CR-2026-021 TASK-03） ──────────────────────────
+ * 向 approval.yml 的 supplemental-reviews[] 追加一条补充审查记录（CAS+审计）。
+ * 安全边界（不变量 7）：只写 supplemental-reviews 段，绝不触碰 approval.yml 的
+ * #requirement/#tech-design/#development-start/#code 四段审批本体（那四段只经 crctl approve）。
+ * 操作者身份由 identity(ws) 生成，不接受 --by（时间戳/身份生成原则）。
+ */
+function cmdReviewNote(ws, cr, gates, flags) {
+  if (!flags.note) fail('BAD_ARGS', 'review-note 需要 --note <text>');
+  if (flags.by !== undefined) fail('BAD_ARGS', 'review-note 不接受 --by：操作者身份必须由 crctl identity(ws) 生成（与 attempt/task done 同构）');
+  const state = resolveCrState(ws, cr);
+  const { sm } = loadStateMachine(ws);
+  const terminals = sm.terminal || [];
+  if (terminals.includes(state.status)) {
+    fail('ILLEGAL_LEDGER_STATE', `review-note 不允许在终态 ${state.status} 追加补充审查记录（已终结 CR 不再接受补充意见）`, { current: state.status, expect: '非终态' });
+  }
+  const p = path.join(crDir(ws, cr), 'approval.yml');
+  const existing = readFileChecked(p);
+  const stage = flags.stage || '';
+  const note = flags.note.replaceAll('"', '\\"');
+  const entry = [
+    `  - reviewer: "${identity(ws)}"`,
+    `    recorded-at: "${nowIso()}"`,
+    '    decision: note',
+    `    stage: "${stage.replaceAll('"', '\\"')}"`,
+    `    status-at-record: ${state.status}`,
+    `    notes: "${note}"`,
+  ].join('\n');
+  const newText = existing == null
+    ? `# approval.yml — 人工审批记录（各段仅接受 crctl approve 写入；supplemental-reviews 仅接受 crctl review-note 写入）\nsupplemental-reviews:\n${entry}\n`
+    : appendSupplementalReview(existing, entry);
+  if (existing == null) fs.writeFileSync(p, newText, 'utf8');
+  else casWrite(p, sha256(existing), newText);
+  auditLog(ws, { kind: 'ledger', op: 'review-note', cr, actor: identity(ws), stage, file: p });
+  emitOutboxEvent(ws, {
+    event_kind: 'review-note', cr_id: cr, actor: identity(ws),
+    payload: { stage, statusAtRecord: state.status },
+  });
+  ok({ op: 'review-note', cr, file: p.replaceAll('\\', '/'), recordedAt: nowIso() });
+}
+
+/** 行级追加 supplemental-reviews 段条目（硬失败：无该段则创建，段结构异常则报错）。 */
+function appendSupplementalReview(text, entry) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const lines = norm.split('\n');
+  const idx = lines.findIndex((l) => /^supplemental-reviews:/.test(l));
+  if (idx === -1) {
+    const tail = norm.trimEnd();
+    return tail + '\n' + (tail.endsWith(':') ? '' : 'supplemental-reviews:\n') + entry + '\n';
+  }
+  const keyIndent = lines[idx].match(/^[ \t]*/)[0].length;
+  let segEnd = lines.length;
+  for (let i = idx + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^[ \t]*/)[0];
+    if (m.length <= keyIndent && /^[A-Za-z0-9_-]+:/.test(lines[i])) { segEnd = i; break; }
+  }
+  const seg = lines.slice(idx + 1, segEnd);
+  // 段结构检查只针对列表项层级（缩进 ≤ 键缩进+2 的非空行）：子字段行（更深缩进）不算异常
+  const badLine = seg.find((l) => {
+    const ind = l.match(/^[ \t]*/)[0].length;
+    return ind > 0 && ind <= keyIndent + 2 && /^\S/.test(l.trimStart()) && !/^-/.test(l.trimStart());
+  });
+  if (badLine) fail('APPROVAL_SHAPE', `supplemental-reviews 段包含非列表行（${badLine.trim()}），结构异常，拒绝追加`);
+  const insertAt = segEnd === lines.length ? lines.length : segEnd;
+  lines.splice(insertAt, 0, entry);
+  return lines.join('\n');
+}
 
 function cmdTest(ws, cr, gates, flags) {
   const cmds = flags.cmdList || [];
@@ -1686,6 +1752,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl attempt <cr_id> --loop <ref>             review-loop 轮次唯一记账点；超限返回 LOOP_EXHAUSTED
   crctl review-record <cr_id> --stage <requirement|tech-design|code> --from <payload.yml> [--bump-attempt]
                                                 schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）
+  crctl review-note  <cr_id> [--stage <s>] --note <text>  approval.yml supplemental-reviews[] 追加（不接受 --by，身份 crctl 生成）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
@@ -1746,6 +1813,7 @@ function main() {
     }
     case 'attempt': return cmdAttempt(ws, requireCr(positional), gates, flags);
     case 'review-record': return cmdReviewRecord(ws, requireCr(positional), gates, flags);
+    case 'review-note': return cmdReviewNote(ws, requireCr(positional), gates, flags);
     case 'task': {
       if (positional[0] !== 'done') fail('BAD_ARGS', 'task 仅支持子命令 done：crctl task done <CR-ID> --task <TASK-ID>');
       return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
