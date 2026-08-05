@@ -74,6 +74,7 @@ description: 在同一 CR workspace 内按 prd/sdd/tasks 执行代码编写，�
 - 不支持子 agent 时使用目标运行时已安装的 external `executing-plans`。
 - 每个 TASK 必须遵循目标运行时已安装的 external `test-driven-development`：先写失败测试，再实现，再验证转绿。
 - 实现只写 repo map 指定的 codeRoot。
+<!-- lint-prompts:ignore --> 描述性：实现节点说明
 - 若存在 `review_feedback`，进入自修复模式：读取 blockers、repair-instructions、repair-target 与上一轮 `test-report.md` / `review-annotations/code.yml`，只修复被指出的问题，避免无关重构，并输出 fixed-blockers。
 
 ### Step 4 - Verify

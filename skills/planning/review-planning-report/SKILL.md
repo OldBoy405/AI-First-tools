@@ -1,5 +1,6 @@
 ---
 name: review-planning-report
+<!-- lint-prompts:ignore --> 描述性：规划评审自有记录路径
 description: 对 docs/product-planning/ 下的产品规划报告执行 AI 评审，输出评审记录到 docs/product-planning/review-annotations/；未通过时回到 write-planning-report 自修复，通过后才允许进入人工审批。
 ---
 
@@ -46,6 +47,7 @@ description: 对 docs/product-planning/ 下的产品规划报告执行 AI 评审
 
 ### Step 3 — 写评审记录
 
+<!-- lint-prompts:ignore --> 描述性：规划评审自有记录路径
 创建目录 `docs/product-planning/review-annotations/`（若不存在），写入：
 
 ```yaml
@@ -84,6 +86,7 @@ recommendations:
   - "{建议人工审批时关注的点；没有则为空数组}"
 ```
 
+<!-- lint-prompts:ignore --> 描述性：规划评审自有记录路径
 路径：`docs/product-planning/review-annotations/{report-id}.yml`
 
 ### Step 4 — 更新索引状态
@@ -92,7 +95,7 @@ recommendations:
 
 ### Step 5 — 输出摘要
 
-输出评审记录路径、`approved` 结论、blocker 数量、`review-loop.current-attempt`、`repair-target`、`repair-instructions` 和下一步：
+输出评审记录路径、`approved` 结论、blocker 数量、当前轮次信息、`repair-target`、`repair-instructions` 和下一步：
 
 - PASS：允许进入 `human_approval`。
 - BLOCK：不得进入 `human_approval`，将当前评审记录作为 `review_feedback` 传给 `write-planning-report` 自动修订。

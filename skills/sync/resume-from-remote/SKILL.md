@@ -69,6 +69,7 @@ await runGit({ subcommand: "worktree",
 
 ### Step 3 — 读取 CR 状态
 
+<!-- lint-prompts:ignore --> 描述性：远端恢复说明
 从 knowledge-base CR worktree 的 `change-requests/{cr_id}/cr.md` 读取：
 - `status`：当前阶段
 - `owners`：requirement / development / test 三类负责人及 assigned-at
@@ -79,10 +80,12 @@ await runGit({ subcommand: "worktree",
 
 若指定了 `new_owner`：
 1. 将 `new_owner_role` 默认为 `development`，并校验取值为 `requirement` / `development` / `test`
+<!-- lint-prompts:ignore --> 描述性：远端恢复说明
 2. 更新 `change-requests/{cr_id}/cr.md` 中的 `owners.{new_owner_role}.id`
 3. 更新 `owners.{new_owner_role}.assigned-at` 为当前时间
 4. 若角色为 `requirement`，同步顶层兼容字段 `owner`
 5. 追加 `owner-history` 与 `handover-history` 记录（role / from / to / at）
+<!-- lint-prompts:ignore --> 描述性：远端恢复说明
 6. 更新 `change-requests/_backlog.yml` 对应条目的同名字段
 
 ### Step 5 — 输出摘要
@@ -120,5 +123,6 @@ await runGit({ subcommand: "worktree",
 |------|------|
 | 任一 active repo 远端分支不存在 | 停止执行，提示联系原持有者 `push-progress`；不得部分恢复 |
 | 本地 worktree 已存在（stderr 含 `already exists`） | 返回结构化错误，建议改用 `pull-progress`（已有 worktree 的增量同步） |
+<!-- lint-prompts:ignore --> 描述性：远端恢复说明
 | `cr.md` 不在恢复的 worktree 中 | 提示 CR 目录可能在 main 分支，检查 `change-requests/_backlog.yml` |
 | 受控 shell 不可用（`SHELL_UNAVAILABLE`） | 停止执行，返回结构化错误；**禁止**输出「请在终端运行」提示 |

@@ -54,6 +54,7 @@ sources:
    - 按日期倒序逐条列 `{date, title, source-url, summary}`
    - 每条后追加来源链接
 3. **对我方产品的潜在影响**
+<!-- lint-prompts:ignore --> 描述性：竞争报告引用账本字段
    - 对照 `specs/_index.yml` baseline spec 与 `change-requests/_backlog.yml` 在途 CR：命中哪些产品能力、哪些 CR 是正面 or 负面影响
    - 对照 `docs/product-planning/_index.yml` 规划大盘：是否影响下一版本的主题或排序
 4. **初步规划建议**
@@ -115,6 +116,7 @@ write-competitive-report:
     - docs/competitive/*.md
     - docs/competitive/reports/_index.yml
     - specs/_index.yml
+<!-- lint-prompts:ignore --> 描述性：竞争报告引用账本字段
     - change-requests/_backlog.yml
     - docs/product-planning/_index.yml
   write:

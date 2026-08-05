@@ -3,4 +3,4 @@
 # 安装（一次性）：git config core.hooksPath .githooks
 node "$(git rev-parse --show-toplevel)/skills/shared/crctl/scripts/check-skill-matrix.mjs" || exit 1
 node "$(git rev-parse --show-toplevel)/skills/shared/crctl/scripts/check-agents-contract.mjs" || exit 1
-node "$(git rev-parse --show-toplevel)/skills/shared/crctl/scripts/lint-prompts.mjs" --mode report || exit 1 # CR-2026-021 TASK-12：Phase 0~2 report 非阻断；TASK-22 切 enforce
+node "$(git rev-parse --show-toplevel)/skills/shared/crctl/scripts/lint-prompts.mjs" --mode enforce || exit 1 # CR-2026-021 TASK-22：漂移已清零，切 enforce 硬阻断（FR-24 Phase 3）

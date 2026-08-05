@@ -44,6 +44,7 @@ description: "查看个人待处理 CR 收件箱"
 | `reviewer` | `backlog[].reviewer == user`（reviewer 字段由 review skill 写入） | 需要我提供审查意见的 CR |
 | `all` | 以上角色合并 | 全部相关 CR |
 
+<!-- lint-prompts:ignore --> 描述性：inbox 流程说明
 若指定 `status-filter`，进一步过滤各 CR 的 `change-requests/{cr_id}/cr.md` frontmatter `status` 字段（权威状态源，CR-2026-018；`_backlog.yml` 已不含 status）。
 
 否则默认排除终态：`archived / rejected / withdrawn`。

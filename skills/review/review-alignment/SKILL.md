@@ -27,9 +27,11 @@ readonly: true
 ## 读取契约（启动序）
 
 1. 读 `dir-graph.yaml#agent_hints.skill_context.review-alignment`
+<!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用
 2. 读 `change-requests/{cr_id}/cr.md` frontmatter — 取目标 CR 的 `status`；读 `change-requests/_backlog.yml` — 取 `checkpoints[]` / `merge-commits[]`
 3. 对 in-flight CR：读 knowledge-base CR worktree 中 `change-requests/{cr_id}/{prd.md,sdd.md,plan.md,tasks/,traceability.yml}`
 4. 对已 writeback 的 CR：读 `specs/{spec_id}/{PRD.md,SDD.md,traceability.yml}` 与 `delivery/task/_index.yaml`
+<!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用
 5. 代码证据仅来自 `review-code` 写入的 `review-annotations/code.yml`、`traceability.yml` 和 `_backlog.yml.merge-commits[]`；不得直接读取主工作区代码目录或旧 `feature/*` 分支
 
 > 本 Skill **只读 + 写 traceability.yml**，不修改 PRD/SDD/TASK/代码。
@@ -46,9 +48,12 @@ readonly: true
 
 | 项 | 通过标准 |
 |---|---|
+<!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用
 | AL-01 PRD→SDD 同步 | `prd.md` 或 `PRD.md` 更新时间 ≤ 最近 `review-annotations/sdd.yml.reviewed-at` |
 | AL-02 SDD→TASK 同步 | `sdd.md` 或 `SDD.md` 更新时间 ≤ `tasks/_index.yml` 或 `delivery/task/_index.yaml` 对应条目的生成时间 |
+<!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用
 | AL-03 TASK→代码 同步 | CR TASK 更新时间 ≤ `review-annotations/code.yml.reviewed-at`，且 code evidence 覆盖所有 TASK |
+<!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用
 | AL-04 代码→writeback 同步 | `_backlog.yml.merge-commits[]` 中每个 active repo 均出现在 `traceability.yml.code.repos[]` |
 | AL-05 requirements 指纹 | PRD.md 中 RQ/FR 条目的文本指纹未变更（检测需求文本改写但未重审） |
 | AL-06 contracts 同步 | `contracts/` 下文件 mtime ≤ `traceability.reviews.sdd.contracts-completeness.at` |

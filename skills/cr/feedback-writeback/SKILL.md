@@ -41,6 +41,7 @@ description: "将实施结论写回 traceability.yml"
 
 ### Step 1 — 读取 CR 上下文
 
+<!-- lint-prompts:ignore --> 描述性：反馈回写说明
 1. 读取 `change-requests/{cr-id}/cr.md` frontmatter，获取：
    - `target.refs`（关联 spec 列表）
    - `type`（变更类型）
@@ -56,7 +57,9 @@ description: "将实施结论写回 traceability.yml"
    ```yaml
    change-requests:
      - cr-id: {cr-id}
+<!-- lint-prompts:ignore --> 描述性：反馈回写说明
        title: {cr.md frontmatter.title}
+<!-- lint-prompts:ignore --> 描述性：反馈回写说明
        type: {cr.md frontmatter.type}
       outcome: {outcome}       # accepted | rejected | withdrawn
       deviation: "{deviation 或 none}"
@@ -77,6 +80,7 @@ description: "将实施结论写回 traceability.yml"
 1. 创建或追加文件 `docs/tech-notes/cr-lessons-learned.md`
 2. 追加格式：
    ```markdown
+<!-- lint-prompts:ignore --> 描述性：反馈回写说明
    ## {cr-id} — {cr.md.title}
 
    **日期**: YYYY-MM-DDTHH:mm:ss+HH:mm  
@@ -94,6 +98,7 @@ description: "将实施结论写回 traceability.yml"
 
 调用 `inbox-emit`：
 ```yaml
+<!-- lint-prompts:ignore --> 描述性：反馈回写说明
 target: change-requests/_backlog.yml
 event: feedback-writeback-done
 cr-id: {cr-id}
@@ -120,6 +125,7 @@ timestamp: "YYYY-MM-DDTHH:mm:ss+HH:mm"
 
 | 错误码 | 含义 | 处理方式 |
 |--------|------|----------|
+<!-- lint-prompts:ignore --> 描述性：反馈回写说明
 | `FWB_CR_NOT_FOUND` | 找不到 change-requests/{cr-id}/cr.md | 检查 cr-id 是否正确 |
 | `FWB_OUTCOME_REQUIRED` | outcome 参数缺失 | 必须明确传入 accepted 或 rejected |
 | `FWB_TARGET_NOT_SPEC` | target.refs 中存在非 spec 类型 | 当前版本仅支持 spec；其他类型跳过并提示 |

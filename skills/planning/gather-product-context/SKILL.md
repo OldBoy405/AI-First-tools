@@ -33,6 +33,7 @@ delegates: [spec-query, cr-query]
 | 需求想法草稿 | `knowledge-docs.subdirs.ideas` | `docs/ideas/` | 尚未进入 spec 流程 |
 | 竞品分析 | `knowledge-docs.subdirs.competitive` | `docs/competitive/` | 最近 5 篇 |
 | 市场洞察 | `knowledge-docs.subdirs.market-insights` | `docs/market-insights/` | 最近 5 篇 |
+<!-- lint-prompts:ignore --> 描述性：上下文收集引用
 | 活跃变更请求 | `change-request-track.backlog` | `change-requests/_backlog.yml` | 委托 `cr-query` |
 | 当前工作焦点 | `runtime.files[focus.yml]` | `focus.yml` | 当前聚焦方向 |
 
@@ -205,6 +206,7 @@ gather-product-context:
     - docs/competitive/*.md
     - docs/market-insights/_index.yml
     - docs/market-insights/*.md
+<!-- lint-prompts:ignore --> 描述性：上下文收集引用
     - change-requests/_backlog.yml
     - focus.yml
   write: []

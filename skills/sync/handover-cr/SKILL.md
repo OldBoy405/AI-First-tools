@@ -12,6 +12,7 @@ description: 正式移交 CR 某一角色 owner：先 push-progress 确保远端
 
 ## 用途
 
+<!-- lint-prompts:ignore --> 描述性：移交流程说明（实际写入走 crctl owner-set）
 将在途 CR 的某个角色负责人从当前 owner 正式移交给新 owner。流程：先执行 `push-progress` 确保远端已是最新状态，再更新 `cr.md` 和 `_backlog.yml` 中的 `owners.{role}.id` 与 `owners.{role}.assigned-at`，追加 `owner-history` / `handover-history`，最后通过 `inbox-emit` 向新 owner 发送接手通知。
 
 ---
@@ -32,6 +33,7 @@ description: 正式移交 CR 某一角色 owner：先 push-progress 确保远端
 
 ### Step 1 — 前置校验
 
+<!-- lint-prompts:ignore --> 描述性：移交流程说明（实际写入走 crctl owner-set）
 1. 读取 `change-requests/{cr_id}/cr.md`，确认 CR 处于在途状态（非 `archived`/`rejected`/`withdrawn`）
 2. 确认 `owner_role` 为 `requirement` / `development` / `test`
 3. 确认当前调用者为当前角色 owner 或具备管理员权限（防止无权移交）
@@ -50,6 +52,7 @@ push-progress(cr_id={cr_id})
 
 ### Step 3 — 更新 cr.md
 
+<!-- lint-prompts:ignore --> 描述性：移交流程说明（实际写入走 crctl owner-set）
 在 `change-requests/{cr_id}/cr.md` 中：
 1. 将 `owners.{owner_role}.id` 更新为 `new_owner`
 2. 将 `owners.{owner_role}.assigned-at` 更新为当前时间戳
@@ -66,6 +69,7 @@ push-progress(cr_id={cr_id})
 
 ### Step 4 — 更新 _backlog.yml
 
+<!-- lint-prompts:ignore --> 描述性：移交流程说明（实际写入走 crctl owner-set）
 在 `change-requests/_backlog.yml` 对应 CR 条目更新 `owners.{owner_role}.id`、`owners.{owner_role}.assigned-at`；若 `owner_role=requirement`，同步更新顶层兼容字段 `owner: {new_owner}`。
 
 ### Step 5 — 发送 inbox 通知

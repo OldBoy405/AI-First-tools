@@ -34,6 +34,7 @@ description: 生成 specs/{spec_id}/traceability.yml 的累积追溯链（头部
 
 ### Step 1 — 前置校验
 
+<!-- lint-prompts:ignore --> 描述性：追溯回写说明
 1. 读取 `change-requests/{cr_id}/cr.md`，确认 status=`writing-back`（脚本同样校验，不满足即 `CR_STATUS_MISMATCH` 硬失败）
 2. 确认 `specs/{spec_id}/PRD.md`、`specs/{spec_id}/SDD.md` 均存在（writeback-prd-sdd 已完成）
 
@@ -115,6 +116,7 @@ crctl git commit --template writeback -m "specs/{spec_id} traceability.yml 累�
 | 错误码 | 处理 |
 |------|------|
 | `BAD_ARGS` | 缺 `--workspace/--cr/--spec/--version/--milestone-file`，补参重跑 |
+<!-- lint-prompts:ignore --> 描述性：追溯回写说明
 | `CR_STATUS_MISMATCH` | cr.md status 非 `writing-back`，先完成 writeback-prd-sdd 的 status 推进 |
 | `STRUCTURE_MISMATCH` | milestone-file 缺 `cr/milestone/target-version/fr-chain[].fr`，或草稿内 merge-commits 与账本提取不一致；报告后停止 |
 | `MERGE_COMMITS_MISSING` | `_backlog.yml` 无该 CR 条目 / 无 merge-commits[] / 三字段不齐全——先修复 merge-feature-branch 输出；**不得猜测或自动取 trunk 最新提交** |

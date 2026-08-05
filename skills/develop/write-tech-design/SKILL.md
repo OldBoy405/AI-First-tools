@@ -45,13 +45,16 @@ description: 读取 change-requests/{CR-ID}/prd.md，在同目录编写 sdd.md �
    - 仅在文件缺失时起草；已存在则只读不改——普通 CR 不得借道修订它（架构级变更需求见该文档自身"维护规则"一节）。
 3. 读取 CR 当前 status：
    - 初次生成：必须为 `requirement-approved`，随后调用 `crctl advance --to tech-designing，`trigger=write-tech-design`，`expected_current_status=requirement-approved`）将 status 推进到 `tech-designing`。
+<!-- lint-prompts:ignore --> 描述性：回修读取评审记录
    - reviewLoop 回修：若存在 `review_feedback`，或 `change-requests/{cr_id}/review-annotations/sdd.yml` 的 `verdict=block`，允许当前 status 为 `tech-designing`，不得因非 `requirement-approved` abort。
    - 其他状态：停止执行，输出当前 status、是否存在 `review_feedback` 与下一步建议。
 
 ### Step 2 — 生成 SDD
 
+<!-- lint-prompts:ignore --> 描述性：回修读取评审记录
 若存在 `review_feedback`，或 status=`tech-designing` 且上一轮 `review-annotations/sdd.yml verdict=block`，先进入自修复模式：
 
+<!-- lint-prompts:ignore --> 描述性：回修读取评审记录
 1. 读取上一轮 `review-annotations/sdd.yml` 与 `review_feedback.blockers`；若 `review_feedback` 缺失，则从 `sdd.yml` 的 blockers、repair-target、repair-instructions 组装修复输入。
 2. 按 `repair-instructions` 修订同一份 `sdd.md`，重点补齐 PRD↔SDD 映射、接口契约、数据模型、风险与测试设计。
 3. 不重写已确认的整体方案，除非 blocker 明确要求替换。

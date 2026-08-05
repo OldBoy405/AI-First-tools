@@ -36,6 +36,7 @@ description: "Spec/CR 全局看板，展示 baseline 版本分组、在途 CR �
 
 ### Step 2 — 计算指标
 
+<!-- lint-prompts:ignore --> 描述性：看板统计引用（实际统计走 crctl report）
 **在途 CR 状态分布**（按 `change-requests/{CR-ID}/cr.md` frontmatter `status` 分组计数）：
 
 | 状态 | 含义 | 数量 |
@@ -56,6 +57,7 @@ description: "Spec/CR 全局看板，展示 baseline 版本分组、在途 CR �
 **Blockers 汇总**（traceability 异常）：
 
 - 读取每个 baseline spec 的 `traceability.yml`，若存在 `summary.missing > 0` 或 `summary.partial > 0` 则标记为 Blocker。
+<!-- lint-prompts:ignore --> 描述性：看板统计引用（实际统计走 crctl report）
 - 读取在途 CR 的 `review-annotations/*` 与 `traceability.yml`，汇总 blocker CR。
 
 **健康度计算**：
@@ -115,6 +117,7 @@ baseline specs without traceability.yml → 单独列出，标注"未建立追�
 ## 注意事项
 
 - 只读操作，不修改任何文件
+<!-- lint-prompts:ignore --> 描述性：看板统计引用（实际统计走 crctl report）
 - 若 `change-requests/_backlog.yml` 为空，显示「当前无在途 CR」
 - 健康度计算仅针对已创建 `traceability.yml` 的 baseline spec；无追溯文件的 spec 单独列出，不计入平均值
 - `focus=blockers` 模式只显示 Blockers 区块；`focus=health` 只显示健康度区块
