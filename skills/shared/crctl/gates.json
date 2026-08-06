@@ -96,7 +96,6 @@
     "review-requirement": { "pipeline": "requirement-authoring" },
     "review-tech-design": { "pipeline": "architecture-design" },
     "write-test-report": { "pipeline": "code-implementation" },
-    "review-code": { "pipeline": "code-implementation" },
-    "review-planning-report": { "pipeline": "product-planning" }
+    "review-code": { "pipeline": "code-implementation" }
   }
 }

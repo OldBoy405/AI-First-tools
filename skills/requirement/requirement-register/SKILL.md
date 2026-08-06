@@ -88,7 +88,7 @@ await runGit({ subcommand: "worktree",
   cwd: repo.path });
 ```
 
-> **注意**：worktree 创建后不自动切换当前主工作区 HEAD。任一 active repo 创建失败时，返回结构化错误并列出已创建的 worktree，交由受控清理入口处理；不得继续写 PRD。
+> **注意**：worktree 创建后不自动切换当前主工作区 HEAD。任一 active repo 创建失败时，返回结构化错误并列出已创建的 worktree，交由受控清理入口处理；不得继续写 PRD。fetch 失败属降级路径（见错误表 `STALE_BASE`），不算创建失败，但摘要必须显式标注基线滞后。
 
 ### Step 6 — 输出摘要
 
@@ -129,3 +129,4 @@ execution_context:
 | 分支已存在 | 停止执行，提示先检查是否重复注册 |
 | 受控 shell 不可用（`SHELL_UNAVAILABLE`） | 停止执行，返回结构化错误；**禁止**输出「请在终端运行」提示 |
 | git 命令执行失败（`EXEC_FAILED`） | 展示 stderr；对 `worktree add` 重复分支错误，回退到「分支已存在」分支处理 |
+| 单仓 `fetch` 失败（如 SSL 证书校验失败，`EXEC_FAILED` 之外） | 降级为「从本地 trunk 派生 worktree，并在输出摘要中标注 `STALE_BASE`」——不 abort，也不静默视为成功（基线滞后必须显式提示；后续 push 前先补 fetch）（CR-2026-022 FR-14，注册实录坐实） |

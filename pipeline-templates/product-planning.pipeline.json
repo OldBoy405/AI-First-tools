@@ -106,7 +106,7 @@
       "kind": "skill",
       "label": "产品规划报告评审",
       "ref": "review-planning-report",
-      "prompt": "读取上一节点生成的产品规划报告，执行 review-planning-report：\n- 校验调研依据、规划建议、路标建议、成功指标、待决策项\n<!-- lint-prompts:ignore --> 规划报告自有评审记录（docs/ 路径非 guard deny 面）\n- 将评审记录写入 docs/product-planning/review-annotations/{report-id}.yml\n- 将 docs/product-planning/_index.yml 中对应规划报告 status 从 draft 更新为 reviewing（如存在）\n- 输出 approved、blockers、risks、recommendations、repair-target、repair-instructions、current-attempt 轮次、review-loop.attempts[]\n\n若 approved=false 或 blockers 非空，pipeline 不得进入 human_approval；必须将 review_feedback 传回 write-planning-report 节点自动修订，并重新执行本评审，直至 approved=true 且 blockers 为空，或达到 reviewLoop.maxAttempts 后停止。每次评审必须持久化 review-loop.attempts[]，避免恢复后重置自修复轮次。",
+      "prompt": "读取上一节点生成的产品规划报告，执行 review-planning-report：\n- 校验调研依据、规划建议、路标建议、成功指标、待决策项\n<!-- lint-prompts:ignore --> 规划报告自有评审记录（docs/ 路径非 guard deny 面）\n- 将评审记录写入 docs/product-planning/review-annotations/{report-id}.yml\n- 将 docs/product-planning/_index.yml 中对应规划报告 status 从 draft 更新为 reviewing（如存在）\n- 输出 approved、blockers、risks、recommendations、repair-target、repair-instructions、current-attempt 轮次（来源 review-annotations/{report-id}.yml）\n\n若 approved=false 或 blockers 非空，pipeline 不得进入 human_approval；必须将 review_feedback 传回 write-planning-report 节点自动修订，并重新执行本评审，直至 approved=true 且 blockers 为空，或达到 reviewLoop.maxAttempts 后停止。每次评审的轮次与结论由本 Skill 自行持久化到 docs/product-planning/review-annotations/{report-id}.yml（不经 crctl review-loop 记账——product-planning 全程主分支运行、无 CR 上下文，D-2 决策），避免恢复后重置自修复轮次。",
       "reviewLoop": {
         "repairNodeId": "00000000-0000-0000-0010-000000000005",
         "repairRef": "write-planning-report",
