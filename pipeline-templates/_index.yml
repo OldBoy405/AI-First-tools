@@ -115,4 +115,4 @@ pipeline-templates:
       覆盖：提取关键信号 → 撰写洞察简报 → 生成规划建议 → 人工确认 → write-planning-entry 写入规划知识库。
     added: "2026-05-07"
 
-  # 废弃条目已迁移至 tools/old/pipeline-templates/_index.yml
+  

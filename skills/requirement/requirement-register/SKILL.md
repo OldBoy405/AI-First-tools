@@ -12,10 +12,9 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
 
 ## 用途
 
-需求编写的起点。完成以下三件事：
+需求编写的起点。完成以下四件事：
 1. 生成唯一 CR-ID（格式 `CR-YYYY-NNN`，NNN 自增）
-<!-- lint-prompts:ignore --> 描述性说明：注册动作由 crctl cr-init 原子完成
-2. 在 `change-requests/_backlog.yml` 注册 CR 条目（不含 status/updated-at，status 只落 cr.md），并在 `change-requests/_index.yml` 追加条目
+2. 在 `change-requests/_backlog.yml` 注册 CR 条目（不含 status/updated-at，status 只落 cr.md），并在 `change-requests/_index.yml` 追加条目<!-- lint-prompts:ignore --> 描述性：登记由 crctl cr-init 原子完成（Step 2）
 3. 将注册记录提交到 knowledge-base trunk，保证 main 可感知在途 CR
 4. 按 `dir-graph.yaml#repositories` 为所有 `active != false` 的 repo 创建同名 worktree 分支 `requirement/CR-YYYY-NNN`（不切换当前 HEAD）
 
@@ -55,9 +54,9 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
    - 并发下后到者见 `_index`/`_backlog` hash 已变 → `CAS_CONFLICT`，三文件全不落盘 → **重跑 cr-init**（重读 max、自动拿新号），不撞号。
    - `cr_id` 变量 = cr-init 返回的 `cr` 字段。
 2. **模型不得手写 `cr.md`/追加 `_backlog.yml`/登记 `_index.yml`**（guard deny + cr-init 独占，含 CAS+审计）。
-3. `summary`/`source`/`target-version` 等注册元信息字段由注册方在 cr-init 建档后直接补全 `cr.md` frontmatter，随 Step 4 的 register 提交一并入库（先例：CR-2026-021 register 提交即含完整 summary/source）。注：`crctl backlog-set`（S5）白名单仅 `prd-path|sdd-path`，不承担 summary 写入。
+3. `summary`/`source`/`target-version` 等注册元信息字段由注册方在 cr-init 建档后直接补全 `cr.md` frontmatter，随 Step 3 的 register 提交一并入库（先例：CR-2026-021 register 提交即含完整 summary/source）。注：`crctl backlog-set`（S5）白名单仅 `prd-path|sdd-path`，不承担 summary 写入。
 
-### Step 4 — 提交注册记录到 knowledge-base trunk
+### Step 3 — 提交注册记录到 knowledge-base trunk
 
 > **执行方式**：所有 git 命令 **必须**通过受控 shell 执行（详见 `skills/shared/controlled-shell/SKILL.md`）。
 > Tauri 桌面壳、opencode session 或其他运行时必须提供平台注入的受控 git 适配器。

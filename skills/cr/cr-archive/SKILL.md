@@ -55,7 +55,7 @@ description: "归档新四阶段 CR：以 cr.md frontmatter status 为 final-sta
 4. 若 status=`writing-back`：
    - 确认 `spec_id` 存在
    - 确认 `specs/{spec_id}/traceability.yml` 存在
-   - 调用 `crctl advance --to archived、`trigger=cr-archive`、`expected_current_status=writing-back`、`commit_mode=embedded`，只获取已校验的 status patch，不单独 commit
+   - 调用 `crctl advance --to archived --trigger cr-archive --expect writing-back --embedded`，只获取已校验的 status patch，不单独 commit
    - 设置 `final-status=archived`
 <!-- lint-prompts:ignore --> 描述性：归档流程说明（实际写入走 crctl archive-move）
 5. 若 status=`archived` 且仍在 `_backlog.yml` 中：

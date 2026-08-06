@@ -42,11 +42,18 @@ description: "Spec/CR 全局看板，展示 baseline 版本分组、在途 CR �
 | 状态 | 含义 | 数量 |
 |------|------|------|
 | drafting | 需求草稿 | N |
+| requirement-reviewing | 需求评审中 | N |
 | requirement-approved | 需求已审批 | N |
+| tech-designing | 技术设计中 | N |
+| tech-design-review-pending | 待技术评审 | N |
 | tech-design-reviewed | 技术设计已审批 | N |
+| task-breakdown | 任务拆分 | N |
 | developing | 开发中 | N |
 | code-reviewing | 代码评审中 | N |
+| code-approved | 代码已审批 | N |
+| merging | 合并中 | N |
 | writing-back | 回写中 | N |
+| （终态）archived / rejected / withdrawn | 已归档 / 已拒绝 / 已撤回 | N |
 
 **版本分组**（按 `specs/_index.yml#features[].since` 与 CR `target-version` 聚合）：
 

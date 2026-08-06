@@ -88,7 +88,7 @@ reviews:
 
 ### Step 5 — 更新 CR status
 
-- 若评审通过（无 blocker）：调用 `crctl advance --to requirement-reviewing，`trigger=review-requirement`，`expected_current_status=[drafting, requirement-reviewing]`）将 status 推进到 `requirement-reviewing`，允许进入 `human_approval`
+- 若评审通过（无 blocker）：调用 `crctl advance --to requirement-reviewing --trigger review-requirement` 将 status 推进到 `requirement-reviewing`，允许进入 `human_approval`（省略 `--expect`：状态机声明 `drafting→requirement-reviewing` 与 `requirement-reviewing→requirement-reviewing` 两条合法转换，单值写死会误拒合法自环；省略后 `findTransition` 仍拦非法转换）
 - 若有 blocker：保持或回退到 `drafting`，输出 `repair-target=write-requirement-prd`、`repair-instructions` 与 blocker 列表，pipeline 自动带 `review_feedback` 回到 PRD 修复节点；不得进入 `human_approval`
 
 ### Step 6 — 输出摘要

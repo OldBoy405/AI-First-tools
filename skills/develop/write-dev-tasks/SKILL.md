@@ -76,7 +76,7 @@ created: {YYYY-MM-DDTHH:mm:ss+08:00}
 
 ### Step 5 — 推进 CR status 并 commit
 
-- `crctl advance --to task-breakdown，`trigger=write-dev-tasks`，`expected_current_status=tech-design-reviewed`）
+- `crctl advance --to task-breakdown --trigger write-dev-tasks --expect tech-design-reviewed`
 - Commit：`crctl git commit --template task-breakdown -m "{N} tasks" --cwd <worktree>`（S10）
 
 ### Step 6 — 输出摘要

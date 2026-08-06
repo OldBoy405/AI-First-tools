@@ -36,4 +36,4 @@ permission:
 
 | 用户意图 | 调用 Skill |
 |---------|-----------|
-| 写入完成后校验 | `skills/validate-doc.md` |
+| 写入完成后校验 | `tools/skills/shared/validate-doc/SKILL.md` |

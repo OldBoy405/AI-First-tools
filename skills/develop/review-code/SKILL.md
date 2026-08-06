@@ -1,6 +1,5 @@
 ---
 name: review-code
-<!-- lint-prompts:ignore --> 评审校验说明：只读 test-report 的 status 字段
 
 description: 读取 CR 代码 worktree 的代码 diff、验证日志、change-requests/{CR-ID}/sdd.md、tasks/* 和 test-report.md 执行代码评审；未通过时回到 implement-code 自修复，通过后推进到 code-reviewing。
 ---
@@ -94,8 +93,8 @@ Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项
 ### Step 5 — 更新 traceability.yml 并推进 status
 
 - 在 `change-requests/{cr_id}/traceability.yml` 写入 `reviews.code` 引用（review-loop 轮次记账已由 `crctl review-record --bump-attempt` 级联完成，见 Step 4）
-- verdict=pass 且 blockers 为空且 `test-report.status=pass` → 调用 `crctl advance --to code-reviewing，`trigger=review-code`，`expected_current_status=developing`），允许进入 `human_approval`
-- verdict=block、blockers 非空或 `test-report.status=block` → 调用 `crctl advance --to developing，`trigger=review-code:block -> implement-code`，`expected_current_status=developing`），输出 `repair-target=implement-code`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到代码实现节点；不得进入 `human_approval`
+- verdict=pass 且 blockers 为空且 `test-report.status=pass` → 调用 `crctl advance --to code-reviewing --trigger review-code --expect developing`，允许进入 `human_approval`
+- verdict=block、blockers 非空或 `test-report.status=block` → 调用 `crctl advance --to developing --trigger "review-code:block -> implement-code" --expect developing`，输出 `repair-target=implement-code`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到代码实现节点；不得进入 `human_approval`
 
 ### Step 6 — 输出摘要
 

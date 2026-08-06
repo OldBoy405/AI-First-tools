@@ -63,7 +63,7 @@ crctl git commit --template writeback -m "PRD/SDD 增量回写 specs/{spec_id} v
 
 ### Step 4 — 更新 CR status
 
-调用 `crctl advance --to writing-back，`trigger=writeback-prd-sdd`，`expected_current_status=merging`
+调用 `crctl advance --to writing-back --trigger writeback-prd-sdd --expect merging`
 
 ### Step 5 — 输出摘要
 

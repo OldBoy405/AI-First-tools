@@ -69,7 +69,7 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 ### Step 4 — 更新 traceability.yml 并处理 status
 
 - 通过评审（无 blocker）→ 保持 status=`tech-design-review-pending`，允许进入 `human_approval`
-- 有 blocker → 调用 `crctl advance --to tech-designing，`trigger=review-tech-design:block -> write-tech-design`，`expected_current_status=tech-design-review-pending`），输出 `repair-target=write-tech-design`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到 SDD 修订节点；不得进入 `human_approval`
+- 有 blocker → 调用 `crctl advance --to tech-designing --trigger "review-tech-design:block -> write-tech-design" --expect tech-design-review-pending`，输出 `repair-target=write-tech-design`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到 SDD 修订节点；不得进入 `human_approval`
 
 ### Step 5 — 输出摘要
 

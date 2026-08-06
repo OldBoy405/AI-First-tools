@@ -15,7 +15,7 @@ description: 按 dir-graph.yaml repositories 动态解析参与仓，通过 dry-
 
 安全合并所有 active repo 的同名分支（`requirement/CR-YYYY-NNN`）到各自 trunk。参与仓、trunk 与 worktree 路径必须从 `dir-graph.yaml#repositories` 和 CR workspace resolver 动态解析，不得硬编码仓库名或主干名。
 
-本 Skill 必须采用“两阶段合并”：
+本 Skill 必须采用“四阶段合并”：
 1. **预检阶段**：所有 repo 先完成远端新鲜度检查与 `merge-tree --write-tree` dry-run，不修改任何 trunk。
 2. **本地合并阶段**：所有 repo 使用 `merge --no-commit --no-ff` 完成本地合并准备；只有全部 repo 都成功后才逐仓 commit。
 3. **远端发布阶段**：只有全部 repo 本地 merge commit 都已生成，且所有 origin trunk 仍与预检 SHA 一致，才允许 push。全部 push 成功后，使用 `crctl advance --to merging --embedded` 校验 `code-approved → merging`（见 Step 4 详细调用），并把状态与 `merge-commits[]` 放在同一 metadata commit 中发布。
@@ -157,7 +157,7 @@ push 前再次对每个 repo 执行：
 
 全部 repo push 成功后，必须将每个 repo 的 merge SHA 与 CR status 在同一知识库 commit 中发布，避免 trunk 已合并但 CR 元数据缺失：
 
-1. 调用 `crctl advance --to merging、`trigger=merge-feature-branch`、`expected_current_status=code-approved`、`commit_mode=embedded`，只获取已校验的 status patch，不单独 commit。
+1. 调用 `crctl advance --to merging --trigger merge-feature-branch --expect code-approved --embedded`，只获取已校验的 status patch，不单独 commit。
 <!-- lint-prompts:ignore --> 描述性：合并流程说明
 2. 对每个 repo 调用 `crctl merge-metadata <CR-ID> --repo {repo.id} --trunk {repo.trunk} --sha {merge-sha} --workspace {knowledgeBaseRepo.path}`，把 merge SHA 追加进 `_backlog.yml` 对应条目的 `merge-commits` 字段（幂等去重、保序，CAS + 审计）。条目最小字段集为 `{repo, trunk, sha}`（SDD §0 修订：结构化条目而非裸 sha）；如需分支/时间信息由后续字段按需扩展。**禁止会话内手写/现写脚本编辑 `_backlog.yml` 的 `merge-commits`**（纪律 #7）：该字段唯一写入通道是 `crctl merge-metadata`。
 
