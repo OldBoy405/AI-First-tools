@@ -24,13 +24,15 @@ scope: drift-governance
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
 | `advance` | 校验 `(current, next, trigger)` 合法转换 + 目标状态门禁，全过才写 `cr.md` frontmatter 并 commit；否则非零退出且**不写文件**。支持 `--embedded`（历史 commit_mode=embedded 语义） | crctl advance |
 | `gate` | 只校验不写，供预检与 CI 复用 | pipeline JSON `passCondition` |
-| `approve` | **仅限交互式终端**的人工审批：展示证据摘要 → 人类确认 → 写 `approval.yml`（`via: crctl-approve`）→ 级联 advance。非 TTY 调用一律返回 `APPROVAL_REQUIRES_HUMAN`，无任何旁路参数或环境变量 | `human_approval` + `approve-*` |
+| `approve` | **仅限交互式终端**的人工审批：展示证据摘要 → 人类确认 → 写 `approval.yml`（`via: crctl-approve`）→ 级联 advance；回答非 yes 时自动执行状态机 `{stage}:reject` 回退转换（错误码 `APPROVAL_DECLINED_ROLLED_BACK`，extra 含 rolledBackTo/rerunHint；CR-2026-022 FR-12）。非 TTY 调用一律返回 `APPROVAL_REQUIRES_HUMAN`；`--grant` 为 Ed25519 签名授权（服务端人在环），与 TTY 二选一、都不可绕过审批本身 | `human_approval` + `approve-*` |
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
 | `validate` | 受控产物 schema 校验：cr.md / _backlog.yml 的 owners 三角色（id + assigned-at）、review-annotations 的 verdict 枚举与 blockers 结构、test-report / approval / traceability | `validate-doc` |
 | `attempt` | review-loop 轮次唯一记账点（`change-requests/{CR-ID}/review-loop.yml`），maxAttempts 从 pipeline JSON 读取，超限返回 `LOOP_EXHAUSTED` | `reviewLoop.maxAttempts` |
 | `test` | 代执行 lint/test/build 命令，按真实退出码生成 `test-report.md` 骨架（status/tester/commands 段模型不得改写），原始输出落盘 `test-evidence/` | `write-test-report` 证据部分 |
-| `next` | 按 status + 评审/测试证据输出下一个该跑的节点；blocker 未清空**绝不**返回 `human_approval` | 最小 pipeline-runner |
-| `git` | controlled-shell 白名单的 IDE 运行时适配器：按「子命令 + 形态 + 调用者」三元放行，越界返回 `FORBIDDEN_SUBCOMMAND`，全量审计日志 | `controlled-shell` |
+| `next` | 按 status + 评审/测试证据输出下一个该跑的节点；blocker 未清空**绝不**返回 `human_approval`；writing-back 态改查 specs/{spec}/traceability.yml（FR-21） | 最小 pipeline-runner |
+| `cr-init` | 唯一权威原子分配与建档：`--title <t> --owner-requirement <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]`（三注册元信息旗标一次写齐，CR-2026-022 FR-9） | requirement-register |
+| `checkpoint-add` | 逐仓记录推送 checkpoint（remote-ref/last-push/checkpoints）；前置态 = 状态机派生全非终态（FR-11） | push-progress |
+| `git` | controlled-shell 白名单的 IDE 运行时适配器：按「子命令 + 形态 + 调用者」三元放行，越界返回 `FORBIDDEN_SUBCOMMAND`，全量审计日志；`commit --template` 支持 `--cr` 显式直传（FR-10） | `controlled-shell` |
 
 ## 单一事实源约定（重要）
 

@@ -109,5 +109,6 @@ crctl（scripts/crctl.mjs）          # 状态与账本的唯一写入执行器�
 
 - 触发修订的变更：新增/删除 skills 顶层分组、Pipeline 结构性变化、crctl 新增写入子命令、状态机口径变化、否决一个重大方案。
   - 已登记：CR-2026-021（T1.3）crctl 新增 8 写 + 2 只读 + 1 处 git commit 扩展子命令（review-record/review-note/checkpoint-add/owner-set/backlog-set/inbox-emit/cr-init/task allocate + worktree-path/report/cr-metrics + --template），§3 代码地图已同步；不改 §5/§6 判据（全部合既有不变量）。
+  - 已登记：CR-2026-022 状态机口径 23→25 声明 / 45→47 展开（新增两条 reject 转换：approve-requirement:reject -> write-requirement-prd、approve-dev-start:reject -> write-dev-plan）；cr-init 补 --summary/--source/--target-version 旗标；git commit --template 补 --cr 旗标且生成形态对齐 commit 白名单；checkpoint-add LEGAL 改状态机派生（全非终态）；approve decline 分支执行状态机 reject 回退（REJECT_ROLLBACK 映射）；gates.json 删 review-planning-report 死配置；§5 不变量 5 口径已同步（25/47）。
 - 普通 Skill 文档措辞调整、单个 CR 的功能改动**不需要**改本文档——若发现必须改，说明该改动是架构级变更，先过设计评审。
 - 评审对照：`review-tech-design` 的"架构合理性"维度逐条对照 §4/§5/§6 判定。
