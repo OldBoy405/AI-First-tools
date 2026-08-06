@@ -96,7 +96,7 @@ insights:
 
 ### Step 5 — 输出摘要
 
-输出 raw insight 路径、提取出的机会点数量、待验证问题数量，以及下一步 `write-insight-brief` 的输入路径。
+输出 raw insight 路径、提取出的机会点数量、待验证问题数量；若本次生成了简报（见 Step 4 附加区块），一并输出简报路径与推进后的 `_index.yml` 状态。
 
 ## 错误处理
 

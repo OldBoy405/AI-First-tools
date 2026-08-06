@@ -44,7 +44,7 @@
       "type": "boolean",
       "required": false,
       "default": false,
-      "description": "勾选后跳过 run-competitive-analysis 节点"
+      "description": "勾选后跳过竞品分析节点"
     },
     {
       "key": "skip_product",
@@ -78,7 +78,7 @@
       "id": "00000000-0000-0000-0010-000000000003",
       "kind": "skill",
       "label": "竞品分析",
-      "ref": "run-competitive-analysis",
+      "ref": "write-competitive-report",
       "prompt": "若 {{inputs.skip_competitive}}=true 则直接在 node-3.md 输出 SKIPPED 并 return。\n否则执行竞品分析：经 fetch-competitor-updates 采集 + write-competitive-report 生成最新竞品报告（run-competitive-analysis 已合并下线，FR-32，CR-2026-022），节点输出引用路径。",
       "onFail": "skip",
       "timeoutMinutes": 20

@@ -63,7 +63,7 @@ summary: "{规划摘要第一段，30-80 字的执行摘要（从报告正文首
 1. **规划摘要**（Executive Summary，3-5 句）
 2. **调研背景** — 触发本次规划的关键事件 / 数据
 3. **用户反馈洞察** — 引用 analyze-user-feedback 输出（或"已跳过"）
-4. **市场与竞品信号** — 引用 conduct-market-research + run-competitive-analysis 输出
+4. **市场与竞品信号** — 引用 conduct-market-research + write-competitive-report 输出（含原 run-competitive-analysis Step4 规划启示摘要，FR-32 已并入本章节）
 5. **当前产品现状** — 引用 analyze-current-product 输出
 6. **规划建议** — 综合以上分析，给出 P0/P1/P2 优先级建议列表
 7. **路标建议** — 版本节奏建议（哪些功能进哪个版本）
