@@ -1461,6 +1461,33 @@ test('cr-init：缺 --title / --owner-requirement → BAD_ARGS', () => {
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+// ── CR-2026-022 TASK-03：cr-init 注册元信息旗标（FR-9）──
+
+test('cr-init：--summary/--source/--target-version 一次写齐，缺省值与旧硬编码同义（AC-4）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-2026-001', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-2026-001', 'drafting');
+    writeFileSync(path.join(ws, 'change-requests', '_index.yml'), 'change-requests:\n  - id: CR-2026-001\n    title: x\n    status: drafting\n    created: "2026-08-01T00:00:00+08:00"\n');
+    // 带旗标：三字段一次原子写齐（cr.md + _backlog）
+    const r = runCrctl(['cr-init', '--title', 'T', '--owner-requirement', 'Ray', '--year', '2026', '--summary', 'S: 含冒号', '--source', 'docs/analysis/x.md', '--target-version', '0.99', '--workspace', ws]);
+    assert.equal(r.status, 0, r.stderr);
+    const crMd = readFileSync(path.join(ws, 'change-requests', 'CR-2026-002', 'cr.md'), 'utf8');
+    assert.ok(crMd.includes('summary: "S: 含冒号"'), 'summary 引号包裹写入 cr.md（含冒号不破坏 YAML）');
+    assert.ok(crMd.includes('source: docs/analysis/x.md'), 'source 写入 cr.md');
+    assert.ok(crMd.includes('target-version: 0.99'), 'target-version 写入 cr.md');
+    const backlog = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(backlog.includes('summary: "S: 含冒号"') && backlog.includes('source: docs/analysis/x.md') && backlog.includes('target-version: 0.99'), '_backlog 三字段同步');
+    // 不带旗标：缺省值与旧硬编码同义（向后兼容）
+    const r2 = runCrctl(['cr-init', '--title', 'T2', '--owner-requirement', 'Ray', '--year', '2026', '--workspace', ws]);
+    assert.equal(r2.status, 0, r2.stderr);
+    const crMd2 = readFileSync(path.join(ws, 'change-requests', 'CR-2026-003', 'cr.md'), 'utf8');
+    assert.ok(crMd2.includes('summary: ""'), '缺省 summary 为空串');
+    assert.ok(crMd2.includes('source: manual'), '缺省 source=manual');
+    assert.ok(crMd2.includes('target-version: tbd'), '缺省 target-version=tbd');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
 // ── CR-2026-021 TASK-07：task allocate（S7，TASK-ID CAS 分配）──
 
 test('task allocate：顺序分配 TASK-ID + slug 兜底命名（AC-5）', () => {

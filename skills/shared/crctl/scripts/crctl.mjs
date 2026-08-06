@@ -1709,19 +1709,24 @@ function scanMaxCrNumber(ws, year) {
 function formatCrId(year, n) { return `CR-${year}-${String(n).padStart(3, '0')}`; }
 
 function cmdCrInit(ws, gates, flags) {
-  if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> [--year Y]');
+  if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]');
   if (!flags['owner-requirement']) fail('BAD_ARGS', 'cr-init 需要 --owner-requirement <id>（被指派人业务身份）');
   const year = flags.year || String(new Date().getFullYear());
   const cr = formatCrId(year, scanMaxCrNumber(ws, year) + 1);
   const now = nowIso();
   const by = identity(ws);
   const ownerId = String(flags['owner-requirement']);
+  // FR-9（CR-2026-022）：注册元信息可选旗标，缺省值与旧硬编码同义（summary="" / source=manual / target-version=tbd），向后兼容
+  const yamlScalar = (v) => (/^[\w./-]+$/.test(String(v)) ? String(v) : `"${String(v).replaceAll('"', '\\"')}"`);
+  const summary = flags.summary ?? '';
+  const source = flags.source ?? 'manual';
+  const tv = flags['target-version'] ?? 'tbd';
   // cr.md 全量 frontmatter（owners/owner-history/时间戳全 crctl 生成）
   const fm = [
     '---',
     `id: ${cr}`,
     `title: ${flags.title.replaceAll('"', '\\"')}`,
-    'summary: ""',
+    `summary: ${yamlScalar(summary)}`,
     `owner: ${ownerId}`,
     'owners:',
     `  requirement:`,
@@ -1733,8 +1738,8 @@ function cmdCrInit(ws, gates, flags) {
     `  test:`,
     `    id: ${ownerId}`,
     `    assigned-at: "${now}"`,
-    'target-version: tbd',
-    'source: manual',
+    `target-version: ${yamlScalar(tv)}`,
+    `source: ${yamlScalar(source)}`,
     'status: drafting',
     `created: "${now}"`,
     `updated: "${now}"`,
@@ -1756,7 +1761,7 @@ function cmdCrInit(ws, gates, flags) {
   const backlogEntry = [
     `  - id: ${cr}`,
     `    title: ${flags.title.replaceAll('"', '\\"')}`,
-    '    summary: ""',
+    `    summary: ${yamlScalar(summary)}`,
     `    owner: ${ownerId}`,
     '    owners:',
     `      requirement:`,
@@ -1768,8 +1773,8 @@ function cmdCrInit(ws, gates, flags) {
     `      test:`,
     `        id: ${ownerId}`,
     `        assigned-at: "${now}"`,
-    '    target-version: tbd',
-    '    source: manual',
+    `    target-version: ${yamlScalar(tv)}`,
+    `    source: ${yamlScalar(source)}`,
     '    prd-path: ""',
     `    created: "${now}"`,
     `    updated: "${now}"`,
@@ -2276,7 +2281,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   _backlog owners.{role} 指派（非终态）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
-  crctl cr-init     --title <t> --owner-requirement <id> [--year Y]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记
+  crctl cr-init     --title <t> --owner-requirement <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
   crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
   crctl report | crctl cr-metrics [--period <N>d]   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
