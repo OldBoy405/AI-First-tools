@@ -423,7 +423,8 @@ flowchart TD
   D7 --> D7G{"测试证据通过?"}
   D7G -- "否：review_feedback" --> D6
   D7G -- "是" --> D8["推送代码 checkpoint<br/>push-progress"]
-  D8 --> D9["代码评审<br/>review-code"]
+  D8 --> D8S["选择代码评审 LLM<br/>human_approval"]
+  D8S --> D9["代码评审<br/>review-code"]
   D9 --> D9G{"代码评审通过?"}
   D9G -- "否：review_feedback" --> D6
   D9G -- "是" --> D10["代码审批<br/>human_approval"]
@@ -451,6 +452,7 @@ flowchart TD
 | 代码编写 | PRD、SDD、TASK、repo worktree map、coding runtime、`owners.development.id`、可选 `review_feedback` | 按 TASK 在 CR worktree 中实现代码；若为回修轮次，则只修复测试或代码评审指出的问题 | 代码变更、验证命令与结果、runtime 信息、fixed-blockers | 否 |
 | 生成测试报告 | `implement-code` 输出、TASK 验收条件、`owners.test.id` | 汇总 lint/test/build、TASK 覆盖和未覆盖风险；block 时回到代码实现 | `test-report.md`、`traceability.yml#tests` | 否 |
 | 推送代码 checkpoint | 代码变更、`test-report.md`、traceability | 将代码和测试证据统一保存到远端分支 | 各 repo checkpoint SHA | 否 |
+| 选择代码评审 LLM | 统一 checkpoint 结果、触发参数 `review_llm` | 暂停等待人工选择执行评审的模型/runner；已指定 `review_llm` 时快速确认 | 无状态写入 | 否 |
 | 代码评审 | 真实 diff、changed files、提交记录、`sdd.md`、TASK、`test-report.md` | 检查实现对齐、工程质量、安全性和测试证据可信度；block 时回到代码实现 | `review-annotations/code.yml`、通过时 status=`code-reviewing`，否则回到 `developing` | 否 |
 | 代码审批 | 代码评审记录、测试报告、`owners.development.id`、`owners.test.id` | 仅在代码评审 `verdict=pass`、`blockers=[]` 且 `test-report.status=pass` 后人工确认代码可以进入回写 | 通过或驳回结论 | 否 |
 | 记录代码审批 | `code.yml`、`test-report.md`、`owners.development.id` | 写入代码审批证据并推进状态，并校验测试报告 tester 与 `owners.test.id` 对齐 | `approval.yml#code`、status=`code-approved` | 否 |

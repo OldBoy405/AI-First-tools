@@ -54,13 +54,13 @@ pipeline-templates:
     name: 代码编写
     scope: product-dev
     trigger: coding
-    nodes: 12
+    nodes: 13
     status: active
     brief: >-
       代码编写流水线：根据已评审 SDD 生成 plan.md → 拆分 TASK
       → 远端 checkpoint（可选）→ 人工确认进入 developing
       → 根据配置调用 code generation runtime/CLI 编码
-      → 生成测试报告 → 统一 checkpoint → 代码评审 → 代码审批（人工）→ approve-code 状态推进
+      → 生成测试报告 → 统一 checkpoint → 选择代码评审 LLM（人工确认） → 代码评审 → 代码审批（人工）→ approve-code 状态推进
       → 审批结果 checkpoint。
       前置 CR status=tech-design-reviewed，审批后 CR status=code-approved，可进入 writeback。
     added: "2026-05-18"
