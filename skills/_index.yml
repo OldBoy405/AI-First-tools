@@ -17,10 +17,6 @@ skills:
     brief: "调研目标市场现状，生成市场洞察报告写入 docs/market-insights/"
     status: active
 
-  - id: run-competitive-analysis
-    path: ./planning/run-competitive-analysis/SKILL.md
-    brief: "薄封装竞品分析流水线：委托 fetch-competitor-updates + write-competitive-report"
-    status: active
 
   - id: analyze-current-product
     path: ./planning/analyze-current-product/SKILL.md
@@ -52,10 +48,6 @@ skills:
     brief: "将市场/用户/竞品洞察原始素材提取为 raw insight 并写入 docs/market-insights/"
     status: active
 
-  - id: write-insight-brief
-    path: ./planning/write-insight-brief/SKILL.md
-    brief: "基于 raw insight 生成产品洞察简报，并推进 docs/market-insights/_index.yml 状态"
-    status: active
 
   # 规划期通用（原有，保留）
   - id: gather-product-context

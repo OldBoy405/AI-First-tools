@@ -46,8 +46,8 @@
       "id": "00000000-0000-0000-0003-000000000002",
       "kind": "skill",
       "label": "撰写洞察简报",
-      "ref": "write-insight-brief",
-      "prompt": "读取 node-1.md 中的 raw insight 文件路径，执行 write-insight-brief：\n- source: {从 node-1.md 提取的 raw insight 文件路径}\n- target_version: {{inputs.target_version}}\n- owner: product-owner\n\n撰写一份产品洞察简报（≤ 800 字），格式：执行摘要 → 核心机会 → 风险与不确定性 → 建议关注的需求方向 → 待人工决策问题。写入 docs/market-insights/brief-{YYYY-MM-DD}-{slug}.md，并将 docs/market-insights/_index.yml 中对应条目 status 推进为 briefed。在 node-2.md 输出 brief 文件路径。",
+      "ref": "extract-market-insight",
+      "prompt": "读取 node-1.md 中的 raw insight 文件路径，再次执行 extract-market-insight 的简报附加区块（FR-32，CR-2026-022：原 write-insight-brief 已合并下线）：\n- source: {从 node-1.md 提取的 raw insight 文件路径}\n- target_version: {{inputs.target_version}}\n- owner: product-owner\n\n撰写一份产品洞察简报（≤ 800 字），格式：执行摘要 → 核心机会 → 风险与不确定性 → 建议关注的需求方向 → 待人工决策问题。写入 docs/market-insights/brief-{YYYY-MM-DD}-{slug}.md，并将 docs/market-insights/_index.yml 中对应条目 status 推进为 briefed。在 node-2.md 输出 brief 文件路径。",
       "onFail": "abort",
       "timeoutMinutes": 10
     },

@@ -79,7 +79,7 @@
       "kind": "skill",
       "label": "竞品分析",
       "ref": "run-competitive-analysis",
-      "prompt": "若 {{inputs.skip_competitive}}=true 则直接在 node-3.md 输出 SKIPPED 并 return。\n否则执行 run-competitive-analysis：串联 fetch-competitor-updates 与 write-competitive-report 生成最新竞品报告，节点输出引用路径。",
+      "prompt": "若 {{inputs.skip_competitive}}=true 则直接在 node-3.md 输出 SKIPPED 并 return。\n否则执行竞品分析：经 fetch-competitor-updates 采集 + write-competitive-report 生成最新竞品报告（run-competitive-analysis 已合并下线，FR-32，CR-2026-022），节点输出引用路径。",
       "onFail": "skip",
       "timeoutMinutes": 20
     },

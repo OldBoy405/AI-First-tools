@@ -24,14 +24,12 @@ actors:
     owns:
       - analyze-user-feedback
       - conduct-market-research
-      - run-competitive-analysis
       - analyze-current-product
       - write-planning-report
       - review-planning-report
       - write-roadmap
       - write-planning-entry
       - extract-market-insight
-      - write-insight-brief
       - gather-product-context
       - planning-draft
       - record-idea
@@ -153,7 +151,6 @@ actors:
       - engineering-docs
       - validate-doc
       - record-idea
-      - write-insight-brief
     external: []
     forbidden:
       - requirement-register
@@ -235,7 +232,7 @@ external-skills:
 known-gaps:
   - id: knowledge-agent-write-skills
     owner: knowledge-agent
-    description: "knowledge-agent 声明 tech-note-write / insight-write，但 phase0 尚未提供专属写入 Skill；当前只能复用 engineering-docs、record-idea 与 write-insight-brief。"
+    description: "knowledge-agent 声明 tech-note-write / insight-write，但 phase0 尚未提供专属写入 Skill；当前只能复用 engineering-docs 与 record-idea。"
   - id: customer-support-feedback-write
     owner: customer-support-agent
     description: "customer-support-agent 声明 unresolved-feedback-record，但 phase0 尚未提供 record-feedback Skill；落盘反馈应在后续补专用 Skill 或绑定到目标系统工单入口。"

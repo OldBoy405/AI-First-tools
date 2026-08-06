@@ -131,7 +131,7 @@ flowchart TD
 
 | 缺口 | 当前处理 | 后续建议 |
 |------|----------|----------|
-| `knowledge-agent` 写入 Skill 不足 | 只能复用 `engineering-docs`、`validate-doc`、`record-idea`、`write-insight-brief` | 补 `write-tech-note` / `write-knowledge-entry` 或收敛能力声明 |
+| `knowledge-agent` 写入 Skill 不足 | 只能复用 `engineering-docs`、`validate-doc`、`record-idea` | 补 `write-tech-note` / `write-knowledge-entry` 或收敛能力声明 |
 | `customer-support-agent` 反馈落盘缺 Skill | 当前只允许读 specs 和有限代码，反馈写入缺专用 Skill | 补 `record-feedback` 或接入目标系统工单入口 |
 | 回写期没有独立 primary Agent | 由 `system-orchestrator` 编排 writeback / CR / delivery Skill，`spec-agent` 仅做回写后只读核对 | 若需要人工入口，再新增 `writeback-agent` |
 
@@ -236,7 +236,7 @@ stateDiagram-v2
 ```mermaid
 flowchart TD
   P1["用户反馈分析<br/>analyze-user-feedback"] --> P2["市场调研<br/>conduct-market-research"]
-  P2 --> P3["竞品分析<br/>run-competitive-analysis"]
+  P2 --> P3["竞品分析<br/>write-competitive-report"]
   P3 --> P4["当前产品分析<br/>analyze-current-product"]
   P4 --> P5["生成规划报告<br/>write-planning-report"]
   P5 --> P6["AI 评审<br/>review-planning-report"]
@@ -276,7 +276,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  I1["提取关键信号<br/>extract-market-insight"] --> I2["撰写洞察简报<br/>write-insight-brief"]
+  I1["提取关键信号<br/>extract-market-insight"] --> I2["简报附加区块（合并）"]
   I2 --> I3["生成规划建议草稿<br/>planning-draft"]
   I3 --> I4["人工确认<br/>human_approval"]
   I4 --> I5["写入规划知识库<br/>write-planning-entry"]

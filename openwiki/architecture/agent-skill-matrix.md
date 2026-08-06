@@ -26,7 +26,7 @@ The permission matrix is consumed by the platform orchestrator and by [`crctl`](
 
 | Agent | Scope | Owns These Skills |
 |-------|-------|-------------------|
-| **product-planning-agent** | Product planning & market research | `analyze-user-feedback`, `conduct-market-research`, `run-competitive-analysis`, `analyze-current-product`, `write-planning-report`, `review-planning-report`, `write-roadmap`, `write-planning-entry`, `extract-market-insight`, `write-insight-brief`, `gather-product-context`, `planning-draft`, `record-idea`, `record-adr`, `focus-briefing` |
+| **product-planning-agent** | Product planning & market research | `analyze-user-feedback`, `conduct-market-research`, `analyze-current-product`, `write-planning-report`, `review-planning-report`, `write-roadmap`, `write-planning-entry`, `extract-market-insight`, `gather-product-context`, `planning-draft`, `record-idea`, `record-adr`, `focus-briefing` |
 | **requirement-writer** | CR registration & PRD | `requirement-register`, `write-requirement-prd`, `review-requirement`, `approve-requirement` |
 | **dev-agent** | Design through code approval | `write-tech-design`, `review-tech-design`, `approve-tech-design`, `write-dev-plan`, `write-dev-tasks`, `approve-dev-start`, `implement-code`, `write-test-report`, `review-code`, `approve-code` |
 | **competitive-analyst-agent** | Competitive intelligence | `fetch-competitor-updates`, `write-competitive-report`, `report-to-planning-suggestion` |
@@ -93,7 +93,7 @@ These checks run in `.githooks/pre-commit` (local) and `.github/workflows/check-
 
 | Gap | Current State | Suggested Fix |
 |-----|--------------|---------------|
-| `knowledge-agent` write Skills insufficient | Can only reuse `engineering-docs`, `validate-doc`, `record-idea`, `record-adr`, `write-insight-brief` | Add `write-tech-note` / `write-knowledge-entry` or constrain to read-only |
+| `knowledge-agent` write Skills insufficient | Can only reuse `engineering-docs`, `validate-doc`, `record-idea`, `record-adr` | Add `write-tech-note` / `write-knowledge-entry` or constrain to read-only |
 | `customer-support-agent` no feedback write Skill | Can only read specs; feedback write has no dedicated Skill | Add `record-feedback` or connect to external ticketing |
 | No independent writeback agent | `feature-writeback` is orchestrated by `system-orchestrator`; `spec-agent` only does post-writeback read verification | Add `writeback-agent` if a human entry point is needed |
 

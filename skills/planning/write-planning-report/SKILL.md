@@ -32,7 +32,9 @@ description: 汇总调研期所有分析输出，生成完整产品规划报告�
 
 ### Step 1 — 汇总上游输入
 
-读取对话上下文中的所有上游节点输出（analyze-user-feedback / conduct-market-research / run-competitive-analysis / analyze-current-product），将可用输出合并为规划报告的输入素材。若某节点标记为 SKIPPED，则对应章节填写"本次调研跳过此维度"。
+读取对话上下文中的所有上游节点输出（analyze-user-feedback / conduct-market-research / analyze-current-product），将可用输出合并为规划报告的输入素材。若某节点标记为 SKIPPED，则对应章节填写"本次调研跳过此维度"。
+
+**市场与竞品信号章节（FR-32，CR-2026-022：run-competitive-analysis 合并下线）**：竞品分析摘要（原 run-competitive-analysis Step4「规划启示摘要」）直接并入本章节——竞品动态 → 我方空白点 → 受影响版本主题/优先级 → 建议关注方向，由本 Skill 在生成报告时从 `docs/competitive/reports/*.md` 与上游节点输出提炼。
 
 ### Step 2 — 生成规划报告
 

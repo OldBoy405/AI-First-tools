@@ -74,6 +74,10 @@ source_kind: pasted
 5. 可信度与局限。
 6. 待验证问题。
 
+### Step 3.5 — 简报附加区块（FR-32，CR-2026-022：write-insight-brief 合并下线，增量能力并入本 Skill）
+
+当调用方请求简报（原 write-insight-brief 场景）时，在正文后附加输出一份 ≤800 字的产品洞察简报：执行摘要 → 核心机会 → 风险与不确定性 → 建议关注方向 → 待人工决策问题；并将 `docs/market-insights/_index.yml` 对应条目 status 从 `raw` 推进为 `briefed`（生命周期 raw → briefed → published）。
+
 ### Step 4 — 维护索引
 
 在 `docs/market-insights/_index.yml` 中追加或更新对应条目：

@@ -676,14 +676,12 @@ AI 会告诉你具体的 blocker（如"接口缺少错误码定义"），你需�
 | 聚合全量产品知识 | "帮我整理当前产品的全貌，包括 specs、在途 CR、竞品、市场洞察" | `gather-product-context` |
 | 分析用户反馈 | "帮我分析 docs/feedback/ 下的用户反馈，归纳高频诉求和痛点" | `analyze-user-feedback` |
 | 市场调研 | "帮我调研 XX 市场的现状，生成市场洞察报告" | `conduct-market-research` |
-| 竞品分析 | "帮我分析竞品 XX 的情况，串联抓取动态和生成报告" | `run-competitive-analysis` |
 | 分析当前产品 | "帮我分析当前产品的现状，包括 specs 基线、在途 CR 和指标" | `analyze-current-product` |
 | 生成规划报告 | "综合各项分析，帮我生成产品规划报告" | `write-planning-report` |
 | 评审规划报告 | "帮我评审这份产品规划报告，检查依据、建议和待决策项" | `review-planning-report` |
 | 更新路线图 | "帮我把已审批的规划条目写入 roadmap" | `write-roadmap` |
 | 写入规划知识库 | "把这条已审批的规划建议落盘到 docs/product-planning/" | `write-planning-entry` |
 | 提取市场洞察 | "从这份原始素材中提取市场/用户/竞品洞察，写入 raw insight" | `extract-market-insight` |
-| 写洞察简报 | "基于这条 raw insight，生成产品洞察简报" | `write-insight-brief` |
 | 生成规划草稿 | "帮我生成一份产品规划文档草稿，不落盘只预览" | `planning-draft` |
 | 快速记录想法 | "帮我把这个产品想法记录到 docs/ideas/" | `record-idea` |
 | 当前焦点简报 | "帮我生成当前焦点版本和在途 CR 的简报摘要" | `focus-briefing` |

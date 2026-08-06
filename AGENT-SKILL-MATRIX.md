@@ -19,7 +19,7 @@
 
 | Actor | 主责 Skill |
 |---|---|
-| `product-planning-agent` | `analyze-user-feedback`, `conduct-market-research`, `run-competitive-analysis`, `analyze-current-product`, `write-planning-report`, `review-planning-report`, `write-roadmap`, `write-planning-entry`, `extract-market-insight`, `write-insight-brief`, `gather-product-context`, `planning-draft`, `record-idea`, `focus-briefing` |
+| `product-planning-agent` | `analyze-user-feedback`, `conduct-market-research`, `analyze-current-product`, `write-planning-report`, `review-planning-report`, `write-roadmap`, `write-planning-entry`, `extract-market-insight`, `gather-product-context`, `planning-draft`, `record-idea`, `focus-briefing` |
 | `requirement-writer` | `requirement-register`, `write-requirement-prd`, `review-requirement`, `approve-requirement` |
 | `dev-agent` | `write-tech-design`, `review-tech-design`, `approve-tech-design`, `write-dev-plan`, `write-dev-tasks`, `approve-dev-start`, `implement-code`, `write-test-report`, `review-code`, `approve-code` |
 | `spec-agent` | `spec-show`, `spec-query`, `spec-dashboard` |
