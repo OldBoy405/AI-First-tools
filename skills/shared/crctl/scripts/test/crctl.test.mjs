@@ -1648,3 +1648,51 @@ test('git commit --template：未知 kind → BAD_ARGS；无法确定 cr → BAD
     assert.equal(r2.stderr.error.code, 'BAD_ARGS');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-022 TASK-04：git commit --template --cr 显式旗标 + 模板形态白名单对齐（FR-10）──
+
+test('git commit --template --cr：master 分支直传已知 CR 号，跳过反向解析（AC-4）', () => {
+  const ws = makeWorkspace();
+  try {
+    const git = initGitWs(ws, 'master');
+    mkdirSync(path.join(ws, 'change-requests', 'CR-2026-009'), { recursive: true });
+    writeFileSync(path.join(ws, 'a.txt'), 'x');
+    git(['add', 'a.txt']);
+    const r = runCrctl(['git', 'commit', '--template', 'register', '--cr', 'CR-2026-009', '-m', 'subject', '--cwd', ws, '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    const msg = git(['log', '--oneline', '-1']);
+    assert.ok(msg.includes('[cr] register CR-2026-009: subject'), 'message=' + msg);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('git commit --template --cr：非法格式与不存在的 CR → BAD_ARGS', () => {
+  const ws = makeWorkspace();
+  try {
+    const git = initGitWs(ws, 'master');
+    writeFileSync(path.join(ws, 'a.txt'), 'x');
+    git(['add', 'a.txt']);
+    const r1 = runCrctl(['git', 'commit', '--template', 'register', '--cr', 'abc', '-m', 'x', '--cwd', ws, '--workspace', ws]);
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'BAD_ARGS');
+    const r2 = runCrctl(['git', 'commit', '--template', 'register', '--cr', 'CR-2026-999', '-m', 'x', '--cwd', ws, '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'BAD_ARGS');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('git commit --template task-breakdown/writeback：生成形态命中 commit 白名单（现场坐实修复）', () => {
+  const ws = makeWorkspace();
+  try {
+    const git = initGitWs(ws, 'requirement/CR-T1');
+    writeFileSync(path.join(ws, 'a.txt'), 'x');
+    git(['add', 'a.txt']);
+    const r1 = runCrctl(['git', 'commit', '--template', 'task-breakdown', '-m', '5 tasks', '--cwd', ws, '--workspace', ws]);
+    assert.equal(r1.status, 0, r1.rawStderr);
+    assert.ok(git(['log', '--oneline', '-1']).includes('[cr] task-breakdown CR-T1: 5 tasks'));
+    writeFileSync(path.join(ws, 'b.txt'), 'y');
+    git(['add', 'b.txt']);
+    const r2 = runCrctl(['git', 'commit', '--template', 'writeback', '-m', '回写', '--cwd', ws, '--workspace', ws]);
+    assert.equal(r2.status, 0, r2.rawStderr);
+    assert.ok(git(['log', '--oneline', '-1']).includes('[cr] writeback CR-T1: 回写'));
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

@@ -65,7 +65,7 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
 ```ts
 <!-- lint-prompts:ignore --> 受控 shell 代码块：runGit = 受控 git 适配器（S10 模板经 crctl git commit）
 await runGit({ subcommand: "add", args: ["change-requests/_backlog.yml", "change-requests/_index.yml", `change-requests/${crId}/cr.md`], cwd: knowledgeBaseRepo.path });
-await runGit({ subcommand: "commit", args: ["--template", "register", "-m", `${crId} ${title}`], cwd: knowledgeBaseRepo.path });  // S10：生成 [cr] register {cr}: {subject}；注册在 trunk（master）提交，分支探测落空，subject 必须含 CR 编号供 resolveTemplateCr 正则兜底
+await runGit({ subcommand: "commit", args: ["--template", "register", "--cr", crId, "-m", title], cwd: knowledgeBaseRepo.path });  // S10（FR-10）：--cr 直传 cr-init 返回的已知 CR 号，跳过分支探测/subject 正则反向解析
 await runGit({ subcommand: "push", args: ["origin", knowledgeBaseRepo.trunk], cwd: knowledgeBaseRepo.path });
 ```
 

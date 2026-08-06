@@ -1950,9 +1950,11 @@ function cmdCrMetrics(ws, gates, flags) {
  * 不改变现有 -m 直传路径的白名单校验（--template 是新增可选分支）。
  */
 const COMMIT_TEMPLATES = {
+  // CR-2026-022 TASK-04：生成形态必须命中 controlled-shell commit 白名单（-m 前缀 wip: | [cr] | merge(）——
+  // task-breakdown/writeback 原 feat()/writeback() 前缀被 FORBIDDEN_SUBCOMMAND 拒绝，统一改 [cr] 前缀（现场坐实：CR-2026-022 任务拆分 commit）
   register: (cr, subject) => `[cr] register ${cr}: ${subject}`,
-  'task-breakdown': (cr, subject) => `feat(${cr}): task breakdown (${subject})`,
-  writeback: (cr, subject) => `writeback(${cr}): ${subject}`,
+  'task-breakdown': (cr, subject) => `[cr] task-breakdown ${cr}: ${subject}`,
+  writeback: (cr, subject) => `[cr] writeback ${cr}: ${subject}`,
 };
 
 function resolveTemplateCr(ws, cwd, subject) {
@@ -1974,7 +1976,17 @@ function applyCommitTemplate(ws, argv, flags) {
   if (mi === -1) fail('BAD_ARGS', 'git commit --template 需要同时提供 -m <subject>（作为模板的 subject 部分）');
   const subject = String(argv[mi + 1] || '').trim();
   if (!subject) fail('BAD_ARGS', '-m subject 为空');
-  const cr = resolveTemplateCr(ws, flags.cwd ? path.resolve(flags.cwd) : ws, subject);
+  // FR-10（CR-2026-022）：--cr 显式旗标直传已知值，跳过「分支探测→subject 正则」反向解析；缺省走原兜底
+  let cr;
+  if (flags.cr) {
+    const m = String(flags.cr).match(/^CR-\d{4}-\d{3}$/);
+    if (!m) fail('BAD_ARGS', `--cr 必须是 CR-YYYY-NNN 格式（当前 ${flags.cr}）`);
+    const crp = path.join(ws, 'change-requests', String(flags.cr));
+    if (!fs.existsSync(crp)) fail('BAD_ARGS', `--cr ${flags.cr} 在 change-requests/ 下不存在`);
+    cr = String(flags.cr);
+  } else {
+    cr = resolveTemplateCr(ws, flags.cwd ? path.resolve(flags.cwd) : ws, subject);
+  }
   argv[mi + 1] = tpl(cr, subject);
   return argv;
 }
@@ -2289,7 +2301,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
   crctl migrate-backlog                          _backlog.yml v1->v2 迁移（撤出 status/updated-at，升 schema）
   crctl git     <sub> [args...] [--cwd <p>] [--caller <skill>]   controlled-shell 白名单执行
-                （git commit 可加 --template <register|task-breakdown|writeback> 生成规范 message）
+                （git commit 可加 --template <register|task-breakdown|writeback> [--cr <CR-ID>] 生成规范 message；--cr 显式直传，缺省走分支/subject 反向解析）
   crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
   crctl task allocate <cr_id> [--slug <s>]   tasks/_index.yml CAS 分配 TASK-ID（task-breakdown/developing 态）
   crctl merge-metadata <cr_id> --repo <r> --trunk <t> --sha <sha>
@@ -2319,7 +2331,7 @@ function parseArgs(argv) {
 
 /** git 子命令专用解析：只抽取 crctl 自己的旗标，git 的旗标（--short 等）原样透传 */
 function parseGitArgs(argv) {
-  const CRCTL_FLAGS = ['--cwd', '--caller', '--workspace', '--template']; // --template 是 crctl 的 commit 模板旗标，不透传给 git
+  const CRCTL_FLAGS = ['--cwd', '--caller', '--workspace', '--template', '--cr']; // --template/--cr 是 crctl 的 commit 模板旗标（FR-10），不透传给 git
   const flags = {};
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
