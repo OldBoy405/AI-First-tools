@@ -35,10 +35,7 @@ description: 在新电脑或新成员环境下，按 CR-ID 与 dir-graph.yaml re
 
 1. 读取 `AGENTS.md`、`dir-graph.yaml#repositories`。
 2. 选择 `active != false` 的 repo。
-3. 对每个 repo 计算：
-   - `bucket = knowledge-base`（当 `repo.role=knowledge-base`）或 `repo.id`
-   - `worktreePath = {workspaceRoot}/.rayai-worktrees/{bucket}/requirement/{cr_id}`
-   - `branch = requirement/{cr_id}`
+3. 对每个 repo：`branch = requirement/{cr_id}`，worktreePath 经 `crctl worktree-path {cr_id} --repo {repo.id} --workspace <ws>` 取权威值（FR-29②，CR-2026-022——不再手拼 bucket/worktreePath；bucket 规则由 crctl 唯一派生）
 4. 对所有 active repo 先执行远端分支预检；任一 repo 缺少远端分支则整体 abort，不创建任何 worktree。
 
 ```ts

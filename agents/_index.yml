@@ -18,11 +18,6 @@ agents:
     capabilities:
       supported: [product-context-snapshot, planning-recommendation, planning-draft, planning-entry-write, roadmap-write]
       pending: []
-    constraints:
-      - product-planning pipeline 中 review-planning-report 未通过前不得进入 human_approval 或写入 roadmap
-      - 未经用户或 pipeline human_approval 确认不得写入规划文档
-      - 禁止直接修改 specs/ 与 change-requests/
-      - baseline spec 查询使用 spec-query，在途 CR 查询使用 cr-query
     references:
       - tools/skills/planning/gather-product-context/SKILL.md
       - tools/skills/planning/planning-draft/SKILL.md
@@ -53,11 +48,6 @@ agents:
     capabilities:
       supported: [CR-register, PRD-write, requirement-review, requirement-approve, progress-push]
       pending: []
-    constraints:
-      - 不得直接写入 specs/；正式回写仅由 writeback-prd-sdd 执行
-      - 不得手动编辑 _backlog.yml；状态推进必须通过 requirement-register、review-requirement、approve-requirement 等封装 Skill 间接完成
-      - 不得跳过 review-requirement 和 human_approval 直接 approve
-      - review-requirement 有 blocker 时必须回到 write-requirement-prd 自修复，完整通过后才可进入 human_approval
     references:
       - tools/skills/requirement/requirement-register/SKILL.md
       - tools/skills/requirement/write-requirement-prd/SKILL.md
@@ -85,11 +75,6 @@ agents:
     capabilities:
       supported: [SDD-write, tech-design-review, tech-design-approve, dev-plan-write, dev-task-write, dev-start-approve, code-write, test-report-write, code-review, code-approve]
       pending: []
-    constraints:
-      - 不得直接写入 specs/；正式回写仅由 writeback-prd-sdd 执行
-      - 不得手动编辑 _backlog.yml；状态推进必须通过 develop/* 中的封装 Skill 间接完成
-      - 不得在主工作区代码目录直接编码；实现只写 CR worktree
-      - review-tech-design、write-test-report、review-code 有 blocker 时必须回到对应修复节点自修复，完整通过后才可进入 human_approval
     references:
       - tools/skills/develop/write-tech-design/SKILL.md
       - tools/skills/develop/review-tech-design/SKILL.md
@@ -120,10 +105,6 @@ agents:
     capabilities:
       supported: [spec-show, spec-query, spec-dashboard, writeback-verification]
       pending: []
-    constraints:
-      - 不得直接修改 specs/{id}/PRD.md 或 specs/{id}/SDD.md
-      - 不得创建旧式 spec.md 或 plan.md
-      - 回写前只读；回写后只读取 PRD.md / SDD.md / traceability.yml 核对结果
     references:
       - tools/skills/spec/spec-show/SKILL.md
       - tools/skills/spec/spec-query/SKILL.md
@@ -147,10 +128,6 @@ agents:
     capabilities:
       supported: [task-writeback]
       pending: []
-    constraints:
-      - 不得在 delivery/ 下写 PRD 或 SDD
-      - 不得修改 delivery/archive/
-      - 不得调用不存在的 write-delivery-plan/write-task/write-release 旧 skill
     references:
       - tools/skills/writeback/writeback-tasks/SKILL.md
       - tools/skills/shared/validate-doc/SKILL.md
@@ -171,11 +148,6 @@ agents:
     capabilities:
       supported: [requirement-review, tech-design-review, code-review, review-alignment, change-impact-analysis]
       pending: []
-    constraints:
-      - blocker 未清空不得返回 pass
-      - blocker 未清空不得触发或建议 human_approval，必须输出 repair-target 与 repair-instructions
-      - 不得直接推进 _backlog.yml；状态推进由对应 review-* / approve-* 封装 Skill 负责
-      - 代码评审必须读取实际 diff 与验证输出，不得只依赖 diff stat
     references:
       - tools/skills/requirement/review-requirement/SKILL.md
       - tools/skills/planning/review-planning-report/SKILL.md
@@ -202,9 +174,6 @@ agents:
     capabilities:
       supported: [tech-note-write, insight-write, design-doc-support]
       pending: []
-    constraints:
-      - 不得修改 docs/references/
-      - 不得删除 docs/tech-notes/ 历史条目
     references:
       - tools/skills/shared/validate-doc/SKILL.md
 
@@ -224,10 +193,6 @@ agents:
     capabilities:
       supported: [competitor-update-fetch, competitive-report, report-to-planning, planning-entry-write]
       pending: []
-    constraints:
-      - 未经用户或 pipeline human_approval 不得落盘规划建议
-      - 禁止修改 specs/ 与 change-requests/
-      - 所有动态条目必须携带来源 URL
     references:
       - tools/skills/competitive/fetch-competitor-updates/SKILL.md
       - tools/skills/competitive/write-competitive-report/SKILL.md
@@ -254,12 +219,6 @@ agents:
     capabilities:
       supported: [product-doc-qa, tech-doc-qa, usage-guidance, implementation-explain, unresolved-feedback-record]
       pending: []
-    constraints:
-      - 必须从 dir-graph.yaml 解析 specs、代码仓与 docs/feedback/ 路径
-      - 产品功能与用法问题优先读取 PRD.md；技术类问题可读取 SDD.md 与 contracts/
-      - 不得读取隐藏目录、change-requests/、docs/product-planning/、delivery/、tools/、_archived/
-      - 不得全局扫描 workspace；代码仅限文档不足或追问实现时按需读取
-      - 不得大段引用代码；必要时最多展示一个相关小片段
     references:
       - tools/skills/spec/spec-query/SKILL.md
       - tools/skills/spec/spec-show/SKILL.md
