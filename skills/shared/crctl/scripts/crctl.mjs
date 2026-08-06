@@ -1028,6 +1028,14 @@ function cmdAdvance(ws, cr, gates, flags) {
   if (result.commit && result.commit.failed) process.exit(1);
 }
 
+// FR-12（CR-2026-022）：四 stage 审批驳回回退映射（与 dir-graph.yaml 的 {approve}:reject -> {write} 转换一一对应）
+const REJECT_ROLLBACK = {
+  requirement: { to: 'drafting', approve: 'approve-requirement', write: 'write-requirement-prd' },
+  'tech-design': { to: 'tech-designing', approve: 'approve-tech-design', write: 'write-tech-design' },
+  'dev-start': { to: 'tech-design-reviewed', approve: 'approve-dev-start', write: 'write-dev-plan' },
+  code: { to: 'developing', approve: 'approve-code', write: 'implement-code' },
+};
+
 function cmdApprove(ws, cr, gates, flags) {
   const stage = flags.stage;
   const stageCfg = gates.approvalStages[stage];
@@ -1073,7 +1081,15 @@ function cmdApprove(ws, cr, gates, flags) {
     rl.close();
     if (answer.trim().toLowerCase() !== 'yes') {
       auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined' });
-      fail('APPROVAL_DECLINED', '审批人未确认，未写入任何文件');
+      // FR-12（CR-2026-022）：驳回必须真正执行状态机已声明的 {stage}:reject 回退转换（AGENTS.md 强制），不再只是 fail
+      const rollback = REJECT_ROLLBACK[stage];
+      const { sm } = loadStateMachine(ws);
+      const trigger = `${rollback.approve}:reject -> ${rollback.write}`;
+      const t = findTransition(sm, current, rollback.to, trigger);
+      if (!t) fail('APPROVAL_DECLINED', '审批人未确认，且状态机未声明该阶段回退转换', { stage, current });
+      cmdAdvance(ws, cr, gates, { to: rollback.to, trigger, expect: current });
+      auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined-rolled-back', to: rollback.to });
+      fail('APPROVAL_DECLINED_ROLLED_BACK', `审批未通过，CR 已回退到 ${rollback.to}，请重跑 ${rollback.write}`, { rolledBackTo: rollback.to, rerunHint: rollback.write });
     }
     writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash);
     auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'approved' });

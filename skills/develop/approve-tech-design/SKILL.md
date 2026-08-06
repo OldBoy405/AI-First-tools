@@ -22,7 +22,7 @@ description: 记录架构设计人工审批结论，校验 change-requests/{CR-I
 
 ## 执行步骤
 
-1. 运行 `crctl approve {cr_id} --stage tech-design`（**仅限人类交互式终端，无旁路**）——crctl 自动完成：
+1. 运行 `crctl approve {cr_id} --stage tech-design`（**仅限人类交互式终端，或 Ed25519 签名授权 `--grant` 二选一；两者都不可绕过审批本身**）——crctl 自动完成：
    - 前置态校验（当前 status=tech-design-review-pending）
    - 评审证据校验（review-annotations/sdd.yml verdict=pass 且 blockers 为空）
    - 计算证据摘要并写入 approval.yml#tech-design（CAS+审计）
@@ -37,3 +37,4 @@ description: 记录架构设计人工审批结论，校验 change-requests/{CR-I
 | status 不是 `tech-design-review-pending` | crctl approve 拒绝（CR_STATUS_CURRENT_MISMATCH），abort |
 | 评审证据未通过（review-annotations/sdd.yml verdict 非 pass 或 blockers 非空） | crctl approve 拒绝（GATE_BLOCKED），先修复并重跑 review-tech-design |
 | 非 TTY 调用 | crctl approve 拒绝（APPROVAL_REQUIRES_HUMAN），必须人工在终端执行 |
+| 审批人回答非 yes | crctl 自动执行状态机回退转换（CR 回退到 tech-designing，错误码 APPROVAL_DECLINED_ROLLED_BACK），请重新执行 write-tech-design |

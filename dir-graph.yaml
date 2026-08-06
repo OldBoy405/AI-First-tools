@@ -214,6 +214,7 @@ change-request-track:
       - { from: requirement-reviewing, to: requirement-reviewing, trigger: "review-requirement" }
       - { from: drafting, to: drafting, trigger: "review-requirement:block -> write-requirement-prd" }
       - { from: requirement-reviewing, to: requirement-approved, trigger: "approve-requirement" }
+      - { from: requirement-reviewing, to: drafting, trigger: "approve-requirement:reject -> write-requirement-prd" }
       - { from: requirement-approved, to: tech-designing, trigger: "write-tech-design" }
       - { from: tech-designing, to: tech-design-review-pending, trigger: "write-tech-design-complete" }
       - { from: tech-design-review-pending, to: tech-designing, trigger: "review-tech-design:block -> write-tech-design" }
@@ -221,6 +222,7 @@ change-request-track:
       - { from: tech-design-review-pending, to: tech-design-reviewed, trigger: "approve-tech-design" }
       - { from: tech-design-reviewed, to: task-breakdown, trigger: "write-dev-tasks" }
       - { from: task-breakdown, to: task-breakdown, trigger: "write-dev-tasks" }
+      - { from: task-breakdown, to: tech-design-reviewed, trigger: "approve-dev-start:reject -> write-dev-plan" }
       - { from: task-breakdown, to: developing, trigger: "approve-dev-start" }
       - { from: developing, to: developing, trigger: "write-test-report:block -> implement-code" }
       - { from: developing, to: developing, trigger: "review-code:block -> implement-code" }

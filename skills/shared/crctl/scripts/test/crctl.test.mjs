@@ -1702,3 +1702,25 @@ test('git commit --template task-breakdown/writeback：生成形态命中 commit
     assert.ok(git(['log', '--oneline', '-1']).includes('[cr] writeback CR-T1: 回写'));
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-022 TASK-06：approve 驳回回退转换（FR-12，D-1 + B3）──
+
+test('approve 驳回回退：四 stage 状态机声明 reject 转换（status legalNext 可见）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-R', 'requirement-reviewing');
+    const r1 = runCrctl(['status', 'CR-R', '--workspace', ws]);
+    assert.equal(r1.status, 0);
+    assert.ok(r1.stdout.legalNext.some((t) => t.trigger === 'approve-requirement:reject -> write-requirement-prd' && t.to === 'drafting'), '需求驳回回退 drafting（D-1）');
+    writeCrEntry(ws, 'CR-D', 'task-breakdown');
+    const r2 = runCrctl(['status', 'CR-D', '--workspace', ws]);
+    assert.equal(r2.status, 0);
+    assert.ok(r2.stdout.legalNext.some((t) => t.trigger === 'approve-dev-start:reject -> write-dev-plan' && t.to === 'tech-design-reviewed'), '开发启动驳回回退 tech-design-reviewed（B3）');
+    writeCrEntry(ws, 'CR-T', 'tech-design-review-pending');
+    const r3 = runCrctl(['status', 'CR-T', '--workspace', ws]);
+    assert.ok(r3.stdout.legalNext.some((t) => t.trigger === 'approve-tech-design:reject -> write-tech-design'), '技术设计驳回回退既有转换');
+    writeCrEntry(ws, 'CR-C', 'code-reviewing');
+    const r4 = runCrctl(['status', 'CR-C', '--workspace', ws]);
+    assert.ok(r4.stdout.legalNext.some((t) => t.trigger === 'approve-code:reject -> implement-code'), '代码驳回回退既有转换');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

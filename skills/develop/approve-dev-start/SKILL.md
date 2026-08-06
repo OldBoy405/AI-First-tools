@@ -37,7 +37,7 @@ description: 记录任务拆分后的开发启动人工确认，校验 plan.md �
 
 ## 执行步骤
 
-1. 运行 `crctl approve {cr_id} --stage dev-start`（**仅限人类交互式终端，无旁路**）——crctl 自动完成：
+1. 运行 `crctl approve {cr_id} --stage dev-start`（**仅限人类交互式终端，或 Ed25519 签名授权 `--grant` 二选一；两者都不可绕过审批本身**）——crctl 自动完成：
    - 前置态校验（当前 status=task-breakdown）
    - 审批前置产物校验（plan.md 与 tasks/ 存在）
    - 计算证据摘要并写入 approval.yml#dev-start（CAS+审计）
@@ -52,3 +52,4 @@ description: 记录任务拆分后的开发启动人工确认，校验 plan.md �
 | status 不是 `task-breakdown` | crctl approve 拒绝（CR_STATUS_CURRENT_MISMATCH），abort |
 | 评审证据未通过（plan/tasks 缺失） | crctl approve 拒绝（GATE_BLOCKED），先修复并重跑 write-dev-plan / write-dev-tasks |
 | 非 TTY 调用 | crctl approve 拒绝（APPROVAL_REQUIRES_HUMAN），必须人工在终端执行 |
+| 审批人回答非 yes | crctl 自动执行状态机回退转换（CR 回退到 tech-design-reviewed，错误码 APPROVAL_DECLINED_ROLLED_BACK），请重新执行 write-dev-plan |
