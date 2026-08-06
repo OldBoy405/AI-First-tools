@@ -58,7 +58,7 @@ node tools/skills/writeback/scripts/writeback-prd-sdd.mjs \
 
 ```bash
 crctl git add specs/{spec_id}/PRD.md specs/{spec_id}/SDD.md specs/_index.yml --cwd <knowledge-base worktree>
-crctl git commit --template writeback -m "PRD/SDD 增量回写 specs/{spec_id} v{target_version}" --cwd <knowledge-base worktree>
+crctl git commit --template writeback --cr {cr_id} -m "PRD/SDD 增量回写 specs/{spec_id} v{target_version}" --cwd <knowledge-base worktree>
 ```
 
 ### Step 4 — 更新 CR status

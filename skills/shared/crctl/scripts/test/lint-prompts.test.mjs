@@ -137,3 +137,60 @@ test('enforce 模式：零漂移 → exit 0', () => {
     assert.equal(r.status, 0, `干净 fixture 应通过 enforce: ${r.stdout}`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-022 TASK-15：R7/R8 规则 + 豁免范围收窄（FR-24~26）──
+
+test('R7：crctl advance 全角分隔符/伪旗标 → CONTRADICTS', () => {
+  const dir = makeFixture({
+    'skills/x/SKILL.md': '# 推进\n\n调用 `crctl advance --to archived、`trigger=cr-archive`、`expected_current_status=writing-back`）推进。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('R7') && r.stdout.includes('CONTRADICTS'), `应命中 R7: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R7：advance 缺 --trigger → CONTRADICTS；完整形态不报', () => {
+  const dir = makeFixture({
+    'skills/x/SKILL.md': '# 推进\n\n调用 `crctl advance --to merging --embedded` 推进。\n\n# 正确\n\n调用 `crctl advance --to merging --trigger merge-feature-branch --embedded` 推进。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('R7'), `应命中缺 trigger 的 R7: ${r.stdout}`);
+    assert.ok(!r.stdout.includes('merge-feature-branch --embedded` 推进'), '完整形态不报');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R7：backlog-set 字段越白名单 + --template subject 缺 CR 编号 → CONTRADICTS', () => {
+  const dir = makeFixture({
+    'skills/x/SKILL.md': '# 账本\n\n运行 crctl backlog-set CR-1 --field status --value x。\n\n# 提交\n\n运行 crctl git commit --template writeback -m \"回写\" --cwd w。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('backlog-set --field 越白名单'), `应命中字段越界: ${r.stdout}`);
+    assert.ok(r.stdout.includes('subject 必须含 CR 编号'), `应命中 template 缺编号: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R8：函数式 inbox-emit + 枚举外 event → CONTRADICTS；合法 event 不报', () => {
+  const dir = makeFixture({
+    'skills/x/SKILL.md': '# 通知\n\ninbox-emit(to: \"a\")\ncrctl inbox-emit CR-1 --event bogus-event --to a\ncrctl inbox-emit CR-1 --event owner-handover --to a\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('函数式 inbox-emit'), `应命中函数式: ${r.stdout}`);
+    assert.ok(r.stdout.includes('bogus-event'), `应命中枚举外 event: ${r.stdout}`);
+    assert.ok(!r.stdout.includes('owner-handover'), '合法 event 不报');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('豁免收窄：注释与违规行隔 3+ 行 → 仍命中；±1 行内 → 豁免（FR-25 契约）', () => {
+  const dir = makeFixture({
+    'skills/x/SKILL.md': '# 说明\n<!-- lint-prompts:ignore --> 描述：历史说明\n\n\n\n历史原因：曾经手写 change-requests/_backlog.yml 的 status。\n\n# 相邻\n<!-- lint-prompts:ignore --> 描述：仅此段\n此处解释 change-requests/_backlog.yml 的写入流程。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('skills/x/SKILL.md:6'), `隔 3+ 行违规仍应命中（R1 at line 6）: ${r.stdout}`);
+    assert.ok(!r.stdout.includes('写入流程'), '±1 行内豁免');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

@@ -73,7 +73,7 @@ node tools/skills/writeback/scripts/writeback-traceability.mjs \
 
 ```bash
 crctl git add specs/{spec_id}/traceability.yml --cwd <knowledge-base worktree>
-crctl git commit --template writeback -m "specs/{spec_id} traceability.yml 累积 milestone {milestone}" --cwd <knowledge-base worktree>
+crctl git commit --template writeback --cr {cr_id} -m "specs/{spec_id} traceability.yml 累积 milestone {milestone}" --cwd <knowledge-base worktree>
 ```
 
 ### Step 5 — 输出归档前置证据

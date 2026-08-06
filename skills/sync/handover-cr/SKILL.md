@@ -46,7 +46,7 @@ description: 正式移交 CR 某一角色 owner：先 push-progress 确保远端
 push-progress(cr_id={cr_id})
 ```
 
-若 `push-progress` 返回 `SHELL_UNAVAILABLE` 结构化错误，**停止执行**本 skill 并原样回传错误；**禁止**降级为「请手工运行 git push」文本。
+若 `push-progress` 返回 `SHELL_UNAVAILABLE` 结构化错误，**停止执行**本 skill 并原样回传错误；**禁止**降级为「请手工执行推送」文本。
 
 确保移交时远端已是最新，新 owner 可直接 `resume-from-remote` 接手。
 

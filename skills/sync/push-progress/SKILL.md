@@ -99,5 +99,5 @@ const head = await runGit({ subcommand: "rev-parse", args: ["HEAD"], cwd: repo.w
 | `_backlog.yml` CR 条目不存在 | 停止执行，返回 `CR_NOT_FOUND` |
 | active repo worktree 缺失 | 停止执行，返回 `WORKTREE_MISSING`，不得只推部分 repo |
 | 受控 shell 不可用（`SHELL_UNAVAILABLE`） | 停止执行，返回结构化错误；**禁止**输出「请在终端运行」提示 |
-| `checkpoint-add` 失败（`ILLEGAL_LEDGER_STATE`/`CAS_CONFLICT` 等） | 非零退出 + 摘要输出 `CHECKPOINT_ALERT` 段（git push 可能已成功，告警必须可见） |
+| `checkpoint-add` 失败（`ILLEGAL_LEDGER_STATE`/`CAS_CONFLICT` 等） | 非零退出 + 摘要输出 `CHECKPOINT_ALERT` 段（推送可能已成功，告警必须可见） |
 | `EXEC_FAILED` 且 stderr 含 `rejected` | 归类为非 fast-forward，按上一行处理 |

@@ -54,7 +54,7 @@ node tools/skills/writeback/scripts/writeback-tasks.mjs \
 
 ```bash
 crctl git add delivery/task/ --cwd <knowledge-base worktree>
-crctl git commit --template writeback -m "任务回写 delivery/task {N} 项（{version}）" --cwd <knowledge-base worktree>
+crctl git commit --template writeback --cr {cr_id} -m "任务回写 delivery/task {N} 项（{version}）" --cwd <knowledge-base worktree>
 ```
 
 ### Step 4 — 输出摘要

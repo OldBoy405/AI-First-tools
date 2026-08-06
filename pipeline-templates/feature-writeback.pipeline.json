@@ -64,7 +64,7 @@
       "kind": "skill",
       "label": "回写追溯链",
       "ref": "writeback-traceability",
-      "prompt": "<!-- lint-prompts:ignore --> 脚本内部处理说明：merge-commits 由脚本从 _backlog.yml 提取，milestone 段由脚本追加\n在 specs/{{inputs.spec_id}}/traceability.yml（跨 CR 累积的唯一权威文件）追加本 CR 的 milestone 段：\n- 按证据源起草 milestone-file（fr-chain 的 title/sdd/code/evidence 为编辑性内容），merge-commits 由脚本从 change-requests/_backlog.yml 定向提取注入（三字段必填校验（repo/trunk/sha，FR-8），缺失 MERGE_COMMITS_MISSING 硬失败，不猜测）\n- 调用 tools/skills/writeback/scripts/writeback-traceability.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --milestone-file <path>）：先 --dry-run 核对（既有 milestones 段不得出现在 diff 中），无误后实跑（脚本末尾自检）\n- 不做\"与 change-requests/{{inputs.cr_id}}/traceability.yml 保持一致\"校验——specs 侧为唯一权威文件，change-requests 侧为开发期工作稿，归档后不再同步\n\n在 node-4.md 输出链路条目数与未对齐项。",
+      "prompt": "<!-- lint-prompts:ignore --> 脚本内部处理说明：merge-commits 由脚本从 _backlog.yml 提取，milestone 段由脚本追加\n在 specs/{{inputs.spec_id}}/traceability.yml（跨 CR 累积的唯一权威文件）追加本 CR 的 milestone 段：\n- 按证据源起草 milestone-file（fr-chain 的 title/sdd/code/evidence 为编辑性内容），merge-commits 由脚本从 `_backlog.yml` 账本定向提取注入（脚本内部读取，非模型写入）（三字段必填校验（repo/trunk/sha，FR-8），缺失 MERGE_COMMITS_MISSING 硬失败，不猜测）\n- 调用 tools/skills/writeback/scripts/writeback-traceability.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --milestone-file <path>）：先 --dry-run 核对（既有 milestones 段不得出现在 diff 中），无误后实跑（脚本末尾自检）\n- 不做\"与 change-requests/{{inputs.cr_id}}/traceability.yml 保持一致\"校验——specs 侧为唯一权威文件，change-requests 侧为开发期工作稿，归档后不再同步\n\n在 node-4.md 输出链路条目数与未对齐项。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },

@@ -60,7 +60,7 @@ description: 汇总 implement-code 的验证命令、TASK 验收条件与测试�
 
 ### Step 4 — 更新 traceability.yml
 
-在 `change-requests/{cr_id}/traceability.yml` 中写入测试证据段（review-loop 轮次记账统一走 `crctl attempt --loop write-test-report`，TASK-17 起生效）：
+在 `change-requests/{cr_id}/traceability.yml` 中写入测试证据段（review-loop 轮次记账统一走 `crctl attempt --loop write-test-report`）：
 
 ```yaml
 tests:
@@ -70,15 +70,6 @@ tests:
   owner-assigned-at: {cr.md owners.test.assigned-at}
   generated-at: {timestamp}
   repair-target: implement-code
-  review-loop:
-    current-attempt: {self_repair_attempt 或 0}
-    max-attempts: 3
-    attempts:
-      - attempt: {self_repair_attempt 或 0}
-        generated-at: {timestamp}
-        result: pass | block
-        blocker-count: {N}
-        repair-target: implement-code
   commands:
     - name: lint
       result: pass | fail | not-applicable

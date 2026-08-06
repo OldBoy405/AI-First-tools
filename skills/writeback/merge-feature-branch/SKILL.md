@@ -18,7 +18,7 @@ description: 按 dir-graph.yaml repositories 动态解析参与仓，通过 dry-
 本 Skill 必须采用“四阶段合并”：
 1. **预检阶段**：所有 repo 先完成远端新鲜度检查与 `merge-tree --write-tree` dry-run，不修改任何 trunk。
 2. **本地合并阶段**：所有 repo 使用 `merge --no-commit --no-ff` 完成本地合并准备；只有全部 repo 都成功后才逐仓 commit。
-3. **远端发布阶段**：只有全部 repo 本地 merge commit 都已生成，且所有 origin trunk 仍与预检 SHA 一致，才允许 push。全部 push 成功后，使用 `crctl advance --to merging --embedded` 校验 `code-approved → merging`（见 Step 4 详细调用），并把状态与 `merge-commits[]` 放在同一 metadata commit 中发布。
+3. **远端发布阶段**：只有全部 repo 本地 merge commit 都已生成，且所有 origin trunk 仍与预检 SHA 一致，才允许 push。全部 push 成功后，使用 `crctl advance --to merging --trigger merge-feature-branch --embedded` 校验 `code-approved → merging`（见 Step 4 详细调用），并把状态与 `merge-commits[]` 放在同一 metadata commit 中发布。
 4. **自动补偿阶段**：若远端发布阶段任一 repo push 失败，必须对已成功 push 的 repo 自动执行补偿 revert，并验证远端 trunk 回到“未包含本 CR”的状态；补偿完成前不得进入 writeback。
 
 不得在全部参与仓本地合并成功前 push 任何 trunk。本 Skill 不清理本地 worktree、不删除远端分支，统一留给 `cr-archive`。
@@ -70,7 +70,7 @@ description: 按 dir-graph.yaml repositories 动态解析参与仓，通过 dry-
    - `repo.trunk`
    - CR 分支：`requirement/{cr_id}`
    - CR worktree：`.rayai-worktrees/{bucket}/requirement/{cr_id}`，其中 knowledge-base 使用 `knowledge-base`，独立代码仓使用 `repo.id`
-4. 确认每个参与仓 CR worktree 无未提交变更，且 `origin/requirement/{cr_id}` 存在；**比对本地 HEAD 与远端 HEAD**（`git rev-parse HEAD` vs `git rev-parse origin/requirement/{cr_id}`），不一致时先要求执行 push-progress 补跑——最后一批提交（评审/审批证据）可能未推送，直接合并会拿到缺证据的远端分支（FR-16，CR-2026-022）。
+4. 确认每个参与仓 CR worktree 无未提交变更，且 `origin/requirement/{cr_id}` 存在；**比对本地 HEAD 与远端 HEAD**（`rev-parse HEAD` 与 `rev-parse origin/requirement/{cr_id}` 的结果比对，经受控 shell），不一致时先要求执行 push-progress 补跑——最后一批提交（评审/审批证据）可能未推送，直接合并会拿到缺证据的远端分支（FR-16，CR-2026-022）。
 5. 任一仓校验失败则 abort，不得单仓提前合并。
 6. 无提交分支的仓（该 CR 在其无代码改动）跳过合并与 merge-commits 记录，**但其 `requirement/{cr_id}` worktree 与本地/远端分支仍由 cr-archive Step 7 统一清理**（"跳过合并 ≠ 跳过清理"，见 cr-archive Step 7.2 无改动仓规则）。
 

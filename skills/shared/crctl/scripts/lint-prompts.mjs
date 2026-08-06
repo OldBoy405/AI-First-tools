@@ -11,7 +11,8 @@
  *   node skills/shared/crctl/scripts/lint-prompts.mjs [--mode report|enforce] [--root <dir>]
  *   --mode report（默认）：输出 file:line + 规则 + 级别，退出 0（不阻断提交）
  *   --mode enforce：命中 CONTRADICTS/STALE-REF 即退出 1（LINT_DRIFT）
- *   段落级豁免：命中处附近有 <!-- lint-prompts:ignore --> 则跳过该段
+ * 规则：R1~R6（CR-2026-021）+ R7（crctl 命令参数形态：advance --to/--trigger、全角/伪旗标、backlog-set 字段白名单、--template subject 编号）+ R8（inbox-emit 接口：函数式违例、--event 枚举）
+ *   豁免契约（CR-2026-022 FR-25）：<!-- lint-prompts:ignore --> 只豁免其所在行 ± radius 行（radius=1，测试向量固化），不再整段生效
  *
  * 零第三方依赖（不变量 3）；读入先 CRLF 归一（纪律 #1）。
  */
@@ -23,6 +24,8 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(__dirname, '..', '..', '..', '..'); // tools 包根
 const RULES_PATH = process.env.CRCTL_RULES_PATH || path.resolve(__dirname, '..', '..', 'controlled-shell', 'rules.json');
+const CRCTL_PATH = path.resolve(__dirname, 'crctl.mjs'); // R7 判据源：backlog-set 字段白名单
+const INBOX_SKILL_PATH = path.resolve(__dirname, '..', '..', '..', 'cr', 'inbox-emit', 'SKILL.md'); // R8 判据源：event 枚举
 
 /* ────────────────────────── 判据加载（直读 rules.json / 字面黑名单） ────────────────────────── */
 
@@ -31,7 +34,15 @@ function loadJudgements() {
   // R1 行内匹配用无锚版本：deny 正则的 ^$ 锚只对整文件路径成立，prompt 行内目标文件后常跟其他文本
   const denyFilesLoose = (j.protectedPaths?.deny || []).map((re) => new RegExp(re.replace(/^\^/, '').replace(/\$/, ''), 'i'));
   const gitSubs = new Set((j.git || []).map((e) => e.sub));
-  return { denyFilesLoose, gitSubs };
+  // R7 判据：backlog-set 字段白名单直读 crctl.mjs 常量（FR-24，零派生物）
+  const crctlSrc = fs.readFileSync(CRCTL_PATH, 'utf8').replaceAll('\r\n', '\n');
+  const bsm = crctlSrc.match(/const BACKLOG_SET_FIELDS = \[([^\]]*)\]/);
+  const backlogSetFields = new Set(bsm ? (bsm[1].match(/'([^']+)'/g) || []).map((s) => s.slice(1, -1)) : []);
+  // R8 判据：inbox-emit event 枚举直读 SKILL 参数表（FR-24）
+  const inboxSkill = fs.readFileSync(INBOX_SKILL_PATH, 'utf8').replaceAll('\r\n', '\n');
+  const evLine = inboxSkill.split('\n').find((l) => l.includes('| `event` |')) || '';
+  const inboxEvents = new Set([...evLine.matchAll(/`([a-z-]+)`/g)].map((m) => m[1]).filter((s) => s !== 'event'));
+  return { denyFilesLoose, gitSubs, backlogSetFields, inboxEvents };
 }
 
 const LITERAL_BLACKLIST = {
@@ -105,14 +116,11 @@ function splitPipelineJson(text) {
 function runRules(para, ctx) {
   const findings = [];
   const t = para.text;
+  const lines = t.split('\n');
   const crctlNearby = CRCTL_CALL.test(t);
-  const ignored = t.includes('<!-- lint-prompts:ignore -->');
-  if (ignored) return findings;
-  // R1 手写 guard-deny 文件（判据来自 rules.json deny 面，未来新增 deny 自动覆盖）
-  // 行级匹配：deny 正则带 $ 锚，整段 match 会失效（review-annotations/xxx.yml 后常跟其他文本）
   const writeVerb = WRITE_VERBS.test(t);
+  // R1 手写 guard-deny 文件（判据来自 rules.json deny 面，未来新增 deny 自动覆盖）
   if (writeVerb && !crctlNearby) {
-    const lines = t.split('\n');
     for (let li = 0; li < lines.length; li++) {
       for (const re of ctx.denyFilesLoose) {
         const m = lines[li].match(re);
@@ -129,7 +137,7 @@ function runRules(para, ctx) {
     while ((m = re.exec(t))) {
       const lineNo = lineOf(t, m.index);
       const lineText = (t.split('\n')[lineNo - 1] || '').trim();
-      if (/crctl[.\w-]*\s+git/.test(lineText)) continue; // 已迁移形态（crctl git / crctl.mjs git / node ...crctl.mjs git）
+      if (/crctl[.\w-]*\s+git/.test(lineText)) continue; // 已迁移形态
       findings.push({ rule: 'R2', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + lineNo - 1, why: `裸 git 命令：${m[2]}` });
     }
   }
@@ -143,16 +151,69 @@ function runRules(para, ctx) {
       }
     }
   }
-  // R6 手写 test-report frontmatter（行级邻近判定：test-report.md 与 status:/commands: 同行才算教手写；
-  // 模板/校验说明里跨行的 status 字段引用不算）
-  const trLines = t.split('\n');
-  for (let li = 0; li < trLines.length; li++) {
-    const l = trLines[li];
+  // R6 手写 test-report frontmatter（行级邻近判定）
+  for (let li = 0; li < lines.length; li++) {
+    const l = lines[li];
     if (l.includes('test-report.md') && (/\b(status|commands):/.test(l) || /手写|手动编辑/.test(l))) {
       findings.push({ rule: 'R6', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: 'test-report.md frontmatter 应由 crctl test 生成，prompt 不得手写 status:/commands:' });
     }
   }
-  return findings;
+  // R7（FR-24，CR-2026-022）：crctl 命令参数形态（命令跨度含旗标才算命令形态；纯机制描述豁免）
+  for (let li = 0; li < lines.length; li++) {
+    const l = lines[li];
+    if (l.includes('crctl advance')) {
+      const span = backtickSpan(l, 'crctl advance');
+      const cmd = span !== null ? span : l;
+      if (/--/.test(cmd)) {
+        if (!/\s--to\s+\S+/.test(cmd) || !/\s--trigger\s+\S+/.test(cmd)) {
+          findings.push({ rule: 'R7', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: 'crctl advance 必须含 --to 与 --trigger（权威旗标，--expect 可省略）' });
+        }
+        if (/[，、）]/.test(cmd) || /`(trigger|expected_current_status|commit_mode)=/.test(cmd)) {
+          findings.push({ rule: 'R7', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: 'crctl advance 参数形态违例（全角分隔符/伪旗标反引号包裹）' });
+        }
+      }
+    }
+    if (l.includes('backlog-set')) {
+      const m = l.match(/--field\s+(\S+)/);
+      if (m && !m[1].includes('{') && !ctx.backlogSetFields.has(m[1])) {
+        findings.push({ rule: 'R7', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: `backlog-set --field 越白名单：${m[1]}（允许 prd-path|sdd-path）` });
+      }
+    }
+    if (l.includes('git commit --template') && /\s-m\s/.test(l)) {
+      if (!l.includes('--cr') && !/CR-\d{4}-\d{3}/.test(l)) {
+        findings.push({ rule: 'R7', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: 'git commit --template 的 -m subject 必须含 CR 编号或显式 --cr（反向解析兜底）' });
+      }
+    }
+  }
+  // R8（FR-24，CR-2026-022）：inbox-emit 接口（函数式违例 + --event 枚举直读）
+  for (let li = 0; li < lines.length; li++) {
+    const l = lines[li];
+    if (/\binbox-emit\(/.test(l)) {
+      findings.push({ rule: 'R8', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: '函数式 inbox-emit(...) 已废弃，改用 crctl inbox-emit CLI 形态' });
+    }
+    const m = l.match(/--event\s+(\S+)/);
+    if (m && !m[1].includes('{') && !ctx.inboxEvents.has(m[1])) {
+      findings.push({ rule: 'R8', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: `inbox-emit --event 不在声明枚举：${m[1]}` });
+    }
+  }
+  // 豁免收窄（FR-25，CR-2026-022）：<!-- lint-prompts:ignore --> 只豁免其所在行 ± radius 行（radius=1 契约），不再整段生效
+  const radius = 1;
+  return findings.filter((f) => !isIgnored(lines, f.line - para.startLine, radius));
+}
+
+/** 行内反引号代码跨度提取（含关键词的跨度），无则 null。 */
+function backtickSpan(line, keyword) {
+  const esc = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = line.match(new RegExp('`[^`]*' + esc + '[^`]*`'));
+  return m ? m[0] : null;
+}
+
+/** 豁免收窄：注释只覆盖其所在行 ± radius 行（radius=1 为契约，测试向量固化）。 */
+function isIgnored(lines, idx, radius = 1) {
+  for (let k = Math.max(0, idx - radius); k <= Math.min(lines.length - 1, idx + radius); k++) {
+    if (lines[k].includes('<!-- lint-prompts:ignore -->')) return true;
+  }
+  return false;
 }
 
 function lineOf(text, index) {
