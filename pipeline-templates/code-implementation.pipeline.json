@@ -214,7 +214,7 @@
       "kind": "skill",
       "label": "推送代码审批结果到远端",
       "ref": "push-progress",
-      "prompt": "执行 push-progress，经 `crctl git add/commit` 提交评审/审批/测试证据与账本 code-approved 状态：\n- commit message 使用 `wip: {{inputs.cr_id}} code approved`\n- 按 dir-graph active repos 推送 requirement/{{inputs.cr_id}} 到 origin\n\n在 node-12.md 输出各仓提交 SHA、远端分支和是否存在未提交改动。",
+      "prompt": "执行 push-progress，经 `crctl git add/commit` 提交评审/审批/测试证据与账本 code-approved 状态：\n- commit message 使用 `wip: {{inputs.cr_id}} code approved`\n- 按 dir-graph active repos 推送 requirement/{{inputs.cr_id}} 到 origin\n- 经 `crctl checkpoint-add` 更新 _backlog 的 remote-ref/last-push/checkpoints（S3，与节点 3/8 一致）\n\n在 node-12.md 输出各仓提交 SHA、远端分支和是否存在未提交改动。",
       "onFail": "skip",
       "timeoutMinutes": 10
     }

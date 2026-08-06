@@ -62,23 +62,20 @@ const head = await runGit({ subcommand: "rev-parse", args: ["HEAD"], cwd: repo.w
 
 > 若工作区已 clean（无变更）则跳过 commit，直接 push（确保远端与本地同步）。
 
-### Step 3 — 更新 _backlog.yml
+### Step 3 — 经 crctl checkpoint-add 落账（FR-11，CR-2026-022）
 
-<!-- lint-prompts:ignore --> 描述性：推送说明（实际写入走 crctl checkpoint-add）
-在 `change-requests/_backlog.yml` 对应 CR 条目更新：
+对 Step 2 推送成功的**每个 active repo** 显式循环调用（**禁止手工编辑 `_backlog.yml`**——账本写入唯一经 crctl，CAS+审计）：
 
-```yaml
-remote-ref: "origin/requirement/{cr_id}"
-last-push-at: "{YYYY-MM-DDTHH:mm:ss+08:00}"
-last-push-by: "{current-actor}"
-checkpoints:
-  - repo: "{repo.id}"
-    branch: "requirement/{cr_id}"
-    sha: "{head-sha}"
-    pushed-at: "{YYYY-MM-DDTHH:mm:ss+08:00}"
+```ts
+// 每个 repo：
+const head = await runGit({ subcommand: "rev-parse", args: ["HEAD"], cwd: repo.worktreePath });
+// crctl checkpoint-add {cr_id} --repo {repo.id} --sha {head.sha} --workspace {ws}
+//   —— 由调用方执行 crctl（受控 shell 白名单外命令），逐仓单次写入 remote-ref/last-push/checkpoints
 ```
 
 `checkpoints[]` 每次 push-progress 按 repo 覆盖同一 CR 的最新 checkpoint SHA，禁止只记录单仓字段。
+
+**失败语义（D-4 决策）**：任一 repo 的 `checkpoint-add` 失败即非零退出，并在输出摘要中强制输出 `CHECKPOINT_ALERT` 段（推送动作可能已成功，告警由工具层承担，不依赖 pipeline `onFail` 的 skip/abort 二值语义）。
 
 ### Step 4 — 输出摘要
 
@@ -102,4 +99,5 @@ checkpoints:
 | `_backlog.yml` CR 条目不存在 | 停止执行，返回 `CR_NOT_FOUND` |
 | active repo worktree 缺失 | 停止执行，返回 `WORKTREE_MISSING`，不得只推部分 repo |
 | 受控 shell 不可用（`SHELL_UNAVAILABLE`） | 停止执行，返回结构化错误；**禁止**输出「请在终端运行」提示 |
+| `checkpoint-add` 失败（`ILLEGAL_LEDGER_STATE`/`CAS_CONFLICT` 等） | 非零退出 + 摘要输出 `CHECKPOINT_ALERT` 段（git push 可能已成功，告警必须可见） |
 | `EXEC_FAILED` 且 stderr 含 `rejected` | 归类为非 fast-forward，按上一行处理 |

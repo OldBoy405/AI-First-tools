@@ -1575,8 +1575,15 @@ function editBacklogSet(text, cr, field, value) {
 function cmdCheckpointAdd(ws, cr, gates, flags) {
   if (!flags.repo || !flags.sha) fail('BAD_ARGS', 'checkpoint-add 需要 --repo <r> --sha <sha> [--remote-ref <ref>]');
   const state = resolveCrState(ws, cr);
-  const LEGAL = ['developing', 'code-reviewing', 'code-approved', 'merging', 'writing-back'];
-  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `checkpoint-add 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
+  // FR-11（CR-2026-022）：LEGAL 从状态机派生全非终态（transitions from/to + wildcards 展开，排除 (new) 与 terminal），
+  // 不硬编码列表——push-progress 在 drafting/task-breakdown 等阶段也会被调用，窄列表会炸 ILLEGAL_LEDGER_STATE；
+  // 与 cmdOwnerSet 的 sm.terminal 判断同源，状态机增态自动覆盖。
+  const { sm } = loadStateMachine(ws);
+  const known = new Set();
+  for (const t of sm.transitions || []) { known.add(t.from); known.add(t.to); }
+  for (const list of Object.values(sm.wildcards || {})) for (const s of list) known.add(s);
+  const LEGAL = [...known].filter((s) => s !== '(new)' && !(sm.terminal || []).includes(s));
+  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `checkpoint-add 仅允许在非终态执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
   const snap = loadBacklogEntry(ws, cr);
   const newText = editCheckpointAdd(snap.text, cr, { repo: flags.repo, sha: flags.sha, remoteRef: flags['remote-ref'] || null, by: identity(ws) });
   casWrite(snap.path, snap.hash, newText);

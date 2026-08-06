@@ -1265,15 +1265,21 @@ test('checkpoint-add：追加 checkpoints[] + remote-ref/last-push 元数据（A
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-test('checkpoint-add：非 developing~writing-back 态 → ILLEGAL_LEDGER_STATE 零写', () => {
+test('checkpoint-add：终态拒绝零写；非终态（含 drafting）可用（FR-11，CR-2026-022）', () => {
   const ws = makeWorkspace();
   try {
-    writeCrEntry(ws, 'CR-T1', 'drafting');
+    // 终态（archived）拒绝，零写
+    writeCrEntry(ws, 'CR-T1', 'archived');
     const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
-    const r = runCrctl(['checkpoint-add', 'CR-T1', '--repo', 'r', '--sha', 's', '--workspace', ws]);
-    assert.equal(r.status, 1);
-    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    const r1 = runCrctl(['checkpoint-add', 'CR-T1', '--repo', 'r', '--sha', 's', '--workspace', ws]);
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
     assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before);
+    // 非终态 drafting 可用（push-progress 在需求期也会调用，旧窄列表会炸 ILLEGAL_LEDGER_STATE）
+    writeCrEntry(ws, 'CR-T2', 'drafting');
+    const r2 = runCrctl(['checkpoint-add', 'CR-T2', '--repo', 'r', '--sha', 's2', '--workspace', ws]);
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.ok(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8').includes('sha: s2'), 'drafting 态 checkpoint 落账');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
