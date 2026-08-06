@@ -1724,3 +1724,31 @@ test('approve 驳回回退：四 stage 状态机声明 reject 转换（status le
     assert.ok(r4.stdout.legalNext.some((t) => t.trigger === 'approve-code:reject -> implement-code'), '代码驳回回退既有转换');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-022 TASK-13：cmdNext writing-back 改查 specs 产物（FR-21）──
+
+test('cmdNext writing-back：specs/ 唯一目录且 traceability.yml 存在才建议可归档（FR-21）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-W', 'writing-back');
+    mkdirSync(path.join(ws, 'change-requests', 'CR-W'), { recursive: true });
+    writeFileSync(path.join(ws, 'change-requests', 'CR-W', 'traceability.yml'), 'cr-id: CR-W\n'); // 开发期工作稿（旧逻辑误判依据）
+    // 无 specs/ 目录 → 建议先回写，不判可归档
+    const r1 = runCrctl(['next', 'CR-W', '--workspace', ws]);
+    assert.equal(r1.status, 0);
+    assert.notEqual(r1.stdout.next, 'cr-archive', '无 specs 目录不得建议归档');
+    // 唯一 specs 子目录但无 traceability.yml → 建议回写链
+    mkdirSync(path.join(ws, 'specs', 'ai-first-platform'), { recursive: true });
+    const r2 = runCrctl(['next', 'CR-W', '--workspace', ws]);
+    assert.notEqual(r2.stdout.next, 'cr-archive');
+    // writeback 产物就位 → 建议 cr-archive
+    writeFileSync(path.join(ws, 'specs', 'ai-first-platform', 'traceability.yml'), 'cr-id: CR-W\n');
+    const r3 = runCrctl(['next', 'CR-W', '--workspace', ws]);
+    assert.equal(r3.stdout.next, 'cr-archive', 'specs 追溯链就位方可归档');
+    // 多 specs 子目录 → 显式报错不猜
+    mkdirSync(path.join(ws, 'specs', 'another'), { recursive: true });
+    const r4 = runCrctl(['next', 'CR-W', '--workspace', ws]);
+    assert.notEqual(r4.stdout.next, 'cr-archive', '多 spec 目录不得猜测');
+    assert.ok(r4.stdout.why.includes('无法唯一确定 spec_id'), 'why 显式说明多目录');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

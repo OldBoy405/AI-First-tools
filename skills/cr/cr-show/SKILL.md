@@ -90,23 +90,7 @@ CR-2026-001  [emergency-fix]  修复协作看板崩溃问题
 
 ### Step 4 — 生成下一步建议
 
-下一步建议必须同时读取 status 与评审/测试证据：
-
-| status | 证据条件 | 下一步 |
-|--------|----------|--------|
-| `drafting` | 任意 | 继续 `requirement-authoring`，从 `write-requirement-prd` / `review-requirement` 进入 |
-| `requirement-reviewing` | `requirement.yml verdict=pass` 且 `blockers=[]` | 等待 `human_approval`，下一节点 `approve-requirement` |
-| `requirement-reviewing` | 评审未通过或缺失 | 回到 `write-requirement-prd` 自修复并重审 |
-| `requirement-approved` | 任意 | 进入 `architecture-design`，从 `write-tech-design` 开始 |
-| `tech-designing` | 任意 | 继续 `write-tech-design` / `review-tech-design` |
-| `tech-design-review-pending` | `sdd.yml verdict=pass` 且 `blockers=[]` | 等待 `human_approval`，下一节点 `approve-tech-design` |
-| `tech-design-review-pending` | 评审未通过或缺失 | 继续 `review-tech-design`，或回到 `write-tech-design` 自修复 |
-| `tech-design-reviewed` | 任意 | 进入 `code-implementation`，从 `write-dev-plan` 开始 |
-| `task-breakdown` | plan/tasks 完整 | 等待开发启动 `human_approval`，下一节点 `approve-dev-start` |
-| `developing` | 任意 | 继续 `implement-code` / `write-test-report` / `review-code` |
-| `code-reviewing` | `code.yml verdict=pass`、`blockers=[]` 且 `test-report.md status=pass` | 等待 `human_approval`，下一节点 `approve-code` |
-| `code-reviewing` | 代码评审或测试报告未通过 | 回到 `implement-code` 自修复并重测重审 |
-| `code-approved` | 任意 | 进入 `feature-writeback` |
+直接运行 `crctl next {cr_id}`（FR-22，CR-2026-022）：不再本地维护 status→下一节点硬编码映射表——旧表只覆盖到 code-approved，缺 merging/writing-back/archived/rejected/withdrawn，且随状态机漂移（resume-cr 节点 prompt 已声明「不再本地维护映射表，跑 crctl next」）。`crctl next` 会同时校验评审/测试证据（blocker 未清空绝不给 human_approval）并覆盖全部非终态。
 
 ---
 

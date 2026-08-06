@@ -74,6 +74,8 @@ created: {YYYY-MM-DDTHH:mm:ss+08:00}
 
 在 `change-requests/{cr_id}/tasks/_index.yml` 中汇总所有 TASK 的 id / title / status / estimate / depends-on。
 
+**估算交叉校验（FR-23，CR-2026-022）**：汇总后核对 `plan.md` 章节 5 的估算总工时与 TASK 级 `estimate` 求和是否一致；不一致时输出 WARN 并说明差异（不静默覆盖 plan.md，由计划负责人决定以哪侧为准）。
+
 ### Step 5 — 推进 CR status 并 commit
 
 - `crctl advance --to task-breakdown --trigger write-dev-tasks --expect tech-design-reviewed`

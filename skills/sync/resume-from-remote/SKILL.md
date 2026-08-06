@@ -80,13 +80,7 @@ await runGit({ subcommand: "worktree",
 
 若指定了 `new_owner`：
 1. 将 `new_owner_role` 默认为 `development`，并校验取值为 `requirement` / `development` / `test`
-<!-- lint-prompts:ignore --> 描述性：远端恢复说明
-2. 更新 `change-requests/{cr_id}/cr.md` 中的 `owners.{new_owner_role}.id`
-3. 更新 `owners.{new_owner_role}.assigned-at` 为当前时间
-4. 若角色为 `requirement`，同步顶层兼容字段 `owner`
-5. 追加 `owner-history` 与 `handover-history` 记录（role / from / to / at）
-<!-- lint-prompts:ignore --> 描述性：远端恢复说明
-6. 更新 `change-requests/_backlog.yml` 对应条目的同名字段
+2. 运行 `crctl owner-set {cr_id} --role {new_owner_role} --id {new_owner} --workspace <worktree>`——crctl 原子更新 `owners.{role}.id`/`assigned-at`（含顶层 `owner` 兼容字段与 owner-history/handover-history 追加，CAS+审计）；**禁止手工编辑** owners 字段（FR-20，CR-2026-022；与 handover-cr 同一唯一写入口）
 
 ### Step 5 — 输出摘要
 
@@ -111,6 +105,7 @@ await runGit({ subcommand: "worktree",
 |------|------|
 | 任一 active repo 远端分支不存在 | 停止执行，提示联系原持有者 `push-progress`；不得部分恢复 |
 | 本地 worktree 已存在（stderr 含 `already exists`） | 返回结构化错误，建议改用 `pull-progress`（已有 worktree 的增量同步） |
+| worktree 元数据残留（报错非 `already exists`，如 `is not a valid path`——Windows Filename too long 等导致 `.git/worktrees/<name>` 残留，目录已删但 git 认为仍注册） | 先跑 `git worktree prune` 清理残留元数据后重试（参照 cr-archive 的 Windows 先例，FR-23） |
 <!-- lint-prompts:ignore --> 描述性：远端恢复说明
 | `cr.md` 不在恢复的 worktree 中 | 提示 CR 目录可能在 main 分支，检查 `change-requests/_backlog.yml` |
 | 受控 shell 不可用（`SHELL_UNAVAILABLE`） | 停止执行，返回结构化错误；**禁止**输出「请在终端运行」提示 |

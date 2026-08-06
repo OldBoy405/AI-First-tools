@@ -2257,8 +2257,14 @@ function cmdNext(ws, cr, gates, flags) {
     case 'code-approved': return suggest('merge-feature-branch', '代码已审批，进入回写合并');
     case 'merging': return suggest('writeback-prd-sdd', '合并完成后回写 baseline');
     case 'writing-back': {
-      const trace = fs.existsSync(path.join(crDir(ws, cr), 'traceability.yml'));
-      return suggest(trace ? 'cr-archive' : 'writeback-tasks → writeback-traceability', trace ? '追溯链已生成，可归档' : '先完成任务与追溯链回写');
+      // FR-21（CR-2026-022）：改查 writeback-traceability 的产物 specs/{spec_id}/traceability.yml——
+      // change-requests/{cr}/traceability.yml 是 developing 期工作稿、恒存在，误判"可归档"；
+      // spec_id 不落账本（--spec-id 为调用方旗标参数），从 specs/ 目录文件系统推断：唯一子目录取其名，多目录/无目录显式报错不猜。
+      const specsDir = path.join(ws, 'specs');
+      const subs = fs.existsSync(specsDir) ? fs.readdirSync(specsDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name) : [];
+      if (subs.length !== 1) return suggest('writeback-prd-sdd', `specs/ 子目录数=${subs.length}，无法唯一确定 spec_id，先完成 PRD/SDD 回写`);
+      const trace = fs.existsSync(path.join(specsDir, subs[0], 'traceability.yml'));
+      return suggest(trace ? 'cr-archive' : 'writeback-tasks → writeback-traceability', trace ? `追溯链已生成（specs/${subs[0]}/traceability.yml），可归档` : '先完成任务与追溯链回写');
     }
     default:
       return suggest(null, `状态 ${status} 为终态或未覆盖，无自动建议`);

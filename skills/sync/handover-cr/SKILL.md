@@ -67,10 +67,10 @@ push-progress(cr_id={cr_id})
   note: "{note}"
 ```
 
-### Step 4 — 更新 _backlog.yml
+### Step 4 — 经 crctl owner-set 变更负责人（FR-20，CR-2026-022）
 
 <!-- lint-prompts:ignore --> 描述性：移交流程说明（实际写入走 crctl owner-set）
-在 `change-requests/_backlog.yml` 对应 CR 条目更新 `owners.{owner_role}.id`、`owners.{owner_role}.assigned-at`；若 `owner_role=requirement`，同步更新顶层兼容字段 `owner: {new_owner}`。
+运行 `crctl owner-set {cr_id} --role {owner_role} --id {new_owner} --workspace <worktree>`：crctl 原子更新 `_backlog.yml` 与 `cr.md` 的 `owners.{role}.id`/`assigned-at`（含顶层 `owner` 兼容字段与 owner-history 追加，CAS+审计）；**禁止手工编辑** owners 字段（guard deny + crctl 独占写）。
 
 ### Step 5 — 发送 inbox 通知
 

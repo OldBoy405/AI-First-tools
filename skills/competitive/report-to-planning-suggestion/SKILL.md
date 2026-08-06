@@ -44,7 +44,7 @@ description: 读取指定竞品分析报告，结合产品上下文快照生成 
      - 是否与 baseline spec 或在途 CR 冲突、重叠
      - 可能影响的版本主题与优先级
       ↓
-④ 委托 planning-draft → 传入 brainstorming 结论 + 产品快照
+④ 委托 planning-draft → 如实传参：`intent`（=从 brainstorming 结论提炼的一句话规划意图）+ `context`（=产品快照）——与 planning-draft 参数表对齐（FR-23，CR-2026-022）
    生成符合 DESIGN-DOC 规范的规划建议草稿（Markdown）
       ↓
 ⑤ 将完整草稿输出到对话，并明确提示：

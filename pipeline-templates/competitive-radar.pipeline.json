@@ -58,7 +58,7 @@
       "label": "转化为规划建议",
       "ref": "report-to-planning-suggestion",
       "prompt": "将竞品分析报告（{{prev.output}}）中的机会点转化为可纳入产品规划的具体建议条目。每条建议含：优先级（P0-P3）、关联竞品功能、对应己方需补强点、参考证据链接。输出写入 node-3.md。",
-      "onFail": "skip",
+      "onFail": "abort",
       "timeoutMinutes": 10
     },
     {

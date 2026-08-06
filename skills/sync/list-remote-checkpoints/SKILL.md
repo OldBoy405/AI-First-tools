@@ -21,6 +21,7 @@ description: 按 dir-graph.yaml repositories 查询所有 active repo 的 origin
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
+| `cr_id` | string | 否 | 只查询指定 CR 的远端分支（resume-cr 单 CR 场景，FR-23）；为空时全量扫描 `requirement/*` |
 | `filter_status` | string | 否 | 按 CR status 筛选（如 `developing`），默认显示全部 |
 | `filter_owner` | string | 否 | 按任一角色 owner 筛选 |
 | `filter_owner_role` | enum | 否 | 限定 owner 角色：`requirement` / `development` / `test` |
@@ -37,7 +38,7 @@ description: 按 dir-graph.yaml repositories 查询所有 active repo 的 origin
 
 ```ts
 await runGit({ subcommand: "fetch", args: ["origin"], cwd: repo.path });
-await runGit({ subcommand: "ls-remote", args: ["--heads", "origin", "requirement/*"], cwd: repo.path });
+await runGit({ subcommand: "ls-remote", args: ["--heads", "origin", cr_id ? `requirement/${cr_id}` : "requirement/*"], cwd: repo.path });  // cr_id 提供时单 CR 过滤
 ```
 
 输出格式：`{SHA}  refs/heads/requirement/CR-YYYY-NNN`，按 `cr_id + repo.id` 汇总。

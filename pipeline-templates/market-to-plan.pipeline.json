@@ -56,7 +56,7 @@
       "kind": "skill",
       "label": "生成规划建议草稿",
       "ref": "planning-draft",
-      "prompt": "将洞察简报（{{prev.output}}）拆解为 3-5 条可执行的产品规划建议，每条含：标题、背景假设、成功指标、优先级（P0-P3）、关联目标版本「{{inputs.target_version}}」。写入 node-3.md。",
+      "prompt": "执行 planning-draft 将洞察简报（{{prev.output}}）生成规划建议草稿：按 planning-draft 真实的固定 6 章节 DESIGN-DOC 格式输出（背景假设/机会点/成功指标/风险与不确定性/建议关注方向/待人工决策问题），优先级按 planning-draft 的 P0-P2 表（无 P3——FR-23，CR-2026-022），关联目标版本「{{inputs.target_version}}」。写入 node-3.md。",
       "onFail": "abort",
       "timeoutMinutes": 10
     },
