@@ -131,7 +131,7 @@ flowchart TD
 
 | 缺口 | 当前处理 | 后续建议 |
 |------|----------|----------|
-| `knowledge-agent` 写入 Skill 不足 | 只能复用 `engineering-docs`、`validate-doc`、`record-idea`、`record-adr`、`write-insight-brief` | 补 `write-tech-note` / `write-knowledge-entry` 或收敛能力声明 |
+| `knowledge-agent` 写入 Skill 不足 | 只能复用 `engineering-docs`、`validate-doc`、`record-idea`、`write-insight-brief` | 补 `write-tech-note` / `write-knowledge-entry` 或收敛能力声明 |
 | `customer-support-agent` 反馈落盘缺 Skill | 当前只允许读 specs 和有限代码，反馈写入缺专用 Skill | 补 `record-feedback` 或接入目标系统工单入口 |
 | 回写期没有独立 primary Agent | 由 `system-orchestrator` 编排 writeback / CR / delivery Skill，`spec-agent` 仅做回写后只读核对 | 若需要人工入口，再新增 `writeback-agent` |
 

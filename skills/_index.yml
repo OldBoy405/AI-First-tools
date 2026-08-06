@@ -73,10 +73,6 @@ skills:
     brief: "快速记录产品想法到 docs/ideas/（原文落盘，不扩写）"
     status: active
 
-  - id: record-adr
-    path: ./planning/record-adr/SKILL.md
-    brief: "记录架构决策 ADR（无前置 gate）"
-    status: active
 
   - id: focus-briefing
     path: ./planning/focus-briefing/SKILL.md
@@ -278,13 +274,9 @@ skills:
 
   - id: cr-review-record
     path: ./cr/cr-review-record/SKILL.md
-    brief: "记录 CR 补充审查意见；仅 reject/withdraw 时通过 cr-status-set 推进终止态"
+    brief: "记录 CR 补充审查意见；仅 reject/withdraw 时经 crctl advance 推进终止态"
     status: active
 
-  - id: cr-status-set
-    path: ./cr/cr-status-set/SKILL.md
-    brief: "CR 状态原子写入：写 cr.md frontmatter + _backlog.yml 同步（幂等）"
-    status: active
 
   - id: inbox-emit
     path: ./cr/inbox-emit/SKILL.md

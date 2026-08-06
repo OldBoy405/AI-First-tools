@@ -13,20 +13,20 @@
 
 `system-orchestrator` 不是可部署 Agent，而是系统编排器/运行时组件，用来承接同步、回写、CR 状态、受控 shell 等跨 Agent 基础能力。
 
-> IDE 单独使用（无平台执行层）时，`crctl`（`skills/shared/crctl/`）是 `cr-status-set` / `controlled-shell` / `validate-doc` 的代码化执行器。`requirement-writer` 与 `dev-agent` 通过 `can-call: crctl` 执行受控 git、状态查询与经门禁的状态推进；`crctl` 自身即状态机与门禁，因此该 can-call 不构成对 `cr-status-set` forbidden 边界的绕过。
+> IDE 单独使用（无平台执行层）时，`crctl`（`skills/shared/crctl/`）是 `controlled-shell` / `validate-doc` 的代码化执行器。`requirement-writer` 与 `dev-agent` 通过 `can-call: crctl` 执行受控 git、状态查询与经门禁的状态推进；`crctl` 自身即状态机与门禁，因此该 can-call 不构成对状态推进边界的绕过。
 
 ## 主责矩阵
 
 | Actor | 主责 Skill |
 |---|---|
-| `product-planning-agent` | `analyze-user-feedback`, `conduct-market-research`, `run-competitive-analysis`, `analyze-current-product`, `write-planning-report`, `review-planning-report`, `write-roadmap`, `write-planning-entry`, `extract-market-insight`, `write-insight-brief`, `gather-product-context`, `planning-draft`, `record-idea`, `record-adr`, `focus-briefing` |
+| `product-planning-agent` | `analyze-user-feedback`, `conduct-market-research`, `run-competitive-analysis`, `analyze-current-product`, `write-planning-report`, `review-planning-report`, `write-roadmap`, `write-planning-entry`, `extract-market-insight`, `write-insight-brief`, `gather-product-context`, `planning-draft`, `record-idea`, `focus-briefing` |
 | `requirement-writer` | `requirement-register`, `write-requirement-prd`, `review-requirement`, `approve-requirement` |
 | `dev-agent` | `write-tech-design`, `review-tech-design`, `approve-tech-design`, `write-dev-plan`, `write-dev-tasks`, `approve-dev-start`, `implement-code`, `write-test-report`, `review-code`, `approve-code` |
 | `spec-agent` | `spec-show`, `spec-query`, `spec-dashboard` |
 | `delivery-agent` | `writeback-tasks` |
 | `quality-reviewer-agent` | `review-alignment`, `change-impact-analysis` |
 | `competitive-analyst-agent` | `fetch-competitor-updates`, `write-competitive-report`, `report-to-planning-suggestion` |
-| `system-orchestrator` | `merge-feature-branch`, `writeback-prd-sdd`, `writeback-traceability`, `push-progress`, `pull-progress`, `resume-from-remote`, `list-remote-checkpoints`, `handover-cr`, `validate-doc`, `engineering-docs`, `controlled-shell`, `crctl`, `cr-review-record`, `cr-status-set`, `inbox-emit`, `cr-archive`, `feedback-writeback`, `cr-inbox`, `cr-query`, `cr-show`, `cr-dashboard` |
+| `system-orchestrator` | `merge-feature-branch`, `writeback-prd-sdd`, `writeback-traceability`, `push-progress`, `pull-progress`, `resume-from-remote`, `list-remote-checkpoints`, `handover-cr`, `validate-doc`, `engineering-docs`, `controlled-shell`, `crctl`, `cr-review-record`, `inbox-emit`, `cr-archive`, `feedback-writeback`, `cr-inbox`, `cr-query`, `cr-show`, `cr-dashboard` |
 
 ## Pipeline Owner
 

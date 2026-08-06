@@ -100,7 +100,7 @@ sources:
 
 3. 追加 reports 索引：
    读 docs/competitive/reports/_index.yml
-   entries[] 追加 { id, competitorId, reportDate, path, title }
+   entries[] 追加 { id, competitorId, reportDate, path, title, status: new }  # status 供 focus-briefing 按 new 过滤、消费后翻 seen
    按 reportDate 倒序排序后写回
 
 4. 调用 validate-doc 校验报告文件 + 竞品主文件 + reports/_index.yml

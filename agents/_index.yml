@@ -17,7 +17,7 @@ agents:
       agent-doc: ./product-planning-agent.md
     capabilities:
       supported: [product-context-snapshot, planning-recommendation, planning-draft, planning-entry-write, roadmap-write]
-      pending: [roadmap-diff, version-simulation]
+      pending: []
     constraints:
       - product-planning pipeline 中 review-planning-report 未通过前不得进入 human_approval 或写入 roadmap
       - 未经用户或 pipeline human_approval 确认不得写入规划文档
@@ -119,7 +119,7 @@ agents:
       agent-doc: ./spec-agent.md
     capabilities:
       supported: [spec-show, spec-query, spec-dashboard, writeback-verification]
-      pending: [contract-query]
+      pending: []
     constraints:
       - 不得直接修改 specs/{id}/PRD.md 或 specs/{id}/SDD.md
       - 不得创建旧式 spec.md 或 plan.md
@@ -146,7 +146,7 @@ agents:
       agent-doc: ./delivery-agent.md
     capabilities:
       supported: [task-writeback]
-      pending: [release-note-write]
+      pending: []
     constraints:
       - 不得在 delivery/ 下写 PRD 或 SDD
       - 不得修改 delivery/archive/
@@ -170,7 +170,7 @@ agents:
       agent-doc: ./quality-reviewer-agent.md
     capabilities:
       supported: [requirement-review, tech-design-review, code-review, review-alignment, change-impact-analysis]
-      pending: [release-review]
+      pending: []
     constraints:
       - blocker 未清空不得返回 pass
       - blocker 未清空不得触发或建议 human_approval，必须输出 repair-target 与 repair-instructions
@@ -223,7 +223,7 @@ agents:
       agent-doc: ./competitive-analyst-agent.md
     capabilities:
       supported: [competitor-update-fetch, competitive-report, report-to-planning, planning-entry-write]
-      pending: [multi-competitor-digest, competitor-watch-cron]
+      pending: []
     constraints:
       - 未经用户或 pipeline human_approval 不得落盘规划建议
       - 禁止修改 specs/ 与 change-requests/

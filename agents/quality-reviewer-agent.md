@@ -45,7 +45,7 @@ phase0 中的质量门以 CR 生命周期为核心，不再使用旧式 `feature
 
 ## 约束
 
-- 不得直接调用 `cr-status-set`。
+- 不得绕过 `crctl advance` 直接修改 CR 状态。
 - 不得把 human approval 当作隐式状态推进。
 - 不得读取主工作区代码进行代码评审；代码证据来自 CR worktree。
 - blocker 未清空前不得返回 pass。

@@ -35,7 +35,6 @@ actors:
       - gather-product-context
       - planning-draft
       - record-idea
-      - record-adr
       - focus-briefing
     can-call:
       - spec-query
@@ -49,7 +48,6 @@ actors:
       - requirement-register
       - implement-code
       - merge-feature-branch
-      - cr-status-set
       - cr-archive
 
   requirement-writer:
@@ -71,7 +69,6 @@ actors:
       - writeback-prd-sdd
       - implement-code
       - merge-feature-branch
-      - cr-status-set
       - cr-archive
 
   dev-agent:
@@ -100,7 +97,6 @@ actors:
     forbidden:
       - writeback-prd-sdd
       - merge-feature-branch
-      - cr-status-set
       - cr-archive
 
   spec-agent:
@@ -116,7 +112,6 @@ actors:
     forbidden:
       - requirement-register
       - implement-code
-      - cr-status-set
       - writeback-prd-sdd
       - writeback-traceability
 
@@ -150,7 +145,6 @@ actors:
       - approve-requirement
       - approve-tech-design
       - approve-code
-      - cr-status-set
 
   knowledge-agent:
     kind: agent
@@ -159,14 +153,12 @@ actors:
       - engineering-docs
       - validate-doc
       - record-idea
-      - record-adr
       - write-insight-brief
     external: []
     forbidden:
       - requirement-register
       - implement-code
       - merge-feature-branch
-      - cr-status-set
 
   competitive-analyst-agent:
     kind: agent
@@ -186,7 +178,6 @@ actors:
       - conduct-market-research
       - requirement-register
       - implement-code
-      - cr-status-set
 
   customer-support-agent:
     kind: agent
@@ -200,7 +191,6 @@ actors:
       - requirement-register
       - write-requirement-prd
       - implement-code
-      - cr-status-set
 
   system-orchestrator:
     kind: system
@@ -218,7 +208,6 @@ actors:
       - controlled-shell
       - crctl
       - cr-review-record
-      - cr-status-set
       - inbox-emit
       - cr-archive
       - feedback-writeback
@@ -246,7 +235,7 @@ external-skills:
 known-gaps:
   - id: knowledge-agent-write-skills
     owner: knowledge-agent
-    description: "knowledge-agent 声明 tech-note-write / insight-write，但 phase0 尚未提供专属写入 Skill；当前只能复用 engineering-docs、record-idea、record-adr 与 write-insight-brief。"
+    description: "knowledge-agent 声明 tech-note-write / insight-write，但 phase0 尚未提供专属写入 Skill；当前只能复用 engineering-docs、record-idea 与 write-insight-brief。"
   - id: customer-support-feedback-write
     owner: customer-support-agent
     description: "customer-support-agent 声明 unresolved-feedback-record，但 phase0 尚未提供 record-feedback Skill；落盘反馈应在后续补专用 Skill 或绑定到目标系统工单入口。"

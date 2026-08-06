@@ -686,7 +686,6 @@ AI 会告诉你具体的 blocker（如"接口缺少错误码定义"），你需�
 | 写洞察简报 | "基于这条 raw insight，生成产品洞察简报" | `write-insight-brief` |
 | 生成规划草稿 | "帮我生成一份产品规划文档草稿，不落盘只预览" | `planning-draft` |
 | 快速记录想法 | "帮我把这个产品想法记录到 docs/ideas/" | `record-idea` |
-| 记录架构决策 | "帮我记录这条架构决策 ADR" | `record-adr` |
 | 当前焦点简报 | "帮我生成当前焦点版本和在途 CR 的简报摘要" | `focus-briefing` |
 
 ### 8.2 需求编写期（4 条）
@@ -760,7 +759,7 @@ AI 会告诉你具体的 blocker（如"接口缺少错误码定义"），你需�
 | 你想做的事 | 在 Qoder 中可以这样说 | 对应 Skill |
 |-----------|----------------------|-----------|
 | 记录补充审查 | "帮我在 CR-2026-001 中记录一条补充审查意见" | `cr-review-record` |
-| 原子写入 CR 状态 | "帮我把 CR-2026-001 的状态更新为 XXX" | `cr-status-set` |
+| 原子写入 CR 状态 | "帮我把 CR-2026-001 推进到 XXX" | `crctl advance` |
 | 发送收件箱事件 | "帮我就 CR-2026-001 的审批结果向 inbox 发送事件" | `inbox-emit` |
 | 归档 CR | "帮我把 CR-2026-001 归档，移入历史记录" | `cr-archive` |
 | CR 反馈回写 | "帮我把 CR-2026-001 的实施结论写回 traceability.yml 和技术笔记" | `feedback-writeback` |

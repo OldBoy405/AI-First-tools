@@ -15,16 +15,15 @@ description: "生成今日焦点 AI 简报，聚合多源数据写入 focus.yml"
 
 ---
 
-## 数据源（6 个）
+## 数据源（5 个）
 
 | # | 数据源文件 | 提取逻辑 |
 |---|-----------|----------|
 | 1 | `delivery/task/_index.yaml` | 过滤 status=pending\|in-progress 且 priority=urgent\|important，按优先级排序取前 5 条 |
 | 2 | `change-requests/{CR-ID}/cr.md` frontmatter | status=developing/code-reviewing/writing-back 的 CR，提醒当前主攻方向 |
-| 3 | `docs/competitive/reports/_index.yml` | status=new 的最新报告，生成关注提醒 |
+| 3 | `docs/competitive/reports/_index.yml` | status=new 的最新报告，生成关注提醒；消费后翻转为 seen（防重复提醒） |
 | 4 | `delivery/task/_index.yaml`（进行中任务） | in-progress 任务，防止遗漏 |
-| 5 | `.rayai/pipelines/_index.yml` | 已激活 pipeline 列表与默认入口（可选） |
-| 6 | （上下文最近操作） | 关键操作或待确认事项 |
+| 5 | （上下文最近操作） | 关键操作或待确认事项 |
 
 > 以上数据源按优先级排序。若文件不存在，静默跳过，不影响整体简报生成。
 
@@ -38,7 +37,6 @@ description: "生成今日焦点 AI 简报，聚合多源数据写入 focus.yml"
 read_file: delivery/task/_index.yaml
 read_file: change-requests/{CR-ID}/cr.md（扫描各 CR frontmatter status）
 read_file: docs/competitive/reports/_index.yml（可选）
-read_file: .rayai/pipelines/_index.yml（可选）
 ```
 
 ### Step 2 — LLM 提炼
@@ -55,7 +53,11 @@ read_file: .rayai/pipelines/_index.yml（可选）
 - summary: 总结句（≤ 25 字）
 ```
 
-### Step 3 — 写入 focus.yml
+### Step 3 — 消费标记
+
+简报生成后，把已消费的竞品报告索引条目 `status: new` 翻转为 `seen`（写回 `docs/competitive/reports/_index.yml`），确保下次简报只提醒新增报告。
+
+### Step 4 — 写入 focus.yml
 
 ```yaml
 schema: rayai.focus/v1

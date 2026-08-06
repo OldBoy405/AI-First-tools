@@ -86,7 +86,7 @@ report-to-planning-suggestion:
   write: []
   delegates:
     - gather-product-context
-    - brainstorming
+    - brainstorming     # 目标运行时未提供 brainstorming 时，直接委托 planning-draft（降级路径）
     - planning-draft
     - engineering-docs      # 仅由调用 Agent 在用户确认后触发
     - validate-doc          # 同上
