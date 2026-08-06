@@ -27,7 +27,7 @@
       "label": "任务拆分后自动推送远端",
       "type": "boolean",
       "required": false,
-      "default": true,
+      "default": false,
       "description": "勾选后 plan.md 与 tasks/ 完成后立即 push-progress 到 origin"
     }
   ],

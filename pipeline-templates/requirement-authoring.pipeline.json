@@ -34,7 +34,7 @@
       "key": "source",
       "label": "关联规划报告路径",
       "type": "text",
-      "required": false,
+      "required": true,
       "placeholder": "docs/product-planning/2026-05-07-xxx.md",
       "description": "留空则表示跳过规划直接写需求"
     },
@@ -75,7 +75,7 @@
       "label": "PRD 完成后自动推送远端",
       "type": "boolean",
       "required": false,
-      "default": true,
+      "default": false,
       "description": "勾选后 PRD 起草完成立即 push-progress 推送到 origin，方便换机续写"
     }
   ],

@@ -27,7 +27,7 @@
       "label": "架构设计审批后自动推送远端",
       "type": "boolean",
       "required": false,
-      "default": true,
+      "default": false,
       "description": "勾选后 SDD 评审和人工审批完成后立即 push-progress 到 origin"
     }
   ],
