@@ -124,6 +124,7 @@ CR 角色 owner 变更必须通过 `handover-cr` 或 `resume-from-remote` 的角
 4. `SKILL.md` 必须包含 `name:` frontmatter，并明确输入、读取、写入、状态推进、失败处理。
 5. 写入型 Skill 必须说明如何调用 `validate-doc` 或等价校验。
 6. 涉及 git/shell 的 Skill 必须通过 `controlled-shell` 约束命令范围。
+7. CR 上下文 skill（requirement/develop/writeback/sync/cr 域）的输出摘要中「下一步」提示一律写「以 `crctl next {cr_id}` 为准」，不得手写 skill/pipeline 名映射副本（lint-prompts R9 强制）。
 
 ### 修改 Agent
 

@@ -194,3 +194,47 @@ test('豁免收窄：注释与违规行隔 3+ 行 → 仍命中；±1 行内 →
     assert.ok(!r.stdout.includes('写入流程'), '±1 行内豁免');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-023 TASK-02：R9 规则（CR 上下文「下一步」提示收敛 crctl next，FR-12）──
+
+test('R9：CR 上下文「下一步」手写 skill 副本 → CONTRADICTS；crctl next 形态不报', () => {
+  const dir = makeFixture({
+    'skills/requirement/x/SKILL.md': '# 输出\n\n下一步 : 执行 review-requirement 或 push-progress\n\n# 合规\n\n下一步 : 以 `crctl next {cr_id}` 为准\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('R9') && r.stdout.includes('CONTRADICTS'), `应命中 R9: ${r.stdout}`);
+    assert.ok(r.stdout.includes('skills/requirement/x/SKILL.md:3'), `违例行号应为 3: ${r.stdout}`);
+    assert.ok(!r.stdout.includes('skills/requirement/x/SKILL.md:7'), 'crctl next 合规行不报');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R9：域外 SKILL.md 的「下一步」不受约束（含真实 skill id 也不报）', () => {
+  const dir = makeFixture({
+    'skills/planning/x/SKILL.md': '# 输出\n\n下一步 : 执行 review-requirement\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(!r.stdout.includes('R9'), `域外不报: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R9：pipeline 名副本（下一步指向 pipeline 而非 skill）→ CONTRADICTS', () => {
+  const dir = makeFixture({
+    'skills/develop/x/SKILL.md': '# 输出\n\n下一步：执行 writeback pipeline\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('R9') && r.stdout.includes('CONTRADICTS'), `应命中 pipeline 名: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R9 记述性豁免：CR 上下文域内无 skill id 的「下一步」行（标题/描述性）→ 不报', () => {
+  const dir = makeFixture({
+    'skills/develop/x/SKILL.md': '# 测试报告输出\n\n- 下一步建议\n\n摘要完成。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(!r.stdout.includes('R9'), `记述性「下一步」行不报: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

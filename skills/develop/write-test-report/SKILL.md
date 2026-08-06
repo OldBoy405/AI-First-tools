@@ -88,7 +88,7 @@ tests:
    结果        : pass/block
    未覆盖风险  : {N} 项
    自修复轮次  : {self_repair_attempt 或 0}/3
-   下一步      : {pass → review-code | block → 自动回到 implement-code 修复后重新生成测试报告}
+   下一步      : 以 `crctl next {cr_id}` 为准（pass→进入代码评审；block→pipeline 自动回对应修复节点重新生成测试报告）
 ```
 
 ## 错误处理

@@ -79,7 +79,7 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
    Verdict     : {PASS / BLOCK}
    FR 覆盖率   : {N}/{总数}
    Blockers    : {N} 条
-   下一步      : {PASS → human_approval 后调用 approve-tech-design | BLOCK → 自动回到 write-tech-design 修复后重审}
+   下一步      : 以 `crctl next {cr_id}` 为准（PASS→等待人工审批；BLOCK→pipeline 自动回对应修复节点重审）
 ```
 
 ## 错误处理

@@ -188,7 +188,7 @@ push 前再次对每个 repo 执行：
    merge commits       : [{repo.id}:{sha8}, ...]
    skipped repos       : [{repo.id}, ...]（无改动仓：未合并，worktree/分支交由 cr-archive Step 7 清理）
    Worktree            : 保留，等待 cr-archive 统一清理
-   下一步              : 执行 writeback-prd-sdd
+   下一步              : 以 `crctl next {cr_id}` 为准
 ```
 
 ---

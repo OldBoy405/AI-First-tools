@@ -50,6 +50,8 @@ permission:
 | 推送进度 / 保存 checkpoint | `sync/push-progress` |
 | 评审需求 / 记录意见 | `requirement/review-requirement` |
 | 批准需求 / 推进状态 | `requirement/approve-requirement` |
+
+> **前置注记（D3）**：上表「批准需求」映射仅当 review-annotations/requirement.yml 的 verdict=pass 且 blockers=[] 时生效；评审未过时不得直连 approve-requirement。
 | 查询 CR 状态 | `cr/cr-show` 或 `cr/cr-query` |
 | 移交 CR 某一角色 owner | `sync/handover-cr` |
 

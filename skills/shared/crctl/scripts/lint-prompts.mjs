@@ -11,7 +11,7 @@
  *   node skills/shared/crctl/scripts/lint-prompts.mjs [--mode report|enforce] [--root <dir>]
  *   --mode report（默认）：输出 file:line + 规则 + 级别，退出 0（不阻断提交）
  *   --mode enforce：命中 CONTRADICTS/STALE-REF 即退出 1（LINT_DRIFT）
- * 规则：R1~R6（CR-2026-021）+ R7（crctl 命令参数形态：advance --to/--trigger、全角/伪旗标、backlog-set 字段白名单、--template subject 编号）+ R8（inbox-emit 接口：函数式违例、--event 枚举）
+ * 规则：R1~R6（CR-2026-021）+ R7（crctl 命令参数形态：advance --to/--trigger、全角/伪旗标、backlog-set 字段白名单、--template subject 编号）+ R8（inbox-emit 接口：函数式违例、--event 枚举） + R9（CR 上下文「下一步」提示收敛 crctl next，CR-2026-023）
  *   豁免契约（CR-2026-022 FR-25）：<!-- lint-prompts:ignore --> 只豁免其所在行 ± radius 行（radius=1，测试向量固化），不再整段生效
  *
  * 零第三方依赖（不变量 3）；读入先 CRLF 归一（纪律 #1）。
@@ -26,6 +26,7 @@ const PACKAGE_ROOT = path.resolve(__dirname, '..', '..', '..', '..'); // tools �
 const RULES_PATH = process.env.CRCTL_RULES_PATH || path.resolve(__dirname, '..', '..', 'controlled-shell', 'rules.json');
 const CRCTL_PATH = path.resolve(__dirname, 'crctl.mjs'); // R7 判据源：backlog-set 字段白名单
 const INBOX_SKILL_PATH = path.resolve(__dirname, '..', '..', '..', 'cr', 'inbox-emit', 'SKILL.md'); // R8 判据源：event 枚举
+const SKILLS_INDEX_PATH = path.resolve(__dirname, '..', '..', '..', '_index.yml'); // R9 判据源：全部 skill id（CR-2026-023）
 
 /* ────────────────────────── 判据加载（直读 rules.json / 字面黑名单） ────────────────────────── */
 
@@ -42,7 +43,10 @@ function loadJudgements() {
   const inboxSkill = fs.readFileSync(INBOX_SKILL_PATH, 'utf8').replaceAll('\r\n', '\n');
   const evLine = inboxSkill.split('\n').find((l) => l.includes('| `event` |')) || '';
   const inboxEvents = new Set([...evLine.matchAll(/`([a-z-]+)`/g)].map((m) => m[1]).filter((s) => s !== 'event'));
-  return { denyFilesLoose, gitSubs, backlogSetFields, inboxEvents };
+  // R9 判据：全部 skill id 直读 skills/_index.yml（CR-2026-023，零派生物，新增 skill 自动覆盖）
+  const skillIndex = fs.readFileSync(SKILLS_INDEX_PATH, 'utf8').replaceAll('\r\n', '\n');
+  const skillIds = new Set([...skillIndex.matchAll(/^\s*-\s*id:\s*([\w-]+)/gm)].map((m) => m[1]));
+  return { denyFilesLoose, gitSubs, backlogSetFields, inboxEvents, skillIds };
 }
 
 const LITERAL_BLACKLIST = {
@@ -54,6 +58,9 @@ const LITERAL_BLACKLIST = {
 // 写动词（中英）：段内出现 deny 文件 + 写动词 + 无 crctl 调用 → R1 命中
 const WRITE_VERBS = /写|写入|创建|编辑|更新|追加|手写|修改|改写|改动|write|create|edit|update|append|persist/i;
 const CRCTL_CALL = /crctl\s+[a-z-]+/i; // 同段有 crctl 调用则视为"正确示范/已迁移"，不判 R1
+// R9（CR-2026-023）：CR 上下文域 scope + pipeline 名命中模式（approve-code「下一步：writeback pipeline」类指向 pipeline 而非 skill）
+const CR_CONTEXT_SCOPE = /^skills\/(requirement|develop|writeback|sync|cr)\//;
+const PIPELINE_NAME_HIT = /\b(requirement-authoring|architecture-design|code-implementation|feature-writeback|resume-cr|writeback|coding|architecture)\s+pipeline\b/;
 
 /* ────────────────────────── 文件遍历与段落切分 ────────────────────────── */
 
@@ -194,6 +201,18 @@ function runRules(para, ctx) {
     const m = l.match(/--event\s+(\S+)/);
     if (m && !m[1].includes('{') && !ctx.inboxEvents.has(m[1])) {
       findings.push({ rule: 'R8', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: `inbox-emit --event 不在声明枚举：${m[1]}` });
+    }
+  }
+  // R9（CR-2026-023）：CR 上下文 skill 的「下一步」提示必须收敛到 crctl next，禁止手写 skill/pipeline 名映射副本
+  // scope 五域（requirement/develop/writeback/sync/cr）且非 cr-show（它是执行 crctl next 的视图 skill）；域外无 CR 上下文不适用
+  if (CR_CONTEXT_SCOPE.test(ctx.file) && !ctx.file.includes('/cr-show/')) {
+    for (let li = 0; li < lines.length; li++) {
+      const l = lines[li];
+      if (!l.includes('下一步') || l.includes('crctl next')) continue;
+      const hit = [...ctx.skillIds].filter((s) => l.includes(s));
+      if (hit.length || PIPELINE_NAME_HIT.test(l)) {
+        findings.push({ rule: 'R9', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: 'CR 上下文 skill 的「下一步」提示必须写「以 crctl next {cr_id} 为准」，禁止手写 skill/pipeline 名映射副本' });
+      }
     }
   }
   // 豁免收窄（FR-25，CR-2026-022）：<!-- lint-prompts:ignore --> 只豁免其所在行 ± radius 行（radius=1 契约），不再整段生效

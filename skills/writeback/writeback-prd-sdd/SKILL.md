@@ -73,7 +73,7 @@ crctl git commit --template writeback --cr {cr_id} -m "PRD/SDD 增量回写 spec
    spec_id     : {spec_id}
    版本        : {target_version}
    回写文件    : specs/{spec_id}/PRD.md, SDD.md
-   下一步      : 执行 writeback-tasks
+   下一步      : 以 `crctl next {cr_id}` 为准
 ```
 
 ---

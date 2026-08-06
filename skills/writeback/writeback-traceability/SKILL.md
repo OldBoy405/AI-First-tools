@@ -94,7 +94,7 @@ crctl git commit --template writeback --cr {cr_id} -m "specs/{spec_id} traceabil
    本 CR 段        : milestone {milestone}（- cr: {cr_id}）
    merge commits   : [{repo.id}={sha8}, ...]
    CR status       : writing-back
-   下一步          : cr-archive
+   下一步          : 以 `crctl next {cr_id}` 为准
 ```
 
 ---

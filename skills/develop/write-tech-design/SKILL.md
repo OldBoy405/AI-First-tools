@@ -99,7 +99,7 @@ sdd.md 完整落盘后，调用 `crctl advance --to tech-design-review-pending -
    FR 覆盖率  : {N}/{总数}
    ARCHITECTURE.md : {已存在，直接引用 | 新起草（{repo}），随本次评审一并确认}
    当前状态   : tech-design-review-pending
-   下一步     : 执行 review-tech-design
+   下一步     : 以 `crctl next {cr_id}` 为准
 ```
 
 ---

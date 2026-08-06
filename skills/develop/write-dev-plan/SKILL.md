@@ -66,5 +66,5 @@ Commit：`feat({cr_id}): draft dev plan`
    文件       : change-requests/{cr_id}/plan.md
    里程碑数   : {N}
    估算总工时 : {N} 人天
-   下一步     : 执行 write-dev-tasks
+   下一步     : 以 `crctl next {cr_id}` 为准
 ```

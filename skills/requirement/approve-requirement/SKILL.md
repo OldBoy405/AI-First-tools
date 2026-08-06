@@ -34,7 +34,7 @@ description: 需求审批通过后的收尾动作：在 approval.yml 记录审�
    - 计算证据摘要并写入 approval.yml#requirement（CAS+审计）
    - 级联 advance 到 requirement-approved
 2. Agent/管道**不得**代写 approval.yml 或推进 status；非 TTY 调用 crctl 一律拒绝（APPROVAL_REQUIRES_HUMAN）。
-3. 输出审批记录路径、当前 status 和下一步：write-tech-design。
+3. 输出审批记录路径、当前 status 和下一步：以 `crctl next {cr_id}` 为准（进入架构设计阶段）。
 
 ## 错误处理
 

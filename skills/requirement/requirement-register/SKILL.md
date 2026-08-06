@@ -103,7 +103,7 @@ await runGit({ subcommand: "worktree",
    Worktree    : [{repo.id}: .rayai-worktrees/{bucket}/requirement/{CR-ID}, ...]
 <!-- lint-prompts:ignore --> 输出摘要：仅展示路径
    cr.md       : change-requests/{CR-ID}/cr.md
-   下一步      : 在 .rayai-worktrees/knowledge-base/requirement/{CR-ID} 中执行 write-requirement-prd
+   下一步      : 以 `crctl next {cr_id}` 为准（在 worktree 中继续撰写 PRD）
 ```
 
 ```yaml

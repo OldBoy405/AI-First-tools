@@ -82,6 +82,7 @@ const head = await runGit({ subcommand: "rev-parse", args: ["HEAD"], cwd: repo.w
    分支            : requirement/{cr_id}
    repos           : [{repo.id}:{sha8}, ...]
    last-push-at    : {YYYY-MM-DDTHH:mm:ss+08:00}
+   下一步          : 以 `crctl next {cr_id}` 为准
 ```
 
 ---

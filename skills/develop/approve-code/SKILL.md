@@ -28,7 +28,7 @@ description: 记录代码人工审批结论，校验 change-requests/{CR-ID}/rev
    - 计算证据摘要并写入 approval.yml#code（CAS+审计）
    - 级联 advance 到 code-approved
 2. Agent/管道**不得**代写 approval.yml 或推进 status；非 TTY 调用 crctl 一律拒绝（APPROVAL_REQUIRES_HUMAN）。
-3. 输出审批记录路径、当前 status 和下一步：writeback pipeline。
+3. 输出审批记录路径、当前 status 和下一步：以 `crctl next {cr_id}` 为准（进入回写阶段）。
 
 ## 错误处理
 

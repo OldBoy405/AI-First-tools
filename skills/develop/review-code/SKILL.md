@@ -105,7 +105,7 @@ Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项
    Critical    : {N} 条
    Major       : {N} 条
    TASK 覆盖率 : {N}/{总数}
-   下一步      : {PASS → human_approval 后调用 approve-code | BLOCK → 自动回到 implement-code 修复、重测、重审}
+   下一步      : 以 `crctl next {cr_id}` 为准（PASS→等待人工审批；BLOCK→pipeline 自动回对应修复节点重审）
 ```
 
 ## 错误处理

@@ -64,7 +64,7 @@ crctl git commit --template writeback --cr {cr_id} -m "任务回写 delivery/tas
    CR          : {cr_id}
    回写数量    : {N} 个（跳过已交付 {M} 个）
    目标目录    : delivery/task/
-   下一步      : 确认 tasks/_index.yml 与 delivery/task/_index.yaml 一致后执行 writeback-traceability → cr-archive
+   下一步      : 以 `crctl next {cr_id}` 为准
 ```
 
 ---

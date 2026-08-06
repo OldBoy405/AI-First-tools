@@ -88,7 +88,7 @@ created: {YYYY-MM-DDTHH:mm:ss+08:00}
    TASK 总数   : {N}
    估算总工时  : {sum}h
    依赖关系    : {有/无}
-   下一步      : 执行 push-progress 或等待人工确认后开始编码
+   下一步      : 以 `crctl next {cr_id}` 为准
 ```
 
 ---

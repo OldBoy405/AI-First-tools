@@ -98,7 +98,7 @@ reviews:
    CR       : {cr_id}
    Verdict  : {PASS / BLOCK}
    Blockers : {N} 条（若有，逐条列出）
-   下一步   : {通过→ 等待人工审批 | 阻塞→ 自动回到 write-requirement-prd 修复后重审}
+   下一步   : 以 `crctl next {cr_id}` 为准（PASS→等待人工审批；BLOCK→pipeline 自动回对应修复节点重审）
 ```
 
 ---

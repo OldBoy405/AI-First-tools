@@ -33,7 +33,7 @@ description: 记录任务拆分后的开发启动人工确认，校验 plan.md �
    - 计算证据摘要并写入 approval.yml#dev-start（CAS+审计）
    - 级联 advance 到 developing
 2. Agent/管道**不得**代写 approval.yml 或推进 status；非 TTY 调用 crctl 一律拒绝（APPROVAL_REQUIRES_HUMAN）。
-3. 输出审批记录路径、当前 status 和下一步：implement-code。
+3. 输出审批记录路径、当前 status 和下一步：以 `crctl next {cr_id}` 为准（进入编码实施阶段）。
 
 ## 错误处理
 

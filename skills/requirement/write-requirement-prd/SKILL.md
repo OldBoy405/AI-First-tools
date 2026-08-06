@@ -95,7 +95,7 @@ Commit：`feat({cr_id}): draft PRD - {title}`
    文件   : change-requests/{cr_id}/prd.md
    FR 数  : {N}
    US 数  : {N}
-   下一步 : 执行 review-requirement 或 push-progress
+   下一步 : 以 `crctl next {cr_id}` 为准
 ```
 
 ---
