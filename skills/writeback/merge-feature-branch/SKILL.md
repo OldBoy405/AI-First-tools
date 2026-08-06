@@ -70,7 +70,7 @@ description: 按 dir-graph.yaml repositories 动态解析参与仓，通过 dry-
    - `repo.trunk`
    - CR 分支：`requirement/{cr_id}`
    - CR worktree：`.rayai-worktrees/{bucket}/requirement/{cr_id}`，其中 knowledge-base 使用 `knowledge-base`，独立代码仓使用 `repo.id`
-4. 确认每个参与仓 CR worktree 无未提交变更，且 `origin/requirement/{cr_id}` 存在。
+4. 确认每个参与仓 CR worktree 无未提交变更，且 `origin/requirement/{cr_id}` 存在；**比对本地 HEAD 与远端 HEAD**（`git rev-parse HEAD` vs `git rev-parse origin/requirement/{cr_id}`），不一致时先要求执行 push-progress 补跑——最后一批提交（评审/审批证据）可能未推送，直接合并会拿到缺证据的远端分支（FR-16，CR-2026-022）。
 5. 任一仓校验失败则 abort，不得单仓提前合并。
 6. 无提交分支的仓（该 CR 在其无代码改动）跳过合并与 merge-commits 记录，**但其 `requirement/{cr_id}` worktree 与本地/远端分支仍由 cr-archive Step 7 统一清理**（"跳过合并 ≠ 跳过清理"，见 cr-archive Step 7.2 无改动仓规则）。
 

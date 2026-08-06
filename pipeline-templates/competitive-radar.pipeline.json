@@ -48,7 +48,7 @@
       "kind": "skill",
       "label": "生成竞品分析报告",
       "ref": "write-competitive-report",
-      "prompt": "基于采集结果（{{prev.output}}），按「{{inputs.focus_dimension}}」维度撰写结构化竞品分析报告。报告需包含：① 执行摘要 ② 功能/策略对比矩阵 ③ 差距识别 ④ 机会点列表。结果写入 node-2.md，同时追加一条 entry 到 docs/competitive/_index.yml。",
+      "prompt": "基于采集结果（{{prev.output}}），按「{{inputs.focus_dimension}}」维度撰写结构化竞品分析报告。报告需包含：① 执行摘要 ② 功能/策略对比矩阵 ③ 差距识别 ④ 机会点列表。以 `confirmed=false` 执行 write-competitive-report（两阶段确认协议：只出草稿写入 node-2.md，**不落盘** docs/competitive/）；human_approval 通过后由节点 5 以 confirmed=true 重新调用完成落盘。追加的报告索引 entry 目标为 `docs/competitive/reports/_index.yml`（竞品注册表与报告索引是两个不同文件，勿混写——FR-17，CR-2026-022）。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },
@@ -74,7 +74,7 @@
       "kind": "skill",
       "label": "写入产品规划知识库",
       "ref": "write-planning-entry",
-      "prompt": "将审批通过的规划建议（node-3.md）落盘为产品规划条目：\n- source: node-3.md\n- title: {{inputs.competitor_slug}} 竞品雷达规划建议\n- target_version: unassigned\n- owner: product-owner\n\n写入 docs/product-planning/{YYYY-MM-DD}-{slug}.md，并更新 docs/product-planning/_index.yml。竞品报告归档由 write-competitive-report 负责，本节点不得重复写 docs/competitive/。",
+      "prompt": "将审批通过的规划建议（node-3.md）落盘为产品规划条目：\n- source: node-3.md\n- title: {{inputs.competitor_slug}} 竞品雷达规划建议\n- target_version: unassigned\n- owner: product-owner\n\n写入 docs/product-planning/{YYYY-MM-DD}-{slug}.md，并更新 docs/product-planning/_index.yml。**并以 confirmed=true 重新调用 write-competitive-report 完成竞品报告与索引落盘（两阶段确认协议的落盘阶段，FR-17）**；本节点不得重复写 docs/competitive/ 除 write-competitive-report 落盘外的内容。",
       "onFail": "abort",
       "timeoutMinutes": 10
     }

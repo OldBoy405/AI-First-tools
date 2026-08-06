@@ -74,13 +74,9 @@ push-progress(cr_id={cr_id})
 
 ### Step 5 — 发送 inbox 通知
 
-调用 `inbox-emit`：
-```
-inbox-emit(
-  to: new_owner,
-  subject: "CR {owner_role} owner 移交：{cr_id} — {cr_title}",
-  body: "你已接手 {cr_id} 的 {owner_role} 责任，当前状态：{status}。\n移交说明：{note}\n\n接手命令：resume-from-remote {cr_id}"
-)
+调用 `crctl inbox-emit`（CLI 形态，事件 `owner-handover`，`subject/body` 塞进 payload）：
+```text
+crctl inbox-emit {cr_id} --event owner-handover --to {new_owner} --payload '{"subject": "CR {owner_role} owner 移交：{cr_id} — {cr_title}", "body": "你已接手 {cr_id} 的 {owner_role} 责任，当前状态：{status}。\n移交说明：{note}\n\n接手命令：resume-from-remote {cr_id}"}' --workspace <worktree>
 ```
 
 ### Step 6 — 输出摘要

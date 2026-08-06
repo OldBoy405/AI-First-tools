@@ -79,8 +79,10 @@ source_kind: pasted
 在 `docs/market-insights/_index.yml` 中追加或更新对应条目：
 
 ```yaml
+# 单一事实源：本文件 schema 由 CR-2026-022 统一定义，新增写入方须先对齐本声明（顶层 insights:/type=MARKET_INSIGHT/生命周期 raw→briefed→published）
 insights:
   - id: market-{YYYY-MM-DD}-{slug}
+    type: MARKET_INSIGHT
     file: docs/market-insights/market-{YYYY-MM-DD}-{slug}.md
     status: raw
     insight_type: {insight_type}

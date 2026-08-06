@@ -96,15 +96,9 @@ description: "将实施结论写回 traceability.yml"
 
 ### Step 4 — emit 写回事件
 
-调用 `inbox-emit`：
-```yaml
-<!-- lint-prompts:ignore --> 描述性：反馈回写说明
-target: change-requests/_backlog.yml
-event: feedback-writeback-done
-cr-id: {cr-id}
-outcome: {outcome}
-specs-updated: [target.refs 中的 spec-id 列表]
-timestamp: "YYYY-MM-DDTHH:mm:ss+HH:mm"
+调用 `crctl inbox-emit`（CLI 形态，接口对齐 CR-2026-022 FR-15；`target/timestamp` 非接口参数，`outcome/specs-updated` 塞进 payload）：
+```text
+crctl inbox-emit {cr-id} --event feedback-writeback-done --to {owners.*.id 或 feedback 发起人} --payload '{"outcome": "{outcome}", "specs-updated": ["{spec-id}", ...]}' --workspace <worktree>
 ```
 
 ---

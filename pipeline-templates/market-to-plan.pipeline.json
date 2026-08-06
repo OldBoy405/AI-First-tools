@@ -73,7 +73,7 @@
       "kind": "skill",
       "label": "写入产品规划知识库",
       "ref": "write-planning-entry",
-      "prompt": "将确认的规划建议（node-3.md）落盘为产品规划条目：\n- source: node-3.md\n- title: {{inputs.insight_type}} 洞察规划建议\n- target_version: {{inputs.target_version}}\n- owner: product-owner\n\n写入 docs/product-planning/{YYYY-MM-DD}-{slug}.md，并更新 docs/product-planning/_index.yml。将 docs/market-insights/_index.yml 中对应条目 status 更新为 planned。",
+      "prompt": "将确认的规划建议（node-3.md）落盘为产品规划条目：\n- source: node-3.md\n- title: {{inputs.insight_type}} 洞察规划建议\n- target_version: {{inputs.target_version}}\n- owner: product-owner\n\n写入 docs/product-planning/{YYYY-MM-DD}-{slug}.md，并更新 docs/product-planning/_index.yml。将 docs/market-insights/_index.yml 中对应条目 status 更新为 `published`（目标 schema 生命周期终态 raw→briefed→published，由本节点 write-planning-entry 执行——FR-19，CR-2026-022）。",
       "onFail": "abort",
       "timeoutMinutes": 10
     }

@@ -33,7 +33,7 @@
   ],
   "nodes": [
     {
-      "id": "00000000-0000-0000-0014-000000000001",
+      "id": "00000000-0000-0000-0016-000000000001",
       "kind": "skill",
       "label": "编写架构设计",
       "ref": "write-tech-design",
@@ -42,13 +42,13 @@
       "timeoutMinutes": 25
     },
     {
-      "id": "00000000-0000-0000-0014-000000000002",
+      "id": "00000000-0000-0000-0016-000000000002",
       "kind": "skill",
       "label": "架构设计评审",
       "ref": "review-tech-design",
       "prompt": "对 CR worktree 中 change-requests/{{inputs.cr_id}}/sdd.md 执行评审：\n① PRD↔SDD 对齐度（每个 FR 都有对应技术方案）\n② 架构合理性与可扩展性\n③ 性能、安全、兼容性风险\n④ 接口契约完整性\n⑤ 可测试性\n\n评审判断写入 .crctl/tmp/review-tech-design.yml（非受控临时路径），经 `crctl review-record --stage tech-design --from .crctl/tmp/review-tech-design.yml --bump-attempt` 落盘 review-annotations/sdd.yml（review-loop 记账由 --bump-attempt 级联，模型不得手写轮次记账）。在 node-2.md 输出 verdict、blockers、repair-target、repair-instructions、current-attempt 轮次 与评审摘要。若 verdict=block 或 blockers 非空，pipeline 不得进入 human_approval；必须把 review_feedback 传回 write-tech-design 自动修订，并重新执行本评审，直至 verdict=pass 且 blockers 为空，或达到 reviewLoop.maxAttempts 后停止。",
       "reviewLoop": {
-        "repairNodeId": "00000000-0000-0000-0014-000000000001",
+        "repairNodeId": "00000000-0000-0000-0016-000000000001",
         "repairRef": "write-tech-design",
         "feedbackInput": "review_feedback",
         "attemptInput": "self_repair_attempt",
@@ -71,7 +71,7 @@
       "timeoutMinutes": 15
     },
     {
-      "id": "00000000-0000-0000-0014-000000000003",
+      "id": "00000000-0000-0000-0016-000000000003",
       "kind": "human_approval",
       "label": "架构设计审批",
       "approvalPrompt": "架构设计自动评审已完成，且 review-annotations/sdd.yml 必须满足 verdict=pass、blockers=[] 后才可进入本节点；当前仍应为 tech-design-review-pending。请审批人检阅 sdd.md 后决定：\n\n✅ 批准：勾选此 Todo，下一节点 approve-tech-design 会记录审批并推进到 tech-design-reviewed\n❌ 驳回：在 review-annotations/sdd.yml 补充 reject_reason，回到架构设计修订",
@@ -79,7 +79,7 @@
       "timeoutMinutes": 2880
     },
     {
-      "id": "00000000-0000-0000-0014-000000000004",
+      "id": "00000000-0000-0000-0016-000000000004",
       "kind": "skill",
       "label": "记录架构审批并推进状态",
       "ref": "approve-tech-design",
@@ -88,7 +88,7 @@
       "timeoutMinutes": 5
     },
     {
-      "id": "00000000-0000-0000-0014-000000000005",
+      "id": "00000000-0000-0000-0016-000000000005",
       "kind": "skill",
       "label": "推送架构设计到远端",
       "ref": "push-progress",

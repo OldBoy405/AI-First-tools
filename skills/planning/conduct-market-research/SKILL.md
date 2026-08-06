@@ -50,7 +50,7 @@ description: 基于指定主题执行市场调研，输出结构化市场洞察�
 ```yaml
 ---
 id: market-{YYYY-MM-DD}-{slug}
-type: MARKET-INSIGHT
+type: MARKET_INSIGHT
 title: {topic} 市场洞察
 summary: {一句话总结，建议 50-100 字}
 category: industry-trend
@@ -70,11 +70,16 @@ pinned: false
 
 ```yaml
 schema: market-insight-index/v1
+# 单一事实源：本文件 schema 由 CR-2026-022 统一定义，新增写入方须先对齐本声明
+# 生命周期：raw → briefed → published；顶层 key=insights；type=MARKET_INSIGHT；file 必填
 title: 市场洞察索引
-entries:
+insights:
   - id: market-{YYYY-MM-DD}-{slug}
+    type: MARKET_INSIGHT
     title: {topic} 市场洞察
     category: {category}
+    status: published
+    file: docs/market-insights/market-{YYYY-MM-DD}-{slug}.md
     createdAt: {YYYY-MM-DD}
     pinned: false
 ```
