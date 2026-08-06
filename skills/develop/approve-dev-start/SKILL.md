@@ -16,22 +16,12 @@ description: 记录任务拆分后的开发启动人工确认，校验 plan.md �
 
 ---
 
-## 输入
+## 参数
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `cr_id` | string | yes | 目标 CR-ID |
 | `approver` | string | no | 确认进入开发的人；为空则使用 `cr.md owners.development.id` |
-
----
-
-## 前置条件
-
-1. 读取 `AGENTS.md`、`dir-graph.yaml`，从 graph 解析 `change-requests/` 路径。
-2. 读取 `change-requests/{cr_id}/cr.md` frontmatter，确认当前 status 为 `task-breakdown`。
-3. 确认 `cr.md owners.development.id` 与 `owners.development.assigned-at` 均存在；若 `approver` 为空，使用该负责人。
-4. 确认 `change-requests/{cr_id}/plan.md` 存在。
-5. 确认 `change-requests/{cr_id}/tasks/_index.yml` 与至少一个 `TASK-*.md` 存在。
 
 ---
 
