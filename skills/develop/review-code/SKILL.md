@@ -43,7 +43,7 @@ crctl git diff --unified=80 {merge-base}...HEAD --cwd <worktree>
 crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 ```
 
-对 `implement-code` 节点输出中的验证命令**无条件重新执行**（不是「缺失才补跑」）：implement-code 自报结果仅作参考对照，不一致时以本轮重新执行结果为准并在 blockers 注明差异。「测试通过」必须是本轮重新执行的完整命令输出（0 failures），"看起来通过"或"之前跑过"不构成证据；验证命令缺失时要求补齐后再继续：
+对 `implement-code` 节点输出中的验证命令**无条件重新执行**（不以证据缺失为前提）：implement-code 自报结果仅作参考对照，不一致时以本轮重新执行结果为准并在 blockers 注明差异。「测试通过」必须是本轮重新执行的完整命令输出（0 failures），"看起来通过"或"之前跑过"不构成证据；验证命令缺失时要求补齐后再继续：
 
 ```bash
 pnpm lint
@@ -72,7 +72,7 @@ Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项
 | **安全性** | 输入校验、权限控制、敏感数据处理 |
 | **测试覆盖** | 是否有对应单元/集成测试 |
 | **测试证据可信度** | `test-report.md` 是否覆盖 TASK 验收条件，是否说明未覆盖风险 |
-| **前端质量** | 仅 diff 触及 `*.tsx|*.vue|*.css|*.html` 时触发：WCAG AA 对比度、键盘可达、ARIA 语义；破坏即判 blocker |
+| **前端质量** | 仅 diff 触及 `*.tsx`、`*.vue`、`*.css`、`*.html` 时触发，检查三项：① a11y 对比度达 WCAG AA（破 AA 升 blocker）；② 组件 loading/empty/error 状态完整覆盖；③ 构建体积在预算内。②③ 未达为 minor |
 
 **改进建议处置策略**（策略参数由 pipeline 触发参数注入，缺省 strict）：
 
