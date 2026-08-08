@@ -766,8 +766,12 @@ function editTaskDone(text, taskId) {
  * 非数组形态复用 SCHEMA_INVALID（TD-BL-3：不新增错误码）。成环 TASK 天然互卡在 DEPENDS_ON_NOT_DONE，
  * 不做传递闭包遍历、不单独检测环（D-6）。解析复用既有 parseYaml（FR-8/NFR-8，禁新写解析）。 */
 function guardDependsOn(normText, taskId) {
-  const idx = parseYaml(normText) || {};
-  const tasks = Array.isArray(idx.tasks) ? idx.tasks : [];
+  // BL-1（代码评审 attempt-1）：根结构形状硬失败，禁止静默降级为空集合绕过守卫——
+  // 复用既有 TASK_INDEX_SHAPE 错误码（editTaskDone 同款），不新增错误码（TD-BL-3 口径）
+  const idx = parseYaml(normText);
+  if (!idx || typeof idx !== 'object' || Array.isArray(idx)) fail('TASK_INDEX_SHAPE', 'tasks/_index.yml 顶层必须是映射（结构异常，禁止静默降级）');
+  if (!Array.isArray(idx.tasks)) fail('TASK_INDEX_SHAPE', 'tasks/_index.yml 缺少 tasks 列表（结构异常，禁止静默降级）');
+  const tasks = idx.tasks;
   const byId = new Map(tasks.filter((t) => t && t.id != null).map((t) => [String(t.id), t]));
   const target = byId.get(taskId);
   if (!target) return; // TASK 不存在由后续 editTaskDone 的 TASK_NOT_FOUND 兜底
@@ -1453,8 +1457,12 @@ function renderReviewsStageBlock(stage, p) {
 function upsertReviewsStage(traceNorm, cr, stage, blockText) {
   if (traceNorm == null) return `cr-id: ${cr}\nreviews:\n${blockText}`;
   const lines = traceNorm.split('\n');
-  const ri = lines.findIndex((l) => /^reviews:\s*$/.test(l));
-  if (ri === -1) fail('TRACE_SHAPE', 'traceability.yml 缺少顶层 reviews: 段，不猜位置插入顶层键');
+  // BL-3（代码评审 attempt-1）：顶层 reviews: 段必须唯一，重复时无法唯一定位，禁止静默编辑首段
+  const reviewsHits = [];
+  for (let i = 0; i < lines.length; i++) if (/^reviews:\s*$/.test(lines[i])) reviewsHits.push(i);
+  if (reviewsHits.length === 0) fail('TRACE_SHAPE', 'traceability.yml 缺少顶层 reviews: 段，不猜位置插入顶层键');
+  if (reviewsHits.length > 1) fail('TRACE_SHAPE', 'traceability.yml 出现重复顶层 reviews: 段，无法唯一定位，拒绝编辑');
+  const ri = reviewsHits[0];
   let re = lines.length;
   for (let i = ri + 1; i < lines.length; i++) { if (/^\S/.test(lines[i])) { re = i; break; } }
   const stageRe = new RegExp(`^  ${stage}:\\s*$`);
@@ -1513,12 +1521,14 @@ function cmdReviewRecord(ws, cr, gates, flags) {
       fail('TRACE_SHAPE', `traceability.yml 顶层不是映射或 cr-id 与 ${cr} 不一致，拒绝写投影`, { crId: traceDoc && traceDoc['cr-id'] });
     }
     const stageNode = traceDoc.reviews && typeof traceDoc.reviews === 'object' ? traceDoc.reviews[stage] : undefined;
-    if (stageNode === undefined || stageNode === null) {
-      // TD-BL-4：目标 stage 首次写入是合法情形（FR-18 定点新增），空历史起步
+    if (stageNode === undefined) {
+      // TD-BL-4/BL-2：仅 undefined（键缺失）是合法首写（FR-18 定点新增），空历史起步；
+      // null 与其余非映射形态一律 TRACE_SHAPE（TASK-03 明定口径，不得用宽泛空值兜底）
     } else {
       // 目标 stage 已存在：review-loop 与 attempts 必须齐全且形状合规（TD-BL-1/TD-BL-4 收紧口径，
       // 不得用宽泛空值兜底掩盖形状损坏——历史数据源唯一 = trace 现有投影，禁从 review-loop.yml/annotation 臆造）
-      const rl = (typeof stageNode === 'object' && !Array.isArray(stageNode)) ? stageNode['review-loop'] : undefined;
+      if (stageNode === null || typeof stageNode !== 'object' || Array.isArray(stageNode)) fail('TRACE_SHAPE', `traceability reviews.${stage} 必须是映射，实际 ${stageNode === null ? 'null' : typeof stageNode}`);
+      const rl = stageNode['review-loop'];
       if (!rl || typeof rl !== 'object' || Array.isArray(rl)) fail('TRACE_SHAPE', `traceability reviews.${stage}.review-loop 缺失或不是映射`);
       const old = rl.attempts;
       if (!Array.isArray(old)) fail('TRACE_SHAPE', `traceability reviews.${stage}.review-loop.attempts 缺失或不是列表`);

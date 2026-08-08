@@ -2173,3 +2173,51 @@ test('CR-2026-025 路由回归：drafting 无证据/通过证据时仍建议 rev
     assert.equal(n.stdout.next, 'review-requirement', 'pass 证据不算失败证据，维持现状');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-025 implement-code 回修 attempt-1：BL-1~BL-3 回归向量 ──
+
+test('CR-2026-025 回修 BL-1：tasks 根结构缺失/非数组 → TASK_INDEX_SHAPE，退出非 0 且文件哈希不变（禁止静默降级绕过守卫）', () => {
+  for (const malformed of ['cr-ref: CR-G1\n', 'cr-ref: CR-G1\ntasks: not-a-list\n']) {
+    const ws = makeWorkspace();
+    try {
+      writeCrEntry(ws, 'CR-G1', 'developing');
+      const p = writeRawTaskIndex(ws, 'CR-G1', malformed);
+      const before = readFileSync(p, 'utf8');
+      const r = runCrctl(['task', 'done', 'CR-G1', '--task', 'CR-G1-TASK-01', '--workspace', ws]);
+      assert.equal(r.status, 1);
+      assert.equal(r.stderr.error.code, 'TASK_INDEX_SHAPE');
+      assert.equal(readFileSync(p, 'utf8'), before, '文件不得变化');
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-025 回修 BL-2：reviews.<stage>: null → TRACE_SHAPE，三账本不变且 payload 保留（仅 undefined 可首写）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-R1', 'tech-design-review-pending');
+    const badTrace = 'cr-id: CR-R1\nreviews:\n  tech-design: null\n';
+    writeEvidence(ws, 'CR-R1', 'traceability.yml', badTrace);
+    writeReviewPayload(ws, 'CR-R1', 'tech-design', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-R1', '--stage', 'tech-design', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'TRACE_SHAPE');
+    assert.equal(sha16(readTrace(ws, 'CR-R1')), sha16(badTrace));
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-R1', 'review-annotations', 'sdd.yml')), false);
+    assert.ok(existsSync(path.join(ws, '.crctl', 'tmp', 'review-tech-design.yml')), 'payload 保留');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-025 回修 BL-3：重复顶层 reviews: 段 → TRACE_SHAPE 原子拒写（FR-18/AC-21 唯一定位）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-R1', 'tech-design-review-pending');
+    const badTrace = 'cr-id: CR-R1\nreviews:\n  requirement:\n    reviewer: "x"\n    verdict: pass\nreviews:\n  requirement:\n    reviewer: "y"\n    verdict: block\n';
+    writeEvidence(ws, 'CR-R1', 'traceability.yml', badTrace);
+    writeReviewPayload(ws, 'CR-R1', 'tech-design', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-R1', '--stage', 'tech-design', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'TRACE_SHAPE');
+    assert.equal(sha16(readTrace(ws, 'CR-R1')), sha16(badTrace), 'trace 不得变化');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-R1', 'review-annotations', 'sdd.yml')), false, 'annotation 不得写入');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
