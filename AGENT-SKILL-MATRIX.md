@@ -54,5 +54,5 @@
 1. 新增 active Skill 时，必须在 `agent-skill-matrix.yml` 中为它指定且只指定一个 `owns` owner。
 2. Agent 正文出现的 active Skill，应出现在该 Agent 的 `owns` 或 `can-call` 中。
 3. Pipeline 新增或替换 `node.ref` 时，该 Skill 必须存在 owner，且 pipeline 本身必须登记 `pipeline-owners`。
-4. 外部方法论 Skill 只能出现在 `external` 或 `external-skills` 中，不能登记为 active Skill。
+4. 外部方法论 Skill 只能出现在 actor 级 `external` 中（唯一被 check-skill-matrix 解析的声明位置），不能登记为 active Skill。
 5. `forbidden` 用于表达跨域禁止调用，不用于表达“暂未支持”；暂未支持请写入 `known-gaps`。

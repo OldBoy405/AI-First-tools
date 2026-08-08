@@ -218,6 +218,7 @@ actors:
     external: []
     forbidden: []
 
+# 纯文档参考，不被任何程序解析（CR-2026-025 FR-4/D-2）；唯一被 check-skill-matrix 解析的声明位置是 actor 级 external。
 external-skills:
   - using-superpowers
   - brainstorming

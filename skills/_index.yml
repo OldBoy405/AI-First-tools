@@ -311,7 +311,7 @@ skills:
     status: active
 
   # ─── 外部方法论 Skill ───────────────────────────────────────────────
-  # using-superpowers / brainstorming / writing-plans / executing-plans /
-  # subagent-driven-development / test-driven-development 等由目标运行时
-  # 的 superpowers 安装提供。phase0 tools 不复制这些同名 SKILL.md，避免
-  # 与 .qoder/.agents/.opencode 或全局安装路径发生重复注册。
+  # 外部方法论 Skill 的权威声明位置是 agent-skill-matrix.yml 的 actor 级
+  # external（CR-2026-025 FR-4，D-2：顶层 external-skills 块仅作纯文档参考、
+  # 不被解析）。phase0 tools 不复制这些同名 SKILL.md，避免与运行时安装路径
+  # 发生重复注册；具体名称随声明面增减，本处不再逐一点名。
