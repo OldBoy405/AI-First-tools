@@ -106,7 +106,7 @@ skills:
       description: "CR 注册、PRD 编写、需求评审与需求审批"
     develop:
       path: "skills/develop/"
-      description: "SDD、开发计划、任务拆分、编码、测试报告、代码评审与代码审批"
+      description: "SDD、开发计划、任务拆分、编码、测试报告、代码评审与代码审批、开发纪律兜底（coding-discipline）"
     writeback:
       path: "skills/writeback/"
       description: "分支合入、PRD/SDD 回写、TASK 回写与追溯链生成"

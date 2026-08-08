@@ -43,7 +43,7 @@ crctl git diff --unified=80 {merge-base}...HEAD --cwd <worktree>
 crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 ```
 
-同时读取 `implement-code` 节点输出中的验证命令与结果；若缺失，必须重新运行或要求补齐：
+对 `implement-code` 节点输出中的验证命令**无条件重新执行**（不是「缺失才补跑」）：implement-code 自报结果仅作参考对照，不一致时以本轮重新执行结果为准并在 blockers 注明差异。「测试通过」必须是本轮重新执行的完整命令输出（0 failures），"看起来通过"或"之前跑过"不构成证据；验证命令缺失时要求补齐后再继续：
 
 ```bash
 pnpm lint
@@ -51,7 +51,7 @@ pnpm test
 pnpm build
 ```
 
-Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项不适用，必须在 review 输出中写明原因。
+Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项不适用，必须在 review 输出中写明原因。目标运行时已装 `verification-before-completion` 时可用其 Gate Function/Common Failures 表作执行细则参考，未装按本节最低要求执行——本条不得弱化为"可选加速"。
 
 ### Step 2 — 读取设计文档
 
@@ -72,6 +72,16 @@ Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项
 | **安全性** | 输入校验、权限控制、敏感数据处理 |
 | **测试覆盖** | 是否有对应单元/集成测试 |
 | **测试证据可信度** | `test-report.md` 是否覆盖 TASK 验收条件，是否说明未覆盖风险 |
+| **前端质量** | 仅 diff 触及 `*.tsx|*.vue|*.css|*.html` 时触发：WCAG AA 对比度、键盘可达、ARIA 语义；破坏即判 blocker |
+
+**改进建议处置策略**（策略参数由 pipeline 触发参数注入，缺省 strict）：
+
+- **strict（默认）**：非阻塞发现一律进 `suggestions`；verdict 只判 CR 本身的 pass/block。
+- **lenient**：非阻塞发现同时满足三条判据且通过轮次闸才升格进 `blockers`（同轮多条成批写入）：
+  ① 改动不超出本 CR 已触碰的文件（不扩大 diff）；② 有明确的"改成什么"（能写进 repair-instructions，不是"优化一下"）；③ 不需要产品/架构决策（纯实现层）；
+  ④ **轮次闸**：仅首轮评审（attempt=1）允许升格；第 2 轮起一律按 suggestions 处理——防升格消耗 maxAttempts 耗尽轮次、停在 developing 无法进入审批。
+- **留痕**：dimensions 记录 `suggestion-policy: {strict|lenient}`（canonical，跨 CR 可比）。
+- **语义**：blockers=本 CR 内要处理的（不论轻重）；suggestions=本 CR 内不处理的。
 
 ### Step 4 — 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
 
@@ -79,7 +89,7 @@ Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项
    ```yaml
    verdict: pass | block
    blockers: []          # block 时列出 blocker（字符串列表）
-   dimensions: {评审维度: 结论, ...}   # 该 stage 门禁要求的维度齐全
+   dimensions: {评审维度: 结论, suggestion-policy: strict|lenient, ...}   # 该 stage 门禁要求的维度齐全；suggestion-policy 为本轮策略留痕（canonical）
    suggestions: []       # 可选
    ```
 2. 运行 `crctl review-record {cr_id} --stage code --bump-attempt --workspace <worktree>`（`--from` 缺省即 `.crctl/tmp/review-code.yml`，无需显式指定），crctl 自动完成**确定性部分**：
@@ -105,6 +115,8 @@ Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项
    Critical    : {N} 条
    Major       : {N} 条
    TASK 覆盖率 : {N}/{总数}
+   Suggestions : {N} 条
+   Policy      : {strict|lenient}
    下一步      : 以 `crctl next {cr_id}` 为准（PASS→等待人工审批；BLOCK→pipeline 自动回对应修复节点重审）
 ```
 

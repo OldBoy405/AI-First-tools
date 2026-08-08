@@ -29,6 +29,7 @@ description: 记录代码人工审批结论，校验 change-requests/{CR-ID}/rev
    - 级联 advance 到 code-approved
 2. Agent/管道**不得**代写 approval.yml 或推进 status；非 TTY 调用 crctl 一律拒绝（APPROVAL_REQUIRES_HUMAN）。
 3. 输出审批记录路径、当前 status 和下一步：以 `crctl next {cr_id}` 为准（进入回写阶段）。
+4. **suggestions 承接（可选）**：剩余 `suggestions` 可经 `record-idea`（planning 域 Skill）转入 `docs/ideas/`——必须在 approve-code 期做（CR worktree 内随分支合并进 trunk；feature-writeback 硬边界只写 specs/delivery）；不设默认、不阻塞本 CR；不转则仅留档 review-annotations，无损失。
 
 ## 错误处理
 

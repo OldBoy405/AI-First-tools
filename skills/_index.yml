@@ -125,6 +125,11 @@ skills:
     brief: "记录任务拆分后的开发启动人工确认，校验 plan/tasks 后推进 status=developing"
     status: active
 
+  - id: coding-discipline
+    path: ./develop/coding-discipline/SKILL.md
+    brief: "开发纪律兜底事实源：极简阶梯选方案、2-5 分钟步骤粒度、先根因后动手与回归红绿验证"
+    status: active
+
   - id: implement-code
     path: ./develop/implement-code/SKILL.md
     brief: "在同一 CR workspace 内按 PRD/SDD/TASK 编码，读取 CR worktree 文档并写入对应代码仓 CR worktree"

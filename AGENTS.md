@@ -53,7 +53,7 @@ tools/
 ## 平台包边界
 
 1. 保留现有完整的 Skill 和 Agent，作为预置平台包交付。除非用户明确要求，不删除、不裁剪、不迁移到 `old/`。
-2. 外部 superpowers 能力由目标运行时提供，phase0 tools 不复制同名 `SKILL.md`，只在需要处声明依赖。
+2. 外部同名技能由目标运行时按需提供；phase0 tools 以自有规则（如 `coding-discipline`）为兜底事实源，外部技能作可选加速器——已装则优先走其完整流程，未装按本包规则执行，二者等价、不要求探测。本包不复制同名 `SKILL.md`。
 3. `pipeline-templates/*.pipeline.json` 只能引用 `skills/_index.yml` 中 active 的 Skill。
 4. `agents/_index.yml` 中的 references 必须指向真实存在的 Skill 或明确的目标 workspace 资料入口。
 5. `agent-skill-matrix.yml` 必须为每个 active Skill 指定且只指定一个 `owns` owner；Agent 正文或索引引用的 Skill 必须出现在该 Agent 的 `owns` 或 `can-call` 中。

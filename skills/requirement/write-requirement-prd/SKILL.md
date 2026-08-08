@@ -39,6 +39,7 @@ description: 在 requirement/CR-* worktree 内编写 PRD 需求文档，落盘�
 ### Step 2 — 读取上下文
 
 - 读取 `change-requests/{cr_id}/cr.md` 获取 title / summary / target-version / source / owners.requirement
+- `summary` 中已确认的边界（注册阶段拍板或审批确认的范围/排除项）与当前上下文无冲突时优先原样采纳进 PRD 范围与 AC，不以换措辞方式重新定义已拍板事项
 - 若 `source` 指向规划报告路径，读取报告中对应功能的规划建议
 - 读取 `change-requests/_config.yml` 获取 PRD 模板约定
 - 若存在 `review_feedback`，读取上一轮 `review-annotations/requirement.yml` 中的 blockers、repair-instructions 与 reviewer 摘要

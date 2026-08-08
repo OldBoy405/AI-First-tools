@@ -12,7 +12,7 @@ description: 基于 change-requests/{CR-ID}/sdd.md 编写开发计划 plan.md，
 
 ## 用途
 
-将 SDD 转化为可执行的开发计划，落盘到 `change-requests/{CR-ID}/plan.md`，作为 write-dev-tasks 的输入基础。
+将 SDD 转化为可执行的开发计划，落盘到 `change-requests/{CR-ID}/plan.md`，作为 write-dev-tasks 的输入基础。计划的步骤粒度约束引用 `coding-discipline` §2（2-5 分钟切分，仅在实现期生效；计划层不写步骤粒度表述）。
 
 ---
 

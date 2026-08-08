@@ -28,7 +28,7 @@ The permission matrix is consumed by the platform orchestrator and by [`crctl`](
 |-------|-------|-------------------|
 | **product-planning-agent** | Product planning & market research | `analyze-user-feedback`, `conduct-market-research`, `analyze-current-product`, `write-planning-report`, `review-planning-report`, `write-roadmap`, `write-planning-entry`, `extract-market-insight`, `gather-product-context`, `planning-draft`, `record-idea`, `focus-briefing` |
 | **requirement-writer** | CR registration & PRD | `requirement-register`, `write-requirement-prd`, `review-requirement`, `approve-requirement` |
-| **dev-agent** | Design through code approval | `write-tech-design`, `review-tech-design`, `approve-tech-design`, `write-dev-plan`, `write-dev-tasks`, `approve-dev-start`, `implement-code`, `write-test-report`, `review-code`, `approve-code` |
+| **dev-agent** | Design through code approval | `write-tech-design`, `review-tech-design`, `approve-tech-design`, `write-dev-plan`, `write-dev-tasks`, `approve-dev-start`, `implement-code`, `write-test-report`, `review-code`, `approve-code`, `coding-discipline` |
 | **competitive-analyst-agent** | Competitive intelligence | `fetch-competitor-updates`, `write-competitive-report`, `report-to-planning-suggestion` |
 | **customer-support-agent** | Product Q&A | (none owned — primarily reads specs) |
 
@@ -76,7 +76,7 @@ When modifying the matrix:
 1. New active Skills must be assigned exactly one `owns` owner in `agent-skill-matrix.yml`
 2. Agent definition files must reference only Skills that appear in their `owns` or `can-call`
 3. Pipeline `node.ref` values must point to Skills with existing owners
-4. External methodology Skills (provided by target runtimes) must only appear in `external`
+4. External methodology Skills (provided by target runtimes) must only appear in `external`; phase0's own rules (e.g. `coding-discipline`) serve as the fallback source of truth — installed externals act as optional accelerators, never hard dependencies
 5. `forbidden` expresses active prohibition — not "not yet supported"
 
 ## Contract Invariants & Automated Enforcement
@@ -93,8 +93,6 @@ These checks run in `.githooks/pre-commit` (local) and `.github/workflows/check-
 
 | Gap | Current State | Suggested Fix |
 |-----|--------------|---------------|
-| `knowledge-agent` write Skills insufficient | Can only reuse `engineering-docs`, `validate-doc`, `record-idea` | Add `write-tech-note` / `write-knowledge-entry` or constrain to read-only |
-| `customer-support-agent` no feedback write Skill | Can only read specs; feedback write has no dedicated Skill | Add `record-feedback` or connect to external ticketing |
 | No independent writeback agent | `feature-writeback` is orchestrated by `system-orchestrator`; `spec-agent` only does post-writeback read verification | Add `writeback-agent` if a human entry point is needed |
 
 ## Source References

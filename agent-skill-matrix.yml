@@ -82,12 +82,14 @@ actors:
       - write-test-report
       - review-code
       - approve-code
+      - coding-discipline
     can-call:
       - push-progress
       - pull-progress
       - cr-show
       - controlled-shell
       - crctl
+      - record-idea
     external:
       - executing-plans
       - subagent-driven-development
@@ -137,6 +139,7 @@ actors:
       - write-test-report
       - review-code
       - cr-show
+      - coding-discipline
     external: []
     forbidden:
       - approve-requirement
