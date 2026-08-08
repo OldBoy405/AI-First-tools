@@ -1,8 +1,0 @@
-schema_version: 1
-module_path: agents
-title: 预置 Agent 能力台账与角色契约
-scope:
-    - agents/
-source_files: []
-depends_on: []
-related_to: []

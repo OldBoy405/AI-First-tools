@@ -1,8 +1,0 @@
-schema_version: 1
-module_path: pipeline_templates
-title: AI First 研发协同平台 Pipeline 模板集
-scope:
-    - pipeline-templates/
-source_files: []
-depends_on: []
-related_to: []
