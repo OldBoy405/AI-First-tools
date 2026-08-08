@@ -111,5 +111,6 @@ crctl（scripts/crctl.mjs）          # 状态与账本的唯一写入执行器�
   - 已登记：CR-2026-021（T1.3）crctl 新增 8 写 + 2 只读 + 1 处 git commit 扩展子命令（review-record/review-note/checkpoint-add/owner-set/backlog-set/inbox-emit/cr-init/task allocate + worktree-path/report/cr-metrics + --template），§3 代码地图已同步；不改 §5/§6 判据（全部合既有不变量）。
   - 已登记：CR-2026-024 新增 active skill `coding-discipline`（develop 域，dev-agent owns；内化开发纪律，不触 crctl/状态机）+ code-implementation.pipeline.json 新增 `suggestion_policy` select input（strict 默认，评审期 suggestions 策略化分流）——合 §4 依赖方向与 §5 全部不变量。
   - 已登记：CR-2026-022 状态机口径 23→25 声明 / 45→47 展开（新增两条 reject 转换：approve-requirement:reject -> write-requirement-prd、approve-dev-start:reject -> write-dev-plan）；cr-init 补 --summary/--source/--target-version 旗标；git commit --template 补 --cr 旗标且生成形态对齐 commit 白名单；checkpoint-add LEGAL 改状态机派生（全非终态）；approve decline 分支执行状态机 reject 回退（REJECT_ROLLBACK 映射）；gates.json 删 review-planning-report 死配置；§5 不变量 5 口径已同步（25/47）。
+  - 已登记：CR-2026-025 crctl 命令面语义扩展（task done 一跳 depends-on 守卫 + review-record 三账本一致写/投影 + next drafting 摘要路由）与 check-skill-matrix 检查 4（external 引用点校验）+ 首个测试文件——§3 代码地图的 crctl 段与测试面已随改动落地；合 §4 依赖方向与 §5 全部不变量（不新增子命令/旗标，不触状态机与 gates 判据），仅按 §8 维护规则登记。
 - 普通 Skill 文档措辞调整、单个 CR 的功能改动**不需要**改本文档——若发现必须改，说明该改动是架构级变更，先过设计评审。
 - 评审对照：`review-tech-design` 的"架构合理性"维度逐条对照 §4/§5/§6 判定。
