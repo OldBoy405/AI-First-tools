@@ -83,7 +83,7 @@ When modifying the matrix:
 
 The matrix is protected by a [CI guard system](/openwiki/operations/ci-guards.md) that runs two zero-dependency Node.js scripts on every commit and push:
 
-- **`check-skill-matrix.mjs`**: Verifies every active skill has exactly one `owns` owner, every owned skill is registered (or external), and the human-readable `AGENT-SKILL-MATRIX.md` table matches the machine-readable `agent-skill-matrix.yml`.
+- **`check-skill-matrix.mjs`**: Verifies every active skill has exactly one `owns` owner, every owned skill is registered (or external), the human-readable `AGENT-SKILL-MATRIX.md` table matches the machine-readable `agent-skill-matrix.yml`, and every actor-level `external` declaration has at least one reference point in `skills/` or `pipeline-templates/` (CR-2026-025 FR-1).
 
 - **`check-agents-contract.mjs`**: Verifies the four [agent contract invariants](/openwiki/architecture/overview.md#agent-contract-invariants) — bidirectional agent registration, valid skill references, matrix coverage of referenced skills, and the behavioral constraint against bypassing skills for controlled writes.
 

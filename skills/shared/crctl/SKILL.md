@@ -28,6 +28,8 @@ scope: drift-governance
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
 | `validate` | 受控产物 schema 校验：cr.md / _backlog.yml 的 owners 三角色（id + assigned-at）、review-annotations 的 verdict 枚举与 blockers 结构、test-report / approval / traceability | `validate-doc` |
 | `attempt` | review-loop 轮次唯一记账点（`change-requests/{CR-ID}/review-loop.yml`），maxAttempts 从 pipeline JSON 读取，超限返回 `LOOP_EXHAUSTED` | `reviewLoop.maxAttempts` |
+| `task done` | 任务状态唯一写入点（`tasks/_index.yml`）；CAS 写入前校验直接 `depends-on`（一跳）：未完成前置 `DEPENDS_ON_NOT_DONE`、悬空引用 `DEPENDS_ON_UNKNOWN`、非数组形态 `SCHEMA_INVALID`（CR-2026-025 FR-6/FR-7，依赖顺序机械强制） | 账本 TASK 状态契约 |
+| `review-record` | 评审判断落盘：canonical annotation + `review-loop.yml` + `traceability.yml#reviews.<stage>` 投影同批写入（同一 recordedAt）；requirement 阶段额外写 `subject-sha256` 供 next 路由（CR-2026-025 FR-16~FR-19） | review-* Skill 评审记录 |
 | `test` | 代执行 lint/test/build 命令，按真实退出码生成 `test-report.md` 骨架（status/tester/commands 段模型不得改写），原始输出落盘 `test-evidence/` | `write-test-report` 证据部分 |
 | `next` | 按 status + 评审/测试证据输出下一个该跑的节点；blocker 未清空**绝不**返回 `human_approval`；writing-back 态改查 specs/{spec}/traceability.yml（FR-21） | 最小 pipeline-runner |
 | `cr-init` | 唯一权威原子分配与建档：`--title <t> --owner-requirement <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]`（三注册元信息旗标一次写齐，CR-2026-022 FR-9） | requirement-register |

@@ -100,9 +100,9 @@ Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项
    - 成功后删除临时 payload（避免残留/跨 CR 串味）
 3. **模型不得直接 Write `review-annotations/code.yml` 或手写 review-loop**（guard deny + crctl 独占写）。
 
-### Step 5 — 更新 traceability.yml 并推进 status
+### Step 5 — 核对 traceability 投影并推进 status
 
-- 在 `change-requests/{cr_id}/traceability.yml` 写入 `reviews.code` 引用（review-loop 轮次记账已由 `crctl review-record --bump-attempt` 级联完成，见 Step 4）
+- 核对 `traceability.yml#reviews.code` 投影与 canonical annotation 一致（由 `crctl review-record` 同步写入，CR-2026-025 FR-16；禁止手改账本补齐）
 - verdict=pass 且 blockers 为空且 `test-report.status=pass` → 调用 `crctl advance --to code-reviewing --trigger review-code --expect developing`，允许进入 `human_approval`
 - verdict=block、blockers 非空或 `test-report.status=block` → 调用 `crctl advance --to developing --trigger "review-code:block -> implement-code" --expect developing`，输出 `repair-target=implement-code`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到代码实现节点；不得进入 `human_approval`
 
