@@ -18,7 +18,7 @@ The Agent/Skill relationship is governed by `agent-skill-matrix.yml` — the mac
 | `external` | Skill provided by the target runtime (e.g., `brainstorming`, `executing-plans`) | Phase0 tools does not bundle a `SKILL.md` for it |
 | `forbidden` | Actor is explicitly prohibited from calling this Skill | Prevents cross-domain violations and process bypass |
 
-The permission matrix is consumed by the platform orchestrator and by [`crctl`](/openwiki/operations/drift-governance.md) to enforce boundaries at runtime.
+The permission matrix is consumed by the platform orchestrator and by [`crctl`](/openwiki/operations/drift-governance.md) for drift governance checks. Note that `forbidden` is a **declarative boundary**: enforcement relies on agent self-discipline plus protectedPaths file guards (write-protection of critical ledgers/artifacts) — there is **no call-level runtime interception**, and this package does not add runtime hooks for it.
 
 ## Actors
 

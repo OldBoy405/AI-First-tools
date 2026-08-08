@@ -56,7 +56,6 @@ slug: {任务标题提炼的英文 kebab-case，建议填写但非强制}
 status: pending
 estimate: {N}h
 depends-on: []
-assignee: ""
 created: {YYYY-MM-DDTHH:mm:ss+08:00}
 ---
 ```

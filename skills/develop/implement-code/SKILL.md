@@ -72,7 +72,7 @@ description: 在同一 CR workspace 内按 prd/sdd/tasks 执行代码编写，�
 
 - 优先使用目标运行时已安装的 external `subagent-driven-development` 执行 TASK。
 - 不支持子 agent 时使用目标运行时已安装的 external `executing-plans`。
-- 每个 TASK 必须遵循目标运行时已安装的 external `test-driven-development`：先写失败测试，再实现，再验证转绿。
+- 目标运行时未提供 `subagent-driven-development` 时，按 TASK 顺序串行实现（等价于降级到 `executing-plans` 语义），并在节点输出中注明降级。
 - 实现只写 repo map 指定的 codeRoot。
 - 若存在 `review_feedback`，进入自修复模式：读取 blockers、repair-instructions、repair-target 与上一轮 `test-report.md` / `review-annotations/code.yml`，只修复被指出的问题，避免无关重构，并输出 fixed-blockers。<!-- lint-prompts:ignore --> 描述性：仅读取评审证据（写走 review-record）
 

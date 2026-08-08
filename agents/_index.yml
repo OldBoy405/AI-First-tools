@@ -172,8 +172,8 @@ agents:
     entry:
       agent-doc: ./knowledge-agent.md
     capabilities:
-      supported: [tech-note-write, insight-write, design-doc-support]
-      pending: []
+      supported: [design-doc-support]
+      pending: [tech-note-write, insight-write]
     references:
       - tools/skills/shared/validate-doc/SKILL.md
 
@@ -217,8 +217,8 @@ agents:
     entry:
       agent-doc: ./customer-support-agent.md
     capabilities:
-      supported: [product-doc-qa, tech-doc-qa, usage-guidance, implementation-explain, unresolved-feedback-record]
-      pending: []
+      supported: [product-doc-qa, tech-doc-qa, usage-guidance, implementation-explain]
+      pending: [unresolved-feedback-record]
     references:
       - tools/skills/spec/spec-query/SKILL.md
       - tools/skills/spec/spec-show/SKILL.md

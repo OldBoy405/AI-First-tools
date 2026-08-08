@@ -91,7 +91,6 @@ actors:
     external:
       - executing-plans
       - subagent-driven-development
-      - test-driven-development
     forbidden:
       - writeback-prd-sdd
       - merge-feature-branch
@@ -213,10 +212,7 @@ actors:
       - cr-show
       - cr-dashboard
     can-call: []
-    external:
-      - using-superpowers
-      - writing-plans
-      - verification-before-completion
+    external: []
     forbidden: []
 
 external-skills:
@@ -230,12 +226,6 @@ external-skills:
   - verification-before-completion
 
 known-gaps:
-  - id: knowledge-agent-write-skills
-    owner: knowledge-agent
-    description: "knowledge-agent 声明 tech-note-write / insight-write，但 phase0 尚未提供专属写入 Skill；当前只能复用 engineering-docs 与 record-idea。"
-  - id: customer-support-feedback-write
-    owner: customer-support-agent
-    description: "customer-support-agent 声明 unresolved-feedback-record，但 phase0 尚未提供 record-feedback Skill；落盘反馈应在后续补专用 Skill 或绑定到目标系统工单入口。"
   - id: writeback-agent-entry
     owner: system-orchestrator
     description: "feature-writeback 当前由 system-orchestrator 直接编排 writeback / delivery / CR Skill；spec-agent 仅做回写后只读核对。若后续需要人工主入口，可新增 writeback-agent。"

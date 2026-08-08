@@ -11,6 +11,8 @@
 | `external` | 目标运行时提供的外部方法论 Skill | phase0 tools 不打包同名 `SKILL.md` |
 | `forbidden` | Actor 明确禁止调用 | 用于防止跨域越权或跳过流程 |
 
+> **forbidden 的性质说明**：forbidden 是**声明性边界**——记录某 actor 不应执行的 Skill，执行约束靠 agent 自觉遵守与 protectedPaths 文件守卫（关键账本/产物的写保护），**不存在调用级运行时拦截**，本包也不为其加运行时钩子。
+
 `system-orchestrator` 不是可部署 Agent，而是系统编排器/运行时组件，用来承接同步、回写、CR 状态、受控 shell 等跨 Agent 基础能力。
 
 > IDE 单独使用（无平台执行层）时，`crctl`（`skills/shared/crctl/`）是 `controlled-shell` / `validate-doc` 的代码化执行器。`requirement-writer` 与 `dev-agent` 通过 `can-call: crctl` 执行受控 git、状态查询与经门禁的状态推进；`crctl` 自身即状态机与门禁，因此该 can-call 不构成对状态推进边界的绕过。
@@ -45,8 +47,6 @@
 
 | 缺口 | 说明 | 建议 |
 |---|---|---|
-| `knowledge-agent` 写入 Skill 不足 | 其能力声明包含技术笔记、洞察写入和设计文档辅助，但当前没有专属 `write-tech-note` / `write-knowledge-entry` | 后续补知识写入 Skill，或收敛声明为只读/校验型 Agent |
-| `customer-support-agent` 反馈落盘缺 Skill | 其能力声明包含 unresolved feedback record，但没有 `record-feedback` | 后续补 `record-feedback`，或绑定目标系统工单入口 |
 | 回写期没有独立 primary Agent | `feature-writeback` 当前由系统编排器直接编排 writeback / CR / delivery Skill，`spec-agent` 仅做回写后只读核对 | 如需要人工入口，可新增 `writeback-agent`，否则保持系统编排即可 |
 
 ## 维护规则
