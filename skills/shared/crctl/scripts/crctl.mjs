@@ -905,6 +905,19 @@ function readAttempts(ws, cr, loopRef, gates) {
   return { current, max, attempts: loop.attempts || [], exhausted: current >= max, data: data || {} };
 }
 
+/** review-loop.yml 全量渲染纯函数（CR-2026-025 I-1 拆分：bumpAttempt 与 review-record 共用同一渲染，
+ * 使 review-record 能"先算后写"并入 casWriteMulti 同批，消除半状态，B-16）。 */
+function renderLoopText(loopsMap) {
+  const lines = ['# 由 crctl attempt 维护，请勿手工编辑', 'loops:'];
+  for (const [k, v] of Object.entries(loopsMap)) {
+    lines.push(`  ${k}:`);
+    lines.push(`    current-attempt: ${v['current-attempt']}`);
+    lines.push('    attempts:');
+    for (const a of v.attempts) lines.push(`      - { attempt: ${a.attempt}, at: "${a.at}", by: "${a.by}" }`);
+  }
+  return lines.join('\n') + '\n';
+}
+
 function bumpAttempt(ws, cr, loopRef, gates) {
   const state = readAttempts(ws, cr, loopRef, gates);
   if (state.exhausted) fail('LOOP_EXHAUSTED', `${loopRef} 已达 maxAttempts=${state.max}，不得继续自修复；请人工处理剩余 blocker`, { current: state.current });
@@ -916,14 +929,7 @@ function bumpAttempt(ws, cr, loopRef, gates) {
     attempts: [...state.attempts, { attempt: next, at: nowIso(), by: identity(ws) }],
   };
   // review-loop.yml 由 crctl 全量生成（crctl 独占该文件，无 CAS 冲突面）
-  const lines = ['# 由 crctl attempt 维护，请勿手工编辑', 'loops:'];
-  for (const [k, v] of Object.entries(all.loops)) {
-    lines.push(`  ${k}:`);
-    lines.push(`    current-attempt: ${v['current-attempt']}`);
-    lines.push('    attempts:');
-    for (const a of v.attempts) lines.push(`      - { attempt: ${a.attempt}, at: "${a.at}", by: "${a.by}" }`);
-  }
-  fs.writeFileSync(p, lines.join('\n') + '\n', 'utf8');
+  fs.writeFileSync(p, renderLoopText(all.loops), 'utf8');
   return { loop: loopRef, current: next, max: state.max, file: p };
 }
 
@@ -1410,6 +1416,61 @@ const REVIEW_STAGE_LOOPS = { requirement: 'review-requirement', 'tech-design': '
 // 若前置态错设为评审态将与 advance 门禁互锁成死锁——CR-2026-021 开发期实测缺陷（先写后推进）。
 const REVIEW_STAGE_EXPECT = { requirement: ['drafting', 'requirement-reviewing'], 'tech-design': ['tech-design-review-pending'], code: ['developing'] };
 
+// CR-2026-025 项④（FR-16）：三 stage 的 repair-target 映射（同一 review-record 契约，D-10 不做特判）
+const REVIEW_REPAIR_TARGETS = { requirement: 'write-requirement-prd', 'tech-design': 'write-tech-design', code: 'implement-code' };
+
+/** traceability reviews.<stage> 投影块渲染（2 空格基准缩进，含尾换行；FR-16 字段集，§2.4）。 */
+function renderReviewsStageBlock(stage, p) {
+  const L = [];
+  L.push(`  ${stage}:`);
+  L.push(`    reviewer: "${p.reviewer}"`);
+  L.push(`    verdict: ${p.verdict}`);
+  L.push(`    reviewed-at: "${p.recordedAt}"`);
+  L.push(`    blocker-count: ${p.blockerCount}`);
+  L.push(`    annotation: "${p.annotationRel}"`);
+  L.push(`    repair-target: ${p.repairTarget}`);
+  L.push('    review-loop:');
+  L.push(`      current-attempt: ${p.current}`);
+  L.push(`      max-attempts: ${p.max}`);
+  if (p.attempts.length === 0) {
+    L.push('      attempts: []'); // current-attempt=0 时空历史，不伪造 attempt=1（plan v0.1.1）
+  } else {
+    L.push('      attempts:');
+    for (const a of p.attempts) {
+      L.push(`        - attempt: ${a.attempt}`);
+      if (a['reviewed-at'] != null) L.push(`          reviewed-at: "${a['reviewed-at']}"`);
+      L.push(`          result: ${a.result}`);
+      L.push(`          blocker-count: ${a['blocker-count']}`);
+      L.push(`          repair-target: ${a['repair-target']}`);
+    }
+  }
+  return L.join('\n') + '\n';
+}
+
+/** traceability reviews.<stage> 行级定点编辑（FR-18，风格对齐 matchEntryBlock/editTaskDone）：
+ * trace 为 null → 最小骨架；cr-id 不匹配/无顶层 reviews:/重复 stage 键 → TRACE_SHAPE；
+ * 非目标行 LF 规范化后逐字节保留（AC-19 口径，TD-SUG-2）。本函数不关心轮次语义（合并规则在 cmdReviewRecord）。 */
+function upsertReviewsStage(traceNorm, cr, stage, blockText) {
+  if (traceNorm == null) return `cr-id: ${cr}\nreviews:\n${blockText}`;
+  const lines = traceNorm.split('\n');
+  const ri = lines.findIndex((l) => /^reviews:\s*$/.test(l));
+  if (ri === -1) fail('TRACE_SHAPE', 'traceability.yml 缺少顶层 reviews: 段，不猜位置插入顶层键');
+  let re = lines.length;
+  for (let i = ri + 1; i < lines.length; i++) { if (/^\S/.test(lines[i])) { re = i; break; } }
+  const stageRe = new RegExp(`^  ${stage}:\\s*$`);
+  const hits = [];
+  for (let i = ri + 1; i < re; i++) if (stageRe.test(lines[i])) hits.push(i);
+  if (hits.length > 1) fail('TRACE_SHAPE', `reviews 段内出现多个 ${stage}: 键，不静默择一`);
+  const blockLines = blockText.replace(/\n$/, '').split('\n');
+  if (hits.length === 1) {
+    const si = hits[0];
+    let se = re;
+    for (let i = si + 1; i < re; i++) { if (/^ {0,2}\S/.test(lines[i])) { se = i; break; } }
+    return [...lines.slice(0, si), ...blockLines, ...lines.slice(se)].join('\n');
+  }
+  return [...lines.slice(0, re), ...blockLines, ...lines.slice(re)].join('\n');
+}
+
 function cmdReviewRecord(ws, cr, gates, flags) {
   const stage = flags.stage;
   const fileName = REVIEW_STAGE_FILES[stage];
@@ -1432,12 +1493,66 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   if (!payload.dimensions || typeof payload.dimensions !== 'object' || Array.isArray(payload.dimensions)) {
     fail('SCHEMA_INVALID', 'dimensions 缺失或不是映射（该 stage 门禁要求的维度必须齐全）');
   }
-  // --bump-attempt：先检查未 exhausted（避免 canonical 已写而记账失败产生半状态）
-  if (flags['bump-attempt']) {
-    const a = readAttempts(ws, cr, REVIEW_STAGE_LOOPS[stage], gates);
-    if (a.exhausted) fail('LOOP_EXHAUSTED', `${REVIEW_STAGE_LOOPS[stage]} 已达 maxAttempts=${a.max}，不得继续自修复；请人工处理剩余 blocker`, { current: a.current });
+  const bump = !!flags['bump-attempt'];
+  const loopRef = REVIEW_STAGE_LOOPS[stage];
+  const att = readAttempts(ws, cr, loopRef, gates);
+  if (bump && att.exhausted) fail('LOOP_EXHAUSTED', `${loopRef} 已达 maxAttempts=${att.max}，不得继续自修复；请人工处理剩余 blocker`, { current: att.current });
+  const recordedAt = nowIso(); // 一次生成，三账本共用（FR-17）
+  const reviewer = identity(ws);
+  const blockerCount = payload.blockers.length;
+  const repairTarget = REVIEW_REPAIR_TARGETS[stage];
+
+  // ── traceability：读取 + 结构校验 + attempts 历史合并（全部在任何写入之前，FR-17）──
+  const tracePath = path.join(crDir(ws, cr), 'traceability.yml');
+  const traceRaw = readFileChecked(tracePath);
+  const traceNorm = traceRaw == null ? null : traceRaw.replaceAll('\r\n', '\n'); // 纪律 #1
+  let oldAttempts = [];
+  if (traceNorm != null) {
+    const traceDoc = parseYaml(traceNorm);
+    if (!traceDoc || typeof traceDoc !== 'object' || Array.isArray(traceDoc) || traceDoc['cr-id'] !== cr) {
+      fail('TRACE_SHAPE', `traceability.yml 顶层不是映射或 cr-id 与 ${cr} 不一致，拒绝写投影`, { crId: traceDoc && traceDoc['cr-id'] });
+    }
+    const stageNode = traceDoc.reviews && typeof traceDoc.reviews === 'object' ? traceDoc.reviews[stage] : undefined;
+    if (stageNode === undefined || stageNode === null) {
+      // TD-BL-4：目标 stage 首次写入是合法情形（FR-18 定点新增），空历史起步
+    } else {
+      // 目标 stage 已存在：review-loop 与 attempts 必须齐全且形状合规（TD-BL-1/TD-BL-4 收紧口径，
+      // 不得用宽泛空值兜底掩盖形状损坏——历史数据源唯一 = trace 现有投影，禁从 review-loop.yml/annotation 臆造）
+      const rl = (typeof stageNode === 'object' && !Array.isArray(stageNode)) ? stageNode['review-loop'] : undefined;
+      if (!rl || typeof rl !== 'object' || Array.isArray(rl)) fail('TRACE_SHAPE', `traceability reviews.${stage}.review-loop 缺失或不是映射`);
+      const old = rl.attempts;
+      if (!Array.isArray(old)) fail('TRACE_SHAPE', `traceability reviews.${stage}.review-loop.attempts 缺失或不是列表`);
+      for (const e of old) {
+        if (!e || typeof e !== 'object' || Array.isArray(e) || e.attempt == null || !('result' in e) || e['blocker-count'] == null || e['repair-target'] == null) {
+          fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 条目形状非法：${JSON.stringify(e)}`);
+        }
+      }
+      oldAttempts = old;
+    }
   }
-  // canonical 写入（crctl 独占写：首次创建无 CAS 冲突面；已存在走 casWrite 防并发覆盖）
+  let mergedAttempts;
+  let projCurrent;
+  if (bump) {
+    const nextNo = att.current + 1;
+    if (oldAttempts.some((e) => Number(e.attempt) === nextNo)) {
+      fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 已含第 ${nextNo} 轮，不得静默覆盖历史`);
+    }
+    mergedAttempts = [...oldAttempts, { attempt: nextNo, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': repairTarget }];
+    projCurrent = nextNo;
+  } else {
+    projCurrent = att.current;
+    if (att.current > 0) {
+      // 刷新当前轮证据：命中整条替换、未命中追加；不新增轮次
+      const entry = { attempt: att.current, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': repairTarget };
+      mergedAttempts = oldAttempts.some((e) => Number(e.attempt) === att.current)
+        ? oldAttempts.map((e) => (Number(e.attempt) === att.current ? entry : e))
+        : [...oldAttempts, entry];
+    } else {
+      mergedAttempts = []; // current-attempt=0 → 投影空历史，不伪造 attempt=1（plan v0.1.1；仅 --bump-attempt 创建首条轮次账本）
+    }
+  }
+
+  // ── 构造三份新文本（同一 recordedAt），再交 casWriteMulti 统一写入（FR-17/D-11，复用 B-18 语义）──
   const target = path.join(crDir(ws, cr), 'review-annotations', fileName);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const existing = readFileChecked(target);
@@ -1445,8 +1560,8 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   const lines = [
     `cr-id: ${cr}`,
     `review-type: ${stage}`,
-    `reviewer: "${identity(ws)}"`,
-    `reviewed-at: "${nowIso()}"`,
+    `reviewer: "${reviewer}"`,
+    `reviewed-at: "${recordedAt}"`,
     `verdict: ${payload.verdict}`,
     payload.blockers.length === 0 ? 'blockers: []' : 'blockers:',
     ...payload.blockers.map((b) => `  - ${yamlOf(b)}`),
@@ -1455,22 +1570,43 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     ...(payload.suggestions && payload.suggestions.length
       ? ['suggestions:', ...payload.suggestions.map((s) => `  - ${yamlOf(s)}`)]
       : ['suggestions: []']),
-    '',
   ];
-  const newText = lines.join('\n');
-  if (existing == null) fs.writeFileSync(target, newText, 'utf8');
-  else casWrite(target, sha256(existing), newText);
-  // 级联 attempt 记账（复用既有 bumpAttempt，不重写）
-  let attempt = null;
-  if (flags['bump-attempt']) attempt = bumpAttempt(ws, cr, REVIEW_STAGE_LOOPS[stage], gates);
-  // 删除临时 payload（避免残留误提交或跨 CR 串味）
-  try { fs.rmSync(fromPath, { force: true }); } catch { /* 删除失败不阻塞主结果 */ }
-  auditLog(ws, { kind: 'ledger', op: 'review-record', cr, stage, verdict: payload.verdict, actor: identity(ws), file: target });
-  emitOutboxEvent(ws, {
-    event_kind: 'review', cr_id: cr, actor: identity(ws),
-    payload: { stage, verdict: payload.verdict, blockerCount: (payload.blockers || []).length },
+  if (stage === 'requirement') {
+    // 被评审内容摘要（FR-19/D-12）：LF 规范化后 SHA-256，mtime 不参与判定；供 cmdNext 回修/重审路由
+    const prdPath = path.join(crDir(ws, cr), 'prd.md');
+    const prdRaw = readFileChecked(prdPath);
+    if (prdRaw == null) fail('SUBJECT_NOT_FOUND', `requirement review-record 需要 ${prdPath} 存在（写入 subject-sha256）`);
+    lines.push(`subject-file: change-requests/${cr}/prd.md`);
+    lines.push(`subject-sha256: ${sha256(prdRaw.replaceAll('\r\n', '\n'))}`);
+  }
+  lines.push('');
+  const annotationText = lines.join('\n');
+  const blockText = renderReviewsStageBlock(stage, {
+    reviewer, verdict: payload.verdict, recordedAt, blockerCount,
+    annotationRel: `change-requests/${cr}/review-annotations/${fileName}`,
+    repairTarget, current: projCurrent, max: att.max, attempts: mergedAttempts,
   });
-  ok({ op: 'review-record', cr, stage, file: target.replaceAll('\\', '/'), verdict: payload.verdict, ...(attempt ? { attempt: attempt.current } : {}) });
+  const newTrace = upsertReviewsStage(traceNorm, cr, stage, blockText);
+  const writes = [
+    { path: target, expectedHash: existing == null ? null : sha256(existing), newText: annotationText },
+    { path: tracePath, expectedHash: traceRaw == null ? null : sha256(traceRaw), newText: newTrace },
+  ];
+  if (bump) {
+    const loopPath = attemptsFilePath(ws, cr);
+    const loopRaw = readFileChecked(loopPath);
+    const all = att.data.loops ? att.data : { loops: {} };
+    all.loops[loopRef] = { 'current-attempt': projCurrent, attempts: [...att.attempts, { attempt: projCurrent, at: recordedAt, by: reviewer }] };
+    writes.push({ path: loopPath, expectedHash: loopRaw == null ? null : sha256(loopRaw), newText: renderLoopText(all.loops) });
+  }
+  casWriteMulti(writes); // 任一前置校验/CAS 失败时本次涉及的受控文件均不落盘；保留 B-18 已声明的连续 rename 极小崩溃窗口，不另造事务
+  auditLog(ws, { kind: 'ledger', op: 'review-record', cr, stage, verdict: payload.verdict, actor: reviewer, file: target });
+  emitOutboxEvent(ws, {
+    event_kind: 'review', cr_id: cr, actor: reviewer,
+    payload: { stage, verdict: payload.verdict, blockerCount },
+  });
+  // 删除临时 payload（避免残留误提交或跨 CR 串味）——放在写入成功之后，失败路径 payload 保留供重试
+  try { fs.rmSync(fromPath, { force: true }); } catch { /* 删除失败不阻塞主结果 */ }
+  ok({ op: 'review-record', cr, stage, file: target.replaceAll('\\', '/'), verdict: payload.verdict, trace: tracePath.replaceAll('\\', '/'), ...(bump ? { attempt: projCurrent } : {}) });
 }
 /* ────────────────────────── review-note（S2，CR-2026-021 TASK-03） ──────────────────────────
  * 向 approval.yml 的 supplemental-reviews[] 追加一条补充审查记录（CAS+审计）。
@@ -2251,8 +2387,19 @@ function cmdNext(ws, cr, gates, flags) {
 
   switch (status) {
     case 'drafting': {
-      const prd = fs.existsSync(path.join(crDir(ws, cr), 'prd.md'));
-      return suggest(prd ? 'review-requirement' : 'write-requirement-prd', prd ? 'prd.md 已存在，进入需求评审' : 'prd.md 缺失');
+      // CR-2026-025 FR-20/D-12：block 后先回修；PRD 实质修订后转重审；以 LF 规范化摘要判 freshness，禁 mtime
+      const prdPath = path.join(crDir(ws, cr), 'prd.md');
+      if (!fs.existsSync(prdPath)) return suggest('write-requirement-prd', 'prd.md 缺失');
+      const a = ev('change-requests/{cr}/review-annotations/requirement.yml');
+      const failed = a.exists && a.data && (a.data.verdict === 'block' || (Array.isArray(a.data.blockers) && a.data.blockers.length > 0));
+      if (failed) {
+        const recSha = a.data['subject-sha256'];
+        if (recSha == null) return suggest('review-requirement', `旧评审证据无摘要，维持改动前行为（verdict=${a.data.verdict}）`); // FR-20⑤ 兼容，不做历史迁移
+        const curSha = sha256(fs.readFileSync(prdPath, 'utf8').replaceAll('\r\n', '\n'));
+        if (recSha === curSha) return suggest('write-requirement-prd', `需求评审未通过（blockers=${(a.data.blockers || []).length} 条，证据 ${a.path}）且 PRD 未回修，先回修`);
+        return suggest('review-requirement', 'PRD 已修订，评审证据过时，重新评审刷新证据');
+      }
+      return suggest('review-requirement', 'prd.md 已存在，进入需求评审');
     }
     case 'requirement-reviewing': {
       const a = ev('change-requests/{cr}/review-annotations/requirement.yml');
