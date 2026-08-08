@@ -1876,3 +1876,98 @@ test('CR-2026-025 守卫⑦：环 A→B→A 与自引用 A→A 均有限时间�
     assert.equal(rS.stderr.error.code, 'DEPENDS_ON_NOT_DONE');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-025 TASK-02：isEmpty 失败回显收敛（FR-11~FR-15，SDD §4.3） ──
+// fixture：passCondition 判据运行时读自 pipeline JSON（B-15），测试仓内写最小
+// requirement-authoring.pipeline.json；状态机复制 2 条所需转换（fixture 自含，不碰权威源）。
+
+const LONG_BLOCKERS = Array.from({ length: 7 }, (_, i) => `超长blocker-${i}-` + 'x'.repeat(500));
+const LONG_ANNOTATION = 'verdict: block\nblockers:\n' + LONG_BLOCKERS.map((b) => `  - "${b}"`).join('\n') + '\n';
+
+function setupBriefWs(cr, status, annotation) {
+  const ws = makeWorkspace();
+  writeCrEntry(ws, cr, status);
+  writeFileSync(path.join(ws, 'dir-graph.yaml'), [
+    'change-request-track:',
+    '  state_machine:',
+    '    field: "status"',
+    '    transitions:',
+    '      - { from: drafting, to: requirement-reviewing, trigger: "review-requirement" }',
+    '      - { from: requirement-reviewing, to: requirement-approved, trigger: "approve-requirement" }',
+  ].join('\n') + '\n');
+  mkdirSync(path.join(ws, 'tools', 'pipeline-templates'), { recursive: true });
+  writeFileSync(path.join(ws, 'tools', 'pipeline-templates', 'requirement-authoring.pipeline.json'), JSON.stringify({
+    id: 'requirement-authoring',
+    nodes: [{ ref: 'review-requirement', reviewLoop: { maxAttempts: 3, passCondition: { allOf: [
+      { path: 'verdict', equals: 'pass' }, { path: 'blockers', isEmpty: true } ] } } }],
+  }));
+  writeEvidence(ws, cr, 'prd.md', '# prd\n');
+  if (annotation != null) writeEvidence(ws, cr, 'review-annotations/requirement.yml', annotation);
+  return ws;
+}
+
+test('CR-2026-025 回显①②③④：gate 超长 blockers → actual 数组截断、why 条数指针、无原文（AC-12）', () => {
+  const ws = setupBriefWs('CR-B1', 'drafting', LONG_ANNOTATION);
+  try {
+    const r = runCrctl(['gate', 'CR-B1', '--for', 'requirement-reviewing', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    const pc = r.stdout.checks.find((c) => c.type === 'passCondition');
+    assert.equal(pc.ok, false);
+    const isEmptyDetail = pc.detail.find((d) => d.cond && d.cond.isEmpty === true && !d.ok);
+    assert.ok(Array.isArray(isEmptyDetail.actual), 'actual 必须仍是数组（FR-13/NFR-3）');
+    assert.equal(isEmptyDetail.actual.length, 7);
+    for (const item of isEmptyDetail.actual) assert.ok(item.length <= 120 + 12, `每项 ≤ ITEM_MAX+后缀：${item.length}`);
+    assert.match(isEmptyDetail.actual[0], /^超长blocker-0-x{20,}…\(\+\d+字\)$/);
+    assert.match(isEmptyDetail.why, /^期望 blockers 为空，实际 7 条（详见 /);
+    for (const b of LONG_BLOCKERS) assert.ok(!JSON.stringify(pc.detail).includes(b), 'detail 不得含任一完整原文');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-025 回显④：失败的 advance → GATE_BLOCKED message 不含 blocker 原文（AC-13）', () => {
+  const ws = setupBriefWs('CR-B1', 'requirement-reviewing', LONG_ANNOTATION);
+  try {
+    const r = runCrctl(['advance', 'CR-B1', '--to', 'requirement-approved', '--trigger', 'approve-requirement', '--no-commit', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'GATE_BLOCKED');
+    for (const b of LONG_BLOCKERS) assert.ok(!r.stderr.error.message.includes(b), 'message 不得含 blocker 原文');
+    const gate = r.stderr.error.gate;
+    const pc = gate.checks.find((c) => c.type === 'passCondition');
+    const isEmptyDetail = pc.detail.find((d) => d.cond && d.cond.isEmpty === true && !d.ok);
+    assert.ok(Array.isArray(isEmptyDetail.actual) && isEmptyDetail.actual.length === 7);
+    assert.match(isEmptyDetail.why, /实际 7 条（详见/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-025 回显⑤：标量 equals 失败输出与改动前一致（D-9 零变化）', () => {
+  const ws = setupBriefWs('CR-B1', 'drafting', 'verdict: block\nblockers: []\n');
+  try {
+    const r = runCrctl(['gate', 'CR-B1', '--for', 'requirement-reviewing', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    const pc = r.stdout.checks.find((c) => c.type === 'passCondition');
+    const eqDetail = pc.detail.find((d) => d.cond && 'equals' in d.cond && !d.ok);
+    assert.equal(eqDetail.actual, 'block');
+    assert.equal(eqDetail.why, '期望 verdict=pass，实际 "block"');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-025 回显⑥：标量 isEmpty 失败路径保持现状（非数组不走截断，D-9）', () => {
+  const ws = setupBriefWs('CR-B1', 'drafting', 'verdict: pass\nblockers: "not-empty-scalar"\n');
+  try {
+    const r = runCrctl(['gate', 'CR-B1', '--for', 'requirement-reviewing', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    const pc = r.stdout.checks.find((c) => c.type === 'passCondition');
+    const isEmptyDetail = pc.detail.find((d) => d.cond && d.cond.isEmpty === true && !d.ok);
+    assert.equal(isEmptyDetail.actual, 'not-empty-scalar');
+    assert.equal(isEmptyDetail.why, '期望 blockers 为空，实际 "not-empty-scalar"');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-025 回显⑦：blockers 空数组 → isEmpty 通过（收敛不得影响判定本身）', () => {
+  const ws = setupBriefWs('CR-B1', 'drafting', 'verdict: pass\nblockers: []\n');
+  try {
+    const r = runCrctl(['gate', 'CR-B1', '--for', 'requirement-reviewing', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const pc = r.stdout.checks.find((c) => c.type === 'passCondition');
+    assert.equal(pc.ok, true);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

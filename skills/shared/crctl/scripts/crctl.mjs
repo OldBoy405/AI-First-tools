@@ -525,6 +525,14 @@ function readEvidenceDoc(ws, cr, rel) {
   return { path: p, exists: true, data: parseYaml(text) };
 }
 
+// CR-2026-025 项③（FR-11，D-7：常量不做配置）：isEmpty 数组失败逐项截断。
+// 只封单条长度、不封条数；非字符串项原样保留，数组类型不变（FR-13/NFR-3）。
+const ITEM_MAX = 120;
+function briefArray(v) {
+  return v.map((x) => (typeof x === 'string' && x.length > ITEM_MAX)
+    ? x.slice(0, ITEM_MAX) + `…(+${x.length - ITEM_MAX}字)` : x);
+}
+
 function evaluatePassCondition(ws, cr, stageCfg, gates) {
   // stageCfg: { passCondition: {pipeline, nodeRef}, evidence: {"$default": rel, "test-report": rel} }
   const results = [];
@@ -551,7 +559,13 @@ function evaluatePassCondition(ws, cr, stageCfg, gates) {
       results.push({ ok: okv, cond, actual: val ?? null, file: doc.path, why: okv ? null : `期望 ${fieldPath}=${cond.equals}，实际 ${JSON.stringify(val ?? null)}` });
     } else if (cond.isEmpty === true) {
       const okv = val == null || (Array.isArray(val) && val.length === 0) || val === '';
-      results.push({ ok: okv, cond, actual: val ?? null, file: doc.path, why: okv ? null : `期望 ${fieldPath} 为空，实际 ${JSON.stringify(val)}` });
+      // CR-2026-025 回显收敛（FR-11/FR-12/FR-14）：只封单条长度、不封条数——条目数极多时输出仍线性增长；
+      // 全量原文唯一来源是 file 字段指向的 review-annotations/{stage}.yml。equals 分支与标量路径保持现状（D-9）。
+      if (!okv && Array.isArray(val)) {
+        results.push({ ok: okv, cond, actual: briefArray(val), file: doc.path, why: `期望 ${fieldPath} 为空，实际 ${val.length} 条（详见 ${doc.path}）` });
+      } else {
+        results.push({ ok: okv, cond, actual: val ?? null, file: doc.path, why: okv ? null : `期望 ${fieldPath} 为空，实际 ${JSON.stringify(val)}` });
+      }
     } else {
       results.push({ ok: false, cond, why: `不支持的条件形态: ${JSON.stringify(cond)}` });
     }
