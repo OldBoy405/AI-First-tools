@@ -747,6 +747,28 @@ function editTaskDone(text, taskId) {
   return norm.slice(0, block.start) + nb + '\n' + norm.slice(block.end);
 }
 
+/** task done 依赖守卫（CR-2026-025 TASK-01，PRD FR-6/FR-7，SDD §4.2）：一跳直接前置校验。
+ * 缺失/空数组 = 无依赖放行（D-5）；悬空引用 DEPENDS_ON_UNKNOWN；未完成前置 DEPENDS_ON_NOT_DONE。
+ * 非数组形态复用 SCHEMA_INVALID（TD-BL-3：不新增错误码）。成环 TASK 天然互卡在 DEPENDS_ON_NOT_DONE，
+ * 不做传递闭包遍历、不单独检测环（D-6）。解析复用既有 parseYaml（FR-8/NFR-8，禁新写解析）。 */
+function guardDependsOn(normText, taskId) {
+  const idx = parseYaml(normText) || {};
+  const tasks = Array.isArray(idx.tasks) ? idx.tasks : [];
+  const byId = new Map(tasks.filter((t) => t && t.id != null).map((t) => [String(t.id), t]));
+  const target = byId.get(taskId);
+  if (!target) return; // TASK 不存在由后续 editTaskDone 的 TASK_NOT_FOUND 兜底
+  const deps = target['depends-on'];
+  if (deps == null || (Array.isArray(deps) && deps.length === 0)) return; // D-5：缺失/空数组 = 无依赖
+  if (!Array.isArray(deps)) fail('SCHEMA_INVALID', `${taskId} 的 depends-on 必须是列表，实际 ${JSON.stringify(deps)}`, { taskId, field: 'depends-on' });
+  const ids = deps.map((d) => String(d));
+  const unknown = ids.filter((d) => !byId.has(d));
+  if (unknown.length) fail('DEPENDS_ON_UNKNOWN', `${taskId} 的 depends-on 引用了不存在的 TASK：${unknown.join(', ')}`, { unknown });
+  const notDone = ids.filter((d) => byId.get(d).status !== 'done');
+  if (notDone.length) fail('DEPENDS_ON_NOT_DONE',
+    `${taskId} 的直接前置未全部 done：${notDone.map((d) => `${d}(${byId.get(d).status})`).join(', ')}。若前置互相等待，检查 depends-on 是否成环`,
+    { notDone: notDone.map((d) => ({ id: d, status: byId.get(d).status })) });
+}
+
 /** merge-metadata：条目 merge-commits[] 追加 {repo,trunk,sha,branch}，无则创建键（SDD §4.2）。
  * branch 由 CR id 按硬约定（分支恒为 requirement/{cr}）自动补全——必填集仍为 {repo,trunk,sha}
  * （唯一生产者保证输出的集合），branch 是可推导的富化字段（CR-2026-020 复盘 FR-8：字段契约收敛）。 */
@@ -1303,7 +1325,9 @@ function cmdTaskDone(ws, cr, gates, flags) {
   const p = path.join(crDir(ws, cr), 'tasks', '_index.yml');
   const text = readFileChecked(p);
   if (text == null) fail('TASK_INDEX_NOT_FOUND', `缺少 ${p}`);
-  const newText = editTaskDone(text, flags.task);
+  const norm = text.replaceAll('\r\n', '\n'); // 纪律 #1：守卫与编辑共用同一份规范化文本，不重复读盘
+  guardDependsOn(norm, flags.task);
+  const newText = editTaskDone(norm, flags.task);
   casWrite(p, sha256(text), newText);
   auditLog(ws, { kind: 'ledger', op: 'task-done', cr, actor: identity(ws), before: { taskId: flags.task, from: 'pending' }, after: { taskId: flags.task, to: 'done' } });
   ok({ op: 'task-done', cr, task: flags.task, status: 'done', file: p });

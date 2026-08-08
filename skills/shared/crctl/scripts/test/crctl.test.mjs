@@ -1752,3 +1752,127 @@ test('cmdNext writing-back：specs/ 唯一目录且 traceability.yml 存在才�
     assert.ok(r4.stdout.why.includes('无法唯一确定 spec_id'), 'why 显式说明多目录');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-025 TASK-01：task done depends-on 一跳依赖守卫（FR-6/FR-7/FR-10，SDD §4.2） ──
+
+function writeRawTaskIndex(ws, cr, text) {
+  const dir = path.join(ws, 'change-requests', cr, 'tasks');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, '_index.yml'), text);
+  return path.join(dir, '_index.yml');
+}
+
+test('CR-2026-025 守卫①：前置未 done → DEPENDS_ON_NOT_DONE，退出非 0 且 _index.yml 未变（AC-7，不带引号形态）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-G1', 'developing');
+    const p = writeRawTaskIndex(ws, 'CR-G1', [
+      'cr-ref: CR-G1', 'tasks:',
+      '  - id: CR-G1-TASK-01', '    status: pending', '    depends-on: []',
+      '  - id: CR-G1-TASK-02', '    status: pending', '    depends-on: [CR-G1-TASK-01]',
+    ].join('\n') + '\n');
+    const before = readFileSync(p, 'utf8');
+    const r = runCrctl(['task', 'done', 'CR-G1', '--task', 'CR-G1-TASK-02', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'DEPENDS_ON_NOT_DONE');
+    assert.deepEqual(r.stderr.error.notDone, [{ id: 'CR-G1-TASK-01', status: 'pending' }]);
+    assert.match(r.stderr.error.message, /若前置互相等待，检查 depends-on 是否成环/);
+    assert.equal(readFileSync(p, 'utf8'), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-025 守卫②：前置全 done → 正常写入 status: done 与 done-at（AC-8）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-G1', 'developing');
+    writeRawTaskIndex(ws, 'CR-G1', [
+      'cr-ref: CR-G1', 'tasks:',
+      '  - id: CR-G1-TASK-01', '    status: done', '    done-at: "2026-08-09T01:00:00+08:00"', '    depends-on: []',
+      '  - id: CR-G1-TASK-02', '    status: pending', '    depends-on: [CR-G1-TASK-01]',
+    ].join('\n') + '\n');
+    const r = runCrctl(['task', 'done', 'CR-G1', '--task', 'CR-G1-TASK-02', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const idx = readFileSync(path.join(ws, 'change-requests', 'CR-G1', 'tasks', '_index.yml'), 'utf8');
+    assert.match(idx, /- id: CR-G1-TASK-02\n    status: done\n    done-at:/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-025 守卫③：depends-on 缺失与空数组均放行（AC-9，D-5）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-G1', 'developing');
+    writeRawTaskIndex(ws, 'CR-G1', [
+      'cr-ref: CR-G1', 'tasks:',
+      '  - id: CR-G1-TASK-01', '    status: pending',   // 缺失字段是 task allocate 的正常形态（B-8）
+      '  - id: CR-G1-TASK-02', '    status: pending', '    depends-on: []',
+    ].join('\n') + '\n');
+    const r1 = runCrctl(['task', 'done', 'CR-G1', '--task', 'CR-G1-TASK-01', '--workspace', ws]);
+    assert.equal(r1.status, 0);
+    const r2 = runCrctl(['task', 'done', 'CR-G1', '--task', 'CR-G1-TASK-02', '--workspace', ws]);
+    assert.equal(r2.status, 0);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-025 守卫④：depends-on 指向不存在 TASK → DEPENDS_ON_UNKNOWN（AC-9，FR-7）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-G1', 'developing');
+    writeRawTaskIndex(ws, 'CR-G1', [
+      'cr-ref: CR-G1', 'tasks:',
+      '  - id: CR-G1-TASK-01', '    status: pending', '    depends-on: [CR-G1-TASK-99]',
+    ].join('\n') + '\n');
+    const r = runCrctl(['task', 'done', 'CR-G1', '--task', 'CR-G1-TASK-01', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'DEPENDS_ON_UNKNOWN');
+    assert.deepEqual(r.stderr.error.unknown, ['CR-G1-TASK-99']);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-025 守卫⑤：带引号 ["ID"] 形态与不带引号等价（FR-10⑤，钉 parseYaml unquote）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-G1', 'developing');
+    writeRawTaskIndex(ws, 'CR-G1', [
+      'cr-ref: CR-G1', 'tasks:',
+      '  - id: CR-G1-TASK-01', '    status: pending', '    depends-on: []',
+      '  - id: CR-G1-TASK-02', '    status: pending', '    depends-on: ["CR-G1-TASK-01"]',
+    ].join('\n') + '\n');
+    const r = runCrctl(['task', 'done', 'CR-G1', '--task', 'CR-G1-TASK-02', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'DEPENDS_ON_NOT_DONE');
+    assert.deepEqual(r.stderr.error.notDone, [{ id: 'CR-G1-TASK-01', status: 'pending' }]);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-025 守卫⑥：depends-on 非数组形态 → 复用 SCHEMA_INVALID，不新增错误码（TD-BL-3）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-G1', 'developing');
+    writeRawTaskIndex(ws, 'CR-G1', [
+      'cr-ref: CR-G1', 'tasks:',
+      '  - id: CR-G1-TASK-01', '    status: pending', '    depends-on: CR-G1-TASK-99',
+    ].join('\n') + '\n');
+    const r = runCrctl(['task', 'done', 'CR-G1', '--task', 'CR-G1-TASK-01', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'SCHEMA_INVALID');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-025 守卫⑦：环 A→B→A 与自引用 A→A 均有限时间返回 DEPENDS_ON_NOT_DONE（AC-10，D-6 一跳天然挡环）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-G1', 'developing');
+    writeRawTaskIndex(ws, 'CR-G1', [
+      'cr-ref: CR-G1', 'tasks:',
+      '  - id: CR-G1-TASK-A', '    status: pending', '    depends-on: [CR-G1-TASK-B]',
+      '  - id: CR-G1-TASK-B', '    status: pending', '    depends-on: [CR-G1-TASK-A]',
+      '  - id: CR-G1-TASK-S', '    status: pending', '    depends-on: [CR-G1-TASK-S]',
+    ].join('\n') + '\n');
+    const rA = runCrctl(['task', 'done', 'CR-G1', '--task', 'CR-G1-TASK-A', '--workspace', ws]);
+    assert.equal(rA.status, 1);
+    assert.equal(rA.stderr.error.code, 'DEPENDS_ON_NOT_DONE');
+    const rS = runCrctl(['task', 'done', 'CR-G1', '--task', 'CR-G1-TASK-S', '--workspace', ws]);
+    assert.equal(rS.status, 1);
+    assert.equal(rS.stderr.error.code, 'DEPENDS_ON_NOT_DONE');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
