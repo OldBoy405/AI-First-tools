@@ -2391,6 +2391,17 @@ function cmdTest(ws, cr, gates, flags) {
  * 幂等：v2 + 无 status 行时输出 already-migrated，退出码 0。
  */
 
+// CR-2026-027 FR-10/TASK-05：迁移提前返回路径的统一收尾——幽灵清理若删除了条目且非 embedded，需 standalone commit。
+function finishMigrateBacklog(ws, flags, base, ghostResult) {
+  if (ghostResult.ghost && ghostResult.ghost.removed && !flags.embedded && !flags['no-commit']) {
+    const addR = controlledGit(ws, 'add', ['change-requests/_backlog.yml'], ws, 'crctl-migrate');
+    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', `[cr] migrate backlog ghost cleanup: ${ghostResult.ghost.title}`], ws, 'crctl-migrate') : addR;
+    base.commit = commitR.ok ? { message: 'ghost cleanup' } : { failed: true, detail: commitR };
+    if (commitR && !commitR.ok) process.exit(1);
+  }
+  ok({ ...base, ...ghostResult });
+}
+
 function cmdMigrateBacklog(ws, gates, flags) {
   const p = backlogPath(ws);
   const text = readFileChecked(p);
@@ -2401,11 +2412,12 @@ function cmdMigrateBacklog(ws, gates, flags) {
   const schemaVer = (doc && !Array.isArray(doc) && doc.schema) || '';
   const isV2 = schemaVer === 'cr-backlog/v2';
 
-  // 幂等检查：v2 且所有条目无 status/updated-at
+  // 幂等检查：v2 且所有条目无 status/updated-at（仍执行幽灵清理——清理独立于 v1→v2 迁移）
   if (isV2) {
     const hasLegacy = list.some((e) => e && (e.status !== undefined || e['updated-at'] !== undefined));
     if (!hasLegacy) {
-      ok({ migrated: false, reason: 'already-migrated', entries: list.length });
+      const ghostResult = migrateGhostCleanup(ws, text, hash, p);
+      finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
       return;
     }
   }
@@ -2431,7 +2443,8 @@ function cmdMigrateBacklog(ws, gates, flags) {
     fail('MIGRATE_STATUS_MISMATCH', `迁移预检发现 ${diffs.length} 个条目 backlog 与 cr.md 状态不一致，拒绝写入`, { diffs });
   }
   if (!toMigrate.length) {
-    ok({ migrated: false, reason: 'already-migrated', entries: list.length });
+    const ghostResult = migrateGhostCleanup(ws, text, hash, p);
+    finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
     return;
   }
 
@@ -2472,6 +2485,12 @@ function cmdMigrateBacklog(ws, gates, flags) {
 
   casWrite(p, hash, finalText);
 
+  // CR-2026-027 FR-10/TASK-05：幽灵条目清理阶段（B-12 实测形态：尾部缺 id 的续行块）。
+  // 归属判定：_history.yml 存在同 title 的归档条目（final-status 存在）才允许删除；
+  // 无对应归档 → GHOST_ENTRY_ORPHANED 硬失败（不静默删除）；无幽灵块 → already-clean（幂等）。
+  // 注：迁移已先落盘，清理失败时迁移结果有效、幽灵块保留可重试（清理幂等）。
+  const ghostResult = migrateGhostCleanup(ws, finalText, sha256(finalText), p);
+
   // 迁移报告（gitignored）
   const reportDir = path.join(ws, '.crctl');
   fs.mkdirSync(reportDir, { recursive: true });
@@ -2494,13 +2513,66 @@ function cmdMigrateBacklog(ws, gates, flags) {
   // standalone commit
   const msg = `[cr] migrate backlog to v2: ${toMigrate.length} entries, status->cr.md`;
   if (flags.embedded || flags['no-commit']) {
-    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, commit: 'embedded：由调用方在同一事务中提交' });
+    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, ...ghostResult, commit: 'embedded：由调用方在同一事务中提交' });
   } else {
     const addR = controlledGit(ws, 'add', ['change-requests/_backlog.yml'], ws, 'crctl-migrate');
     const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-migrate') : addR;
-    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR } });
+    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, ...ghostResult, commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR } });
     if (commitR && !commitR.ok) process.exit(1);
   }
+}
+
+// CR-2026-027 FR-10/TASK-05：幽灵条目清理（幂等；删除依据 = history 存在同 title 归档条目）。
+// B-12 实测形态：幽灵块是最后一个 id 条目块内的重复字段 key（如 title 二次出现），
+// 从第一个重复 key 行到文件尾即为幽灵块（CR-2026-024 归档残留）。
+function migrateGhostCleanup(ws, text, hash, p) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const lines = norm.split('\n');
+  // 列表项缩进（'  - id:' 的缩进）与条目字段层缩进（itemIndent+2）
+  let itemIndent = -1;
+  for (const l of lines) {
+    const m = l.match(/^(\s*)-\s+id:/);
+    if (m) { itemIndent = m[1].length; break; }
+  }
+  if (itemIndent < 0) return { ghost: { removed: false, reason: 'no-list-items' } };
+  const fieldIndent = itemIndent + 2;
+  // 最后一个列表项行号（从尾向前）
+  let lastIdLine = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/^(\s*)-\s+id:\s*["']?([^"'\s]+)["']?\s*$/);
+    if (m && m[1].length === itemIndent) { lastIdLine = i; break; }
+  }
+  if (lastIdLine < 0) return { ghost: { removed: false, reason: 'no-list-items' } };
+  // 在最后条目块内找重复字段 key（幽灵块起点）；只统计字段层缩进（owners 子字段缩进更深不参与）
+  const seen = new Set();
+  let ghostStart = -1, ghostTitle = '';
+  for (let i = lastIdLine + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.trim() === '') continue;
+    const ind = l.match(/^[ \t]*/)[0].length;
+    if (ind <= itemIndent) break;
+    if (ind !== fieldIndent) continue;
+    const km = l.match(/^\s*([a-zA-Z0-9_-]+):\s*(.*)$/);
+    if (!km) continue;
+    if (seen.has(km[1])) { ghostStart = i; ghostTitle = km[2].replace(/^["']|["']$/g, '').trim(); break; }
+    seen.add(km[1]);
+  }
+  if (ghostStart < 0) return { ghost: { removed: false, reason: 'already-clean' } };
+  // 归属判定：_history.yml 存在同 title 的归档条目
+  const hText = readFileChecked(path.join(ws, 'change-requests', '_history.yml'));
+  let archived = false;
+  if (hText != null) {
+    const hDoc = parseYaml(hText);
+    const hList = Array.isArray(hDoc) ? hDoc : hDoc['change-requests'] || hDoc['history'] || [];
+    archived = hList.some((e) => e && e['final-status'] && String(e.title || '').trim() === ghostTitle);
+  }
+  if (!archived) {
+    fail('GHOST_ENTRY_ORPHANED', `_backlog.yml 尾部存在无 id 归属的续行块（title=${ghostTitle || '(未解析)'}），但 _history.yml 无对应归档条目，拒绝删除`);
+  }
+  const cleaned = lines.slice(0, ghostStart).join('\n').replace(/\s+$/, '') + '\n';
+  casWrite(p, hash, cleaned);
+  auditLog(ws, { kind: 'migrate-backlog-ghost', removed: true, title: ghostTitle, by: identity(ws) });
+  return { ghost: { removed: true, title: ghostTitle, reason: 'archived-in-history' } };
 }
 
 function cmdNext(ws, cr, gates, flags) {

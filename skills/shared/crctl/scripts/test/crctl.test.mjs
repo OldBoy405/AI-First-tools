@@ -573,6 +573,88 @@ test('CR-2026-027 FR-9：archived 门禁五步判定 —— 缺 index/空列表/
     assert.equal(gateArchived().code, 'TASK_STATUS_INCOMPLETE');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-027 TASK-05：migrate-backlog 幽灵条目清理（FR-10/D-11）────
+function writeBacklogWithGhost(ws, ghostTitle) {
+  // v2 backlog + 正常条目 + 尾部幽灵块（B-12 实测形态：缺 id 行的 4 空格字段块）
+  const text = [
+    'schema: cr-backlog/v2',
+    'change-requests:',
+    '  - id: CR-2026-017',
+    '    title: P3 组织智能 CR-E — 内部 Skill Market（E6）',
+    '    created: "2026-08-04T06:55:00+08:00"',
+    `    title: ${ghostTitle}`,
+    '    summary: "幽灵条目残留（缺 id 行）"',
+    '    created: "2026-08-08T16:44:35+08:00"',
+  ].join('\n') + '\n';
+  writeFileSync(path.join(ws, 'change-requests', '_backlog.yml'), text);
+}
+
+function writeHistoryWithArchived(ws, title) {
+  const dir = path.join(ws, 'change-requests');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, '_history.yml'), `change-requests:\n  - id: CR-2026-024\n    title: ${title}\n    final-status: archived\n    archived-at: "2026-08-09T12:00:00+08:00"\n`);
+}
+
+function initGit(ws) {
+  const g = (args) => {
+    const r = spawnSync('git', args, { cwd: ws, encoding: 'utf8', shell: false });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+  };
+  g(['init', '-b', 'master']);
+  g(['config', 'user.email', 't@t']);
+  g(['config', 'user.name', 'tester']);
+}
+
+test('CR-2026-027 FR-10：migrate-backlog 幽灵块删除 —— 尾部缺 id 块被移除，正常条目字段恢复完整', () => {
+  const ws = makeWorkspace();
+  initGit(ws);
+  try {
+    const ghostTitle = 'Phase0 Tools 技能整合 — 端到端 Pipeline 最佳实践';
+    writeBacklogWithGhost(ws, ghostTitle);
+    writeHistoryWithArchived(ws, ghostTitle);
+    const r = runCrctl(['migrate-backlog', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.ghost.removed, true);
+    const text = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(!text.includes(ghostTitle), '幽灵块必须消失');
+    assert.ok(text.includes('CR-2026-017'), '正常条目保留');
+    // CR-2026-017 的 title 恢复为自身（幽灵块删除后，唯一 title 行即 P3 标题）
+    assert.ok(text.includes('title: P3 组织智能 CR-E — 内部 Skill Market（E6）'));
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 FR-10：migrate-backlog 幂等 —— 再次运行 already-clean 且文件哈希不变', () => {
+  const ws = makeWorkspace();
+  initGit(ws);
+  try {
+    writeBacklogWithGhost(ws, 'Phase0 Tools 技能整合 — 端到端 Pipeline 最佳实践');
+    writeHistoryWithArchived(ws, 'Phase0 Tools 技能整合 — 端到端 Pipeline 最佳实践');
+    runCrctl(['migrate-backlog', '--workspace', ws]);
+    const text = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const hash1 = sha16(text);
+    const r2 = runCrctl(['migrate-backlog', '--workspace', ws]);
+    assert.equal(r2.status, 0, r2.rawStderr);
+    assert.equal(r2.stdout.ghost.removed, false);
+    assert.equal(r2.stdout.ghost.reason, 'already-clean');
+    const text2 = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.equal(sha16(text2), hash1, '幂等：文件哈希不得变化');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 FR-10：幽灵块无对应归档 -> GHOST_ENTRY_ORPHANED 硬失败且文件不变', () => {
+  const ws = makeWorkspace();
+  initGit(ws);
+  try {
+    writeBacklogWithGhost(ws, '幽灵孤儿条目');
+    writeHistoryWithArchived(ws, '另一个不相关的归档标题');
+    const r = runCrctl(['migrate-backlog', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'GHOST_ENTRY_ORPHANED');
+    const text = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(text.includes('幽灵孤儿条目'), '孤儿幽灵块不得被删除');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
 test('gate：检出 EVIDENCE_DRIFT -> outbox 出现 audit 事件（payload 只有摘要，无证据内容）；重复 gate 不重复堆积', () => {
   const ws = makeWorkspace();
   const cr = 'CR-TEST-1';
