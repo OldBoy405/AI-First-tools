@@ -40,13 +40,13 @@ updated: "2026-08-05T15:10:00+08:00"
 
 ### `skills/shared/crctl/scripts/crctl.mjs`
 
-状态机与账本的唯一可执行治理工具。**刻意单文件**（当前 1400+ 行），不因体量拆分——拆分会打散"状态机 + CAS + 审计"这条强内聚的写入路径，抵消单文件带来的"改动即全貌可见"优势（对标 esbuild/Litestream 的单文件哲学）。
+状态机与账本的唯一可执行治理工具。**刻意单文件**（当前 1400+ 行），不因体量拆分——拆分会打散"状态机 + CAS + 审计"这条强内聚的写入路径，抵消单文件带来的"改动即全貌可见"优势（对标 esbuild/Litestream 的单文件哲学）。**本轮不创建 `commands/` 模块目录**；若未来需要模块化，必须独立立项并先修订本文档（CR-2026-027 FR-2 拍板）。
 
 CR-2026-021 起写入子命令族扩至覆盖：`review-annotations/{stage}.yml`（review-record）、`approval.yml#supplemental-reviews[]`（review-note）、`_backlog` 非 status 字段（checkpoint-add/owner-set/backlog-set/inbox-emit）、CR-ID/TASK-ID 分配与首次建档（cr-init/task allocate）、只读聚合（worktree-path/report/cr-metrics）、`git commit --template` 消息模板。全部沿用「状态机 + CAS + `.crctl/audit.log` 审计」同一条写入路径，无旁路。
 
 ### `skills/shared/crctl/gates.json` + `dir-graph.yaml`
 
-CR 状态机（15 具名状态 + 注册前 `(new)`，25 条声明转移、wildcard 展开 47 条）与门禁判据的唯一事实源。**任何使用方仓库不得复刻这两处声明**，只能引用。
+CR 状态机（15 具名状态 + 注册前 `(new)`，27 条声明转移、wildcard 展开 49 条）与门禁判据的唯一事实源。**任何使用方仓库不得复刻这两处声明**，只能引用。
 
 ### `skills/shared/engineering-docs/`
 
@@ -76,7 +76,7 @@ Skill（skills/{组}/{name}/SKILL.md）# 提示词合约，读写状态/账本�
 crctl（scripts/crctl.mjs）          # 状态与账本的唯一写入执行器，最底层
 ```
 
-规则：依赖只朝下。Skill 不得绕过 crctl 直接改写 `cr.md`/`_backlog.yml`/`tasks/_index.yml` 等账本文件；crctl 不依赖任何 Skill 或 Pipeline 定义。
+规则：依赖只朝下。Skill 不得绕过 crctl 直接改写 `cr.md`/`_backlog.yml`/`tasks/_index.yml` 等账本文件。crctl 与 Pipeline 的依赖描述（CR-2026-027 FR-3 修订）：crctl 不执行 Skill，也不依赖 Skill 的自然语言语义；crctl 可以读取 dir-graph、gates 和 Pipeline 中的声明式 gate/reviewLoop 配置；Pipeline 不得调用 crctl 之外的账本写入口。
 
 ## 5. 硬不变量（Invariants）
 
@@ -86,7 +86,7 @@ crctl（scripts/crctl.mjs）          # 状态与账本的唯一写入执行器�
 2. **账本单一写入通道**：`_backlog.yml`/`tasks/_index.yml`/`_history.yml` 等账本文件的写入只能经 crctl 子命令（CAS + `.crctl/audit.log` 审计），禁止会话内现写脚本或 Skill 文档指导手工编辑 YAML（核查：`grep -rn "手工编辑\|手动改" skills --include=SKILL.md` 应为空，或仅命中"禁止"类措辞）。
 3. **零第三方依赖**：`crctl.mjs` 只用 Node 标准库；YAML 读写用行级定向正则改写（非通用序列化器），避免引入解析器依赖与"全量重排打乱字段序"的副作用（核查：`crctl.mjs` 顶部 `import` 语句只含 `node:*` 内建模块）。
 4. **行尾与硬失败纪律**：任何对账本文件做哈希、跨行正则、逐行解析的代码，读入先 `\r\n → \n` 规范化，解析器用 `split(/\r?\n/)`；跨行正则匹配失败必须硬失败报错，禁止静默降级为空结果（核查：新增解析函数是否在 `replaceAll('\r\n','\n')` 之后才做正则匹配；匹配失败路径是否调用 `fail(...)` 而非返回原文/空值）。
-5. **状态机口径唯一**：状态机 = 15 个具名状态 + 注册前 `(new)`；转移 = 25 条声明，wildcard 展开后 47 条。任何文档/断言/代码注释引用状态机规模必须与此口径一致（核查：新文档若提及"N 个状态/M 条转移"，核对是否为该口径）。
+5. **状态机口径唯一**：状态机 = 15 个具名状态 + 注册前 `(new)`；转移 = 27 条声明，wildcard 展开后 49 条。任何文档/断言/代码注释引用状态机规模必须与此口径一致（核查：新文档若提及"N 个状态/M 条转移"，核对是否为该口径）。
 6. **git 是权威，outbox 只是投影**：`crctl` 状态/事件写入 git 后才是权威事实；`.crctl/outbox/` 事件写入失败只记审计、不阻塞主操作（核查：`emitOutboxEvent` 的失败分支是否仍返回主命令的 `ok()` 结果）。
 7. **人工审批无旁路**：需求/架构/开发启动/代码四个人工审批节点只能经 `crctl approve`（交互式 TTY）或 Ed25519 签名授权完成，非 TTY 调用一律拒绝（核查：`cmdApprove` 的 TTY/签名校验分支是否可被参数绕过）。
 
@@ -104,6 +104,30 @@ crctl（scripts/crctl.mjs）          # 状态与账本的唯一写入执行器�
 - **测试**：`node --test skills/shared/crctl/scripts/test/crctl.test.mjs`，用例覆盖各子命令的正常/边界/CAS 冲突路径，无外部测试框架依赖。
 - **可观测性**：所有状态/账本写入追加 `.crctl/audit.log`（JSON Lines）；跨进程/跨设备同步经 `.crctl/outbox/` 事件（daemon 采集），失败不阻塞主操作。
 - **配置**：身份识别优先读 `.crctl/config.json` 的 `identity` 字段，否则回退 `git config user.name`。
+
+## 7a. 优化指标基线（CR-2026-027 FR-7 固化）
+
+**正确性指标**（v2 方案 §16.1）：状态和账本无旁路；approval 与 status 同一提交；TASK pending 不可回写/归档；archive event 不丢失；archived CR 可查询；所有参与仓来自机器可读声明；候选工具不通过隐藏路径治理当前 CR。
+
+**外部调用量目标**（v2 方案 §16.2，观测值，用于 Phase 2+ 候选路线对照）：
+
+| 阶段 | 当前 | 目标 |
+|---|---:|---:|
+| 注册 | 24 | 8–12 |
+| PRD 编写 | 9 | 3 |
+| PRD 评审 | 6 | 2–3 |
+| SDD 编写 | 14 | 4–6 |
+| SDD 回修评审 | 10 | 4–6 |
+| Plan/TASK | 11 | 4–5 |
+| implement-code | 63 | 25–35 |
+| test-report | 7 | 2–3 |
+| code review | 10 | 3–4 |
+| 用户 scope change 回修 | 53 | 12–20 |
+| merge | 14 | 2–4 |
+| writeback | 18 | 4–7 |
+| archive | 8 | 2–3 |
+
+**调用量是观测指标，不得通过删除 gate、测试、补偿或人工审批达成。**
 
 ## 8. 本文档的维护规则
 
