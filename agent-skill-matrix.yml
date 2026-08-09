@@ -77,6 +77,7 @@ actors:
       - approve-tech-design
       - write-dev-plan
       - write-dev-tasks
+      - review-dev-plan
       - approve-dev-start
       - implement-code
       - write-test-report
@@ -136,6 +137,7 @@ actors:
       - review-planning-report
       - review-requirement
       - review-tech-design
+      - review-dev-plan
       - write-test-report
       - review-code
       - cr-show

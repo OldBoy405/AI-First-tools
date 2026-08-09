@@ -2221,3 +2221,106 @@ test('CR-2026-025 回修 BL-3：重复顶层 reviews: 段 → TRACE_SHAPE 原子
     assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-R1', 'review-annotations', 'sdd.yml')), false, 'annotation 不得写入');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-026 TASK-07：dev-plan stage 双轨路由与 repair-target（FR-6/6a/6b/14，SDD §3.1/§3.2/§4.3） ──
+// 说明：dev-start/developing 门禁向量（⑥⑦⑧）与 LOOP_EXHAUSTED（⑨）依赖 TTY/完整审批 fixture，
+// 由实现期人工验收（plan.md §5 checklist）；⑩ 四 stage 回归由本文件既有用例全量覆盖。
+
+function writeDevPlanPayload(ws, cr, verdict, extra = '') {
+  const blockers = extra.includes('blockers:') ? '' : 'blockers: []\n';
+  return writeReviewPayload(ws, cr, 'dev-plan', `verdict: ${verdict}
+${blockers}${extra}dimensions:
+  sdd-to-plan: ok
+  plan-to-tasks: ok
+  task-executability: ok
+  dependency-topology: ok
+  interface-contracts: ok
+  acceptance-verifiability: ok
+  scope-and-simplicity: ok
+  risk-and-rollback: ok
+`);
+}
+
+test('CR-2026-026 ①: review-record --stage dev-plan 在 task-breakdown 落盘三账本 + annotation 顶层 repair-target 缺省', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    const payload = writeDevPlanPayload(ws, 'CR-T1', 'pass');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.verdict, 'pass');
+    assert.equal(r.stdout.attempt, 1);
+    const ann = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'dev-plan.yml'), 'utf8');
+    assert.ok(ann.includes('repair-target: write-dev-plan'), '缺省 repair-target 落盘');
+    assert.ok(ann.includes('review-type: dev-plan'));
+    const trace = readTrace(ws, 'CR-T1');
+    assert.ok(trace.includes('reviews:\n  dev-plan:'), 'traceability 投影');
+    assert.ok(trace.includes('repair-target: write-dev-plan'), '投影 repair-target');
+    const loop = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-loop.yml'), 'utf8');
+    assert.ok(loop.includes('review-dev-plan'), 'review-loop ref');
+    assert.equal(existsSync(payload), false, 'payload 已删除');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-026 ②: repair-target 非法值 → SCHEMA_INVALID 且三账本不变', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    const payload = writeDevPlanPayload(ws, 'CR-T1', 'block', 'repair-target: bogus\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'SCHEMA_INVALID');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'dev-plan.yml')), false, '不得写 canonical');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'traceability.yml')), false, 'traceability 不变');
+    assert.equal(existsSync(payload), true, '非法 payload 保留');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-026 ③: UPSTREAM 路由（repair-target=write-tech-design）跳过 bump：attempt 不递增、attempts 不追加', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    // 先跑一轮普通 block（attempt 1）
+    writeDevPlanPayload(ws, 'CR-T1', 'block');
+    let r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.stdout.attempt, 1);
+    // 再跑 upstream block：attempt 不递增
+    writeDevPlanPayload(ws, 'CR-T1', 'block', 'repair-target: write-tech-design\n');
+    r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    const ann = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'dev-plan.yml'), 'utf8');
+    assert.ok(ann.includes('repair-target: write-tech-design'), 'annotation 顶层落 upstream');
+    const trace = readTrace(ws, 'CR-T1');
+    assert.ok(trace.includes('current-attempt: 1'), 'attempt 不递增（保持 1）');
+    assert.ok(!trace.includes('- attempt: 2'), 'attempts 不追加第 2 轮');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-026 ④: NORMAL/PASS 路由走既有 bump：attempt 递增', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    writeDevPlanPayload(ws, 'CR-T1', 'block');
+    let r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.stdout.attempt, 1);
+    writeDevPlanPayload(ws, 'CR-T1', 'pass');
+    r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.stdout.attempt, 2, '普通轨/PASS attempt 递增');
+    const trace = readTrace(ws, 'CR-T1');
+    assert.ok(trace.includes('- attempt: 1') && trace.includes('- attempt: 2'), 'attempts 保留两轮');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-026 ⑤: 并存优先——repair-target=write-tech-design 且普通 blocker 并存 → upstream 路由且不 bump', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    writeDevPlanPayload(ws, 'CR-T1', 'block', 'repair-target: write-tech-design\nblockers:\n  - "普通 plan 覆盖缺失"\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    const ann = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'dev-plan.yml'), 'utf8');
+    assert.ok(ann.includes('repair-target: write-tech-design'), '并存时 upstream 优先');
+    const trace = readTrace(ws, 'CR-T1');
+    assert.ok(trace.includes('current-attempt: 0'), '无历史时并存不递增（保持 0）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

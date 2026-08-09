@@ -23,7 +23,7 @@
 |---|---|
 | `product-planning-agent` | `analyze-user-feedback`, `conduct-market-research`, `analyze-current-product`, `write-planning-report`, `review-planning-report`, `write-roadmap`, `write-planning-entry`, `extract-market-insight`, `gather-product-context`, `planning-draft`, `record-idea`, `focus-briefing` |
 | `requirement-writer` | `requirement-register`, `write-requirement-prd`, `review-requirement`, `approve-requirement` |
-| `dev-agent` | `write-tech-design`, `review-tech-design`, `approve-tech-design`, `write-dev-plan`, `write-dev-tasks`, `approve-dev-start`, `implement-code`, `write-test-report`, `review-code`, `approve-code`, `coding-discipline` |
+| `dev-agent` | `write-tech-design`, `review-tech-design`, `approve-tech-design`, `write-dev-plan`, `write-dev-tasks`, `review-dev-plan`, `approve-dev-start`, `implement-code`, `write-test-report`, `review-code`, `approve-code`, `coding-discipline` |
 | `spec-agent` | `spec-show`, `spec-query`, `spec-dashboard` |
 | `delivery-agent` | `writeback-tasks` |
 | `quality-reviewer-agent` | `review-alignment`, `change-impact-analysis` |

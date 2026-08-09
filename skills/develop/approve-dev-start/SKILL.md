@@ -29,8 +29,8 @@ description: 记录任务拆分后的开发启动人工确认，校验 plan.md �
 
 1. 运行 `crctl approve {cr_id} --stage dev-start`（**仅限人类交互式终端，或 Ed25519 签名授权 `--grant` 二选一；两者都不可绕过审批本身**）——crctl 自动完成：
    - 前置态校验（当前 status=task-breakdown）
-   - 审批前置产物校验（plan.md 与 tasks/ 存在）
-   - 计算证据摘要并写入 approval.yml#dev-start（CAS+审计）
+   - 审批前置产物校验（plan.md 与 tasks/ 存在；CR-2026-026 起含 dev-plan 自动评审 passCondition：`review-annotations/dev-plan.yml` 存在且 verdict=pass、blockers=[]）
+   - 计算证据摘要并写入 approval.yml#dev-start（CAS+审计；evidence digest 覆盖 dev-plan.yml / plan.md / tasks/_index.yml 三键，FR-11；TASK-*.md 正文漂移不在承诺范围，AC-12a）
    - 级联 advance 到 developing
 2. Agent/管道**不得**代写 approval.yml 或推进 status；非 TTY 调用 crctl 一律拒绝（APPROVAL_REQUIRES_HUMAN）。
 3. 输出审批记录路径、当前 status 和下一步：以 `crctl next {cr_id}` 为准（进入编码实施阶段）。
@@ -41,5 +41,6 @@ description: 记录任务拆分后的开发启动人工确认，校验 plan.md �
 |------|------|
 | status 不是 `task-breakdown` | crctl approve 拒绝（CR_STATUS_CURRENT_MISMATCH），abort |
 | 评审证据未通过（plan/tasks 缺失） | crctl approve 拒绝（GATE_BLOCKED），先修复并重跑 write-dev-plan / write-dev-tasks |
+| dev-plan 自动评审未通过（dev-plan.yml 缺失 / verdict≠pass / blockers 非空） | crctl approve 拒绝（GATE_BLOCKED），先重跑 review-dev-plan（CR-2026-026 FR-10） |
 | 非 TTY 调用 | crctl approve 拒绝（APPROVAL_REQUIRES_HUMAN），必须人工在终端执行 |
 | 审批人回答非 yes | crctl 自动执行状态机回退转换（CR 回退到 tech-design-reviewed，错误码 APPROVAL_DECLINED_ROLLED_BACK），请重新执行 write-dev-plan |

@@ -71,6 +71,52 @@
       "timeoutMinutes": 20
     },
     {
+      "id": "00000000-0000-0000-0015-000000000014",
+      "kind": "skill",
+      "label": "开发计划与 TASK 合并评审",
+      "ref": "review-dev-plan",
+      "prompt": "读取 node-2.md 的 TASK 拆分输出，执行 review-dev-plan：\n- cr_id: {{inputs.cr_id}}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n对 knowledge_base_worktree 中 change-requests/{{inputs.cr_id}}/plan.md、tasks/_index.yml 与全部 TASK-*.md 对照 sdd.md 与 review-annotations/sdd.yml 执行八类维度合并评审（SDD→plan 覆盖/plan→TASK 覆盖/TASK 可执行性/依赖拓扑/接口契约一致性/验收可验证性/范围与极简性/风险与回滚 + 估算一致性）。评审判断写入 .crctl/tmp/review-dev-plan.yml（顶层 repair-target 可选字段表达双轨：缺省 write-dev-plan，上游设计疑点写 write-tech-design），经 `crctl review-record --stage dev-plan --from .crctl/tmp/review-dev-plan.yml --bump-attempt` 落盘 review-annotations/dev-plan.yml（review-loop 记账与 traceability 投影由 --bump-attempt 级联）。在 node-3.md 输出 verdict、route、blockers、repair-target、current-attempt 与评审摘要。\n路由处理：\n- PASS（verdict=pass 且 blockers=[]）：保持 task-breakdown，进入后续 push-progress 与 human_approval；\n- NORMAL（repair-target=write-dev-plan）：先 `crctl advance --to tech-design-reviewed --trigger review-dev-plan:block`（--embedded）提交状态，再按 replayNodes 重放 write-dev-plan → write-dev-tasks → review-dev-plan，直至 pass 或 maxAttempts=3 后 LOOP_EXHAUSTED 停止；\n- UPSTREAM（repair-target=write-tech-design）：`crctl advance --to tech-design-review-pending --trigger review-dev-plan:upstream-design-blocker`（--embedded）后输出 upstream-design-blocker 并 abort 本 pipeline（等待人工走技术设计修订链路）；不得在本节点修改 review-annotations/sdd.yml。",
+      "reviewLoop": {
+        "repairRef": "write-dev-plan",
+        "feedbackInput": "review_feedback",
+        "attemptInput": "self_repair_attempt",
+        "replayPolicy": "rerun-listed-nodes-in-order",
+        "replayNodes": [
+          {
+            "nodeId": "00000000-0000-0000-0015-000000000001",
+            "ref": "write-dev-plan",
+            "purpose": "repair-plan"
+          },
+          {
+            "nodeId": "00000000-0000-0000-0015-000000000002",
+            "ref": "write-dev-tasks",
+            "purpose": "regenerate-tasks"
+          },
+          {
+            "nodeId": "00000000-0000-0000-0015-000000000014",
+            "ref": "review-dev-plan",
+            "purpose": "rerun-current-review"
+          }
+        ],
+        "maxAttempts": 3,
+        "passCondition": {
+          "allOf": [
+            {
+              "path": "verdict",
+              "equals": "pass"
+            },
+            {
+              "path": "blockers",
+              "isEmpty": true
+            }
+          ]
+        },
+        "onBlock": "route-to-repair-node"
+      },
+      "onFail": "abort",
+      "timeoutMinutes": 30
+    },
+    {
       "id": "00000000-0000-0000-0015-000000000003",
       "kind": "skill",
       "label": "推送设计/任务到远端",
@@ -248,5 +294,5 @@
     }
   ],
   "createdAt": "2026-05-18T00:00:00+08:00",
-  "updatedAt": "2026-05-18T00:00:00+08:00"
+  "updatedAt": "2026-08-09T13:20:00+08:00"
 }

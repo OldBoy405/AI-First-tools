@@ -120,6 +120,11 @@ skills:
     brief: "拆解 change-requests/{CR-ID}/tasks/TASK-NN.md，推进 status=task-breakdown"
     status: active
 
+  - id: review-dev-plan
+    path: ./develop/review-dev-plan/SKILL.md
+    brief: "编码前合并评审（SDD→plan→TASK 八类维度），PASS 保持 task-breakdown，BLOCK 双轨路由"
+    status: active
+
   - id: approve-dev-start
     path: ./develop/approve-dev-start/SKILL.md
     brief: "记录任务拆分后的开发启动人工确认，校验 plan/tasks 后推进 status=developing"

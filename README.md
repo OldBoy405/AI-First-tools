@@ -192,6 +192,8 @@ stateDiagram-v2
   tech_design_review_pending --> tech_designing: approve-tech-design reject
   task_breakdown --> developing: approve-dev-start
   task_breakdown --> task_breakdown: write-dev-tasks 暂缓重拆
+  task_breakdown --> tech_design_reviewed: review-dev-plan block（普通轨回修）
+  task_breakdown --> tech_design_review_pending: review-dev-plan upstream-design-blocker（上游设计疑点）
   developing --> code_reviewing: review-code pass
   code_reviewing --> code_approved: approve-code
   code_reviewing --> developing: approve-code reject
@@ -415,7 +417,8 @@ flowchart TD
 ```mermaid
 flowchart TD
   D1["编写开发计划<br/>write-dev-plan"] --> D2["拆分开发任务<br/>write-dev-tasks"]
-  D2 --> D3["推送任务 checkpoint<br/>push-progress"]
+  D2 --> D3["计划与TASK合并评审<br/>review-dev-plan"]
+  D3 --> D3b["推送任务 checkpoint<br/>push-progress"]
   D3 --> D4["确认进入开发<br/>human_approval"]
   D4 --> D5["记录开发启动<br/>approve-dev-start"]
   D5 --> D6["代码编写<br/>implement-code"]
@@ -446,6 +449,7 @@ flowchart TD
 |------|------------|------------|------------|--------|
 | 编写开发计划 | `sdd.md`、`target_version` | 规划里程碑、依赖、风险、验收和发布策略 | `change-requests/{CR-ID}/plan.md` | 否 |
 | 拆分开发任务 | `plan.md`、`sdd.md` | 拆成可执行 TASK，明确文件、实现要点和验收条件 | `tasks/TASK-NN.md`、`tasks/_index.yml`、status=`task-breakdown` | 否 |
+| 计划与 TASK 合并评审 | `sdd.md`、`plan.md`、`tasks/`、`review-annotations/sdd.yml` | 编码前八类维度评审；PASS 保持 task-breakdown，BLOCK 双轨路由（普通轨回 tech-design-reviewed 重放 / 上游疑点回 tech-design-review-pending） | `review-annotations/dev-plan.yml`、三账本投影（CR-2026-026） | 否 |
 | 推送任务 checkpoint | `plan.md`、`tasks/`、traceability 改动 | 保存设计与任务拆分进度 | 远端 checkpoint、`checkpoints[]` 更新 | 是，`auto_push_after_task=false` |
 | 确认进入开发 | `plan.md`、`tasks/`、`owners.development.id` | 人工确认任务拆分可进入编码 | 通过或暂缓结论 | 否 |
 | 记录开发启动 | `cr_id`、`owners.development.id` | 写入开发启动确认并解锁编码 | `approval.yml#development-start`、status=`developing` | 否 |

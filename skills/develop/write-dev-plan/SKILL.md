@@ -22,6 +22,8 @@ description: 基于 change-requests/{CR-ID}/sdd.md 编写开发计划 plan.md，
 |------|------|------|------|
 | `cr_id` | string | ✅ | 目标 CR-ID |
 | `target_version` | string | ❌ | 目标版本，写入 plan.md frontmatter |
+| `review_feedback` | object | ❌ | 来自 review-dev-plan 的 blockers、repair-instructions；存在时进入自修复模式（CR-2026-026 FR-8） |
+| `self_repair_attempt` | number | ❌ | 当前自动修复轮次，由 pipeline reviewLoop 注入 |
 
 ---
 
@@ -53,6 +55,14 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 3. **资源与分工** — 预计工时分配
 4. **风险与回滚策略** — 技术风险列表及对应回滚方案
 5. **验收与发布策略** — 发布前 checklist / feature-flag 计划
+
+### Step 2a — 回修模式（CR-2026-026 FR-8/FR-9）
+
+若存在 `review_feedback`（来自 review-dev-plan 普通轨 BLOCK）：
+
+1. 逐条消费 blockers 与 repair-instructions，修订同一份 `plan.md`；只处理评审指出的问题，不扩散 SDD 范围。
+2. 输出 `fixed-blockers` 清单（逐条对应修复证据）；禁止只刷新评审证据而不修改被指出的产物（空转由下一轮评审重新读取实际产物继续 BLOCK 兜底）。
+3. 回修期间允许 status=`tech-design-reviewed`（普通轨重放态），不因非 task-breakdown abort。
 
 ### Step 3 — 落盘并 commit
 

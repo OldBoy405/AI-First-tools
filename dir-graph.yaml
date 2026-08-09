@@ -223,6 +223,8 @@ change-request-track:
       - { from: tech-design-reviewed, to: task-breakdown, trigger: "write-dev-tasks" }
       - { from: task-breakdown, to: task-breakdown, trigger: "write-dev-tasks" }
       - { from: task-breakdown, to: tech-design-reviewed, trigger: "approve-dev-start:reject -> write-dev-plan" }
+      - { from: task-breakdown, to: tech-design-reviewed, trigger: "review-dev-plan:block -> write-dev-plan" }
+      - { from: task-breakdown, to: tech-design-review-pending, trigger: "review-dev-plan:upstream-design-blocker" }
       - { from: task-breakdown, to: developing, trigger: "approve-dev-start" }
       - { from: developing, to: developing, trigger: "write-test-report:block -> implement-code" }
       - { from: developing, to: developing, trigger: "review-code:block -> implement-code" }

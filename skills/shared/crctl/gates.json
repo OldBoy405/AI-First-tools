@@ -23,6 +23,12 @@
       "trigger": "approve-dev-start",
       "expect": ["task-breakdown"],
       "approvalSection": "development-start",
+      "evidence": {
+        "$default": "change-requests/{cr}/review-annotations/dev-plan.yml",
+        "plan": "change-requests/{cr}/plan.md",
+        "task-index": "change-requests/{cr}/tasks/_index.yml"
+      },
+      "passCondition": { "pipeline": "code-implementation", "nodeRef": "review-dev-plan" },
       "requireFiles": [
         "change-requests/{cr}/plan.md",
         "change-requests/{cr}/tasks/_index.yml"
@@ -65,6 +71,10 @@
       { "type": "globNonEmpty", "dir": "change-requests/{cr}/tasks", "pattern": "^TASK-\\d+.*\\.md$" }
     ],
     "developing": [
+      { "type": "fileExists", "path": "change-requests/{cr}/plan.md" },
+      { "type": "fileExists", "path": "change-requests/{cr}/tasks/_index.yml" },
+      { "type": "globNonEmpty", "dir": "change-requests/{cr}/tasks", "pattern": "^TASK-\\d+.*\\.md$" },
+      { "type": "passCondition", "stage": "dev-start" },
       { "type": "approval", "section": "development-start" }
     ],
     "code-reviewing": [
@@ -96,6 +106,7 @@
     "review-requirement": { "pipeline": "requirement-authoring" },
     "review-tech-design": { "pipeline": "architecture-design" },
     "write-test-report": { "pipeline": "code-implementation" },
-    "review-code": { "pipeline": "code-implementation" }
+    "review-code": { "pipeline": "code-implementation" },
+    "review-dev-plan": { "pipeline": "code-implementation" }
   }
 }

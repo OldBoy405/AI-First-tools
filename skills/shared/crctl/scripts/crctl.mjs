@@ -1410,18 +1410,26 @@ function cmdAttempt(ws, cr, gates, flags) {
  * （tech-design→sdd.yml 非同名，与门禁读取口径对齐）→ 注入 reviewer/reviewed-at → casWrite canonical →
  * 可选级联 attempt → 删除临时 payload。
  */
-const REVIEW_STAGE_FILES = { requirement: 'requirement.yml', 'tech-design': 'sdd.yml', code: 'code.yml' };
-const REVIEW_STAGE_LOOPS = { requirement: 'review-requirement', 'tech-design': 'review-tech-design', code: 'review-code' };
+const REVIEW_STAGE_FILES = { requirement: 'requirement.yml', 'tech-design': 'sdd.yml', code: 'code.yml', 'dev-plan': 'dev-plan.yml' };
+const REVIEW_STAGE_LOOPS = { requirement: 'review-requirement', 'tech-design': 'review-tech-design', code: 'review-code', 'dev-plan': 'review-dev-plan' };
 // 前置态与各 review-* SKILL 的 Step 顺序对齐（先 review-record 落盘证据、后 advance 进评审态）：
 // - requirement：评审在 drafting 执行（block 回 drafting 重审；requirement-reviewing 保留兼容重跑）
 // - tech-design：write-tech-design 落盘后先进 tech-design-review-pending（其 statusGate 只需 sdd.md），再评审
 // - code：评审在 developing 执行（block 回 developing 修复后重审）
 // 注意：requirement/code 的评审态 statusGate 含 passCondition（需评审证据已存在），
 // 若前置态错设为评审态将与 advance 门禁互锁成死锁——CR-2026-021 开发期实测缺陷（先写后推进）。
-const REVIEW_STAGE_EXPECT = { requirement: ['drafting', 'requirement-reviewing'], 'tech-design': ['tech-design-review-pending'], code: ['developing'] };
+const REVIEW_STAGE_EXPECT = { requirement: ['drafting', 'requirement-reviewing'], 'tech-design': ['tech-design-review-pending'], code: ['developing'], 'dev-plan': ['task-breakdown'] };
 
 // CR-2026-025 项④（FR-16）：三 stage 的 repair-target 映射（同一 review-record 契约，D-10 不做特判）
-const REVIEW_REPAIR_TARGETS = { requirement: 'write-requirement-prd', 'tech-design': 'write-tech-design', code: 'implement-code' };
+const REVIEW_REPAIR_TARGETS = { requirement: 'write-requirement-prd', 'tech-design': 'write-tech-design', code: 'implement-code', 'dev-plan': 'write-dev-plan' };
+
+// CR-2026-026（FR-6/FR-6a/D-13）：dev-plan 双轨路由判定。
+// 顶层 repair-target 表达分流（缺省 write-dev-plan；write-tech-design=上游设计疑点轨），不解析 blockers 字符串。
+function resolveDevPlanRoute(payload) {
+  if (payload.verdict === 'pass') return 'pass';
+  if (payload['repair-target'] === 'write-tech-design') return 'upstream';
+  return 'normal';
+}
 
 /** traceability reviews.<stage> 投影块渲染（2 空格基准缩进，含尾换行；FR-16 字段集，§2.4）。 */
 function renderReviewsStageBlock(stage, p) {
@@ -1501,14 +1509,26 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   if (!payload.dimensions || typeof payload.dimensions !== 'object' || Array.isArray(payload.dimensions)) {
     fail('SCHEMA_INVALID', 'dimensions 缺失或不是映射（该 stage 门禁要求的维度必须齐全）');
   }
-  const bump = !!flags['bump-attempt'];
+  const bumpFlag = !!flags['bump-attempt'];
+  // dev-plan 双轨路由（CR-2026-026，TD-BL-2）：bump 之前判定；repair-target 枚举校验（非法值 SCHEMA_INVALID 不写）；
+  // upstream 轨跳过 bump（review-loop current-attempt 不递增、attempts 不追加，AC-8b）
+  let bump = bumpFlag;
+  let devPlanRoute = null;
+  if (stage === 'dev-plan') {
+    if (payload['repair-target'] != null && !['write-dev-plan', 'write-tech-design'].includes(payload['repair-target'])) {
+      fail('SCHEMA_INVALID', `dev-plan payload 顶层 repair-target 不在枚举 [write-dev-plan, write-tech-design]，实际 ${JSON.stringify(payload['repair-target'])}`);
+    }
+    devPlanRoute = resolveDevPlanRoute(payload);
+    if (devPlanRoute === 'upstream') bump = false;
+  }
   const loopRef = REVIEW_STAGE_LOOPS[stage];
   const att = readAttempts(ws, cr, loopRef, gates);
   if (bump && att.exhausted) fail('LOOP_EXHAUSTED', `${loopRef} 已达 maxAttempts=${att.max}，不得继续自修复；请人工处理剩余 blocker`, { current: att.current });
   const recordedAt = nowIso(); // 一次生成，三账本共用（FR-17）
   const reviewer = identity(ws);
   const blockerCount = payload.blockers.length;
-  const repairTarget = REVIEW_REPAIR_TARGETS[stage];
+  // 上游疑点轨的 repair-target 为 write-tech-design（覆盖映射默认，TD-BL-1：顶层字段落盘）
+  const repairTarget = (stage === 'dev-plan' && devPlanRoute === 'upstream') ? 'write-tech-design' : REVIEW_REPAIR_TARGETS[stage];
 
   // ── traceability：读取 + 结构校验 + attempts 历史合并（全部在任何写入之前，FR-17）──
   const tracePath = path.join(crDir(ws, cr), 'traceability.yml');
@@ -1542,7 +1562,11 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   }
   let mergedAttempts;
   let projCurrent;
-  if (bump) {
+  if (stage === 'dev-plan' && devPlanRoute === 'upstream') {
+    // 上游疑点轨：attempts 不追加、current 不递增（AC-8b），仅投影当前值
+    mergedAttempts = oldAttempts;
+    projCurrent = att.current;
+  } else if (bump) {
     const nextNo = att.current + 1;
     if (oldAttempts.some((e) => Number(e.attempt) === nextNo)) {
       fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 已含第 ${nextNo} 轮，不得静默覆盖历史`);
@@ -1573,6 +1597,7 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     `reviewer: "${reviewer}"`,
     `reviewed-at: "${recordedAt}"`,
     `verdict: ${payload.verdict}`,
+    ...(stage === 'dev-plan' ? [`repair-target: ${repairTarget}`] : []), // CR-2026-026：dev-plan annotation 顶层字段（TD-BL-1）
     payload.blockers.length === 0 ? 'blockers: []' : 'blockers:',
     ...payload.blockers.map((b) => `  - ${yamlOf(b)}`),
     'dimensions:',

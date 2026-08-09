@@ -24,6 +24,8 @@ description: 将 change-requests/{CR-ID}/plan.md 拆解为独立可执行的 TAS
 |------|------|------|------|
 | `cr_id` | string | ✅ | 目标 CR-ID |
 | `task_count_hint` | integer | ❌ | 预期任务数量（Agent 参考用，实际由 plan 决定） |
+| `review_feedback` | object | ❌ | 来自 review-dev-plan 的 blockers、repair-instructions；存在时进入自修复模式（CR-2026-026 FR-8） |
+| `self_repair_attempt` | number | ❌ | 当前自动修复轮次，由 pipeline reviewLoop 注入 |
 
 ---
 
@@ -39,6 +41,14 @@ description: 将 change-requests/{CR-ID}/plan.md 拆解为独立可执行的 TAS
 - TASK 粒度：一个模块 / 一类接口 / 一个组件
 - 不得将"整个功能"作为单个 TASK
 - 跨模块依赖必须通过 `depends-on` 字段声明
+
+### Step 2a — 回修模式（CR-2026-026 FR-8/FR-9）
+
+若存在 `review_feedback`（来自 review-dev-plan 普通轨 BLOCK）：
+
+1. 逐条消费 blockers 与 repair-instructions，**重新生成** TASK 与 `_index.yml`；不保留已被评审判废/删除的旧 TASK。
+2. 输出 `fixed-blockers` 清单；禁止只刷新评审证据而不修改被指出的产物。
+3. 回修期间允许 status=`tech-design-reviewed`（普通轨重放态）。
 
 ### Step 3 — 生成 TASK 文件
 
