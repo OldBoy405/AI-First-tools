@@ -1349,6 +1349,7 @@ test('review-record：tech-design stage 写入 sdd.yml（非 tech-design.yml）+
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-T1', 'tech-design-review-pending');
+    writeEvidence(ws, 'CR-T1', 'sdd.md', '---\nid: CR-T1-sdd\n---\n');
     const payload = writeReviewPayload(ws, 'CR-T1', 'tech-design',
       'verdict: pass\nblockers: []\ndimensions:\n  structure: ok\n  consistency: ok\nsuggestions:\n  - "abc"\n');
     const r = runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--workspace', ws]);
@@ -1411,7 +1412,7 @@ test('review-record：--bump-attempt 级联 attempt 记账（复用既有 bumpAt
     writeReviewPayload(ws, 'CR-T1', 'code', 'verdict: block\nblockers:\n  - "bug A"\ndimensions:\n  a: b\n');
     const r = runCrctl(['review-record', 'CR-T1', '--stage', 'code', '--bump-attempt', '--workspace', ws]);
     assert.equal(r.status, 0);
-    assert.equal(r.stdout.attempt, 1, 'attempt 级联为 1');
+    assert.equal(r.stdout.attempt.current, 1, 'attempt 级联为 1');
     const loop = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-loop.yml'), 'utf8');
     assert.ok(loop.includes('current-attempt: 1'), 'review-loop.yml 记账');
     assert.ok(loop.includes('review-code'), 'loop ref = review-code');
@@ -2245,7 +2246,7 @@ test('CR-2026-025 投影①a：requirement 非 bump + current-attempt=0 → 投�
     assert.match(tr, /^  requirement:$/m);
     assert.match(tr, /^      current-attempt: 0$/m);
     assert.match(tr, /^      attempts: \[\]$/m);
-    assert.match(tr, /^    repair-target: write-requirement-prd$/m);
+    assert.ok(!tr.includes('repair-target:'), 'pass 轨顶层省略 repair-target（CR-2026-027 FR-13 真值表）');
     assert.ok(!existsSync(path.join(ws, 'change-requests', 'CR-R1', 'review-loop.yml')), '非 bump 不创建 review-loop.yml');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
@@ -2254,14 +2255,18 @@ test('CR-2026-025 投影①b：tech-design 与 code stage 同构投影（repair-
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-R1', 'tech-design-review-pending');
+    writeEvidence(ws, 'CR-R1', 'sdd.md', '---\nid: CR-R1-sdd\n---\n');
     writeReviewPayload(ws, 'CR-R1', 'tech-design', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
     const r1 = runCrctl(['review-record', 'CR-R1', '--stage', 'tech-design', '--workspace', ws]);
     assert.equal(r1.status, 0);
     let tr = readTrace(ws, 'CR-R1');
     assert.match(tr, /^  tech-design:$/m);
     assert.match(tr, /^    annotation: "change-requests\/CR-R1\/review-annotations\/sdd.yml"$/m);
-    assert.match(tr, /^    repair-target: write-tech-design$/m);
-    assert.ok(!tr.includes('subject-sha256'), 'tech-design 不写摘要（PRD §7 排除项）');
+    assert.ok(!tr.includes('repair-target:'), 'pass 轨顶层省略 repair-target（CR-2026-027 FR-13 真值表）');
+    // subject-sha256 在 annotation（sdd.yml）而非 trace 投影（CR-2026-027 FR-16）
+    const sddAnn = readFileSync(path.join(ws, 'change-requests', 'CR-R1', 'review-annotations', 'sdd.yml'), 'utf8');
+    assert.ok(sddAnn.includes('subject-file: change-requests/CR-R1/sdd.md'), 'annotation 应含 subject-file');
+    assert.ok(sddAnn.includes('subject-sha256: '), 'annotation 应含 subject-sha256');
   } finally { rmSync(ws, { recursive: true, force: true }); }
   const ws2 = makeWorkspace();
   try {
@@ -2271,7 +2276,7 @@ test('CR-2026-025 投影①b：tech-design 与 code stage 同构投影（repair-
     assert.equal(r2.status, 0);
     const tr2 = readTrace(ws2, 'CR-R2');
     assert.match(tr2, /^  code:$/m);
-    assert.match(tr2, /^    repair-target: implement-code$/m);
+    assert.ok(!tr2.includes('repair-target:'), 'pass 轨顶层省略 repair-target（CR-2026-027 FR-13 真值表）');
   } finally { rmSync(ws2, { recursive: true, force: true }); }
 });
 
@@ -2279,6 +2284,7 @@ test('CR-2026-025 投影①c：trace 已有 requirement 投影时首次写 tech-
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-R1', 'tech-design-review-pending');
+    writeEvidence(ws, 'CR-R1', 'sdd.md', '---\nid: CR-R1-sdd\n---\n');
     writeEvidence(ws, 'CR-R1', 'traceability.yml', [
       'cr-id: CR-R1', 'reviews:', '  requirement:', '    reviewer: "x"', '    verdict: pass',
       '    reviewed-at: "2026-08-09T00:00:00+08:00"', '    blocker-count: 0',
@@ -2324,7 +2330,7 @@ test('CR-2026-025 投影②：两轮 bump 后三账本一致（attempt/verdict/b
     writeReviewPayload(ws, 'CR-R1', 'requirement', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
     const r2 = runCrctl(['review-record', 'CR-R1', '--stage', 'requirement', '--bump-attempt', '--workspace', ws]);
     assert.equal(r2.status, 0);
-    assert.equal(r2.stdout.attempt, 2);
+    assert.equal(r2.stdout.attempt.current, 2);
     const ann = readFileSync(path.join(ws, 'change-requests', 'CR-R1', 'review-annotations', 'requirement.yml'), 'utf8');
     const loop = readFileSync(path.join(ws, 'change-requests', 'CR-R1', 'review-loop.yml'), 'utf8');
     const tr = readTrace(ws, 'CR-R1');
@@ -2348,6 +2354,7 @@ test('CR-2026-025 投影③：trace 缺失创建骨架；已有其他顶层段�
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-R1', 'tech-design-review-pending');
+    writeEvidence(ws, 'CR-R1', 'sdd.md', '---\nid: CR-R1-sdd\n---\n');
     const head = '# 头部手工注释\ncr-id: CR-R1\nreviews:\n  requirement:\n    reviewer: "keep"\n    verdict: pass\ntests:\n  unit: pass\n';
     writeEvidence(ws, 'CR-R1', 'traceability.yml', head);
     writeReviewPayload(ws, 'CR-R1', 'tech-design', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
@@ -2461,6 +2468,7 @@ test('CR-2026-025 回修 BL-3：重复顶层 reviews: 段 → TRACE_SHAPE 原子
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-R1', 'tech-design-review-pending');
+    writeEvidence(ws, 'CR-R1', 'sdd.md', '---\nid: CR-R1-sdd\n---\n');
     const badTrace = 'cr-id: CR-R1\nreviews:\n  requirement:\n    reviewer: "x"\n    verdict: pass\nreviews:\n  requirement:\n    reviewer: "y"\n    verdict: block\n';
     writeEvidence(ws, 'CR-R1', 'traceability.yml', badTrace);
     writeReviewPayload(ws, 'CR-R1', 'tech-design', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
@@ -2469,6 +2477,64 @@ test('CR-2026-025 回修 BL-3：重复顶层 reviews: 段 → TRACE_SHAPE 原子
     assert.equal(r.stderr.error.code, 'TRACE_SHAPE');
     assert.equal(sha16(readTrace(ws, 'CR-R1')), sha16(badTrace), 'trace 不得变化');
     assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-R1', 'review-annotations', 'sdd.yml')), false, 'annotation 不得写入');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-027 TASK-08：review-record 输出契约与 review cycle（FR-13/FR-16）──
+test('CR-2026-027 FR-13：review-record 输出 files/attempt/route/repairTarget（pass 轨 route=pass 且 repairTarget=null）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    writePrd(ws, 'CR-T1', '# prd body\n');
+    writeReviewPayload(ws, 'CR-T1', 'requirement', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'requirement', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.deepEqual(r.stdout.attempt, { current: 0, max: 3, bumped: false });
+    assert.equal(r.stdout.route, 'pass');
+    assert.equal(r.stdout.repairTarget, null);
+    assert.ok(Array.isArray(r.stdout.files) && r.stdout.files.length === 2, 'files 只列实际写入（annotation + traceability，未 bump 无 review-loop）');
+    assert.ok(r.stdout.files.every((f) => !f.includes('review-loop.yml')), '未 bump 不得虚列 review-loop.yml');
+    // 非 dev-plan block → route=repair + 默认修复目标
+    writeReviewPayload(ws, 'CR-T1', 'requirement', 'verdict: block\nblockers:\n  - "b1"\ndimensions:\n  a: b\n');
+    const r2 = runCrctl(['review-record', 'CR-T1', '--stage', 'requirement', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r2.status, 0, r2.rawStderr);
+    assert.equal(r2.stdout.route, 'repair');
+    assert.equal(r2.stdout.repairTarget, 'write-requirement-prd');
+    assert.equal(r2.stdout.attempt.bumped, true);
+    assert.ok(r2.stdout.files.some((f) => f.includes('review-loop.yml')), 'bump 时 files 含 review-loop.yml');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 FR-16：post-PASS SDD 修订 + 较新 upstream blocker → tech-design 自动开启 cycle=2/attempt=1，旧 attempts 保留', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-review-pending');
+    writeEvidence(ws, 'CR-T1', 'sdd.md', '---\nid: CR-T1-sdd\n---\nv1\n');
+    // cycle 1：三轮 block（attempt 1-3 满）
+    for (let i = 0; i < 3; i++) {
+      writeReviewPayload(ws, 'CR-T1', 'tech-design', 'verdict: block\nblockers:\n  - "b"\ndimensions:\n  a: b\n');
+      assert.equal(runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--bump-attempt', '--workspace', ws]).status, 0);
+    }
+    // cycle 1 末轮 PASS（attempt 3 刷新为 pass）
+    writeReviewPayload(ws, 'CR-T1', 'tech-design', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
+    assert.equal(runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--workspace', ws]).status, 0);
+    // 较新的 dev-plan upstream blocker（reviewed-at 晚于 sdd 评审）
+    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', 'cr-id: CR-T1\nreview-type: dev-plan\nreviewer: "r"\nreviewed-at: "2026-08-10T10:00:00+08:00"\nverdict: block\nrepair-target: write-tech-design\nblockers:\n  - "upstream"\n');
+    // SDD 修订（digest 变化）
+    writeEvidence(ws, 'CR-T1', 'sdd.md', '---\nid: CR-T1-sdd\n---\nv2\n');
+    // tech-design bump → 新 cycle：cycle=2/attempt=1，旧 attempts 保留
+    writeReviewPayload(ws, 'CR-T1', 'tech-design', 'verdict: block\nblockers:\n  - "b2"\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.attempt.current, 1, '新 cycle 从 attempt=1 重新计');
+    assert.equal(r.stdout.attempt.bumped, true);
+    const loop = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-loop.yml'), 'utf8');
+    assert.match(loop, /current-cycle: 2/);
+    assert.match(loop, /current-attempt: 1/);
+    assert.ok(loop.includes('cycle: 2'), '新 cycle attempt 带 cycle 字段');
+    assert.ok(loop.includes('attempt: 1') && loop.includes('attempt: 2') && loop.includes('attempt: 3'), '旧 cycle attempts 完整保留');
+    const tr = readTrace(ws, 'CR-T1');
+    assert.ok(tr.includes('- attempt: 1') && tr.includes('- attempt: 2') && tr.includes('- attempt: 3'), 'trace 旧 attempts 保留');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -2499,7 +2565,7 @@ test('CR-2026-026 ①: review-record --stage dev-plan 在 task-breakdown 落盘�
     const r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
     assert.equal(r.status, 0, r.rawStderr);
     assert.equal(r.stdout.verdict, 'pass');
-    assert.equal(r.stdout.attempt, 1);
+    assert.equal(r.stdout.attempt.current, 1);
     const ann = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'dev-plan.yml'), 'utf8');
     assert.ok(!ann.includes('repair-target:'), 'pass 轨 annotation 省略 repair-target（suggestion-1）');
     assert.ok(ann.includes('review-type: dev-plan'));
@@ -2534,7 +2600,7 @@ test('CR-2026-026 ③: UPSTREAM 路由（repair-target=write-tech-design）跳�
     // 先跑一轮普通 block（attempt 1）
     writeDevPlanPayload(ws, 'CR-T1', 'block');
     let r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
-    assert.equal(r.stdout.attempt, 1);
+    assert.equal(r.stdout.attempt.current, 1);
     // 再跑 upstream block：attempt 不递增
     const loopPath = path.join(ws, 'change-requests', 'CR-T1', 'review-loop.yml');
     const loopBefore = readFileSync(loopPath, 'utf8');
@@ -2558,12 +2624,12 @@ test('CR-2026-026 ④: NORMAL/PASS 路由走既有 bump：attempt 递增', () =>
     writeCrEntry(ws, 'CR-T1', 'task-breakdown');
     writeDevPlanPayload(ws, 'CR-T1', 'block');
     let r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
-    assert.equal(r.stdout.attempt, 1);
+    assert.equal(r.stdout.attempt.current, 1);
     const ann1 = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'dev-plan.yml'), 'utf8');
     assert.ok(ann1.includes('repair-target: write-dev-plan'), '普通 block 轨缺省 repair-target 落盘');
     writeDevPlanPayload(ws, 'CR-T1', 'pass');
     r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
-    assert.equal(r.stdout.attempt, 2, '普通轨/PASS attempt 递增');
+    assert.equal(r.stdout.attempt.current, 2, '普通轨/PASS attempt 递增');
     const trace = readTrace(ws, 'CR-T1');
     assert.ok(trace.includes('- attempt: 1') && trace.includes('- attempt: 2'), 'attempts 保留两轮');
   } finally { rmSync(ws, { recursive: true, force: true }); }
@@ -2698,7 +2764,7 @@ test('CR-2026-026 ⑨: 三轮普通 BLOCK 后第 4 轮 --bump-attempt → LOOP_E
       writeDevPlanPayload(ws, 'CR-T1', 'block');
       const r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
       assert.equal(r.status, 0, r.rawStderr);
-      assert.equal(r.stdout.attempt, i);
+      assert.equal(r.stdout.attempt.current, i);
     }
     writeDevPlanPayload(ws, 'CR-T1', 'block');
     const r4 = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);

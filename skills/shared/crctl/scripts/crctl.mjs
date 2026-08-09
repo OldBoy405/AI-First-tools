@@ -959,8 +959,13 @@ function readAttempts(ws, cr, loopRef, gates) {
   const text = readFileChecked(attemptsFilePath(ws, cr));
   const data = text ? parseYaml(text) : {};
   const loop = (data && data.loops && data.loops[loopRef]) || { 'current-attempt': 0, attempts: [] };
-  const current = loop['current-attempt'] || 0;
-  return { current, max, attempts: loop.attempts || [], exhausted: current >= max, data: data || {} };
+  // CR-2026-027 FR-16/TASK-08：review cycle 兼容（SDD §2.4）——current-cycle 缺失视为 1；
+  // attempt 缺 cycle 视为 cycle=1（legacy）；current-attempt 只表示当前 cycle 内轮次，attemptsWithinLimit 只查当前 cycle。
+  const cycle = loop['current-cycle'] || 1;
+  const attempts = loop.attempts || [];
+  const cycleAttempts = attempts.filter((a) => (a && a.cycle || 1) === cycle);
+  const current = cycleAttempts.length;
+  return { current, max, attempts, cycle, cycleAttempts, exhausted: current >= max, data: data || {} };
 }
 
 /** review-loop.yml 全量渲染纯函数（CR-2026-025 I-1 拆分：bumpAttempt 与 review-record 共用同一渲染，
@@ -969,9 +974,13 @@ function renderLoopText(loopsMap) {
   const lines = ['# 由 crctl attempt 维护，请勿手工编辑', 'loops:'];
   for (const [k, v] of Object.entries(loopsMap)) {
     lines.push(`  ${k}:`);
+    lines.push(`    current-cycle: ${v['current-cycle'] || 1}`);
     lines.push(`    current-attempt: ${v['current-attempt']}`);
     lines.push('    attempts:');
-    for (const a of v.attempts) lines.push(`      - { attempt: ${a.attempt}, at: "${a.at}", by: "${a.by}" }`);
+    for (const a of v.attempts) {
+      const c = a && a.cycle ? `, cycle: ${a.cycle}` : '';
+      lines.push(`      - { attempt: ${a.attempt}, at: "${a.at}", by: "${a.by}"${c} }`);
+    }
   }
   return lines.join('\n') + '\n';
 }
@@ -982,13 +991,16 @@ function bumpAttempt(ws, cr, loopRef, gates) {
   const next = state.current + 1;
   const p = attemptsFilePath(ws, cr);
   const all = state.data.loops ? state.data : { loops: {} };
+  const prev = all.loops[loopRef] || { 'current-cycle': 1, 'current-attempt': 0, attempts: [] };
+  const cycle = prev['current-cycle'] || 1;
   all.loops[loopRef] = {
+    'current-cycle': cycle,
     'current-attempt': next,
-    attempts: [...state.attempts, { attempt: next, at: nowIso(), by: identity(ws) }],
+    attempts: [...state.attempts, { attempt: next, at: nowIso(), by: identity(ws), cycle }],
   };
   // review-loop.yml 由 crctl 全量生成（crctl 独占该文件，无 CAS 冲突面）
   fs.writeFileSync(p, renderLoopText(all.loops), 'utf8');
-  return { loop: loopRef, current: next, max: state.max, file: p };
+  return { loop: loopRef, current: next, max: state.max, cycle, file: p };
 }
 
 /* ────────────────────────── 工作区漂移检测（CR-2026-020 复盘 FR-2） ──────────────────────────
@@ -1602,6 +1614,23 @@ function resolveDevPlanRoute(payload) {
   return 'normal';
 }
 
+// CR-2026-027 FR-16/TASK-08：post-PASS 设计修订的新审查周期检测（SDD §3.5）。
+// 条件：上一 tech-design annotation 为 PASS + 存在较新的 dev-plan upstream blocker（repair-target=write-tech-design
+// 且 reviewed-at 晚于 sdd 评审）+ 当前 SDD LF digest 与上一 subject-sha256 不同；
+// legacy annotation 无 digest 时以上游时间关系兜底（必须重审）。
+function detectNewTechDesignCycle(ws, cr) {
+  const sddAnn = readEvidenceDoc(ws, cr, 'change-requests/{cr}/review-annotations/sdd.yml');
+  if (!sddAnn.exists || !sddAnn.data || sddAnn.data.verdict !== 'pass') return false;
+  const dpAnn = readEvidenceDoc(ws, cr, 'change-requests/{cr}/review-annotations/dev-plan.yml');
+  if (!dpAnn.exists || !dpAnn.data || dpAnn.data.verdict !== 'block' || dpAnn.data['repair-target'] !== 'write-tech-design') return false;
+  if (String(dpAnn.data['reviewed-at'] || '') <= String(sddAnn.data['reviewed-at'] || '')) return false;
+  const sddRaw = readFileChecked(path.join(crDir(ws, cr), 'sdd.md'));
+  if (sddRaw == null) return false;
+  const curSha = sha256(sddRaw.replaceAll('\r\n', '\n'));
+  if (sddAnn.data['subject-sha256'] != null && sddAnn.data['subject-sha256'] !== curSha) return true;
+  return sddAnn.data['subject-sha256'] == null; // legacy 无 digest：较新 upstream blocker 已满足时间关系 → 重审
+}
+
 /** traceability reviews.<stage> 投影块渲染（2 空格基准缩进，含尾换行；FR-16 字段集，§2.4）。 */
 function renderReviewsStageBlock(stage, p) {
   const L = [];
@@ -1694,14 +1723,20 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   }
   const loopRef = REVIEW_STAGE_LOOPS[stage];
   const att = readAttempts(ws, cr, loopRef, gates);
-  if (bump && att.exhausted) fail('LOOP_EXHAUSTED', `${loopRef} 已达 maxAttempts=${att.max}，不得继续自修复；请人工处理剩余 blocker`, { current: att.current });
+  // CR-2026-027 FR-16/TASK-08：post-PASS 设计修订自动开启新 review cycle（SDD §3.5）——
+  // tech-design bump 且满足 detectNewTechDesignCycle 时：current-cycle+1、本 cycle attempt 从 1 重新计；
+  // 旧 attempts 仅保留（不删除），legacy 无 cycle 条目按 cycle=1 解释。
+  const newCycle = stage === 'tech-design' && bumpFlag ? detectNewTechDesignCycle(ws, cr) : false;
+  const nextCycleNo = newCycle ? (att.data.loops && att.data.loops[loopRef] && att.data.loops[loopRef]['current-cycle'] || 1) + 1 : null;
+  if (bump && att.exhausted && !newCycle) fail('LOOP_EXHAUSTED', `${loopRef} 已达 maxAttempts=${att.max}，不得继续自修复；请人工处理剩余 blocker`, { current: att.current });
   const recordedAt = nowIso(); // 一次生成，三账本共用（FR-17）
   const reviewer = identity(ws);
   const blockerCount = payload.blockers.length;
   // 上游疑点轨的 repair-target 为 write-tech-design（覆盖映射默认，TD-BL-1：顶层字段落盘）
   const routeRepairTarget = (stage === 'dev-plan' && devPlanRoute === 'upstream') ? 'write-tech-design' : REVIEW_REPAIR_TARGETS[stage];
-  // suggestion-1（code review attempt-1）：pass 轨顶层省略 repair-target（annotation/投影顶层无回修语义），轮次历史保留缺省
-  const repairTarget = (stage === 'dev-plan' && devPlanRoute === 'pass') ? null : routeRepairTarget;
+  // TD-BL-2 真值表（CR-2026-027 FR-13）：任意 stage pass → repairTarget=null（顶层省略）；
+  // block 时按 stage 默认修复目标；dev-plan upstream 轨为 write-tech-design（覆盖映射默认）。
+  const repairTarget = payload.verdict === 'pass' ? null : routeRepairTarget;
 
   // ── traceability：读取 + 结构校验 + attempts 历史合并（全部在任何写入之前，FR-17）──
   const tracePath = path.join(crDir(ws, cr), 'traceability.yml');
@@ -1740,19 +1775,19 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     mergedAttempts = oldAttempts;
     projCurrent = att.current;
   } else if (bump) {
-    const nextNo = att.current + 1;
-    if (oldAttempts.some((e) => Number(e.attempt) === nextNo)) {
-      fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 已含第 ${nextNo} 轮，不得静默覆盖历史`);
+    const nextNo = newCycle ? 1 : att.current + 1;
+    if (oldAttempts.some((e) => Number(e.attempt) === nextNo && (e.cycle || 1) === (nextCycleNo || 1))) {
+      fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 已含第 ${nextNo} 轮（cycle ${nextCycleNo || 1}），不得静默覆盖历史`);
     }
-    mergedAttempts = [...oldAttempts, { attempt: nextNo, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': routeRepairTarget }];
+    mergedAttempts = [...oldAttempts, { attempt: nextNo, cycle: nextCycleNo || 1, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': routeRepairTarget }];
     projCurrent = nextNo;
   } else {
     projCurrent = att.current;
     if (att.current > 0) {
       // 刷新当前轮证据：命中整条替换、未命中追加；不新增轮次
-      const entry = { attempt: att.current, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': routeRepairTarget };
-      mergedAttempts = oldAttempts.some((e) => Number(e.attempt) === att.current)
-        ? oldAttempts.map((e) => (Number(e.attempt) === att.current ? entry : e))
+      const entry = { attempt: att.current, cycle: att.cycle, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': routeRepairTarget };
+      mergedAttempts = oldAttempts.some((e) => Number(e.attempt) === att.current && (e.cycle || 1) === att.cycle)
+        ? oldAttempts.map((e) => (Number(e.attempt) === att.current && (e.cycle || 1) === att.cycle ? entry : e))
         : [...oldAttempts, entry];
     } else {
       mergedAttempts = []; // current-attempt=0 → 投影空历史，不伪造 attempt=1（plan v0.1.1；仅 --bump-attempt 创建首条轮次账本）
@@ -1787,6 +1822,14 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     lines.push(`subject-file: change-requests/${cr}/prd.md`);
     lines.push(`subject-sha256: ${sha256(prdRaw.replaceAll('\r\n', '\n'))}`);
   }
+  if (stage === 'tech-design') {
+    // CR-2026-027 FR-16/TASK-08：SDD subject digest（供 cmdNext tech-design freshness 判定，SDD §3.5）
+    const sddPath = path.join(crDir(ws, cr), 'sdd.md');
+    const sddRaw = readFileChecked(sddPath);
+    if (sddRaw == null) fail('SUBJECT_NOT_FOUND', `tech-design review-record 需要 ${sddPath} 存在（写入 subject-sha256）`);
+    lines.push(`subject-file: change-requests/${cr}/sdd.md`);
+    lines.push(`subject-sha256: ${sha256(sddRaw.replaceAll('\r\n', '\n'))}`);
+  }
   lines.push('');
   const annotationText = lines.join('\n');
   const blockText = renderReviewsStageBlock(stage, {
@@ -1803,7 +1846,14 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     const loopPath = attemptsFilePath(ws, cr);
     const loopRaw = readFileChecked(loopPath);
     const all = att.data.loops ? att.data : { loops: {} };
-    all.loops[loopRef] = { 'current-attempt': projCurrent, attempts: [...att.attempts, { attempt: projCurrent, at: recordedAt, by: reviewer }] };
+    const prev = all.loops[loopRef] || { 'current-cycle': 1, 'current-attempt': 0, attempts: [] };
+    const cycle = newCycle ? (prev['current-cycle'] || 1) + 1 : (prev['current-cycle'] || 1);
+    const attemptNo = newCycle ? 1 : projCurrent;
+    all.loops[loopRef] = {
+      'current-cycle': cycle,
+      'current-attempt': attemptNo,
+      attempts: [...(att.attempts || []), { attempt: attemptNo, at: recordedAt, by: reviewer, cycle }],
+    };
     writes.push({ path: loopPath, expectedHash: loopRaw == null ? null : sha256(loopRaw), newText: renderLoopText(all.loops) });
   }
   casWriteMulti(writes); // 任一前置校验/CAS 失败时本次涉及的受控文件均不落盘；保留 B-18 已声明的连续 rename 极小崩溃窗口，不另造事务
@@ -1814,7 +1864,17 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   });
   // 删除临时 payload（避免残留误提交或跨 CR 串味）——放在写入成功之后，失败路径 payload 保留供重试
   try { fs.rmSync(fromPath, { force: true }); } catch { /* 删除失败不阻塞主结果 */ }
-  ok({ op: 'review-record', cr, stage, file: target.replaceAll('\\', '/'), verdict: payload.verdict, trace: tracePath.replaceAll('\\', '/'), ...(bump ? { attempt: projCurrent } : {}) });
+  // CR-2026-027 FR-13/TASK-08：输出深化（TD-BL-2 真值表 + 真实写入文件 + attempt 信息）
+  const writtenFiles = [target, tracePath];
+  if (bump) writtenFiles.push(attemptsFilePath(ws, cr));
+  const route = payload.verdict === 'pass' ? 'pass'
+    : (stage === 'dev-plan' && devPlanRoute === 'upstream') ? 'upstream' : 'repair';
+  ok({
+    op: 'review-record', cr, stage, file: target.replaceAll('\\', '/'), verdict: payload.verdict, trace: tracePath.replaceAll('\\', '/'),
+    files: writtenFiles.map((f) => f.replaceAll('\\', '/')),
+    attempt: { current: projCurrent, max: att.max, bumped: bump },
+    route, repairTarget,
+  });
 }
 /* ────────────────────────── review-note（S2，CR-2026-021 TASK-03） ──────────────────────────
  * 向 approval.yml 的 supplemental-reviews[] 追加一条补充审查记录（CAS+审计）。
