@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -112,6 +112,20 @@ function writeApprovalYml(ws, cr, section, fields) {
   mkdirSync(dir, { recursive: true });
   const lines = [`${section}:`, ...Object.entries(fields).map(([k, v]) => `  ${k}: ${typeof v === 'string' ? `"${v}"` : v}`)];
   writeFileSync(path.join(dir, 'approval.yml'), lines.join('\n') + '\n');
+}
+
+// CR-2026-027 TASK-06：写 _index.yml fixture（归档终态更新目标）
+function writeIndex(ws, entries) {
+  const dir = path.join(ws, 'change-requests');
+  mkdirSync(dir, { recursive: true });
+  const lines = [];
+  for (const e of entries) {
+    lines.push(`- id: ${e.id}`);
+    lines.push(`    title: ${e.title}`);
+    if (e.status) lines.push(`    status: ${e.status}`);
+    if (e.created) lines.push(`    created: "${e.created}"`);
+  }
+  writeFileSync(path.join(dir, '_index.yml'), lines.join('\n') + '\n');
 }
 
 function writeEvidence(ws, cr, relFromCrDir, content) {
@@ -280,7 +294,6 @@ test('git：rules.json 正常加载后语义与原硬编码表一致（禁子命
 });
 
 // ── outbox 事件通道（CR-2026-002 TASK-02）────────────────────────────────
-import { readdirSync } from 'node:fs';
 
 function readOutbox(ws) {
   const dir = path.join(ws, '.crctl', 'outbox');
@@ -1036,13 +1049,15 @@ test('merge-metadata：非 merging/writing-back 态非零退出且无写（AC-5�
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-test('archive-move：正常路径 backlog 移除 + history 富化（final-status/archived-at）（AC-3）', () => {
+test('archive-move：正常路径 backlog 移除 + history 富化 + index 终态更新（AC-3/CR-2026-027 FR-11）', () => {
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-T1', 'archived');
+    writeIndex(ws, [{ id: 'CR-T1', title: 'T1', status: 'drafting', created: '2026-08-01T00:00:00+08:00' }]);
     const r = runCrctl(['archive-move', 'CR-T1', '--final-status', 'archived', '--archive-reason', 'writeback done', '--spec-id', 'ai-first-platform', '--workspace', ws]);
     assert.equal(r.status, 0);
     assert.equal(r.stdout.op, 'archive-move');
+    assert.deepEqual(r.stdout.recipients, ['Ray']);
     const backlog = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
     assert.ok(!backlog.includes('CR-T1'), 'backlog 不应再包含 CR-T1 条目');
     const history = readFileSync(path.join(ws, 'change-requests', '_history.yml'), 'utf8');
@@ -1053,10 +1068,25 @@ test('archive-move：正常路径 backlog 移除 + history 富化（final-status
     assert.match(history, /writeback-spec-id: ai-first-platform/);
     assert.match(history, /archived-at: "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     assert.match(history, /owners:/);
+    // CR-2026-027 FR-11：archive event 入 history notify-log（同批写入）
+    assert.match(history, /notify-log:/);
+    assert.match(history, /event: archived/);
+    assert.match(history, /to: \["Ray"\]/);
+    assert.match(history, /writeback-spec-id: ai-first-platform/);
+    // _index.yml 终态三字段（D-2）
+    const index = readFileSync(path.join(ws, 'change-requests', '_index.yml'), 'utf8');
+    assert.match(index, /status: archived/);
+    assert.match(index, /archived-at: "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    assert.match(index, /writeback-spec-id: ai-first-platform/);
+    assert.ok(index.includes('CR-T1'), 'index 条目保留（不删除）');
+    // archive outbox 已发
+    const outbox = path.join(ws, '.crctl', 'outbox');
+    const evFiles = readdirSync(outbox).filter((f) => f.includes('archive'));
+    assert.ok(evFiles.length > 0, 'CAS 成功后应发 archive outbox');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-test('archive-move：重复归档（已在 history）→ ENTRY_ALREADY_IN_HISTORY 且两文件均无变更（AC-3 无半状态）', () => {
+test('archive-move：重复调用（已在 history 且 final-status 一致）→ already-archived 幂等零写入（TD-BL-3）', () => {
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-T1', 'archived');
@@ -1066,10 +1096,66 @@ test('archive-move：重复归档（已在 history）→ ENTRY_ALREADY_IN_HISTOR
     const backlogBefore = readFileSync(backlogPath, 'utf8');
     const historyBefore = readFileSync(historyPath, 'utf8');
     const r = runCrctl(['archive-move', 'CR-T1', '--final-status', 'archived', '--workspace', ws]);
-    assert.equal(r.status, 1);
-    assert.equal(r.stderr.error.code, 'ENTRY_ALREADY_IN_HISTORY');
+    assert.equal(r.status, 0);
+    assert.equal(r.stdout.result, 'already-archived');
+    assert.equal(r.stdout.finalStatus, 'archived');
     assert.equal(readFileSync(backlogPath, 'utf8'), backlogBefore, 'backlog 不得被写');
     assert.equal(readFileSync(historyPath, 'utf8'), historyBefore, 'history 不得被写');
+    // 不一致 → FINAL_STATUS_MISMATCH
+    const r2 = runCrctl(['archive-move', 'CR-T1', '--final-status', 'rejected', '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'FINAL_STATUS_MISMATCH');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-027 TASK-06：三终态 / 中文 reason / 收件人矩阵 ────────────
+test('CR-2026-027 FR-11：rejected/withdrawn 终态归档 + 中文 archive-reason 完整保留（不经 Shell 转义）', () => {
+  const ws = makeWorkspace();
+  try {
+    for (const finalStatus of ['rejected', 'withdrawn']) {
+      const cr = `CR-T-${finalStatus}`;
+      writeCrEntry(ws, cr, finalStatus);
+      writeIndex(ws, [{ id: cr, title: finalStatus, status: finalStatus === 'rejected' ? 'requirement-reviewing' : 'tech-designing', created: '2026-08-01T00:00:00+08:00' }]);
+      const r = runCrctl(['archive-move', cr, '--final-status', finalStatus, '--archive-reason', '中文原因：需求撤回', '--workspace', ws]);
+      assert.equal(r.status, 0, r.rawStderr);
+      const history = readFileSync(path.join(ws, 'change-requests', '_history.yml'), 'utf8');
+      assert.match(history, new RegExp(`final-status: ${finalStatus}`));
+      assert.match(history, /archive-reason: "中文原因：需求撤回"/);
+      assert.match(history, /event: /);
+      const index = readFileSync(path.join(ws, 'change-requests', '_index.yml'), 'utf8');
+      assert.match(index, new RegExp(`status: ${finalStatus}`));
+    }
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 FR-11：收件人矩阵 —— owners 去重；legacy 顶层 owner 回退；空收件人 ARCHIVE_RECIPIENTS_MISSING', () => {
+  const ws = makeWorkspace();
+  try {
+    // 三角色同人 → 去重为 1
+    writeCrEntry(ws, 'CR-DEDUP', 'archived');
+    writeIndex(ws, [{ id: 'CR-DEDUP', title: 'D', status: 'archived', created: '2026-08-01T00:00:00+08:00' }]);
+    let r = runCrctl(['archive-move', 'CR-DEDUP', '--final-status', 'archived', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.deepEqual(r.stdout.recipients, ['Ray']);
+    // legacy：无 owners 但有顶层 owner → 回退（writeBacklog 不支持 owner 字段，手动注入）
+    const crLegacy = 'CR-LEGACY';
+    writeBacklog(ws, [{ id: crLegacy, status: 'withdrawn' }], { owners: false });
+    const bpLegacy = path.join(ws, 'change-requests', '_backlog.yml');
+    writeFileSync(bpLegacy, readFileSync(bpLegacy, 'utf8').replace('    status: withdrawn', '    status: withdrawn\n    owner: legacy-user'));
+    writeCrMd(ws, crLegacy, 'withdrawn', { owners: false });
+    writeIndex(ws, [{ id: crLegacy, title: 'L', status: 'withdrawn', created: '2026-08-01T00:00:00+08:00' }]);
+    r = runCrctl(['archive-move', crLegacy, '--final-status', 'withdrawn', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.deepEqual(r.stdout.recipients, ['legacy-user']);
+    // 无 owners 且无顶层 owner → ARCHIVE_RECIPIENTS_MISSING（CAS 前硬失败，零写入）
+    const crOrphan = 'CR-ORPHAN';
+    writeBacklog(ws, [{ id: crOrphan, status: 'rejected' }], { owners: false });
+    writeCrMd(ws, crOrphan, 'rejected', { owners: false });
+    writeIndex(ws, [{ id: crOrphan, title: 'O', status: 'rejected', created: '2026-08-01T00:00:00+08:00' }]);
+    r = runCrctl(['archive-move', crOrphan, '--final-status', 'rejected', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ARCHIVE_RECIPIENTS_MISSING');
+    assert.ok(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8').includes(crOrphan), 'backlog 不得被写');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 

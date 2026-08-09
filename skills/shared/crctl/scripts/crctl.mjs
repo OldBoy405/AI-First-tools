@@ -849,9 +849,50 @@ function editArchiveMove(textB, textH, cr, meta) {
     meta.specId ? `    writeback-spec-id: ${meta.specId}` : null,
     `    archived-at: "${nowIso()}"`,
   ].filter(Boolean).join('\n');
-  const record = entry + '\n' + enrich + '\n';
+  // CR-2026-027 FR-11/TASK-06：归档事件随 history 条目同批写入（meta.notifyLog 行数组，4 空格基准缩进）
+  const notifyLog = meta.notifyLog && meta.notifyLog.length ? '\n' + meta.notifyLog.join('\n') : '';
+  const record = entry + '\n' + enrich + notifyLog + '\n';
   const newHistory = (normH.trim() === '' ? 'history:' : normH.trimEnd()) + '\n' + record;
   return { newBacklog, newHistory };
+}
+
+// CR-2026-027 FR-11/TASK-06：归档事件行构造（与 editInboxEmit 同构：at/event/to/payload）。
+// 收件人由 resolveArchiveRecipients 解析（owners 三角色去重 → legacy 顶层 owner → 空则硬失败）。
+function buildArchiveNotifyLog(finalStatus, to, payload) {
+  return [
+    '    notify-log:',
+    `      - at: "${nowIso()}"`,
+    `        event: ${finalStatus}`,
+    `        to: ${JSON.stringify(to)}`,
+    `        payload: ${JSON.stringify(payload)}`,
+  ];
+}
+
+// CR-2026-027 FR-11/TASK-06：收件人解析（D-10）。
+function resolveArchiveRecipients(ws, cr) {
+  const snap = loadBacklogEntry(ws, cr);
+  const o = snap.entry.owners || {};
+  const to = [...new Set([o.requirement && o.requirement.id, o.development && o.development.id, o.test && o.test.id].filter(Boolean))];
+  if (to.length === 0 && snap.entry.owner) to.push(String(snap.entry.owner));
+  if (to.length === 0) fail('ARCHIVE_RECIPIENTS_MISSING', `归档事件收件人为空：${cr} 缺少 owners 三角色且无顶层 owner，CAS 前拒绝归档`);
+  return to;
+}
+
+// CR-2026-027 FR-11/TASK-06：_index.yml 终态字段更新（只写 status/archived-at/可选 writeback-spec-id，D-2）。
+function editIndexFinalStatus(text, cr, finalStatus, specId) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, cr);
+  if (!block) fail('INDEX_ENTRY_NOT_FOUND', `${cr} 不在 _index.yml`);
+  const fieldIndent = ' '.repeat(block.indent + 2);
+  let body = block.text;
+  const set = (key, val) => {
+    const re = new RegExp(`^([ \\t]*)${key}:.*$`, 'm');
+    return re.test(body) ? body.replace(re, `$1${key}: ${val}`) : body + `\n${fieldIndent}${key}: ${val}`;
+  };
+  body = set('status', finalStatus);
+  body = set('archived-at', `"${nowIso()}"`);
+  if (specId) body = set('writeback-spec-id', String(specId));
+  return norm.slice(0, block.start) + body + norm.slice(block.end);
 }
 
 
@@ -1465,24 +1506,66 @@ function cmdMergeMetadata(ws, cr, gates, flags) {
 
 function cmdArchiveMove(ws, cr, gates, flags) {
   if (!flags['final-status']) fail('BAD_ARGS', 'archive-move 需要 --final-status <status>');
-  const state = resolveCrState(ws, cr);
-  if (state.status !== 'archived') fail('ILLEGAL_LEDGER_STATE', `archive-move 仅允许在前置态 archived 执行，当前 ${state.status}。请先 crctl advance 到 archived（带 --spec-id）再 archive-move（状态前置强制）`, { current: state.status, expect: ['archived'] });
-  const bp = backlogPath(ws);
+  // CR-2026-027 FR-11/TASK-06：重复调用检测（TD-BL-3 拍板）——先查 history：
+  // 同 CR 且 final-status 一致 → already-archived 幂等（零写入、不发 outbox）；不一致 → FINAL_STATUS_MISMATCH。
   const hp = path.join(ws, 'change-requests', '_history.yml');
+  const hText = readFileChecked(hp);
+  if (hText != null) {
+    const hDoc = parseYaml(hText);
+    const hList = Array.isArray(hDoc) ? hDoc : hDoc['change-requests'] || hDoc['history'] || [];
+    const histEntry = hList.find((e) => e && e.id === cr);
+    if (histEntry) {
+      if (String(histEntry['final-status']) === String(flags['final-status'])) {
+        auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), result: 'already-archived', finalStatus: flags['final-status'] });
+        ok({ op: 'archive-move', cr, result: 'already-archived', finalStatus: flags['final-status'] });
+        return;
+      }
+      fail('FINAL_STATUS_MISMATCH', `history 中 ${cr} 的 final-status=${histEntry['final-status']}，与 --final-status ${flags['final-status']} 不一致`, { current: histEntry['final-status'], expect: flags['final-status'] });
+    }
+  }
+  const state = resolveCrState(ws, cr);
+  // CR-2026-027 FR-11/TASK-06：前置态放宽为三种终态，且 --final-status 必须与 cr.md 当前 status 完全一致（D-8）
+  if (!['archived', 'rejected', 'withdrawn'].includes(state.status)) {
+    fail('ILLEGAL_LEDGER_STATE', `archive-move 仅允许在终态 archived/rejected/withdrawn 执行，当前 ${state.status}。请先 crctl advance 到终态再 archive-move（状态前置强制）`, { current: state.status, expect: ['archived', 'rejected', 'withdrawn'] });
+  }
+  if (String(flags['final-status']) !== String(state.status)) {
+    fail('FINAL_STATUS_MISMATCH', `--final-status ${flags['final-status']} 与 cr.md 当前状态 ${state.status} 不一致`, { current: state.status, expect: flags['final-status'] });
+  }
+  const bp = backlogPath(ws);
+  const ip = path.join(ws, 'change-requests', '_index.yml');
   const textB = readFileChecked(bp);
   if (textB == null) fail('BACKLOG_NOT_FOUND', `缺少 ${bp}`);
-  const textH = readFileChecked(hp);
-  const parts = editArchiveMove(textB, textH, cr, {
+  // 收件人解析（CAS 前，空则硬失败）
+  const to = resolveArchiveRecipients(ws, cr);
+  const payload = {
+    'final-status': flags['final-status'],
+    'archive-reason': flags['archive-reason'] || '',
+    ...(flags['spec-id'] ? { 'writeback-spec-id': flags['spec-id'] } : {}),
+    'archived-at': nowIso(),
+  };
+  const parts = editArchiveMove(textB, hText, cr, {
     finalStatus: flags['final-status'],
     archiveReason: flags['archive-reason'] || '',
     specId: flags['spec-id'] || null,
+    notifyLog: buildArchiveNotifyLog(flags['final-status'], to, payload),
   });
+  // _index.yml 终态更新（D-2：只写 status/archived-at/可选 writeback-spec-id，不复制 history、不删除条目）
+  const textI = readFileChecked(ip);
+  if (textI == null) fail('INDEX_NOT_FOUND', `缺少 ${ip}`);
+  const newIndex = editIndexFinalStatus(textI, cr, flags['final-status'], flags['spec-id'] || null);
+  // 三账本同一 CAS：事件与 backlog/history/index 要么同生要么同灭
   casWriteMulti([
     { path: bp, expectedHash: sha256(textB), newText: parts.newBacklog },
-    { path: hp, expectedHash: textH == null ? null : sha256(textH), newText: parts.newHistory },
+    { path: hp, expectedHash: hText == null ? null : sha256(hText), newText: parts.newHistory },
+    { path: ip, expectedHash: sha256(textI), newText: newIndex },
   ]);
-  auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), before: { inBacklog: true }, after: { inBacklog: false, inHistory: true, finalStatus: flags['final-status'] } });
-  ok({ op: 'archive-move', cr, finalStatus: flags['final-status'], backlog: bp, history: hp });
+  auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), before: { inBacklog: true }, after: { inBacklog: false, inHistory: true, inIndex: true, finalStatus: flags['final-status'] } });
+  // CAS 成功后发 archive outbox（git 是权威、outbox 只是投影）
+  const outbox = emitOutboxEvent(ws, {
+    event_kind: 'archive', cr_id: cr, from_status: state.status, to_status: flags['final-status'],
+    actor: identity(ws), payload,
+  });
+  ok({ op: 'archive-move', cr, finalStatus: flags['final-status'], recipients: to, backlog: bp, history: hp, index: ip, outbox });
 }
 
 function cmdAttempt(ws, cr, gates, flags) {
