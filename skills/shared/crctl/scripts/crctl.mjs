@@ -505,10 +505,7 @@ function matchFrontmatter(text) {
   return m ? { match: m[0], body: m[1] } : null;
 }
 
-function readEvidenceDoc(ws, cr, rel) {
-  const p = path.join(ws, rel.replaceAll('{cr}', cr));
-  const text = readFileChecked(p);
-  if (text == null) return { path: p, exists: false, data: null };
+function parseEvidenceText(p, text) {
   if (p.endsWith('.md')) {
     const m = matchFrontmatter(text);
     let data = m ? parseYaml(m.body) : {};
@@ -525,6 +522,16 @@ function readEvidenceDoc(ws, cr, rel) {
   return { path: p, exists: true, data: parseYaml(text) };
 }
 
+function readEvidenceDoc(ws, cr, rel, overrides) {
+  // 候选证据 override（CR-2026-027 FR-8/TASK-03）：overrides 的 key 用含 {cr} 占位符的规范相对路径，
+  // 匹配发生在路径展开前（调用方与读取方统一占位符形态）；命中时用内存文本走同一解析路径，不落盘。
+  if (overrides && overrides[rel]) return parseEvidenceText(path.join(ws, rel.replaceAll('{cr}', cr)), overrides[rel].text);
+  const p = path.join(ws, rel.replaceAll('{cr}', cr));
+  const text = readFileChecked(p);
+  if (text == null) return { path: p, exists: false, data: null };
+  return parseEvidenceText(p, text);
+}
+
 // CR-2026-025 项③（FR-11，D-7：常量不做配置）：isEmpty 数组失败逐项截断。
 // 只封单条长度、不封条数；非字符串项原样保留，数组类型不变（FR-13/NFR-3）。
 const ITEM_MAX = 120;
@@ -533,8 +540,9 @@ function briefArray(v) {
     ? x.slice(0, ITEM_MAX) + `…(+${x.length - ITEM_MAX}字)` : x);
 }
 
-function evaluatePassCondition(ws, cr, stageCfg, gates) {
+function evaluatePassCondition(ws, cr, stageCfg, gates, evidence) {
   // stageCfg: { passCondition: {pipeline, nodeRef}, evidence: {"$default": rel, "test-report": rel} }
+  // evidence: 候选证据 override（CR-2026-027 FR-8），透传给 readEvidenceDoc；缺省为磁盘读。
   const results = [];
   const { pipeline, nodeRef } = stageCfg.passCondition;
   const { doc: pl, source } = loadPipeline(ws, pipeline);
@@ -543,7 +551,7 @@ function evaluatePassCondition(ws, cr, stageCfg, gates) {
   const conds = getPath(node, 'reviewLoop.passCondition.allOf') || [];
   const docsCache = {};
   const getDoc = (key) => {
-    if (!(key in docsCache)) docsCache[key] = readEvidenceDoc(ws, cr, stageCfg.evidence[key]);
+    if (!(key in docsCache)) docsCache[key] = readEvidenceDoc(ws, cr, stageCfg.evidence[key], evidence);
     return docsCache[key];
   };
   for (const cond of conds) {
@@ -613,10 +621,10 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
       out.checks.push({ type: check.type, dir, pattern: check.pattern, ok: okv, why: okv ? null : '目录缺失或无匹配文件' });
     } else if (check.type === 'passCondition') {
       const stageCfg = gates.approvalStages[check.stage];
-      const r = evaluatePassCondition(ws, cr, stageCfg, gates);
+      const r = evaluatePassCondition(ws, cr, stageCfg, gates, opts.evidence);
       out.checks.push({ type: check.type, stage: check.stage, ok: r.pass, detail: r.results, pipelineSource: r.source });
     } else if (check.type === 'approval') {
-      const doc = readEvidenceDoc(ws, cr, 'change-requests/{cr}/approval.yml');
+      const doc = readEvidenceDoc(ws, cr, 'change-requests/{cr}/approval.yml', opts.evidence);
       const section = doc.exists ? doc.data?.[check.section] : null;
       // 两轨审批（TASK-03）：TTY 的 crctl-approve 与 grant 的 server-approve 都被门禁承认
       const okv = !!(section && section.approver && section['approved-at'] && ['crctl-approve', 'server-approve'].includes(section.via));
@@ -855,14 +863,21 @@ function updateCrMdStatus(ws, cr, newStatus) {
   const text = readFileChecked(p);
   if (text == null) return { updated: false, why: `cr.md 不存在: ${p}` };
   const hash = sha256(text);
+  const next = crMdStatusText(text, newStatus);
+  if (next == null) return { updated: false, why: 'cr.md 无 frontmatter' };
+  casWrite(p, hash, next);
+  return { updated: true, path: p };
+}
+
+// CR-2026-027 FR-8/TASK-03：cr.md 状态文本生成纯函数（status + updated-at 更新），供 approve 原子提交在内存生成候选文本。
+function crMdStatusText(text, newStatus) {
   const m = matchFrontmatter(text);
-  if (!m) return { updated: false, why: 'cr.md 无 frontmatter' };
+  if (!m) return null;
   let fm = m.body;
   if (/^status:\s*.*$/m.test(fm)) fm = fm.replace(/^status:\s*.*$/m, `status: ${newStatus}`);
   else fm = fm + `\nstatus: ${newStatus}`;
   if (/^updated-at:\s*.*$/m.test(fm)) fm = fm.replace(/^updated-at:\s*.*$/m, `updated-at: "${nowIso()}"`);
-  casWrite(p, hash, text.replace(m.match, `---\n${fm}\n---`));
-  return { updated: true, path: p };
+  return text.replace(m.match, `---\n${fm}\n---`);
 }
 
 /* ────────────────────────── 状态读取收敛（CR-2026-018 FR-2） ──────────────────────────
@@ -1082,6 +1097,68 @@ const REJECT_ROLLBACK = {
   code: { to: 'developing', approve: 'approve-code', write: 'implement-code' },
 };
 
+// CR-2026-027 FR-8/TASK-03：候选 cr.md 独立 invariant 校验。
+// 现有目标态 gate（如 tech-design-reviewed）没有任何 checker 读取 cr.md，runGateChecks 只以 targetStatus 选择门禁，
+// 因此候选 cr.md 的目标态一致性必须由本 helper 在 CAS 前直接断言（不假设 gate 消费 cr.md）。
+function assertCandidateStatus(crMdText, expectStatus) {
+  const m = matchFrontmatter(crMdText);
+  if (!m) fail('CANDIDATE_STATUS_MISMATCH', '候选 cr.md 无 frontmatter');
+  const fm = parseYaml(m.body) || {};
+  if (fm.status !== expectStatus) {
+    fail('CANDIDATE_STATUS_MISMATCH', `候选 cr.md status=${fm.status}，目标态应为 ${expectStatus}`);
+  }
+  return true;
+}
+
+// CR-2026-027 FR-8/TASK-03：approval 与 status 的原子提交核心（TTY 与 --grant 共用）。
+// 流程：预检（调用方完成）→ 内存生成候选两文件 → runGateChecks（approval.yml evidence override）→
+// assertCandidateStatus → casWriteMulti 两文件 → controlledGit add/commit 单次提交 → commit 成功后发 status outbox。
+// 失败边界：gate/候选校验失败零写入；CAS 冲突两文件均不写；commit 失败两文件共同留在工作区、不发 outbox、返回结构化恢复信息。
+function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
+  const { approver, via, evidenceHash, grant, outboxEvidence, specId, fromStatus } = ctx;
+  const crMdP = path.join(crDir(ws, cr), 'cr.md');
+  const approvalP = path.join(crDir(ws, cr), 'approval.yml');
+  const crMdText = readFileChecked(crMdP);
+  if (crMdText == null) fail('CR_MD_WRITE_FAILED', `cr.md 不存在: ${crMdP}`);
+  // 1) 内存生成候选文本（零落盘）
+  const approvalText = buildApprovalSectionText(approvalP, stageCfg, approver, evidenceHash, { via, grant });
+  const nextCrMd = crMdStatusText(crMdText, stageCfg.to);
+  if (nextCrMd == null) fail('CANDIDATE_STATUS_MISMATCH', '候选 cr.md 无 frontmatter，无法生成目标态文本');
+  // 2) 按候选 approval 复核目标 gate（evidence override，approval.yml 不落盘）
+  const gate = runGateChecks(ws, cr, stageCfg.to, gates, {
+    specId,
+    evidence: { 'change-requests/{cr}/approval.yml': { text: approvalText } },
+  });
+  if (!gate.pass) {
+    const why = gate.checks.filter((c) => !c.ok).map((c) => c.why).filter(Boolean).join('；');
+    fail('GATE_BLOCKED', `目标状态 ${stageCfg.to} 的门禁未通过，拒绝写入${why ? '：' + why : ''}`, { gate });
+  }
+  // 3) 候选 cr.md 独立 invariant 校验（零写入前提）
+  assertCandidateStatus(nextCrMd, stageCfg.to);
+  // 4) 两文件同一 CAS：全校验→全 temp→连续 rename，任一冲突整体中止
+  const approvalHash = readFileChecked(approvalP) == null ? null : sha256(readFileChecked(approvalP));
+  casWriteMulti([
+    { path: approvalP, expectedHash: approvalHash, newText: approvalText },
+    { path: crMdP, expectedHash: sha256(crMdText), newText: nextCrMd },
+  ]);
+  // 5) 单次 commit（approval.yml + cr.md 同批可见）
+  const addR = controlledGit(ws, 'add', [`change-requests/${cr}/approval.yml`, `change-requests/${cr}/cr.md`], ws, 'crctl-approve');
+  const msg = `[cr] approve ${cr} ${stage} approval+status -> ${stageCfg.to}`;
+  const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-approve') : addR;
+  auditLog(ws, { kind: 'approve', cr, stage, approver, via, result: 'approved', commit: commitR.ok ? msg : 'commit-failed' });
+  const result = { advanced: true, op: 'approve', cr, stage, from: fromStatus, to: stageCfg.to, trigger: stageCfg.trigger, crMd: { updated: true, path: crMdP }, files: [approvalP, crMdP], commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR, note: 'approval.yml 与 cr.md 已同批写入工作区；commit 失败时两文件共同保留、未发 status outbox，请修复后手工经 crctl git 提交' } };
+  // 6) commit 成功后发 status outbox（git 是权威、outbox 只是投影）；commit 失败不发
+  if (commitR.ok) {
+    result.outbox = emitOutboxEvent(ws, {
+      event_kind: 'status', cr_id: cr, from_status: fromStatus, to_status: stageCfg.to,
+      trigger: stageCfg.trigger, commit_sha: gitHeadSha(ws),
+      actor: identity(ws), evidence: outboxEvidence || {},
+    });
+  }
+  ok(result);
+  if (!commitR.ok) process.exit(1);
+}
+
 function cmdApprove(ws, cr, gates, flags) {
   const stage = flags.stage;
   const stageCfg = gates.approvalStages[stage];
@@ -1137,12 +1214,12 @@ function cmdApprove(ws, cr, gates, flags) {
       auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined-rolled-back', to: rollback.to });
       fail('APPROVAL_DECLINED_ROLLED_BACK', `审批未通过，CR 已回退到 ${rollback.to}，请重跑 ${rollback.write}`, { rolledBackTo: rollback.to, rerunHint: rollback.write });
     }
-    writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash);
-    auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'approved' });
-    // 证据摘要随级联 advance 的 status 事件进 outbox（一个 approve 只发一条事件，避免与去重键冲突）
-    const outboxEvidence = collectOutboxEvidence(ws, cr, stageCfg);
-    // 级联推进状态（同一 gate 再校验一遍，包含 approval 检查）
-    cmdAdvance(ws, cr, gates, { to: stageCfg.to, trigger: stageCfg.trigger, expect: current, specId: flags['spec-id'], outboxEvidence });
+    // CR-2026-027 FR-8/TASK-03：TTY 确认后走 approveAndAdvance（approval.yml + cr.md 单次原子提交），替代原分提交路径
+    approveAndAdvance(ws, cr, gates, stage, stageCfg, {
+      approver, via: 'crctl-approve', evidenceHash,
+      outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
+      specId: flags['spec-id'], fromStatus: current,
+    });
   });
 }
 
@@ -1184,10 +1261,12 @@ function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
   }
   const sig = verifyGrantSignature(ws, grant);
   if (!sig.ok) fail(sig.code, sig.why);
-  writeApprovalSection(ws, cr, stage, stageCfg, grant.approver, digest || null, { via: 'server-approve', grant });
-  auditLog(ws, { kind: 'approve', cr, stage, approver: grant.approver, via: 'server-approve', keyId: grant.key_id, result: 'approved' });
-  const outboxEvidence = collectOutboxEvidence(ws, cr, stageCfg);
-  cmdAdvance(ws, cr, gates, { to: stageCfg.to, trigger: stageCfg.trigger, expect: current, specId: flags['spec-id'], outboxEvidence });
+  // CR-2026-027 FR-8/TASK-03：grant 验签通过后走 approveAndAdvance（approval.yml + cr.md 单次原子提交），替代原分提交路径
+  approveAndAdvance(ws, cr, gates, stage, stageCfg, {
+    approver: grant.approver, via: 'server-approve', evidenceHash: digest || null, grant,
+    outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
+    specId: flags['spec-id'], fromStatus: current,
+  });
 }
 
 function collectOutboxEvidence(ws, cr, stageCfg) {
@@ -1204,10 +1283,31 @@ function collectOutboxEvidence(ws, cr, stageCfg) {
 
 function writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash, opts = {}) {
   const p = path.join(crDir(ws, cr), 'approval.yml');
+  const existing = readFileChecked(p);
+  const next = buildApprovalSectionText(p, stageCfg, approver, evidenceHash, opts);
+  if (existing == null) {
+    fs.writeFileSync(p, next, 'utf8');
+    return;
+  }
+  casWrite(p, sha256(existing), next);
+}
+
+// CR-2026-027 FR-8/TASK-03：approval.yml 候选文本生成（含既有文件段落合并），供 approve 原子提交在内存构造。
+function buildApprovalSectionText(p, stageCfg, approver, evidenceHash, opts = {}) {
   const section = stageCfg.approvalSection;
   const existing = readFileChecked(p);
+  const block = buildApprovalBlock(stageCfg, approver, evidenceHash, opts);
+  if (existing == null) return `# approval.yml — 人工审批记录（各段仅接受 crctl approve 写入）\n${block}\n`;
+  const re = new RegExp(`^${section}:\\n(?:[ \\t]+.*\\n?)*`, 'm');
+  return re.test(existing)
+    ? existing.replace(re, block + '\n')
+    : existing.replace(/\s*$/, '\n') + block + '\n';
+}
+
+function buildApprovalBlock(stageCfg, approver, evidenceHash, opts = {}) {
+  const section = stageCfg.approvalSection;
   const g = opts.grant || null;
-  const block = [
+  return [
     `${section}:`,
     `  approver: "${approver}"`,
     `  approved-at: "${nowIso()}"`,
@@ -1218,16 +1318,6 @@ function writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash, o
     g ? `  grant-approved-at: "${g.approved_at}"` : null,
     `  target-status: ${stageCfg.to}`,
   ].filter(Boolean).join('\n');
-  if (existing == null) {
-    fs.writeFileSync(p, `# approval.yml — 人工审批记录（各段仅接受 crctl approve 写入）\n${block}\n`, 'utf8');
-    return;
-  }
-  const hash = sha256(existing);
-  const re = new RegExp(`^${section}:\\n(?:[ \\t]+.*\\n?)*`, 'm');
-  const next = re.test(existing)
-    ? existing.replace(re, block + '\n')
-    : existing.replace(/\s*$/, '\n') + block + '\n';
-  casWrite(p, hash, next);
 }
 
 function cmdValidate(ws, target, gates) {

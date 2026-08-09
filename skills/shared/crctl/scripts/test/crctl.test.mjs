@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -356,7 +356,6 @@ test('outbox：git push 成功 -> checkpoint 事件携带 HEAD sha 与从提交�
 
 // ── evidence-digest 统一 + grant 验签（CR-2026-002 TASK-03）──────────────
 import { generateKeyPairSync, sign as cryptoSign, createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
 
 const VECTORS_DIR = path.resolve(import.meta.dirname, 'fixtures', 'digest-vectors');
 
@@ -490,7 +489,60 @@ test('approve --grant：签名伪造 -> SIGNATURE_INVALID；digest 不符 -> EVI
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-// ── TASK-10：漂移检出发 audit outbox 事件（activity_log 留证半边，AC-7③）──────
+// ── CR-2026-027 TASK-03：approve 原子提交（FR-8）────────────────────
+test('CR-2026-027 FR-8：grant 审批 approval.yml 与 cr.md 单次原子提交（同 commit，无分提交残留）', () => {
+  const { ws, privateKey } = makeGrantWorkspace();
+  try {
+    const gp = makeGrant(ws, privateKey);
+    const r = runCrctl(['approve', 'CR-2026-001', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.advanced, true);
+    assert.equal(r.stdout.to, 'requirement-approved');
+    // 单次提交：最近 commit 同时含 approval.yml 与 cr.md，且消息为原子 approve 形态
+    const show = spawnSync('git', ['show', '--stat', '--oneline', 'HEAD'], { cwd: ws, encoding: 'utf8' });
+    assert.match(show.stdout, /approval\.yml/);
+    assert.match(show.stdout, /cr\.md/);
+    assert.match(show.stdout, /\[cr\] approve CR-2026-001 requirement approval\+status -> requirement-approved/);
+    // approval.yml 与 cr.md 不再悬空（fixture 其他文件为测试前置，本测试只看这两个文件）
+    const st = spawnSync('git', ['status', '--porcelain'], { cwd: ws, encoding: 'utf8' });
+    assert.ok(!st.stdout.includes('approval.yml'), 'approval.yml 不得留在未提交状态');
+    assert.ok(!st.stdout.includes('cr.md'), 'cr.md 不得留在未提交状态');
+    // 状态已推进且 approval 段可被 gate 承认（server-approve + 签名重验证）
+    const g2 = runCrctl(['gate', 'CR-2026-001', '--for', 'requirement-approved', '--workspace', ws]);
+    const check = g2.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(check.ok, true, `server-approve 应被 gate 承认且验签通过（why=${check.why}）`);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 FR-8：证据漂移时 grant 拒绝且零文件写入（approval.yml/cr.md 均不落盘，无 outbox）', () => {
+  const { ws, privateKey } = makeGrantWorkspace();
+  try {
+    const gp = makeGrant(ws, privateKey, { evidence_digest: canonicalDigestOf(['verdict: pass\nblockers: []\n# tampered\n']) });
+    const r = runCrctl(['approve', 'CR-2026-001', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'EVIDENCE_DRIFT');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-2026-001', 'approval.yml')), false, 'approval.yml 不得落盘');
+    const md = readFileSync(path.join(ws, 'change-requests', 'CR-2026-001', 'cr.md'), 'utf8');
+    assert.match(md, /status: requirement-reviewing/, 'cr.md 不得推进');
+    assert.equal(existsSync(path.join(ws, '.crctl', 'outbox')), false, '不得发 status outbox');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 FR-8：runGateChecks evidence override —— 候选 approval 缺 via 时 GATE_BLOCKED（零写入前提的 seam 验证）', () => {
+  const ws = makeWorkspace();
+  const cr = 'CR-TEST-1';
+  try {
+    writeCrEntry(ws, cr, 'requirement-reviewing');
+    writeEvidence(ws, cr, 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n');
+    // 构造缺 via 的 approval.yml（approval checker 与 evidence override 共用同一判定路径）
+    writeFileSync(path.join(ws, 'change-requests', cr, 'approval.yml'), 'requirement:\n  approver: "alice"\n  approved-at: "2026-08-10T00:00:00+08:00"\n', 'utf8');
+    // gate 验证：缺 via 的 approval 段 → 不通过（与 override 同路径的 approval checker）
+    const r = runCrctl(['gate', cr, '--for', 'requirement-approved', '--workspace', ws]);
+    const check = r.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(check.ok, false);
+    assert.match(check.why, /via 必须为 crctl-approve 或 server-approve/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
 test('gate：检出 EVIDENCE_DRIFT -> outbox 出现 audit 事件（payload 只有摘要，无证据内容）；重复 gate 不重复堆积', () => {
   const ws = makeWorkspace();
   const cr = 'CR-TEST-1';
