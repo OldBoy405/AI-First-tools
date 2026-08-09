@@ -543,6 +543,36 @@ test('CR-2026-027 FR-8：runGateChecks evidence override —— 候选 approval 
     assert.match(check.why, /via 必须为 crctl-approve 或 server-approve/);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-027 TASK-04：archived TASK 完成门禁五步判定（FR-9/D-8）────
+test('CR-2026-027 FR-9：archived 门禁五步判定 —— 缺 index/空列表/全 pending/部分 done/delivery 缺失均拦截，全就绪放行', () => {
+  const ws = makeWorkspace();
+  const cr = 'CR-TEST-1';
+  try {
+    writeCrEntry(ws, cr, 'writing-back');
+    const taskDir = path.join(ws, 'change-requests', cr, 'tasks');
+    const gateArchived = () => runCrctl(['gate', cr, '--for', 'archived', '--workspace', ws]).stdout.checks.find((c) => c.type === 'deliveryIndexComplete');
+    // ① index 缺失 → TASK_INDEX_MISSING（缺文件不得解释为 no-task）
+    assert.equal(gateArchived().code, 'TASK_INDEX_MISSING');
+    // ② 空列表 → TASK_LIST_EMPTY
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(path.join(taskDir, '_index.yml'), 'schema: cr-tasks/v1\ncr: CR-TEST-1\ntasks: []\n');
+    assert.equal(gateArchived().code, 'TASK_LIST_EMPTY');
+    // ③ 全 pending → TASK_STATUS_INCOMPLETE
+    writeFileSync(path.join(taskDir, '_index.yml'), 'schema: cr-tasks/v1\ncr: CR-TEST-1\ntasks:\n  - { id: CR-TEST-1-TASK-01, status: pending }\n');
+    assert.equal(gateArchived().code, 'TASK_STATUS_INCOMPLETE');
+    // ④ 全 done 但 delivery 缺失 → DELIVERY_INDEX_MISSING
+    writeFileSync(path.join(taskDir, '_index.yml'), 'schema: cr-tasks/v1\ncr: CR-TEST-1\ntasks:\n  - { id: CR-TEST-1-TASK-01, status: done }\n');
+    assert.equal(gateArchived().code, 'DELIVERY_INDEX_MISSING');
+    // ⑤ 全 done + delivery 齐 → 放行
+    mkdirSync(path.join(ws, 'delivery', 'task'), { recursive: true });
+    writeFileSync(path.join(ws, 'delivery', 'task', '_index.yaml'), 'schema: delivery-task/v1\ntasks:\n  - { id: CR-TEST-1-TASK-01 }\n');
+    assert.equal(gateArchived().ok, true);
+    // ⑥ 部分 done → TASK_STATUS_INCOMPLETE（混合状态同样拦截）
+    writeFileSync(path.join(taskDir, '_index.yml'), 'schema: cr-tasks/v1\ncr: CR-TEST-1\ntasks:\n  - { id: CR-TEST-1-TASK-01, status: done }\n  - { id: CR-TEST-1-TASK-02, status: pending }\n');
+    assert.equal(gateArchived().code, 'TASK_STATUS_INCOMPLETE');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
 test('gate：检出 EVIDENCE_DRIFT -> outbox 出现 audit 事件（payload 只有摘要，无证据内容）；重复 gate 不重复堆积', () => {
   const ws = makeWorkspace();
   const cr = 'CR-TEST-1';

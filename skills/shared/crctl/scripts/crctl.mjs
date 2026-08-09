@@ -581,25 +581,23 @@ function evaluatePassCondition(ws, cr, stageCfg, gates, evidence) {
   return { pass: results.length > 0 && results.every((r) => r.ok), results, source };
 }
 
-// CR-2026-005 FR-1: delivery/task 回写一致性检查。tasks/_index.yml 中每条
-// status=done 的任务，必须能在全局 delivery/task/_index.yaml 里按 id 找到
-// 对应条目——两份索引的 id 字段已核实同名同值（如 CR-2026-004-TASK-01），
-// 简单集合差即可，不需要映射表。两个边界（PRD FR-3）处理不同：doneIds 为
-// 空时直接放行（没有待核对项）；全局索引文件不存在但 doneIds 非空时视为
-// 全局集合为空集，正常计算 missing（此时应报告缺失，因为回写确实没做，
-// 不是"视为通过"）。
+// CR-2026-027 FR-9/TASK-04：archived 目标态任务完成门禁五步判定（SDD §4.1，D-8）。
+// 缺文件/空数组/pending 均不得被解释为 no-task：正常归档必须存在非空 task index 且全部 done，
+// 全部 done 后再校验 delivery/task/_index.yaml。rejected/withdrawn 属提前终止，不走本门禁（gates.json 不挂载）。
 function checkDeliveryIndexComplete(ws, cr) {
   const tasksIdx = readEvidenceDoc(ws, cr, 'change-requests/{cr}/tasks/_index.yml');
-  const doneIds = tasksIdx.exists
-    ? (tasksIdx.data?.tasks || []).filter((t) => t.status === 'done').map((t) => t.id)
-    : [];
-  if (doneIds.length === 0) return { ok: true, missing: [] };
+  if (!tasksIdx.exists) return { ok: false, code: 'TASK_INDEX_MISSING', why: 'tasks/_index.yml 不存在（缺文件不得解释为 no-task）' };
+  const tasks = Array.isArray(tasksIdx.data?.tasks) ? tasksIdx.data.tasks : [];
+  if (tasks.length === 0) return { ok: false, code: 'TASK_LIST_EMPTY', why: 'tasks[] 为空（空数组不得解释为 no-task）' };
+  const pending = tasks.filter((t) => t.status !== 'done');
+  if (pending.length > 0) {
+    return { ok: false, code: 'TASK_STATUS_INCOMPLETE', why: `存在未完成任务: ${pending.map((t) => t.id).filter(Boolean).join(', ')}` };
+  }
   const globalPath = path.join(ws, 'delivery/task/_index.yaml');
-  const globalIds = fs.existsSync(globalPath)
-    ? (parseYaml(fs.readFileSync(globalPath, 'utf8'))?.tasks || []).map((e) => e.id)
-    : [];
-  const missing = doneIds.filter((id) => !globalIds.includes(id));
-  return { ok: missing.length === 0, missing };
+  if (!fs.existsSync(globalPath)) return { ok: false, code: 'DELIVERY_INDEX_MISSING', why: 'delivery/task/_index.yaml 缺失（TASK 全 done 后回写索引必须存在）' };
+  const globalIds = (parseYaml(fs.readFileSync(globalPath, 'utf8'))?.tasks || []).map((e) => e.id);
+  const missing = tasks.map((t) => t.id).filter((id) => !globalIds.includes(id));
+  return { ok: missing.length === 0, missing, code: missing.length ? 'DELIVERY_INDEX_INCOMPLETE' : undefined, why: missing.length ? `delivery/task 索引缺失 ${missing.length} 项: ${missing.join(', ')}` : null };
 }
 
 function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
@@ -664,8 +662,8 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
     } else if (check.type === 'deliveryIndexComplete') {
       const r = checkDeliveryIndexComplete(ws, cr);
       out.checks.push({
-        type: check.type, ok: r.ok, missing: r.missing,
-        why: r.ok ? null : `delivery/task 索引缺失 ${r.missing.length} 项: ${r.missing.join(', ')}`,
+        type: check.type, ok: r.ok, code: r.code, missing: r.missing || [],
+        why: r.ok ? null : (r.why || `delivery/task 索引缺失 ${(r.missing || []).length} 项: ${(r.missing || []).join(', ')}`),
       });
     } else if (check.type === 'attemptsWithinLimit') {
       const r = readAttempts(ws, cr, check.loop, gates);
