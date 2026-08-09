@@ -2285,14 +2285,19 @@ test('CR-2026-026 ③: UPSTREAM 路由（repair-target=write-tech-design）跳�
     let r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
     assert.equal(r.stdout.attempt, 1);
     // 再跑 upstream block：attempt 不递增
+    const loopPath = path.join(ws, 'change-requests', 'CR-T1', 'review-loop.yml');
+    const loopBefore = readFileSync(loopPath, 'utf8');
     writeDevPlanPayload(ws, 'CR-T1', 'block', 'repair-target: write-tech-design\n');
     r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
     assert.equal(r.status, 0, r.rawStderr);
     const ann = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'dev-plan.yml'), 'utf8');
     assert.ok(ann.includes('repair-target: write-tech-design'), 'annotation 顶层落 upstream');
     const trace = readTrace(ws, 'CR-T1');
-    assert.ok(trace.includes('current-attempt: 1'), 'attempt 不递增（保持 1）');
-    assert.ok(!trace.includes('- attempt: 2'), 'attempts 不追加第 2 轮');
+    assert.ok(trace.includes('current-attempt: 1'), 'traceability attempt 不递增（保持 1）');
+    assert.ok(!trace.includes('- attempt: 2'), 'traceability attempts 不追加第 2 轮');
+    const loopAfter = readFileSync(loopPath, 'utf8');
+    assert.equal(loopAfter, loopBefore, 'review-loop.yml 内容不变（UPSTREAM 跳过 bump，不递增不追加）');
+    assert.ok(!loopAfter.includes('- attempt: 2'), 'review-loop attempts 不追加第 2 轮');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
