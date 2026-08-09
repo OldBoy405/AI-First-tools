@@ -2523,8 +2523,8 @@ function cmdMigrateBacklog(ws, gates, flags) {
 }
 
 // CR-2026-027 FR-10/TASK-05：幽灵条目清理（幂等；删除依据 = history 存在同 title 归档条目）。
-// B-12 实测形态：幽灵块是最后一个 id 条目块内的重复字段 key（如 title 二次出现），
-// 从第一个重复 key 行到文件尾即为幽灵块（CR-2026-024 归档残留）。
+// B-12 实测形态：幽灵块是某条目块内的重复字段 key（如 title 二次出现，CR-2026-024 归档残留），
+// 后续可能有正常条目（如 CR-2026-027），因此遍历所有条目块，删除范围 = 重复 key 行 到 下一个条目行。
 function migrateGhostCleanup(ws, text, hash, p) {
   const norm = text.replaceAll('\r\n', '\n');
   const lines = norm.split('\n');
@@ -2536,40 +2536,45 @@ function migrateGhostCleanup(ws, text, hash, p) {
   }
   if (itemIndent < 0) return { ghost: { removed: false, reason: 'no-list-items' } };
   const fieldIndent = itemIndent + 2;
-  // 最后一个列表项行号（从尾向前）
-  let lastIdLine = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
+  // 所有条目行号
+  const idLines = [];
+  for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(/^(\s*)-\s+id:\s*["']?([^"'\s]+)["']?\s*$/);
-    if (m && m[1].length === itemIndent) { lastIdLine = i; break; }
+    if (m && m[1].length === itemIndent) idLines.push(i);
   }
-  if (lastIdLine < 0) return { ghost: { removed: false, reason: 'no-list-items' } };
-  // 在最后条目块内找重复字段 key（幽灵块起点）；只统计字段层缩进（owners 子字段缩进更深不参与）
-  const seen = new Set();
-  let ghostStart = -1, ghostTitle = '';
-  for (let i = lastIdLine + 1; i < lines.length; i++) {
-    const l = lines[i];
-    if (l.trim() === '') continue;
-    const ind = l.match(/^[ \t]*/)[0].length;
-    if (ind <= itemIndent) break;
-    if (ind !== fieldIndent) continue;
-    const km = l.match(/^\s*([a-zA-Z0-9_-]+):\s*(.*)$/);
-    if (!km) continue;
-    if (seen.has(km[1])) { ghostStart = i; ghostTitle = km[2].replace(/^["']|["']$/g, '').trim(); break; }
-    seen.add(km[1]);
+  if (idLines.length === 0) return { ghost: { removed: false, reason: 'no-list-items' } };
+  // 遍历每个条目块，找第一个重复字段 key（幽灵起点）；只统计字段层缩进（嵌套子字段不参与）
+  let ghostStart = -1, ghostEnd = -1, ghostTitle = '';
+  for (let k = 0; k < idLines.length && ghostStart < 0; k++) {
+    const start = idLines[k] + 1;
+    const end = k + 1 < idLines.length ? idLines[k + 1] : lines.length;
+    const seen = new Set();
+    for (let i = start; i < end; i++) {
+      const l = lines[i];
+      if (l.trim() === '') continue;
+      const ind = l.match(/^[ \t]*/)[0].length;
+      if (ind <= itemIndent) break;
+      if (ind !== fieldIndent) continue;
+      const km = l.match(/^\s*([a-zA-Z0-9_-]+):\s*(.*)$/);
+      if (!km) continue;
+      if (seen.has(km[1])) { ghostStart = i; ghostEnd = end; ghostTitle = km[2].replace(/^["']|["']$/g, '').trim(); break; }
+      seen.add(km[1]);
+    }
   }
   if (ghostStart < 0) return { ghost: { removed: false, reason: 'already-clean' } };
-  // 归属判定：_history.yml 存在同 title 的归档条目
+  // 归属判定：_history.yml 存在同 title 的终态条目（行级匹配，不依赖 YAML 解析器对复杂标量的解析）
   const hText = readFileChecked(path.join(ws, 'change-requests', '_history.yml'));
   let archived = false;
-  if (hText != null) {
-    const hDoc = parseYaml(hText);
-    const hList = Array.isArray(hDoc) ? hDoc : hDoc['change-requests'] || hDoc['history'] || [];
-    archived = hList.some((e) => e && e['final-status'] && String(e.title || '').trim() === ghostTitle);
+  if (hText != null && ghostTitle) {
+    archived = hText.replaceAll('\r\n', '\n').split('\n').some((l) => {
+      const tm = l.match(/^\s*title:\s*(.*)$/);
+      return tm && tm[1].replace(/^["']|["']$/g, '').trim() === ghostTitle;
+    });
   }
   if (!archived) {
-    fail('GHOST_ENTRY_ORPHANED', `_backlog.yml 尾部存在无 id 归属的续行块（title=${ghostTitle || '(未解析)'}），但 _history.yml 无对应归档条目，拒绝删除`);
+    fail('GHOST_ENTRY_ORPHANED', `_backlog.yml 条目块内存在无 id 归属的重复字段块（title=${ghostTitle || '(未解析)'}），但 _history.yml 无对应归档条目，拒绝删除`);
   }
-  const cleaned = lines.slice(0, ghostStart).join('\n').replace(/\s+$/, '') + '\n';
+  const cleaned = lines.slice(0, ghostStart).concat(lines.slice(ghostEnd)).join('\n').replace(/\s+$/, '') + '\n';
   casWrite(p, hash, cleaned);
   auditLog(ws, { kind: 'migrate-backlog-ghost', removed: true, title: ghostTitle, by: identity(ws) });
   return { ghost: { removed: true, title: ghostTitle, reason: 'archived-in-history' } };
