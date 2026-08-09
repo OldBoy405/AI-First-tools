@@ -20,7 +20,7 @@
  *        CAS）与 adapters/claude-code 的 PreToolUse hook 在运行时承担，此处仅声明。
  *
  * 零依赖（仅 node: 内置模块），退出码非 0 = 发现不一致，可接入 CI / pre-commit。
- * 解析一律逐行 split('\n') 状态机，不做 indexOf 块切分（CRLF 教训）。
+ * 所有文本读入先规范化 CRLF，再用 split(/\r?\n/) 逐行解析；不做 indexOf 块切分。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,11 +29,15 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 const errors = [];
 
+function readLines(p) {
+  return fs.readFileSync(p, 'utf8').replaceAll('\r\n', '\n').split(/\r?\n/);
+}
+
 // ── skills/_index.yml：active skill id 集合（与 check-skill-matrix.mjs 同款解析）──
 const activeSkills = new Set();
 {
   let curId = null;
-  for (const line of fs.readFileSync(path.join(root, 'skills/_index.yml'), 'utf8').split('\n')) {
+  for (const line of readLines(path.join(root, 'skills/_index.yml'))) {
     const idM = line.match(/^\s*-\s*id:\s*(\S+)/);
     if (idM) { curId = idM[1]; continue; }
     const statusM = line.match(/^\s*status:\s*(\w+)/);
@@ -46,7 +50,7 @@ const callableByActor = {};
 const externalSkills = new Set();
 {
   let actor = null, section = null;
-  for (const line of fs.readFileSync(path.join(root, 'agent-skill-matrix.yml'), 'utf8').split('\n')) {
+  for (const line of readLines(path.join(root, 'agent-skill-matrix.yml'))) {
     const actorM = line.match(/^  (\S[\w-]*):\s*$/);
     if (actorM && !/^\s*(owns|can-call|external|forbidden):/.test(line)) { actor = actorM[1]; section = null; continue; }
     const sectionM = line.match(/^    (owns|can-call|external|forbidden):/);
@@ -64,7 +68,7 @@ const externalSkills = new Set();
 const agents = [];
 {
   let cur = null, inRefs = false;
-  for (const line of fs.readFileSync(path.join(root, 'agents/_index.yml'), 'utf8').split('\n')) {
+  for (const line of readLines(path.join(root, 'agents/_index.yml'))) {
     const idM = line.match(/^\s{2}-\s*id:\s*(\S+)/);
     if (idM) { cur = { id: idM[1], path: null, status: null, references: [] }; agents.push(cur); inRefs = false; continue; }
     if (!cur) continue;
