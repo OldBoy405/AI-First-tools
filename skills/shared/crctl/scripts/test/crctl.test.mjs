@@ -2223,8 +2223,8 @@ test('CR-2026-025 回修 BL-3：重复顶层 reviews: 段 → TRACE_SHAPE 原子
 });
 
 // ── CR-2026-026 TASK-07：dev-plan stage 双轨路由与 repair-target（FR-6/6a/6b/14，SDD §3.1/§3.2/§4.3） ──
-// 说明：dev-start/developing 门禁向量（⑥⑦⑧）与 LOOP_EXHAUSTED（⑨）依赖 TTY/完整审批 fixture，
-// 由实现期人工验收（plan.md §5 checklist）；⑩ 四 stage 回归由本文件既有用例全量覆盖。
+// 门禁向量（⑥⑦⑧⑨）经 code review suggestion-2 落地为 spawnSync 可驱动的非 TTY 等价向量（grant/手写 approval 夹具）；
+// ⑩ 四 stage 回归由本文件既有用例全量覆盖。
 
 function writeDevPlanPayload(ws, cr, verdict, extra = '') {
   const blockers = extra.includes('blockers:') ? '' : 'blockers: []\n';
@@ -2241,7 +2241,7 @@ ${blockers}${extra}dimensions:
 `);
 }
 
-test('CR-2026-026 ①: review-record --stage dev-plan 在 task-breakdown 落盘三账本 + annotation 顶层 repair-target 缺省', () => {
+test('CR-2026-026 ①: review-record --stage dev-plan 在 task-breakdown 落盘三账本 + pass 轨省略 repair-target（suggestion-1）', () => {
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-T1', 'task-breakdown');
@@ -2251,11 +2251,12 @@ test('CR-2026-026 ①: review-record --stage dev-plan 在 task-breakdown 落盘�
     assert.equal(r.stdout.verdict, 'pass');
     assert.equal(r.stdout.attempt, 1);
     const ann = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'dev-plan.yml'), 'utf8');
-    assert.ok(ann.includes('repair-target: write-dev-plan'), '缺省 repair-target 落盘');
+    assert.ok(!ann.includes('repair-target:'), 'pass 轨 annotation 省略 repair-target（suggestion-1）');
     assert.ok(ann.includes('review-type: dev-plan'));
     const trace = readTrace(ws, 'CR-T1');
     assert.ok(trace.includes('reviews:\n  dev-plan:'), 'traceability 投影');
-    assert.ok(trace.includes('repair-target: write-dev-plan'), '投影 repair-target');
+    assert.ok(!/^    repair-target:/m.test(trace), 'pass 轨投影顶层省略 repair-target');
+    assert.ok(trace.includes('          repair-target: write-dev-plan'), 'attempts 轮次历史保留缺省 repair-target（schema 稳定）');
     const loop = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-loop.yml'), 'utf8');
     assert.ok(loop.includes('review-dev-plan'), 'review-loop ref');
     assert.equal(existsSync(payload), false, 'payload 已删除');
@@ -2308,6 +2309,8 @@ test('CR-2026-026 ④: NORMAL/PASS 路由走既有 bump：attempt 递增', () =>
     writeDevPlanPayload(ws, 'CR-T1', 'block');
     let r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
     assert.equal(r.stdout.attempt, 1);
+    const ann1 = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'dev-plan.yml'), 'utf8');
+    assert.ok(ann1.includes('repair-target: write-dev-plan'), '普通 block 轨缺省 repair-target 落盘');
     writeDevPlanPayload(ws, 'CR-T1', 'pass');
     r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
     assert.equal(r.stdout.attempt, 2, '普通轨/PASS attempt 递增');
@@ -2327,5 +2330,129 @@ test('CR-2026-026 ⑤: 并存优先——repair-target=write-tech-design 且普�
     assert.ok(ann.includes('repair-target: write-tech-design'), '并存时 upstream 优先');
     const trace = readTrace(ws, 'CR-T1');
     assert.ok(trace.includes('current-attempt: 0'), '无历史时并存不递增（保持 0）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-026 code review suggestion-2：门禁向量自动化（⑥-⑨，非 TTY 等价） ──
+// 夹具：真实 Ed25519 密钥 + 三文件证据（dev-plan.yml/plan.md/tasks/_index.yml），
+// evidence digest 顺序与 canonicalEvidenceDigest 一致（evidence 值字典序：plan.md < review-annotations < tasks）。
+
+function makeDevStartWorkspace() {
+  const ws = makeWorkspace();
+  // approve 级联 advance 需要 git 仓（与 makeGrantWorkspace 同款）
+  const g = (args) => { const r = spawnSync('git', args, { cwd: ws, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
+  g(['init', '-b', 'master']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 'tester']);
+  writeCrEntry(ws, 'CR-D1', 'task-breakdown');
+  writeEvidence(ws, 'CR-D1', 'review-annotations/dev-plan.yml', 'cr-id: CR-D1\nreview-type: dev-plan\nverdict: pass\nblockers: []\ndimensions:\n  sdd-to-plan: ok\n');
+  writeEvidence(ws, 'CR-D1', 'plan.md', '# plan\n');
+  writeEvidence(ws, 'CR-D1', 'tasks/_index.yml', 'tasks:\n  - id: CR-D1-TASK-01\n');
+  writeEvidence(ws, 'CR-D1', 'tasks/TASK-01.md', '# TASK-01\n');
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  mkdirSync(path.join(ws, '.crctl', 'keys'), { recursive: true });
+  writeFileSync(path.join(ws, '.crctl', 'keys', 'approval-test.pub'), publicKey.export({ type: 'spki', format: 'pem' }));
+  return { ws, privateKey };
+}
+
+function devStartEvidenceTexts(ws) {
+  return [
+    readFileSync(path.join(ws, 'change-requests', 'CR-D1', 'plan.md'), 'utf8'),
+    readFileSync(path.join(ws, 'change-requests', 'CR-D1', 'review-annotations', 'dev-plan.yml'), 'utf8'),
+    readFileSync(path.join(ws, 'change-requests', 'CR-D1', 'tasks', '_index.yml'), 'utf8'),
+  ];
+}
+
+function makeDevStartGrant(ws, privateKey, overrides = {}) {
+  const grant = {
+    v: 1, cr_id: 'CR-D1', stage: 'dev-start', decision: 'approve',
+    approver: 'alice@corp', approved_at: '2026-08-09T10:30:00+08:00',
+    evidence_digest: canonicalDigestOf(devStartEvidenceTexts(ws)),
+    key_id: 'approval-test',
+    ...overrides,
+  };
+  const canonical = `v1|${grant.cr_id}|${grant.stage}|${grant.decision}|${grant.approver}|${grant.approved_at}|${grant.evidence_digest}`;
+  grant.signature = overrides.signature ?? cryptoSign(null, Buffer.from(canonical, 'utf8'), privateKey).toString('base64');
+  const gp = path.join(ws, 'grant.json');
+  writeFileSync(gp, JSON.stringify(grant, null, 2));
+  return gp;
+}
+
+function writeDevStartApproval(ws, extra = {}) {
+  writeApprovalYml(ws, 'CR-D1', 'development-start', {
+    approver: 'alice', 'approved-at': '2026-08-09T10:30:00+08:00', via: 'crctl-approve',
+    'evidence-digest': canonicalDigestOf(devStartEvidenceTexts(ws)), 'target-status': 'developing',
+    ...extra,
+  });
+}
+
+test('CR-2026-026 ⑥: approve --grant dev-start 门禁升级生效（evidence+passCondition），非 TTY 放行到 developing（FR-10）', () => {
+  const { ws, privateKey } = makeDevStartWorkspace();
+  try {
+    const gp = makeDevStartGrant(ws, privateKey);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'dev-start', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.to, 'developing');
+    const approval = readFileSync(path.join(ws, 'change-requests', 'CR-D1', 'approval.yml'), 'utf8');
+    assert.match(approval, /development-start:/);
+    assert.match(approval, /evidence-digest: /);
+    assert.match(approval, /via: server-approve/);
+    const state = runCrctl(['status', 'CR-D1', '--workspace', ws]);
+    assert.equal(state.stdout.status, 'developing', '级联推进 developing');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-026 ⑥b: dev-plan 评审未通过（verdict=block）→ approve --grant dev-start 被 GATE_BLOCKED，不写审批（AC-10）', () => {
+  const { ws, privateKey } = makeDevStartWorkspace();
+  try {
+    writeEvidence(ws, 'CR-D1', 'review-annotations/dev-plan.yml', 'cr-id: CR-D1\nreview-type: dev-plan\nverdict: block\nblockers:\n  - "x"\ndimensions:\n  sdd-to-plan: ok\n');
+    const gp = makeDevStartGrant(ws, privateKey); // digest 与签名均按 block 版本重签，证明拦截来自 passCondition 而非 digest
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'dev-start', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'GATE_BLOCKED');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-D1', 'approval.yml')), false, '不写合法审批段');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-026 ⑦: developing 目标态门禁——缺 TASK-*.md 时 advance 被拦截，补齐后放行（AC-11a）', () => {
+  const ws = makeDevStartWorkspace().ws;
+  try {
+    rmSync(path.join(ws, 'change-requests', 'CR-D1', 'tasks', 'TASK-01.md'));
+    writeDevStartApproval(ws); // 合法审批段（digest 匹配当前证据）
+    let r = runCrctl(['advance', 'CR-D1', '--to', 'developing', '--trigger', 'approve-dev-start', '--expect', 'task-breakdown', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'GATE_BLOCKED');
+    writeEvidence(ws, 'CR-D1', 'tasks/TASK-01.md', '# TASK-01\n');
+    r = runCrctl(['advance', 'CR-D1', '--to', 'developing', '--trigger', 'approve-dev-start', '--expect', 'task-breakdown', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-026 ⑧: 审批后篡改 dev-plan 证据 → gate 检出 EVIDENCE_DRIFT 且 advance 被拦截（AC-12）', () => {
+  const ws = makeDevStartWorkspace().ws;
+  try {
+    writeDevStartApproval(ws);
+    writeEvidence(ws, 'CR-D1', 'review-annotations/dev-plan.yml', 'cr-id: CR-D1\nreview-type: dev-plan\nverdict: pass\nblockers: []\n# tampered\ndimensions:\n  sdd-to-plan: ok\n');
+    const g = runCrctl(['gate', 'CR-D1', '--for', 'developing', '--workspace', ws]);
+    const check = g.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(check.ok, false);
+    assert.equal(check.code, 'EVIDENCE_DRIFT');
+    const r = runCrctl(['advance', 'CR-D1', '--to', 'developing', '--trigger', 'approve-dev-start', '--expect', 'task-breakdown', '--workspace', ws]);
+    assert.equal(r.status, 1, 'advance 被拦截');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-026 ⑨: 三轮普通 BLOCK 后第 4 轮 --bump-attempt → LOOP_EXHAUSTED（AC-13）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    for (let i = 1; i <= 3; i++) {
+      writeDevPlanPayload(ws, 'CR-T1', 'block');
+      const r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+      assert.equal(r.status, 0, r.rawStderr);
+      assert.equal(r.stdout.attempt, i);
+    }
+    writeDevPlanPayload(ws, 'CR-T1', 'block');
+    const r4 = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r4.status, 1);
+    assert.equal(r4.stderr.error.code, 'LOOP_EXHAUSTED');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });

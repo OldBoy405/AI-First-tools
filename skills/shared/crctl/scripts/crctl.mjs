@@ -1440,7 +1440,7 @@ function renderReviewsStageBlock(stage, p) {
   L.push(`    reviewed-at: "${p.recordedAt}"`);
   L.push(`    blocker-count: ${p.blockerCount}`);
   L.push(`    annotation: "${p.annotationRel}"`);
-  L.push(`    repair-target: ${p.repairTarget}`);
+  if (p.repairTarget != null) L.push(`    repair-target: ${p.repairTarget}`); // suggestion-1：pass 轨顶层省略
   L.push('    review-loop:');
   L.push(`      current-attempt: ${p.current}`);
   L.push(`      max-attempts: ${p.max}`);
@@ -1528,7 +1528,9 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   const reviewer = identity(ws);
   const blockerCount = payload.blockers.length;
   // 上游疑点轨的 repair-target 为 write-tech-design（覆盖映射默认，TD-BL-1：顶层字段落盘）
-  const repairTarget = (stage === 'dev-plan' && devPlanRoute === 'upstream') ? 'write-tech-design' : REVIEW_REPAIR_TARGETS[stage];
+  const routeRepairTarget = (stage === 'dev-plan' && devPlanRoute === 'upstream') ? 'write-tech-design' : REVIEW_REPAIR_TARGETS[stage];
+  // suggestion-1（code review attempt-1）：pass 轨顶层省略 repair-target（annotation/投影顶层无回修语义），轮次历史保留缺省
+  const repairTarget = (stage === 'dev-plan' && devPlanRoute === 'pass') ? null : routeRepairTarget;
 
   // ── traceability：读取 + 结构校验 + attempts 历史合并（全部在任何写入之前，FR-17）──
   const tracePath = path.join(crDir(ws, cr), 'traceability.yml');
@@ -1571,13 +1573,13 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     if (oldAttempts.some((e) => Number(e.attempt) === nextNo)) {
       fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 已含第 ${nextNo} 轮，不得静默覆盖历史`);
     }
-    mergedAttempts = [...oldAttempts, { attempt: nextNo, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': repairTarget }];
+    mergedAttempts = [...oldAttempts, { attempt: nextNo, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': routeRepairTarget }];
     projCurrent = nextNo;
   } else {
     projCurrent = att.current;
     if (att.current > 0) {
       // 刷新当前轮证据：命中整条替换、未命中追加；不新增轮次
-      const entry = { attempt: att.current, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': repairTarget };
+      const entry = { attempt: att.current, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': routeRepairTarget };
       mergedAttempts = oldAttempts.some((e) => Number(e.attempt) === att.current)
         ? oldAttempts.map((e) => (Number(e.attempt) === att.current ? entry : e))
         : [...oldAttempts, entry];
@@ -1597,7 +1599,7 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     `reviewer: "${reviewer}"`,
     `reviewed-at: "${recordedAt}"`,
     `verdict: ${payload.verdict}`,
-    ...(stage === 'dev-plan' ? [`repair-target: ${repairTarget}`] : []), // CR-2026-026：dev-plan annotation 顶层字段（TD-BL-1）
+    ...(stage === 'dev-plan' && payload.verdict === 'block' ? [`repair-target: ${repairTarget}`] : []), // CR-2026-026：dev-plan annotation 顶层字段（TD-BL-1）；pass 轨省略（suggestion-1）
     payload.blockers.length === 0 ? 'blockers: []' : 'blockers:',
     ...payload.blockers.map((b) => `  - ${yamlOf(b)}`),
     'dimensions:',
