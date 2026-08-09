@@ -840,7 +840,8 @@ function editArchiveMove(textB, textH, cr, meta) {
   const newBacklog = normB.slice(0, block.start) + normB.slice(block.end);
   const normH = textH == null ? '' : textH.replaceAll('\r\n', '\n');
   if (normH && matchEntryBlock(normH, cr)) fail('ENTRY_ALREADY_IN_HISTORY', `${cr} 已在 _history.yml，禁止重复归档`);
-  const minIndent = Math.min(...block.text.split('\n').map((l) => (l.match(/^[ \t]*/) || [''])[0].length));
+  // minIndent 必须排除空行（block.text 结尾换行会产生空串，其缩进为 0，会把整块错压成 +2 缩进——CR-2026-027 TASK-07 实测）
+  const minIndent = Math.min(...block.text.split('\n').filter((l) => l.trim() !== '').map((l) => (l.match(/^[ \t]*/) || [''])[0].length));
   const entry = block.text.split('\n').map((l) => '  ' + l.slice(minIndent)).join('\n');
   const reason = String(meta.archiveReason || '').replaceAll('"', '\\"');
   const enrich = [
@@ -946,6 +947,45 @@ function resolveCrState(ws, cr) {
   fail('CR_MD_STATUS_MISSING', `${cr} 在 cr.md 与 _backlog.yml 中均无 status`);
 }
 
+// CR-2026-027 FR-12/TASK-07：终态只读查询——从 _history.yml 找 CR 条目（仅 status/next 使用；写命令不 fallback）。
+// 行级解析（兼容新旧两种缩进：archive-move 旧版 4 空格条目 + 新版 2 空格条目），不依赖 YAML 解析器对嵌套缩进的解析。
+function findHistoryEntry(ws, cr) {
+  const hText = readFileChecked(path.join(ws, 'change-requests', '_history.yml'));
+  if (hText == null) return null;
+  const lines = hText.replaceAll('\r\n', '\n').split('\n');
+  let idLine = -1, indent = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^"'\s]+)["']?\s*$/);
+    if (m && m[2] === cr) { idLine = i; indent = m[1].length; break; }
+  }
+  if (idLine < 0) return null;
+  const entry = { id: cr };
+  for (let i = idLine + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.trim() === '') continue;
+    const ind = l.match(/^[ \t]*/)[0].length;
+    if (ind < indent) break;
+    const km = l.match(/^\s*([a-zA-Z0-9_-]+):\s*(.*)$/);
+    if (km && ind >= indent) entry[km[1]] = km[2].replace(/^["']|["']$/g, '').trim();
+  }
+  return entry;
+}
+
+// CR-2026-027 FR-12/TASK-07：终态前置检测（status/next 专用）。命中 history 时：
+// backlog 同存同 CR → CR_LOCATION_CONFLICT 硬失败；history 缺 final-status → 硬失败；否则返回终态条目。
+function resolveTerminalForQuery(ws, cr) {
+  const hist = findHistoryEntry(ws, cr);
+  if (!hist) return null;
+  const bText = readFileChecked(backlogPath(ws));
+  if (bText != null) {
+    const bDoc = parseYaml(bText);
+    const bList = Array.isArray(bDoc) ? bDoc : bDoc['change-requests'] || [];
+    if (bList.some((e) => e && e.id === cr)) fail('CR_LOCATION_CONFLICT', `${cr} 同时存在于 _backlog.yml 与 _history.yml，数据冲突`, { location: 'both' });
+  }
+  if (hist['final-status'] == null) fail('HISTORY_FINAL_STATUS_MISSING', `${cr} 在 _history.yml 中缺少 final-status，终态查询失败`);
+  return hist;
+}
+
 /* ────────────────────────── attempts（review-loop 轮次记账） ────────────────────────── */
 
 function attemptsFilePath(ws, cr) { return path.join(crDir(ws, cr), 'review-loop.yml'); }
@@ -1041,6 +1081,12 @@ function detectStatusDivergence(ws, cr, currentStatus) {
 /* ────────────────────────── 子命令实现 ────────────────────────── */
 
 function cmdStatus(ws, cr, gates, flags) {
+  // CR-2026-027 FR-12/TASK-07：终态只读查询（history final-status 为权威；写命令不 fallback）
+  const terminal = resolveTerminalForQuery(ws, cr);
+  if (terminal) {
+    ok({ cr, status: String(terminal['final-status']), terminal: true, source: { history: 'change-requests/_history.yml' }, legalNext: [], reviewLoops: {}, gateBlockers: {}, next: null });
+    return;
+  }
   const { sm, source } = loadStateMachine(ws);
   const state = resolveCrState(ws, cr);
   const snap = state.snap;
@@ -2134,6 +2180,10 @@ function cmdInboxEmit(ws, cr, gates, flags) {
     try { to = JSON.parse(flags.to); } catch { to = String(flags.to).split(',').map((s) => s.trim()).filter(Boolean); }
     if (!Array.isArray(to)) to = [String(to)];
   }
+  // CR-2026-027 FR-11/TASK-07：--to 缺失、解析后非列表、去重后为空 → BAD_ARGS（与 Skill 契约对齐，B-13，不写无收件人 notify-log）
+  if (flags.to === undefined || !Array.isArray(to) || to.length === 0) {
+    fail('BAD_ARGS', 'inbox-emit 需要非空 --to <a,b>（缺失或去重后为空均拒绝，不写无收件人 notify-log）');
+  }
   let payload = null;
   if (flags.payload) {
     try { payload = JSON.parse(flags.payload); } catch { fail('BAD_ARGS', `--payload 不是合法 JSON: ${flags.payload}`); }
@@ -2724,6 +2774,12 @@ function migrateGhostCleanup(ws, text, hash, p) {
 }
 
 function cmdNext(ws, cr, gates, flags) {
+  // CR-2026-027 FR-12/TASK-07：终态只读查询（next:null 不报错；写命令不 fallback）
+  const terminal = resolveTerminalForQuery(ws, cr);
+  if (terminal) {
+    ok({ cr, status: String(terminal['final-status']), terminal: true, source: { history: 'change-requests/_history.yml' }, legalNext: [], reviewLoops: {}, gateBlockers: {}, next: null, humanApproval: false, why: '终态 CR：无后继节点' });
+    return;
+  }
   const state = resolveCrState(ws, cr);
   const status = state.status;
   const ev = (rel) => readEvidenceDoc(ws, cr, rel);
@@ -2758,15 +2814,41 @@ function cmdNext(ws, cr, gates, flags) {
     }
     case 'tech-design-review-pending': {
       const a = ev('change-requests/{cr}/review-annotations/sdd.yml');
+      if (!a.exists) return suggest('review-tech-design', '缺少 sdd.yml 评审记录，先跑 review-tech-design');
+      // CR-2026-027 FR-16/TASK-07：SDD freshness——subject digest 不一致 → 重审（旧 PASS 不得直接建议审批）
+      const sddPath = path.join(crDir(ws, cr), 'sdd.md');
+      if (fs.existsSync(sddPath) && a.data && a.data['subject-sha256'] != null) {
+        const curSha = sha256(fs.readFileSync(sddPath, 'utf8').replaceAll('\r\n', '\n'));
+        if (curSha !== a.data['subject-sha256']) return suggest('review-tech-design', 'SDD 已修订（subject digest 不一致），重新评审刷新证据');
+      }
+      // CR-2026-027 FR-16/TASK-07：较新的 dev-plan upstream blocker → 重审（即使旧 PASS；legacy 无 digest 同样适用）
+      const dp = ev('change-requests/{cr}/review-annotations/dev-plan.yml');
+      const upstreamStale = dp.exists && dp.data && dp.data.verdict === 'block'
+        && dp.data['repair-target'] === 'write-tech-design'
+        && String(dp.data['reviewed-at'] || '') > String(a.data && a.data['reviewed-at'] || '');
+      if (upstreamStale) return suggest('review-tech-design', '存在较新的 dev-plan 上游设计疑点（upstream blocker），技术评审证据过时，重新评审');
       if (passAndClean(a)) return suggest('crctl approve --stage tech-design', '技术评审 pass 且无 blocker，等待人工审批', true);
-      return suggest('write-tech-design', a.exists ? `评审未通过（verdict=${a.data?.verdict}），按 blocker 回修 SDD` : '缺少 sdd.yml 评审记录，先跑 review-tech-design');
+      return suggest('write-tech-design', `评审未通过（verdict=${a.data && a.data.verdict}），按 blocker 回修 SDD`);
     }
     case 'tech-design-reviewed': return suggest('write-dev-plan', '技术设计已审批，编写开发计划');
     case 'task-breakdown': {
       const planOk = fs.existsSync(path.join(crDir(ws, cr), 'plan.md'));
       const tasksOk = fs.existsSync(path.join(crDir(ws, cr), 'tasks'));
-      if (planOk && tasksOk) return suggest('crctl approve --stage dev-start', 'plan 与 tasks 就绪，等待开发启动人工确认', true);
-      return suggest(planOk ? 'write-dev-tasks' : 'write-dev-plan', '开发计划或任务拆分缺失');
+      if (!planOk) return suggest('write-dev-plan', 'plan.md 缺失');
+      if (!tasksOk) return suggest('write-dev-tasks', 'tasks/ 缺失');
+      // CR-2026-027 FR-16/TASK-07：canonical dev-plan.yml 判定（缺失/畸形 → 评审；PASS → 审批；BLOCK → 按 annotation 重算 route）
+      const dp = ev('change-requests/{cr}/review-annotations/dev-plan.yml');
+      if (!dp.exists || !dp.data || !['pass', 'block'].includes(dp.data.verdict) || !Array.isArray(dp.data.blockers)) {
+        return suggest('review-dev-plan', dp.exists ? 'dev-plan.yml 畸形（缺 verdict/blockers），重跑评审' : '缺少 dev-plan.yml 评审记录，先跑 review-dev-plan');
+      }
+      if (dp.data.verdict === 'pass' && dp.data.blockers.length === 0) {
+        return suggest('crctl approve --stage dev-start', '开发计划评审 pass 且无 blocker，等待开发启动人工确认', true);
+      }
+      const route = resolveDevPlanRoute(dp.data);
+      if (route === 'upstream') return suggest('write-tech-design', '开发计划评审发现上游设计疑点（repair-target=write-tech-design），先修订 SDD');
+      const att = readAttempts(ws, cr, 'review-dev-plan', gates);
+      if (att.exhausted) return suggest(null, '开发计划评审已 LOOP_EXHAUSTED（当前 cycle 3/3），需人工处理剩余 blocker', true);
+      return suggest('write-dev-plan', `开发计划评审未通过（blockers=${dp.data.blockers.length} 条），回修 plan/TASK`);
     }
     case 'developing': {
       const tr = ev('change-requests/{cr}/test-report.md');

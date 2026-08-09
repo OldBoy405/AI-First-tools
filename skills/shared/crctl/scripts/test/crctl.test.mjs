@@ -2538,6 +2538,117 @@ test('CR-2026-027 FR-16：post-PASS SDD 修订 + 较新 upstream blocker → tec
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+// ── CR-2026-027 TASK-07：终态查询 / next 路由 freshness / inbox-emit 校验（FR-12/FR-16/FR-11）──
+test('CR-2026-027 FR-12：终态 CR status/next 只读查询（archived/rejected/withdrawn → terminal + next:null），冲突/缺 final-status 硬失败', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-OLD', status: 'archived' }, { id: 'CR-OTHER', status: 'drafting' }]); // 常驻条目：backlog 归档后保持非空
+    writeCrMd(ws, 'CR-OLD', 'archived');
+    writeCrMd(ws, 'CR-OTHER', 'drafting');
+    writeIndex(ws, [{ id: 'CR-OLD', title: 'O', status: 'archived', created: '2026-08-01T00:00:00+08:00' }]);
+    runCrctl(['archive-move', 'CR-OLD', '--final-status', 'archived', '--workspace', ws]);
+    // status/next 终态查询
+    const st = runCrctl(['status', 'CR-OLD', '--workspace', ws]);
+    assert.equal(st.status, 0);
+    assert.equal(st.stdout.status, 'archived');
+    assert.equal(st.stdout.terminal, true);
+    assert.deepEqual(st.stdout.source, { history: 'change-requests/_history.yml' });
+    assert.equal(st.stdout.next, null);
+    const nx = runCrctl(['next', 'CR-OLD', '--workspace', ws]);
+    assert.equal(nx.status, 0, '终态 next 不报错');
+    assert.equal(nx.stdout.next, null);
+    assert.equal(nx.stdout.status, 'archived');
+    // 写命令对终态维持拒绝（不 fallback 引入可写性）
+    const adv = runCrctl(['advance', 'CR-OLD', '--to', 'drafting', '--trigger', 'x', '--workspace', ws]);
+    assert.equal(adv.status, 1);
+    assert.equal(adv.stderr.error.code, 'CR_STATUS_NOT_FOUND');
+    // history 缺 final-status → 硬失败（CR-BAD 仅存在于 history，不写 backlog）
+    writeFileSync(path.join(ws, 'change-requests', '_history.yml'), 'history:\n  - id: CR-BAD\n');
+    const bad = runCrctl(['next', 'CR-BAD', '--workspace', ws]);
+    assert.equal(bad.status, 1);
+    assert.equal(bad.stderr.error.code, 'HISTORY_FINAL_STATUS_MISSING');
+    // backlog/history 同存 → CR_LOCATION_CONFLICT（CR-DUP 同时出现在两处）
+    const bpFile = path.join(ws, 'change-requests', '_backlog.yml');
+    writeFileSync(bpFile, readFileSync(bpFile, 'utf8') + '  - id: CR-DUP\n    status: withdrawn\n');
+    writeFileSync(path.join(ws, 'change-requests', '_history.yml'), 'history:\n  - id: CR-DUP\n    final-status: withdrawn\n');
+    const dup = runCrctl(['next', 'CR-DUP', '--workspace', ws]);
+    assert.equal(dup.status, 1);
+    assert.equal(dup.stderr.error.code, 'CR_LOCATION_CONFLICT');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 FR-16：next task-breakdown 路由 —— 无/畸形 dev-plan → review-dev-plan；PASS → approve dev-start；repair/upstream/exhausted 正确分流', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    mkdirSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks'), { recursive: true });
+    writeFileSync(path.join(ws, 'change-requests', 'CR-T1', 'plan.md'), '# plan\n');
+    writeFileSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml'), 'tasks: []\n');
+    // 无 dev-plan.yml → review-dev-plan（不得误报 approve dev-start）
+    let r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.stdout.next, 'review-dev-plan');
+    // 畸形 → review-dev-plan
+    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', 'cr-id: CR-T1\nverdict: maybe\n');
+    r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.stdout.next, 'review-dev-plan');
+    // PASS → approve dev-start
+    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', 'cr-id: CR-T1\nreviewer: "r"\nreviewed-at: "2026-08-10T00:00:00+08:00"\nverdict: pass\nblockers: []\n');
+    r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.stdout.next, 'crctl approve --stage dev-start');
+    assert.equal(r.stdout.humanApproval, true);
+    // repair BLOCK → write-dev-plan
+    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', 'cr-id: CR-T1\nreviewer: "r"\nreviewed-at: "2026-08-10T00:00:00+08:00"\nverdict: block\nblockers:\n  - "b1"\n');
+    r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.stdout.next, 'write-dev-plan');
+    // upstream BLOCK → write-tech-design
+    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', 'cr-id: CR-T1\nreviewer: "r"\nreviewed-at: "2026-08-10T00:00:00+08:00"\nverdict: block\nrepair-target: write-tech-design\nblockers:\n  - "up"\n');
+    r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.stdout.next, 'write-tech-design');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 FR-16：tech-design-review-pending freshness —— SDD digest 不一致/较新 upstream blocker → review-tech-design；fresh PASS → approve', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-review-pending');
+    writeEvidence(ws, 'CR-T1', 'sdd.md', '---\nid: CR-T1-sdd\n---\nv1\n');
+    // 旧 PASS annotation（含 digest）
+    const digestV1 = crypto.createHash('sha256').update('---\nid: CR-T1-sdd\n---\nv1\n', 'utf8').digest('hex');
+    writeEvidence(ws, 'CR-T1', 'review-annotations/sdd.yml', `cr-id: CR-T1\nreviewer: "r"\nreviewed-at: "2026-08-09T00:00:00+08:00"\nverdict: pass\nblockers: []\nsubject-file: change-requests/CR-T1/sdd.md\nsubject-sha256: ${digestV1}\n`);
+    // fresh PASS → approve tech-design
+    let r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.stdout.next, 'crctl approve --stage tech-design');
+    // SDD 修订（digest 变化）→ review-tech-design
+    writeEvidence(ws, 'CR-T1', 'sdd.md', '---\nid: CR-T1-sdd\n---\nv2\n');
+    r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.stdout.next, 'review-tech-design');
+    // 较新的 dev-plan upstream blocker（SDD 未再动）→ review-tech-design
+    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', 'cr-id: CR-T1\nreviewer: "r"\nreviewed-at: "2026-08-10T00:00:00+08:00"\nverdict: block\nrepair-target: write-tech-design\nblockers:\n  - "up"\n');
+    r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.stdout.next, 'review-tech-design');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 FR-11：inbox-emit 空 --to 拒绝 —— 缺失/空串/去重后为空 → BAD_ARGS 且不写 notify-log', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    // 缺失 --to
+    let r = runCrctl(['inbox-emit', 'CR-T1', '--event', 'note', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'BAD_ARGS');
+    // 空串
+    r = runCrctl(['inbox-emit', 'CR-T1', '--event', 'note', '--to', '', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'BAD_ARGS');
+    const backlog = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.ok(!backlog.includes('notify-log'), '无收件人时不得写 notify-log');
+    // 正常 --to 仍工作
+    r = runCrctl(['inbox-emit', 'CR-T1', '--event', 'note', '--to', 'alice', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
 // ── CR-2026-026 TASK-07：dev-plan stage 双轨路由与 repair-target（FR-6/6a/6b/14，SDD §3.1/§3.2/§4.3） ──
 // 门禁向量（⑥⑦⑧⑨）经 code review suggestion-2 落地为 spawnSync 可驱动的非 TTY 等价向量（grant/手写 approval 夹具）；
 // ⑩ 四 stage 回归由本文件既有用例全量覆盖。
