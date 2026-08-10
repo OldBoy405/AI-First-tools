@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -1928,15 +1928,20 @@ test('worktree-path：确定性路径输出且不写任何文件（AC-6）', () 
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-test('worktree-path：linked worktree 内调用以主 checkout 为根、无嵌套 .rayai-worktrees（CR-2026-028 FR-2）', () => {
-  const ws = makeWorkspace();
+test('worktree-path：linked worktree 内同时以主 checkout 解析相对 Tools Root 与 worktree 根（CR-2026-028 FR-2）', () => {
+  const fixture = makeToolsFixture();
+  const ws = makeWorkspace({ toolsRoot: fixture });
   const wt = path.join(ws, 'linked-worktree');
   try {
+    // 相对声明必须以 Installation Workspace（主 checkout）为基准，而不是 linked worktree。
+    writeFileSync(path.join(ws, 'dir-graph.yaml'),
+      `workspace:\n  tools_package_path: ${JSON.stringify(path.relative(ws, fixture))}\n`, 'utf8');
     // 初始化 git 主仓并提交，使 linked worktree 的 common-dir 指向主 checkout 的 .git
     spawnSync('git', ['init', '-b', 'main'], { cwd: ws, encoding: 'utf8', shell: false });
     spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ws, encoding: 'utf8', shell: false });
     spawnSync('git', ['config', 'user.name', 'test'], { cwd: ws, encoding: 'utf8', shell: false });
     writeCrEntry(ws, 'CR-T1', 'drafting');
+    writeCrEntry(ws, 'CR-S1', 'sentinel-drafting');
     spawnSync('git', ['add', '.'], { cwd: ws, encoding: 'utf8', shell: false });
     const ci = spawnSync('git', ['commit', '-m', 'init'], { cwd: ws, encoding: 'utf8', shell: false });
     assert.equal(ci.status, 0, '主仓初始提交成功');
@@ -1944,7 +1949,11 @@ test('worktree-path：linked worktree 内调用以主 checkout 为根、无嵌�
     const wa = spawnSync('git', ['worktree', 'add', '-b', 'requirement/CR-T1', wt], { cwd: ws, encoding: 'utf8', shell: false });
     assert.equal(wa.status, 0, `linked worktree 创建成功: ${wa.stderr}`);
 
-    // 从 linked worktree 内调用：根基准必须是主 checkout（ws），不得拼出 <wt>/.rayai-worktrees/...
+    // 从 linked worktree 调用 sentinel 转换，证明相对 Tools Root 以主 checkout 为基准解析。
+    const sentinel = runCrctl(['advance', 'CR-S1', '--to', 'sentinel-reviewing', '--trigger', 'sentinel-advance', '--no-commit', '--workspace', wt]);
+    assert.equal(sentinel.status, 0, `linked worktree 相对 Tools Root 生效: ${sentinel.rawStderr}`);
+
+    // worktree 根基准同样必须是主 checkout（ws），不得拼出 <wt>/.rayai-worktrees/...
     const r = runCrctl(['worktree-path', 'CR-T1', '--repo', 'ai-first-platform-docs', '--workspace', wt]);
     assert.equal(r.status, 0, `linked worktree 调用成功: ${r.rawStderr}`);
     const p = r.stdout.path.replaceAll('\\', '/');
@@ -1955,7 +1964,10 @@ test('worktree-path：linked worktree 内调用以主 checkout 为根、无嵌�
     // 主 checkout 调用行为不变
     const r2 = runCrctl(['worktree-path', 'CR-T1', '--repo', 'multica', '--workspace', ws]);
     assert.ok(r2.stdout.path.replaceAll('\\', '/').endsWith('.rayai-worktrees/multica/requirement/CR-T1'));
-  } finally { rmSync(ws, { recursive: true, force: true }); }
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test('report/cr-metrics：状态直方图 + 周期活动计数（AC-6）', () => {
@@ -3258,6 +3270,36 @@ test('CR-2026-027 回修 b10：approve --resign 非交互式调用拒绝（人�
 
 // ── CR-2026-028 FR-1/FR-3/FR-4：Tools Root 唯一解析（TASK-02/03，AC-6/AC-7/AC-8）──
 
+test('resolveToolsRoot：相对/绝对声明归一到同一 realpath，workspace 空壳 tools 不参与回退（AC-1/AC-3）', () => {
+  const fixture = makeToolsFixture();
+  const absWs = makeWorkspace({ toolsRoot: fixture });
+  const relWs = makeWorkspace({ toolsRoot: fixture });
+  try {
+    for (const ws of [absWs, relWs]) writeCrEntry(ws, 'CR-T1', 'sentinel-drafting');
+    mkdirSync(path.join(relWs, 'tools'), { recursive: true }); // 同名空壳不得成为候选
+    const relative = path.relative(relWs, fixture);
+    writeFileSync(path.join(relWs, 'dir-graph.yaml'),
+      `workspace:\n  tools_package_path: ${JSON.stringify(relative)}\n`, 'utf8');
+
+    const abs = runCrctl(['status', 'CR-T1', '--workspace', absWs]);
+    const rel = runCrctl(['status', 'CR-T1', '--workspace', relWs]);
+    assert.equal(abs.status, 0, abs.rawStderr);
+    assert.equal(rel.status, 0, rel.rawStderr);
+    assert.equal(realpathSync(abs.stdout.source.stateMachine), realpathSync(rel.stdout.source.stateMachine), '相对/绝对声明归一到同一状态机来源');
+    assert.ok(!rel.stdout.source.stateMachine.replaceAll('\\', '/').includes('/tools/dir-graph.yaml'), '不读取 workspace 空壳 tools');
+
+    writeFileSync(path.join(relWs, 'dir-graph.yaml'), 'workspace:\n  tools_package_path: ./missing-tools\n', 'utf8');
+    const broken = runCrctl(['status', 'CR-T1', '--workspace', relWs]);
+    assert.equal(broken.status, 1, '声明破坏后硬失败，不回退空壳 tools');
+    assert.equal(broken.stderr.error.code, 'TOOLS_PACKAGE_NOT_FOUND');
+    assert.equal(broken.stderr.error.reason, 'path-not-exists');
+  } finally {
+    rmSync(absWs, { recursive: true, force: true });
+    rmSync(relWs, { recursive: true, force: true });
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('resolveToolsRoot：缺失/无效 tools_package_path 硬失败 TOOLS_PACKAGE_NOT_FOUND（表驱动，零回退）', () => {
   const cases = [
     { name: '缺 dir-graph.yaml', mutate: (ws) => rmSync(path.join(ws, 'dir-graph.yaml')) },
@@ -3340,6 +3382,22 @@ test('四类配置来自同一 Tools Root：rules sentinel 形状生效（AC-6�
     const r = runCrctl(['git', 'status', '--short', '--workspace', ws]);
     assert.equal(r.status, 1, 'fixture rules 只允许 --sentinel-shape');
     assert.equal(r.stderr.error.code, 'FORBIDDEN_SUBCOMMAND', 'git status 无 sentinel 形状 → 拒绝（rules 来自 fixture 而非真实 tools）');
+  } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('CRCTL_RULES_PATH：有效显式 rules 优先于 Tools Root 默认 rules（AC-7）', () => {
+  const fixture = makeToolsFixture();
+  const ws = makeWorkspace({ toolsRoot: fixture });
+  try {
+    const init = spawnSync('git', ['init', '-b', 'main'], { cwd: ws, encoding: 'utf8', shell: false });
+    assert.equal(init.status, 0, init.stderr);
+    const override = path.join(ws, 'rules-override.json');
+    writeFileSync(override, JSON.stringify({
+      git: [{ sub: 'status', shapes: ['^--short$'] }],
+      forbiddenFlags: ['-c', '-C', '--exec'],
+    }), 'utf8');
+    const r = runCrctl(['git', 'status', '--short', '--workspace', ws], { CRCTL_RULES_PATH: override });
+    assert.equal(r.status, 0, `有效显式覆盖应允许 --short（fixture 默认仅允许 --sentinel-shape）: ${r.rawStderr}`);
   } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
 });
 

@@ -21,7 +21,6 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = path.resolve(__dirname, '..', '..', '..', '..'); // tools 包根（仅帮助/回退说明等静态引用；配置来源见 resolveToolsRoot）
 
 /* ────────────────────────── 通用输出 / 错误 ────────────────────────── */
 

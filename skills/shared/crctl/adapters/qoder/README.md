@@ -12,7 +12,7 @@
 | `.lingma/settings.json` | 项目级 | 2 | 是（可提交 Git） |
 | `.lingma/settings.local.json` | 项目级（本地） | 3 | 否（建议 .gitignore） |
 
-把模板中的 `{WORKSPACE}` 替换为 tools 包所在 workspace 的绝对路径（建议正斜杠，如 `C:/Users/you/proj`）。**修改配置后需重启 IDE 生效**（Qoder 当前不支持热加载）。
+把模板中的 `{TOOLS_ROOT}` 替换为 `dir-graph.yaml#workspace.tools_package_path` 指向的 tools 包绝对路径（建议正斜杠）。**修改配置后需重启 IDE 生效**（Qoder 当前不支持热加载）。
 
 生效后：
 
@@ -40,11 +40,11 @@ Guard 脚本已做工具名归一化（`Bash`/`Shell`/`run_in_terminal` 均识�
 
 ```bash
 # PreToolUse：裸 git 应被 deny（exit 2 或 stdout JSON deny）
-echo '{"tool_name":"Bash","tool_input":{"command":"git status"},"hook_event_name":"PreToolUse","cwd":"<workspace>"}' | node <workspace>/tools/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs
+echo '{"tool_name":"Bash","tool_input":{"command":"git status"},"hook_event_name":"PreToolUse","cwd":"<workspace>"}' | node {TOOLS_ROOT}/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs
 echo "Exit code: $?"
 
 # UserPromptSubmit：注入 CR 状态
-echo '{"hook_event_name":"UserPromptSubmit","cwd":"<workspace>"}' | node <workspace>/tools/skills/shared/crctl/adapters/claude-code/hooks/inject-cr-status.mjs
+echo '{"hook_event_name":"UserPromptSubmit","cwd":"<workspace>"}' | node {TOOLS_ROOT}/skills/shared/crctl/adapters/claude-code/hooks/inject-cr-status.mjs
 ```
 
 然后在 Qoder 面板里让 Agent 尝试 `git commit`（应被 deny 并提示改用 `crctl git`）、尝试直接编辑 `change-requests/_backlog.yml`（应被 deny）。
