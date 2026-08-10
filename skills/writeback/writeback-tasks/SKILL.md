@@ -15,7 +15,7 @@ description: 将 change-requests/{CR-ID}/tasks/ 下 status=done 的任务原子�
 
 把 `change-requests/{CR-ID}/tasks/` 下 `status=done` 的任务，一次调用原子完成：拷贝为 `delivery/task/` 下规范命名的文件 + 追加 frontmatter + 全量重建全局 `delivery/task/_index.yaml`——消除"拷文件"与"更新索引"两个动作靠记忆分别执行、容易漏掉后者的问题（CR-2026-003 归档时曾发生：3 个任务文件被正确拷贝，但 3 条索引行漏加，直到下一个 CR 归档时才被偶然发现，见 CR-2026-005 立项背景）。
 
-**机械步骤由入库脚本执行（CR-2026-020 起）**：脚本位于 `tools/skills/writeback/scripts/writeback-tasks.mjs`。执行者只做「调脚本 → 核对 dry-run 输出 → 实跑 → 提交」。
+**机械步骤由入库脚本执行（CR-2026-020 起）**：脚本位于 `{TOOLS_ROOT}/skills/writeback/scripts/writeback-tasks.mjs`。执行者只做「调脚本 → 核对 dry-run 输出 → 实跑 → 提交」。
 
 > **格式约定**：目标文件名 `TASK-{version}-{cr_id}-{NN}-{slug}.md`（`{cr_id}` 用完整形式如 `CR-2026-005`）。`{slug}` 取源任务 frontmatter 的 `slug:` 字段，缺失回退 `task-{NN}`——由脚本内置逻辑保证，不做中文分词/语义猜测。此格式与 `writeback-traceability` SKILL / pipeline 模板三处一致（CR-2026-020 FR-8 统一）。
 
@@ -42,7 +42,7 @@ description: 将 change-requests/{CR-ID}/tasks/ 下 status=done 的任务原子�
 ### Step 2 — 调用脚本，dry-run 核对
 
 ```bash
-node tools/skills/writeback/scripts/writeback-tasks.mjs \
+node {TOOLS_ROOT}/skills/writeback/scripts/writeback-tasks.mjs \
   --workspace . --cr {cr_id} --spec {spec_id} --version {version} --dry-run
 ```
 

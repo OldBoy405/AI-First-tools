@@ -47,11 +47,11 @@ scope: drift-governance
 ## 调用方式
 
 ```bash
-node tools/skills/shared/crctl/scripts/crctl.mjs status CR-2026-001
-node tools/skills/shared/crctl/scripts/crctl.mjs advance CR-2026-001 --to code-reviewing --trigger review-code
-node tools/skills/shared/crctl/scripts/crctl.mjs approve CR-2026-001 --stage code        # 仅人类在终端运行
-node tools/skills/shared/crctl/scripts/crctl.mjs approve CR-2026-001 --stage dev-start --resign "evidence definition changed"  # 仅迁移本地审批；服务端审批须重签 grant
-node tools/skills/shared/crctl/scripts/crctl.mjs git status --short --cwd <worktree>
+node {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs status CR-2026-001
+node {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs advance CR-2026-001 --to code-reviewing --trigger review-code
+node {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs approve CR-2026-001 --stage code        # 仅人类在终端运行
+node {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs approve CR-2026-001 --stage dev-start --resign "evidence definition changed"  # 仅迁移本地审批；服务端审批须重签 grant
+node {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs git status --short --cwd <worktree>
 ```
 
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
@@ -60,7 +60,7 @@ node tools/skills/shared/crctl/scripts/crctl.mjs git status --short --cwd <workt
 ## 读取 / 写入 / 状态推进 / 失败处理
 
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
-- **读取**：`change-requests/{CR-ID}/cr.md` frontmatter（status 权威源）、`change-requests/_backlog.yml`（注册索引）、`change-requests/{CR-ID}/`（review-annotations/、test-report.md、approval.yml）、目标 workspace `dir-graph.yaml`、`tools/pipeline-templates/*.pipeline.json`、同目录 `gates.json`。
+- **读取**：`change-requests/{CR-ID}/cr.md` frontmatter（status 权威源）、`change-requests/_backlog.yml`（注册索引）、`change-requests/{CR-ID}/`（review-annotations/、test-report.md、approval.yml）、目标 workspace `dir-graph.yaml`、Tools Root（`{TOOLS_ROOT}`，运行时经 `workspace.tools_package_path` 解析，CR-2026-028 FR-1）下的 `pipeline-templates/*.pipeline.json` 与 `skills/shared/crctl/gates.json`。
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
 - **写入**：`cr.md` frontmatter 的 status/updated（行级定点编辑，写前 sha256 CAS 复核，防并发覆盖）；`approval.yml`（仅 approve）；`review-loop.yml`（仅 attempt）；`test-report.md` 与 `test-evidence/`（仅 test）；`.crctl/audit.log`（审计，自动 gitignore）。时间戳与执行者身份一律由本工具生成，**拒绝调用方传入**。
 - **状态推进**：只经 `advance`；`standalone` 模式自动 commit `[cr] status {CR-ID} {from} -> {to}`（经自身 git 白名单执行），`--embedded` 只写文件由调用方同事务提交。

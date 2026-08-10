@@ -15,7 +15,7 @@ description: 将 change-requests/{CR-ID}/prd.md 和 sdd.md 回写到 specs/{spec
 
 将需求期与开发期在 `change-requests/` 目录下生产的 PRD 和 SDD 文档正式回写到 `specs/{spec_id}/` 知识库，若该 spec 目录不存在则新建，同时维护 `specs/_index.yml` 元数据。回写完成后推进 CR status 到 `writing-back`。
 
-**机械步骤由入库脚本执行（CR-2026-020 起）**：本 skill 不再描述逐文件手工操作；执行者只做「调脚本 → 核对 dry-run diff → 实跑 → 提交」。脚本位于 `tools/skills/writeback/scripts/writeback-prd-sdd.mjs`（版本化、可测试，回归套件 `tools/skills/writeback/scripts/test/writeback.test.mjs`）。脚本不再执行回写前旧版备份步骤——回写本身是一次提交，旧版本由 git 历史承载（CR-2026-020 FR-6）。
+**机械步骤由入库脚本执行（CR-2026-020 起）**：本 skill 不再描述逐文件手工操作；执行者只做「调脚本 → 核对 dry-run diff → 实跑 → 提交」。脚本位于 `{TOOLS_ROOT}/skills/writeback/scripts/writeback-prd-sdd.mjs`（版本化、可测试，回归套件 `{TOOLS_ROOT}/skills/writeback/scripts/test/writeback.test.mjs`）。脚本不再执行回写前旧版备份步骤——回写本身是一次提交，旧版本由 git 历史承载（CR-2026-020 FR-6）。
 
 ---
 
@@ -41,7 +41,7 @@ description: 将 change-requests/{CR-ID}/prd.md 和 sdd.md 回写到 specs/{spec
 ### Step 2 — 调用脚本，dry-run 核对 diff
 
 ```bash
-node tools/skills/writeback/scripts/writeback-prd-sdd.mjs \
+node {TOOLS_ROOT}/skills/writeback/scripts/writeback-prd-sdd.mjs \
   --workspace . --cr {cr_id} --spec {spec_id} --version {target_version} \
   [--milestone-name "{milestone_name}"] [--brief "{brief}"] --dry-run
 ```
@@ -86,7 +86,7 @@ crctl git commit --template writeback --cr {cr_id} -m "PRD/SDD 增量回写 spec
 | 幂等判据 | 文档内已含 `（v{version} · CR-{cr}` 唯一标识 → noop，重跑不重复追加 |
 | 增量回写 frontmatter 更新字段 | `cr-ref` / `cr-history`（按 id 追加去重）/ `target-version` / `version`（v 前缀）；首次回写另补 `spec-id` / `status: ga` |
 | specs/_index.yml 结构 | 顶层 `schema: specs-index/v1` + `updated` + `features:` 列表；条目字段 `id/name/scope/status/since/current/brief/cr-ref/cr-history/updated`（字段名严禁写成 specs/items/title/version/updated_at） |
-| 脚本落点 | `tools/skills/writeback/scripts/`（非 `skills/shared/scripts/`，范围澄清见 ARCHITECTURE.md §6，CR-2026-020） |
+| 脚本落点 | `{TOOLS_ROOT}/skills/writeback/scripts/`（非 `skills/shared/scripts/`，范围澄清见 ARCHITECTURE.md §6，CR-2026-020） |
 
 ---
 

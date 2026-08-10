@@ -15,7 +15,7 @@ description: 生成 specs/{spec_id}/traceability.yml 的累积追溯链（头部
 
 聚合本次 CR 生命周期中产生的可追溯证据，在 `specs/{spec_id}/traceability.yml`（跨 CR 累积的**唯一权威文件**）追加本 CR 的 milestone 段，建立需求→设计→任务→代码→CR 的完整追溯链。`change-requests/{cr_id}/traceability.yml` 仅作为开发期工作稿，归档后不再维护、不再要求与 specs 侧同步（CR-2026-020 FR-7）。写入完成后保持 CR status=`writing-back`，由 `cr-archive` 统一归档。
 
-**机械步骤由入库脚本执行（CR-2026-020 起）**：脚本位于 `tools/skills/writeback/scripts/writeback-traceability.mjs`。**不是全量重建**（SDD §8 D3）：头部手工注释与既有 milestones 段逐字节保留，只做「头部结构化字段更新 + 本 CR 段末尾追加」。
+**机械步骤由入库脚本执行（CR-2026-020 起）**：脚本位于 `{TOOLS_ROOT}/skills/writeback/scripts/writeback-traceability.mjs`。**不是全量重建**（SDD §8 D3）：头部手工注释与既有 milestones 段逐字节保留，只做「头部结构化字段更新 + 本 CR 段末尾追加」。
 
 ---
 
@@ -60,7 +60,7 @@ fr-chain:
 ### Step 3 — 调用脚本，dry-run 核对
 
 ```bash
-node tools/skills/writeback/scripts/writeback-traceability.mjs \
+node {TOOLS_ROOT}/skills/writeback/scripts/writeback-traceability.mjs \
   --workspace . --cr {cr_id} --spec {spec_id} --version {target_version} \
   --milestone-file {milestone_file 路径} --dry-run
 ```
