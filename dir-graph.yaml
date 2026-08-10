@@ -8,7 +8,7 @@ workspace:
   timezone: "Asia/Shanghai"
   edition: phase0-tools-package
   path_basis: "tools-package-root"
-  target_install_path: "tools/"
+  # 安装位置不在本文件声明：tools 包挂载点由目标 workspace 的 dir-graph.yaml#workspace.tools_package_path 单向声明（CR-2026-028 FR-7）
 
 repositories:
   - id: phase0-tools

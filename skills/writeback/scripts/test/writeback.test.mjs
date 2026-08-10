@@ -1,6 +1,6 @@
 // writeback.test.mjs — writeback 回写脚本回归自检套件（CR-2026-020，TASK-05 / NFR-6 / AC-8）
 // 覆盖：lib.mjs / writeback-prd-sdd.mjs / writeback-tasks.mjs / writeback-traceability.mjs
-// 运行：node --test tools/skills/writeback/scripts/test/writeback.test.mjs
+// 运行：node --test {TOOLS_ROOT}/skills/writeback/scripts/test/writeback.test.mjs
 // 数据：临时目录（node:fs.mkdtempSync），不依赖外部固定状态；结束时清理。
 
 import { test } from 'node:test';

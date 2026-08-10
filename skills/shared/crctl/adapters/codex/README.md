@@ -48,13 +48,13 @@ Codex 对非托管 command hook 有**审查-信任**机制：新 hook 默认跳�
 
 ```bash
 # PreToolUse：裸 git 应被 deny
-echo '{"tool_name":"Bash","tool_input":{"command":"git status"},"hook_event_name":"PreToolUse","cwd":"<workspace>"}' | node <tools>/tools/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs
+echo '{"tool_name":"Bash","tool_input":{"command":"git status"},"hook_event_name":"PreToolUse","cwd":"<workspace>"}' | node {TOOLS_ROOT}/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs
 
 # PreToolUse：apply_patch 改受控文件应被 deny（Codex 特有路径）
-echo '{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: change-requests/_backlog.yml\n@@\n-foo\n+bar\n*** End Patch"},"hook_event_name":"PreToolUse","cwd":"<workspace>"}' | node <tools>/tools/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs
+echo '{"tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch\n*** Update File: change-requests/_backlog.yml\n@@\n-foo\n+bar\n*** End Patch"},"hook_event_name":"PreToolUse","cwd":"<workspace>"}' | node {TOOLS_ROOT}/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs
 
 # SessionStart：注入 CR 状态
-echo '{"hook_event_name":"SessionStart","cwd":"<workspace>"}' | node <tools>/tools/skills/shared/crctl/adapters/claude-code/hooks/inject-cr-status.mjs
+echo '{"hook_event_name":"SessionStart","cwd":"<workspace>"}' | node {TOOLS_ROOT}/skills/shared/crctl/adapters/claude-code/hooks/inject-cr-status.mjs
 ```
 
 然后在 Codex 会话里让 Agent 尝试 `git commit`（应被 deny 并提示改用 `crctl git`）、尝试直接编辑 `change-requests/_backlog.yml`（应被 deny）。

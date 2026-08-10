@@ -10,13 +10,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 const CRCTL = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
+// 真实 tools 包根（test → scripts → crctl → shared → skills → tools 共 5 层）：
+// 既有测试默认通过 ws/dir-graph.yaml#workspace.tools_package_path 指向它（CR-2026-028 FR-1/FR-4 后配置来源收敛）
+const PACKAGE_ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
 
 function sha16(text) {
   // 与 crctl.mjs 的 evidenceSha16 同口径：行尾规范化后哈希（防 autocrlf 误报）
@@ -64,10 +67,86 @@ fs.readFileSync = (file, ...args) => {
   return runCrctlWrapped(['migrate-backlog', '--no-commit', '--workspace', ws], `import path from 'node:path';\n${prelude}`);
 }
 
-/** 建一个一次性临时 workspace；返回目录路径，调用方负责在 test 结束时 rmSync。 */
-function makeWorkspace() {
+/** 建一个一次性临时 workspace；返回目录路径，调用方负责在 test 结束时 rmSync。
+ * 默认写入 dir-graph.yaml 声明 workspace.tools_package_path 指向真实 tools 包（CR-2026-028 FR-1），
+ * 使既有测试语义不变（仍读真实 tools 配置），同时覆盖 resolver 契约；
+ * 传 opts.toolsRoot 可指向定制 fixture（sentinel / 失败场景）。 */
+function makeWorkspace(opts = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'crctl-test-'));
   mkdirSync(path.join(dir, 'change-requests'), { recursive: true });
+  const toolsRoot = opts.toolsRoot || PACKAGE_ROOT;
+  writeFileSync(path.join(dir, 'dir-graph.yaml'),
+    `workspace:\n  tools_package_path: ${JSON.stringify(toolsRoot)}\n`, 'utf8');
+  return dir;
+}
+
+/* ── CR-2026-028 FR-9：最小 tools 包 fixture（四标志 + sentinel 配置，不修改真实 checkout）── */
+
+const FIXTURE_DIR_GRAPH = [
+  'change-request-track:',
+  '  state_machine:',
+  '    field: "status"',
+  '    transitions:',
+  '      - { from: sentinel-drafting, to: sentinel-reviewing, trigger: "sentinel-advance" }',
+].join('\n') + '\n';
+
+const FIXTURE_GATES = {
+  approvalStages: {},
+  statusGates: {},
+  reviewLoops: {},
+  evidence: { 'sentinel': 'change-requests/{cr}/sentinel-evidence.md' },
+};
+
+const FIXTURE_PIPELINE = {
+  id: 'sentinel',
+  nodes: [{ ref: 'sentinel-node', reviewLoop: { maxAttempts: 3, passCondition: { allOf: [
+    { path: 'verdict', equals: 'pass' }, { path: 'blockers', isEmpty: true } ] } } }],
+};
+
+// setupBriefWs 专用：requirement 审批门禁（对齐真实 gates.json 的 requirement 段，供回显测试触发 passCondition）
+const BRIEF_GATES = {
+  approvalStages: {
+    requirement: {
+      to: 'requirement-approved',
+      trigger: 'approve-requirement',
+      expect: ['requirement-reviewing'],
+      approvalSection: 'requirement',
+      evidence: { $default: 'change-requests/{cr}/review-annotations/requirement.yml' },
+      passCondition: { pipeline: 'requirement-authoring', nodeRef: 'review-requirement' },
+    },
+  },
+  statusGates: {
+    'requirement-reviewing': [
+      { type: 'fileExists', path: 'change-requests/{cr}/prd.md' },
+      { type: 'passCondition', stage: 'requirement' },
+    ],
+    'requirement-approved': [
+      { type: 'passCondition', stage: 'requirement' },
+      { type: 'approval', section: 'requirement' },
+    ],
+  },
+  reviewLoops: { 'review-requirement': { pipeline: 'requirement-authoring' } },
+};
+
+const FIXTURE_RULES = {
+  git: [{ sub: 'status', shapes: ['--sentinel-shape'] }],
+  forbiddenFlags: ['--push'],
+};
+
+/** 建一次性最小 tools 包 fixture（四标志齐全 + sentinel 配置）。 */
+function makeToolsFixture() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'crctl-tools-fixture-'));
+  writeFileSync(path.join(dir, 'AGENTS.md'), '# fixture tools\n', 'utf8');
+  writeFileSync(path.join(dir, 'dir-graph.yaml'), FIXTURE_DIR_GRAPH, 'utf8');
+  mkdirSync(path.join(dir, 'skills'), { recursive: true });
+  writeFileSync(path.join(dir, 'skills', '_index.yml'), 'skills: []\n', 'utf8');
+  mkdirSync(path.join(dir, 'skills', 'shared', 'crctl', 'scripts'), { recursive: true });
+  writeFileSync(path.join(dir, 'skills', 'shared', 'crctl', 'scripts', 'crctl.mjs'), '// fixture marker\n', 'utf8');
+  writeFileSync(path.join(dir, 'skills', 'shared', 'crctl', 'gates.json'), JSON.stringify(FIXTURE_GATES), 'utf8');
+  mkdirSync(path.join(dir, 'pipeline-templates'), { recursive: true });
+  writeFileSync(path.join(dir, 'pipeline-templates', 'sentinel.pipeline.json'), JSON.stringify(FIXTURE_PIPELINE), 'utf8');
+  mkdirSync(path.join(dir, 'skills', 'shared', 'controlled-shell'), { recursive: true });
+  writeFileSync(path.join(dir, 'skills', 'shared', 'controlled-shell', 'rules.json'), JSON.stringify(FIXTURE_RULES), 'utf8');
   return dir;
 }
 
@@ -1849,6 +1928,48 @@ test('worktree-path：确定性路径输出且不写任何文件（AC-6）', () 
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('worktree-path：linked worktree 内同时以主 checkout 解析相对 Tools Root 与 worktree 根（CR-2026-028 FR-2）', () => {
+  const fixture = makeToolsFixture();
+  const ws = makeWorkspace({ toolsRoot: fixture });
+  const wt = path.join(ws, 'linked-worktree');
+  try {
+    // 相对声明必须以 Installation Workspace（主 checkout）为基准，而不是 linked worktree。
+    writeFileSync(path.join(ws, 'dir-graph.yaml'),
+      `workspace:\n  tools_package_path: ${JSON.stringify(path.relative(ws, fixture))}\n`, 'utf8');
+    // 初始化 git 主仓并提交，使 linked worktree 的 common-dir 指向主 checkout 的 .git
+    spawnSync('git', ['init', '-b', 'main'], { cwd: ws, encoding: 'utf8', shell: false });
+    spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ws, encoding: 'utf8', shell: false });
+    spawnSync('git', ['config', 'user.name', 'test'], { cwd: ws, encoding: 'utf8', shell: false });
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    writeCrEntry(ws, 'CR-S1', 'sentinel-drafting');
+    spawnSync('git', ['add', '.'], { cwd: ws, encoding: 'utf8', shell: false });
+    const ci = spawnSync('git', ['commit', '-m', 'init'], { cwd: ws, encoding: 'utf8', shell: false });
+    assert.equal(ci.status, 0, '主仓初始提交成功');
+
+    const wa = spawnSync('git', ['worktree', 'add', '-b', 'requirement/CR-T1', wt], { cwd: ws, encoding: 'utf8', shell: false });
+    assert.equal(wa.status, 0, `linked worktree 创建成功: ${wa.stderr}`);
+
+    // 从 linked worktree 调用 sentinel 转换，证明相对 Tools Root 以主 checkout 为基准解析。
+    const sentinel = runCrctl(['advance', 'CR-S1', '--to', 'sentinel-reviewing', '--trigger', 'sentinel-advance', '--no-commit', '--workspace', wt]);
+    assert.equal(sentinel.status, 0, `linked worktree 相对 Tools Root 生效: ${sentinel.rawStderr}`);
+
+    // worktree 根基准同样必须是主 checkout（ws），不得拼出 <wt>/.rayai-worktrees/...
+    const r = runCrctl(['worktree-path', 'CR-T1', '--repo', 'ai-first-platform-docs', '--workspace', wt]);
+    assert.equal(r.status, 0, `linked worktree 调用成功: ${r.rawStderr}`);
+    const p = r.stdout.path.replaceAll('\\', '/');
+    assert.ok(p.startsWith(ws.replaceAll('\\', '/') + '/.rayai-worktrees/'), `以主 checkout 为根: ${p}`);
+    assert.ok(!p.includes('/.rayai-worktrees/.rayai-worktrees/'), `无嵌套 .rayai-worktrees: ${p}`);
+    assert.ok(p.endsWith('.rayai-worktrees/knowledge-base/requirement/CR-T1'), `路径模板不变: ${p}`);
+
+    // 主 checkout 调用行为不变
+    const r2 = runCrctl(['worktree-path', 'CR-T1', '--repo', 'multica', '--workspace', ws]);
+    assert.ok(r2.stdout.path.replaceAll('\\', '/').endsWith('.rayai-worktrees/multica/requirement/CR-T1'));
+  } finally {
+    rmSync(ws, { recursive: true, force: true });
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('report/cr-metrics：状态直方图 + 周期活动计数（AC-6）', () => {
   const ws = makeWorkspace();
   try {
@@ -2175,8 +2296,15 @@ const LONG_ANNOTATION = 'verdict: block\nblockers:\n' + LONG_BLOCKERS.map((b) =>
 
 function setupBriefWs(cr, status, annotation) {
   const ws = makeWorkspace();
-  writeCrEntry(ws, cr, status);
-  writeFileSync(path.join(ws, 'dir-graph.yaml'), [
+  // 定制 tools fixture（CR-2026-028 FR-1：配置来源收敛后，pipeline 与状态机从 Tools Root 读）
+  const fixture = path.join(ws, '_fixture-tools');
+  mkdirSync(path.join(fixture, 'skills', 'shared', 'crctl', 'scripts'), { recursive: true });
+  writeFileSync(path.join(fixture, 'AGENTS.md'), '# fixture tools\n', 'utf8');
+  writeFileSync(path.join(fixture, 'skills', '_index.yml'), 'skills: []\n', 'utf8');
+  writeFileSync(path.join(fixture, 'skills', 'shared', 'crctl', 'scripts', 'crctl.mjs'), '// marker\n', 'utf8');
+  writeFileSync(path.join(fixture, 'skills', 'shared', 'crctl', 'gates.json'), JSON.stringify(BRIEF_GATES), 'utf8');
+  mkdirSync(path.join(fixture, 'pipeline-templates'), { recursive: true });
+  writeFileSync(path.join(fixture, 'dir-graph.yaml'), [
     'change-request-track:',
     '  state_machine:',
     '    field: "status"',
@@ -2184,12 +2312,14 @@ function setupBriefWs(cr, status, annotation) {
     '      - { from: drafting, to: requirement-reviewing, trigger: "review-requirement" }',
     '      - { from: requirement-reviewing, to: requirement-approved, trigger: "approve-requirement" }',
   ].join('\n') + '\n');
-  mkdirSync(path.join(ws, 'tools', 'pipeline-templates'), { recursive: true });
-  writeFileSync(path.join(ws, 'tools', 'pipeline-templates', 'requirement-authoring.pipeline.json'), JSON.stringify({
+  writeFileSync(path.join(fixture, 'pipeline-templates', 'requirement-authoring.pipeline.json'), JSON.stringify({
     id: 'requirement-authoring',
     nodes: [{ ref: 'review-requirement', reviewLoop: { maxAttempts: 3, passCondition: { allOf: [
       { path: 'verdict', equals: 'pass' }, { path: 'blockers', isEmpty: true } ] } } }],
   }));
+  writeFileSync(path.join(ws, 'dir-graph.yaml'),
+    `workspace:\n  tools_package_path: ${JSON.stringify(fixture)}\n`, 'utf8');
+  writeCrEntry(ws, cr, status);
   writeEvidence(ws, cr, 'prd.md', '# prd\n');
   if (annotation != null) writeEvidence(ws, cr, 'review-annotations/requirement.yml', annotation);
   return ws;
@@ -3136,4 +3266,179 @@ test('CR-2026-027 回修 b10：approve --resign 非交互式调用拒绝（人�
     assert.equal(r.status, 1);
     assert.equal(r.stderr.error.code, 'APPROVAL_REQUIRES_HUMAN', '非 TTY 一律拒绝，无旁路');
   } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-028 FR-1/FR-3/FR-4：Tools Root 唯一解析（TASK-02/03，AC-6/AC-7/AC-8）──
+
+test('resolveToolsRoot：相对/绝对声明归一到同一 realpath，workspace 空壳 tools 不参与回退（AC-1/AC-3）', () => {
+  const fixture = makeToolsFixture();
+  const absWs = makeWorkspace({ toolsRoot: fixture });
+  const relWs = makeWorkspace({ toolsRoot: fixture });
+  try {
+    for (const ws of [absWs, relWs]) writeCrEntry(ws, 'CR-T1', 'sentinel-drafting');
+    mkdirSync(path.join(relWs, 'tools'), { recursive: true }); // 同名空壳不得成为候选
+    const relative = path.relative(relWs, fixture);
+    writeFileSync(path.join(relWs, 'dir-graph.yaml'),
+      `workspace:\n  tools_package_path: ${JSON.stringify(relative)}\n`, 'utf8');
+
+    const abs = runCrctl(['status', 'CR-T1', '--workspace', absWs]);
+    const rel = runCrctl(['status', 'CR-T1', '--workspace', relWs]);
+    assert.equal(abs.status, 0, abs.rawStderr);
+    assert.equal(rel.status, 0, rel.rawStderr);
+    assert.equal(realpathSync(abs.stdout.source.stateMachine), realpathSync(rel.stdout.source.stateMachine), '相对/绝对声明归一到同一状态机来源');
+    assert.ok(!rel.stdout.source.stateMachine.replaceAll('\\', '/').includes('/tools/dir-graph.yaml'), '不读取 workspace 空壳 tools');
+
+    writeFileSync(path.join(relWs, 'dir-graph.yaml'), 'workspace:\n  tools_package_path: ./missing-tools\n', 'utf8');
+    const broken = runCrctl(['status', 'CR-T1', '--workspace', relWs]);
+    assert.equal(broken.status, 1, '声明破坏后硬失败，不回退空壳 tools');
+    assert.equal(broken.stderr.error.code, 'TOOLS_PACKAGE_NOT_FOUND');
+    assert.equal(broken.stderr.error.reason, 'path-not-exists');
+  } finally {
+    rmSync(absWs, { recursive: true, force: true });
+    rmSync(relWs, { recursive: true, force: true });
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('resolveToolsRoot：缺失/无效 tools_package_path 硬失败 TOOLS_PACKAGE_NOT_FOUND（表驱动，零回退）', () => {
+  const cases = [
+    { name: '缺 dir-graph.yaml', mutate: (ws) => rmSync(path.join(ws, 'dir-graph.yaml')) },
+    { name: '字段缺失', mutate: (ws) => writeFileSync(path.join(ws, 'dir-graph.yaml'), 'workspace:\n  other: 1\n') },
+    { name: '非字符串', mutate: (ws) => writeFileSync(path.join(ws, 'dir-graph.yaml'), 'workspace:\n  tools_package_path: [a, b]\n') },
+    { name: '空值', mutate: (ws) => writeFileSync(path.join(ws, 'dir-graph.yaml'), 'workspace:\n  tools_package_path: ""\n') },
+    { name: '路径不存在', mutate: (ws) => writeFileSync(path.join(ws, 'dir-graph.yaml'), 'workspace:\n  tools_package_path: "C:/no/such/tools"\n') },
+  ];
+  for (const c of cases) {
+    const ws = makeWorkspace();
+    try {
+      writeCrEntry(ws, 'CR-T1', 'drafting');
+      c.mutate(ws);
+      const r = runCrctl(['status', 'CR-T1', '--workspace', ws]);
+      assert.equal(r.status, 1, c.name);
+      assert.equal(r.stderr.error.code, 'TOOLS_PACKAGE_NOT_FOUND', c.name);
+      assert.ok(r.stderr.error.instRoot, `${c.name} detail 含 instRoot`);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+});
+
+test('resolveToolsRoot：四标志任一缺失 → TOOLS_PACKAGE_NOT_FOUND（identity-marker-missing）', () => {
+  for (const rel of ['AGENTS.md', 'dir-graph.yaml', 'skills/_index.yml', 'skills/shared/crctl/scripts/crctl.mjs']) {
+    const fixture = makeToolsFixture();
+    const ws = makeWorkspace({ toolsRoot: fixture });
+    try {
+      writeCrEntry(ws, 'CR-T1', 'drafting');
+      rmSync(path.join(fixture, rel), { recursive: true, force: true });
+      const r = runCrctl(['status', 'CR-T1', '--workspace', ws]);
+      assert.equal(r.status, 1, `缺 ${rel}`);
+      assert.equal(r.stderr.error.code, 'TOOLS_PACKAGE_NOT_FOUND', `缺 ${rel}`);
+      assert.ok((r.stderr.error.missing || []).includes(rel), `missing 含 ${rel}`);
+    } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
+  }
+});
+
+test('四类配置来自同一 Tools Root：状态机 sentinel 转换可 advance（AC-6）', () => {
+  const fixture = makeToolsFixture();
+  const ws = makeWorkspace({ toolsRoot: fixture });
+  try {
+    writeCrEntry(ws, 'CR-S1', 'sentinel-drafting');
+    const r = runCrctl(['advance', 'CR-S1', '--to', 'sentinel-reviewing', '--trigger', 'sentinel-advance', '--no-commit', '--workspace', ws]);
+    assert.equal(r.status, 0, `fixture 状态机转换生效: ${r.rawStderr}`);
+    assert.equal(r.stdout.to, 'sentinel-reviewing');
+  } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('四类配置来自同一 Tools Root：gates sentinel statusGate + pipeline sentinel nodeRef（AC-6）', () => {
+  const fixture = makeToolsFixture();
+  const gates = {
+    ...FIXTURE_GATES,
+    statusGates: { 'sentinel-state': [
+      { type: 'fileExists', path: 'change-requests/{cr}/sentinel-evidence.md' },
+      { type: 'passCondition', stage: 'sentinel' },
+    ] },
+    approvalStages: { sentinel: {
+      evidence: { $default: 'change-requests/{cr}/review-annotations/sentinel.yml' },
+      passCondition: { pipeline: 'sentinel', nodeRef: 'sentinel-node' },
+    } },
+  };
+  writeFileSync(path.join(fixture, 'skills/shared/crctl/gates.json'), JSON.stringify(gates));
+  const ws = makeWorkspace({ toolsRoot: fixture });
+  try {
+    writeCrEntry(ws, 'CR-S1', 'sentinel-state');
+    mkdirSync(path.join(ws, 'change-requests', 'CR-S1', 'review-annotations'), { recursive: true });
+    writeFileSync(path.join(ws, 'change-requests', 'CR-S1', 'sentinel-evidence.md'), 'sentinel\n');
+    writeFileSync(path.join(ws, 'change-requests', 'CR-S1', 'review-annotations', 'sentinel.yml'), 'verdict: pass\nblockers: []\n');
+    const r = runCrctl(['gate', 'CR-S1', '--for', 'sentinel-state', '--workspace', ws]);
+    assert.equal(r.status, 0, `fixture gates+pipeline 生效: ${r.rawStderr}`);
+    assert.equal(r.stdout.pass, true);
+    const pc = r.stdout.checks.find((c) => c.type === 'passCondition');
+    assert.equal(pc.ok, true, 'sentinel pipeline passCondition 来自 fixture');
+  } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('四类配置来自同一 Tools Root：rules sentinel 形状生效（AC-6）', () => {
+  const fixture = makeToolsFixture();
+  const ws = makeWorkspace({ toolsRoot: fixture });
+  try {
+    const r = runCrctl(['git', 'status', '--short', '--workspace', ws]);
+    assert.equal(r.status, 1, 'fixture rules 只允许 --sentinel-shape');
+    assert.equal(r.stderr.error.code, 'FORBIDDEN_SUBCOMMAND', 'git status 无 sentinel 形状 → 拒绝（rules 来自 fixture 而非真实 tools）');
+  } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('CRCTL_RULES_PATH：有效显式 rules 优先于 Tools Root 默认 rules（AC-7）', () => {
+  const fixture = makeToolsFixture();
+  const ws = makeWorkspace({ toolsRoot: fixture });
+  try {
+    const init = spawnSync('git', ['init', '-b', 'main'], { cwd: ws, encoding: 'utf8', shell: false });
+    assert.equal(init.status, 0, init.stderr);
+    const override = path.join(ws, 'rules-override.json');
+    writeFileSync(override, JSON.stringify({
+      git: [{ sub: 'status', shapes: ['^--short$'] }],
+      forbiddenFlags: ['-c', '-C', '--exec'],
+    }), 'utf8');
+    const r = runCrctl(['git', 'status', '--short', '--workspace', ws], { CRCTL_RULES_PATH: override });
+    assert.equal(r.status, 0, `有效显式覆盖应允许 --short（fixture 默认仅允许 --sentinel-shape）: ${r.rawStderr}`);
+  } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('配置来源恒由 ws/tools_package_path 决定：真实 checkout 脚本 + fixture 配置仍生效（AC-6）', () => {
+  const fixture = makeToolsFixture();
+  const ws = makeWorkspace({ toolsRoot: fixture });
+  try {
+    writeCrEntry(ws, 'CR-S1', 'sentinel-drafting');
+    const r = runCrctl(['advance', 'CR-S1', '--to', 'sentinel-reviewing', '--trigger', 'sentinel-advance', '--no-commit', '--workspace', ws]);
+    assert.equal(r.status, 0, `真实 checkout 脚本 + fixture 配置仍生效: ${r.rawStderr}`);
+    assert.equal(r.stdout.to, 'sentinel-reviewing');
+  } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-028 AC-8：源码审查断言（四 loader 同一 resolver、成功值缓存、无 module-scope 全局）──
+
+test('AC-8：四 loader 均显式接收 ws 并调用同一 resolveToolsRoot(ws)；main/controlledGit 各自接线（源码静态断言）', () => {
+  const src = readFileSync(CRCTL, 'utf8').replace(/\r\n/g, '\n');
+  // 四个 loader 定义均带 ws 参数
+  for (const sig of ['function loadStateMachine(ws)', 'function loadGates(ws)', 'function loadPipeline(ws, id)', 'function loadShellRules(ws)']) {
+    assert.ok(src.includes(sig), `定义存在: ${sig}`);
+  }
+  // 四个 loader 内部调用同一 resolver
+  const loaderBodies = ['loadStateMachine', 'loadGates', 'loadPipeline', 'loadShellRules']
+    .map((f) => src.slice(src.indexOf(`function ${f}(`)));
+  for (const body of loaderBodies) {
+    assert.ok(body.slice(0, body.indexOf('\nfunction ')) .includes('resolveToolsRoot('), `${body.slice(0, 20)} 调用 resolveToolsRoot`);
+  }
+  // main() eager loadGates(ws)；controlledGit 内 loadShellRules(ws)
+  const mainTail = src.slice(src.indexOf('function main()'));
+  assert.ok(mainTail.includes('loadGates(ws)'), 'main() eager loadGates(ws)');
+  const cg = src.slice(src.indexOf('function controlledGit('), src.indexOf('function controlledGit(') + 1200);
+  assert.ok(cg.includes('loadShellRules(ws)'), 'controlledGit 内 loadShellRules(ws)');
+  // toolsRootCache：单值成功缓存；_shellRules 独立；无 module-scope workspace 全局
+  const cacheDecl = src.slice(src.indexOf('let toolsRootCache'), src.indexOf('let toolsRootCache') + 160);
+  assert.match(cacheDecl, /undefined=未解析, string=成功/, 'toolsRootCache 仅成功值');
+  assert.equal((src.match(/toolsRootCache = /g) || []).length, 1, 'toolsRootCache 仅一处赋值');
+  assert.ok(src.includes('let _shellRules;'), '_shellRules 独立声明');
+  assert.ok(!/^let ws\s*=|^const ws\s*=/m.test(src), '无 module-scope workspace 全局');
+  // resolver/loader 区域无 Map 缓存（全文件 new Map 仅 task 索引用途）
+  const resolverZone = src.slice(src.indexOf('let toolsRootCache'), src.indexOf('function loadShellRules(ws)'));
+  assert.ok(!resolverZone.includes('new Map('), 'Tools Root 区域无 Map 缓存');
+  assert.ok(!src.includes('telemetry'), '无 telemetry');
 });

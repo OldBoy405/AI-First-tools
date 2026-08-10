@@ -110,7 +110,7 @@ if (isEditTool) {
     if (!target) continue;
     const cls = classifyPath(target, extra);
     if (cls === 'deny') {
-      out('deny', `受控状态文件只能由 crctl 写入（advance/approve/attempt）。请改用 tools/skills/shared/crctl/scripts/crctl.mjs，禁止直接编辑 ${target}`);
+      out('deny', `受控状态文件只能由 crctl 写入（advance/approve/attempt）。请改用经 Tools Root 解析的 crctl（{TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs），禁止直接编辑 ${target}`);
     }
     if (cls === 'ask') {
       out('ask', `${target} 属于门禁路径（specs/delivery 只归 writeback Skill，test-report 骨架只归 crctl test）。若这是合法的回写/分析补写，请人工确认放行。`);
@@ -124,7 +124,7 @@ if (isShellTool) {
   const isCrctlGit = /crctl(\.mjs)?["']?\s+git\b/.test(cmd);
   const mentionsGit = /(^|[\s;&|(`])(command\s+)?(\S*[\\/])?git(\.exe)?\s/.test(cmd) || /(^|[\s;&|(`])git$/.test(cmd);
   if (mentionsGit && !isCrctlGit) {
-    out('deny', '裸 git 被禁止（漂移治理 v2 ③）。所有 git 操作必须经 controlled-shell 白名单执行：node tools/skills/shared/crctl/scripts/crctl.mjs git <sub> [args] --cwd <path>');
+    out('deny', '裸 git 被禁止（漂移治理 v2 ③）。所有 git 操作必须经 controlled-shell 白名单执行：经 Tools Root 解析的 crctl（{TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs）git <sub> [args] --cwd <path>');
   }
   const writeOps = /(>>?|\btee\b|\bsed\s+(-[a-z]*\s+)*-i\b|\bmv\b|\bcp\b|\brm\b|\btruncate\b)/.test(cmd);
   if (writeOps) {

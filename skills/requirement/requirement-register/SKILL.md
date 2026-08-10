@@ -47,12 +47,11 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
 
 ### Step 2 — 权威注册：crctl cr-init（S8，唯一权威分配与建档）
 
-1. 运行 `crctl cr-init --title "{title}" --owner-requirement {requirement_owner} [--year Y] --workspace <ws>`（**不取显式 cr-id 入参**——SDD-BLOCK-001 语义：内部分配 `CR-{Y}-{NNN+1}`，以 `casWriteMulti` 原子写 `cr.md`(新建) + `_backlog.yml`(追加) + `_index.yml`(登记)，成功后在输出 JSON 返回分配到的 `cr`）。
-   - `cr.md` frontmatter 全量由 crctl 生成（owners/owner-history/时间戳 = identity(ws)/nowIso()）；`--owner-requirement` 只提供被指派人业务身份。
+1. 运行 `crctl cr-init --title "{title}" --owner-requirement {requirement_owner} --summary "{summary}" --source {source} --target-version {target_version} [--year Y] --workspace <ws>`（**不取显式 cr-id 入参**——SDD-BLOCK-001 语义：内部分配 `CR-{Y}-{NNN+1}`，以 `casWriteMulti` 原子写 `cr.md`(新建) + `_backlog.yml`(追加) + `_index.yml`(登记)，成功后在输出 JSON 返回分配到的 `cr`）。
+   - `cr.md` frontmatter 全量由 crctl 生成（owners/owner-history/时间戳 = identity(ws)/nowIso()）；`--owner-requirement` 只提供被指派人业务身份；`--summary`/`--source`/`--target-version` 为注册元信息旗标（CR-2026-022 FR-9，缺省 summary="" / source=manual / target-version=tbd），**一次传齐，不得建档后二次补写**（CR-2026-028 FR-6）。
    - 并发下后到者见 `_index`/`_backlog` hash 已变 → `CAS_CONFLICT`，三文件全不落盘 → **重跑 cr-init**（重读 max、自动拿新号），不撞号。
    - `cr_id` 变量 = cr-init 返回的 `cr` 字段。
-2. **模型不得手写 `cr.md`/追加 `_backlog.yml`/登记 `_index.yml`**（guard deny + cr-init 独占，含 CAS+审计）。
-3. `summary`/`source`/`target-version` 等注册元信息字段由注册方在 cr-init 建档后直接补全 `cr.md` frontmatter，随 Step 3 的 register 提交一并入库（先例：CR-2026-021 register 提交即含完整 summary/source）。注：`crctl backlog-set`（S5）白名单仅 `prd-path|sdd-path`，不承担 summary 写入。
+2. **模型不得手写 `cr.md`/追加 `_backlog.yml`/登记 `_index.yml`**（guard deny + cr-init 独占，含 CAS+审计）。`summary`/`source`/`target-version` 已随 cr-init 写入 `cr.md` frontmatter（CR-2026-028 FR-6 废除建档后手工补 frontmatter）。
 
 ### Step 3 — 提交注册记录到 knowledge-base trunk
 
