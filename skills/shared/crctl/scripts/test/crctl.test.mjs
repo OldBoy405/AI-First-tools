@@ -3442,3 +3442,31 @@ test('AC-8：四 loader 均显式接收 ws 并调用同一 resolveToolsRoot(ws)�
   assert.ok(!resolverZone.includes('new Map('), 'Tools Root 区域无 Map 缓存');
   assert.ok(!src.includes('telemetry'), '无 telemetry');
 });
+
+// ── CR-2026-029 TASK-03：merge pipeline 发布联调走查文本静态断言 ──
+
+test('CR-2026-029：merge-feature-branch 含 Step 6 联调走查与 merge-verification 产出、发布类任务约定', () => {
+  const md = readFileSync(path.join(PACKAGE_ROOT, 'skills', 'writeback', 'merge-feature-branch', 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
+  assert.ok(md.includes('### Step 6 — 发布联调走查'), '含 Step 6 联调走查');
+  assert.ok(md.includes('merge-verification.md'), '含 merge-verification 产出契约');
+  assert.ok(md.includes('发布联调、merge 验证类工作归本步骤'), '含发布类任务归属约定');
+  assert.ok(md.includes('### Step 7 — 输出摘要'), '原输出摘要顺延为 Step 7');
+  assert.ok(!/### Step 6 — 输出摘要/.test(md), '无重复 Step 6 输出摘要');
+});
+
+test('CR-2026-029：feature-writeback pipeline merge-feature-branch 节点 prompt 同步联调走查', () => {
+  const pl = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'pipeline-templates', 'feature-writeback.pipeline.json'), 'utf8'));
+  const node = pl.nodes.find((n) => n.ref === 'merge-feature-branch');
+  assert.ok(node, 'merge-feature-branch 节点存在');
+  assert.ok(node.prompt.includes('发布联调走查'), 'prompt 含发布联调走查');
+  assert.ok(node.prompt.includes('merge-verification.md'), 'prompt 含 merge-verification 产出');
+  assert.ok(node.prompt.includes('不创建开发 TASK'), 'prompt 含发布类任务不落开发 TASK');
+});
+
+test('CR-2026-029：write-dev-tasks 无发布联调类任务拆分指引（FR-3）', () => {
+  const skill = readFileSync(path.join(PACKAGE_ROOT, 'skills', 'develop', 'write-dev-tasks', 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n');
+  const pl = readFileSync(path.join(PACKAGE_ROOT, 'pipeline-templates', 'code-implementation.pipeline.json'), 'utf8').replace(/\r\n/g, '\n');
+  for (const [name, text] of [['write-dev-tasks', skill], ['code-implementation', pl]]) {
+    assert.ok(!/发布.{0,12}联调|联调.{0,12}TASK|发布类任务拆分/.test(text), `${name} 不含发布联调类 TASK 拆分指引`);
+  }
+});
