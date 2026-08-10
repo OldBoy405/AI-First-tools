@@ -49,6 +49,15 @@ function nowIso() {
   );
 }
 
+// CR-2026-027 代码评审回修（b4）：reviewed-at 时间戳统一解析为 epoch 毫秒后再比较。
+// ISO 字符串字典序比较在跨时区偏移时会产生错误先后判定（如 +08:00 vs Z）；
+// Date.parse 归一到 UTC epoch，与偏移无关。非法/缺失时间戳硬失败（fail-fast，不静默降级）。
+function reviewedAtEpoch(s, field) {
+  const ms = Date.parse(String(s == null ? '' : s));
+  if (!Number.isFinite(ms)) fail('BAD_TIMESTAMP', `${field} 时间戳非法（无法解析为 epoch）: ${JSON.stringify(s)}`);
+  return ms;
+}
+
 function sha256(text) {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }
@@ -71,7 +80,8 @@ function evidenceSha16(text) {
  * evidenceSha16 自本任务起仅用于历史 approval.yml 的 evidence-sha256-16 兼容复核（已废弃字段）。 */
 function canonicalEvidenceDigest(ws, cr, stageCfg) {
   if (!stageCfg || !stageCfg.evidence) return null;
-  const rels = Object.values(stageCfg.evidence).map((rel) => rel.replaceAll('{cr}', cr)).sort();
+  // `$comment` 为声明内元注释（非证据文件路径），不参与 digest（CR-2026-027 代码评审回修 b9）
+  const rels = Object.entries(stageCfg.evidence).filter(([k]) => k !== '$comment').map(([, rel]) => rel.replaceAll('{cr}', cr)).sort();
   const parts = [];
   for (const rel of rels) {
     const text = readFileChecked(path.join(ws, rel));
@@ -121,10 +131,16 @@ function stripComment(line) {
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (c === "'" && !inD) inS = !inS;
-    else if (c === '"' && !inS) inD = !inD;
+    else if (c === '"' && !inS && !isEscaped(line, i)) inD = !inD;
     else if (c === '#' && !inS && !inD && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i);
   }
   return line;
+}
+
+function isEscaped(text, index) {
+  let slashes = 0;
+  for (let i = index - 1; i >= 0 && text[i] === '\\'; i--) slashes++;
+  return slashes % 2 === 1;
 }
 
 function parseBlock(lines, idx, minIndent) {
@@ -248,10 +264,10 @@ function parseFlow(s) {
 }
 
 function unquote(s) {
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
-    const inner = s.slice(1, -1);
-    return s.startsWith('"') ? inner.replace(/\\(.)/g, '$1') : inner;
+  if (s.startsWith('"') && s.endsWith('"')) {
+    try { return JSON.parse(s); } catch { return s.slice(1, -1).replace(/\\(.)/g, '$1'); }
   }
+  if (s.startsWith("'") && s.endsWith("'")) return s.slice(1, -1);
   return s;
 }
 
@@ -265,6 +281,12 @@ function parseScalar(s) {
   if (/^-?\d+$/.test(s)) return parseInt(s, 10);
   if (/^-?\d+\.\d+$/.test(s)) return parseFloat(s);
   return unquote(s);
+}
+
+// Dynamic YAML strings use JSON's quoted-string form, which is valid YAML and
+// safely escapes quotes, backslashes, control characters, and line breaks.
+function yamlStringScalar(value) {
+  return JSON.stringify(String(value));
 }
 
 function getPath(obj, dotted) {
@@ -505,10 +527,7 @@ function matchFrontmatter(text) {
   return m ? { match: m[0], body: m[1] } : null;
 }
 
-function readEvidenceDoc(ws, cr, rel) {
-  const p = path.join(ws, rel.replaceAll('{cr}', cr));
-  const text = readFileChecked(p);
-  if (text == null) return { path: p, exists: false, data: null };
+function parseEvidenceText(p, text) {
   if (p.endsWith('.md')) {
     const m = matchFrontmatter(text);
     let data = m ? parseYaml(m.body) : {};
@@ -525,6 +544,16 @@ function readEvidenceDoc(ws, cr, rel) {
   return { path: p, exists: true, data: parseYaml(text) };
 }
 
+function readEvidenceDoc(ws, cr, rel, overrides) {
+  // 候选证据 override（CR-2026-027 FR-8/TASK-03）：overrides 的 key 用含 {cr} 占位符的规范相对路径，
+  // 匹配发生在路径展开前（调用方与读取方统一占位符形态）；命中时用内存文本走同一解析路径，不落盘。
+  if (overrides && overrides[rel]) return parseEvidenceText(path.join(ws, rel.replaceAll('{cr}', cr)), overrides[rel].text);
+  const p = path.join(ws, rel.replaceAll('{cr}', cr));
+  const text = readFileChecked(p);
+  if (text == null) return { path: p, exists: false, data: null };
+  return parseEvidenceText(p, text);
+}
+
 // CR-2026-025 项③（FR-11，D-7：常量不做配置）：isEmpty 数组失败逐项截断。
 // 只封单条长度、不封条数；非字符串项原样保留，数组类型不变（FR-13/NFR-3）。
 const ITEM_MAX = 120;
@@ -533,8 +562,9 @@ function briefArray(v) {
     ? x.slice(0, ITEM_MAX) + `…(+${x.length - ITEM_MAX}字)` : x);
 }
 
-function evaluatePassCondition(ws, cr, stageCfg, gates) {
+function evaluatePassCondition(ws, cr, stageCfg, gates, evidence) {
   // stageCfg: { passCondition: {pipeline, nodeRef}, evidence: {"$default": rel, "test-report": rel} }
+  // evidence: 候选证据 override（CR-2026-027 FR-8），透传给 readEvidenceDoc；缺省为磁盘读。
   const results = [];
   const { pipeline, nodeRef } = stageCfg.passCondition;
   const { doc: pl, source } = loadPipeline(ws, pipeline);
@@ -543,7 +573,7 @@ function evaluatePassCondition(ws, cr, stageCfg, gates) {
   const conds = getPath(node, 'reviewLoop.passCondition.allOf') || [];
   const docsCache = {};
   const getDoc = (key) => {
-    if (!(key in docsCache)) docsCache[key] = readEvidenceDoc(ws, cr, stageCfg.evidence[key]);
+    if (!(key in docsCache)) docsCache[key] = readEvidenceDoc(ws, cr, stageCfg.evidence[key], evidence);
     return docsCache[key];
   };
   for (const cond of conds) {
@@ -573,25 +603,23 @@ function evaluatePassCondition(ws, cr, stageCfg, gates) {
   return { pass: results.length > 0 && results.every((r) => r.ok), results, source };
 }
 
-// CR-2026-005 FR-1: delivery/task 回写一致性检查。tasks/_index.yml 中每条
-// status=done 的任务，必须能在全局 delivery/task/_index.yaml 里按 id 找到
-// 对应条目——两份索引的 id 字段已核实同名同值（如 CR-2026-004-TASK-01），
-// 简单集合差即可，不需要映射表。两个边界（PRD FR-3）处理不同：doneIds 为
-// 空时直接放行（没有待核对项）；全局索引文件不存在但 doneIds 非空时视为
-// 全局集合为空集，正常计算 missing（此时应报告缺失，因为回写确实没做，
-// 不是"视为通过"）。
+// CR-2026-027 FR-9/TASK-04：archived 目标态任务完成门禁五步判定（SDD §4.1，D-8）。
+// 缺文件/空数组/pending 均不得被解释为 no-task：正常归档必须存在非空 task index 且全部 done，
+// 全部 done 后再校验 delivery/task/_index.yaml。rejected/withdrawn 属提前终止，不走本门禁（gates.json 不挂载）。
 function checkDeliveryIndexComplete(ws, cr) {
   const tasksIdx = readEvidenceDoc(ws, cr, 'change-requests/{cr}/tasks/_index.yml');
-  const doneIds = tasksIdx.exists
-    ? (tasksIdx.data?.tasks || []).filter((t) => t.status === 'done').map((t) => t.id)
-    : [];
-  if (doneIds.length === 0) return { ok: true, missing: [] };
+  if (!tasksIdx.exists) return { ok: false, code: 'TASK_INDEX_MISSING', why: 'tasks/_index.yml 不存在（缺文件不得解释为 no-task）' };
+  const tasks = Array.isArray(tasksIdx.data?.tasks) ? tasksIdx.data.tasks : [];
+  if (tasks.length === 0) return { ok: false, code: 'TASK_LIST_EMPTY', why: 'tasks[] 为空（空数组不得解释为 no-task）' };
+  const pending = tasks.filter((t) => t.status !== 'done');
+  if (pending.length > 0) {
+    return { ok: false, code: 'TASK_STATUS_INCOMPLETE', why: `存在未完成任务: ${pending.map((t) => t.id).filter(Boolean).join(', ')}` };
+  }
   const globalPath = path.join(ws, 'delivery/task/_index.yaml');
-  const globalIds = fs.existsSync(globalPath)
-    ? (parseYaml(fs.readFileSync(globalPath, 'utf8'))?.tasks || []).map((e) => e.id)
-    : [];
-  const missing = doneIds.filter((id) => !globalIds.includes(id));
-  return { ok: missing.length === 0, missing };
+  if (!fs.existsSync(globalPath)) return { ok: false, code: 'DELIVERY_INDEX_MISSING', why: 'delivery/task/_index.yaml 缺失（TASK 全 done 后回写索引必须存在）' };
+  const globalIds = (parseYaml(fs.readFileSync(globalPath, 'utf8'))?.tasks || []).map((e) => e.id);
+  const missing = tasks.map((t) => t.id).filter((id) => !globalIds.includes(id));
+  return { ok: missing.length === 0, missing, code: missing.length ? 'DELIVERY_INDEX_INCOMPLETE' : undefined, why: missing.length ? `delivery/task 索引缺失 ${missing.length} 项: ${missing.join(', ')}` : null };
 }
 
 function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
@@ -613,10 +641,10 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
       out.checks.push({ type: check.type, dir, pattern: check.pattern, ok: okv, why: okv ? null : '目录缺失或无匹配文件' });
     } else if (check.type === 'passCondition') {
       const stageCfg = gates.approvalStages[check.stage];
-      const r = evaluatePassCondition(ws, cr, stageCfg, gates);
+      const r = evaluatePassCondition(ws, cr, stageCfg, gates, opts.evidence);
       out.checks.push({ type: check.type, stage: check.stage, ok: r.pass, detail: r.results, pipelineSource: r.source });
     } else if (check.type === 'approval') {
-      const doc = readEvidenceDoc(ws, cr, 'change-requests/{cr}/approval.yml');
+      const doc = readEvidenceDoc(ws, cr, 'change-requests/{cr}/approval.yml', opts.evidence);
       const section = doc.exists ? doc.data?.[check.section] : null;
       // 两轨审批（TASK-03）：TTY 的 crctl-approve 与 grant 的 server-approve 都被门禁承认
       const okv = !!(section && section.approver && section['approved-at'] && ['crctl-approve', 'server-approve'].includes(section.via));
@@ -656,8 +684,8 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
     } else if (check.type === 'deliveryIndexComplete') {
       const r = checkDeliveryIndexComplete(ws, cr);
       out.checks.push({
-        type: check.type, ok: r.ok, missing: r.missing,
-        why: r.ok ? null : `delivery/task 索引缺失 ${r.missing.length} 项: ${r.missing.join(', ')}`,
+        type: check.type, ok: r.ok, code: r.code, missing: r.missing || [],
+        why: r.ok ? null : (r.why || `delivery/task 索引缺失 ${(r.missing || []).length} 项: ${(r.missing || []).join(', ')}`),
       });
     } else if (check.type === 'attemptsWithinLimit') {
       const r = readAttempts(ws, cr, check.loop, gates);
@@ -834,7 +862,8 @@ function editArchiveMove(textB, textH, cr, meta) {
   const newBacklog = normB.slice(0, block.start) + normB.slice(block.end);
   const normH = textH == null ? '' : textH.replaceAll('\r\n', '\n');
   if (normH && matchEntryBlock(normH, cr)) fail('ENTRY_ALREADY_IN_HISTORY', `${cr} 已在 _history.yml，禁止重复归档`);
-  const minIndent = Math.min(...block.text.split('\n').map((l) => (l.match(/^[ \t]*/) || [''])[0].length));
+  // minIndent 必须排除空行（block.text 结尾换行会产生空串，其缩进为 0，会把整块错压成 +2 缩进——CR-2026-027 TASK-07 实测）
+  const minIndent = Math.min(...block.text.split('\n').filter((l) => l.trim() !== '').map((l) => (l.match(/^[ \t]*/) || [''])[0].length));
   const entry = block.text.split('\n').map((l) => '  ' + l.slice(minIndent)).join('\n');
   const reason = String(meta.archiveReason || '').replaceAll('"', '\\"');
   const enrich = [
@@ -843,9 +872,50 @@ function editArchiveMove(textB, textH, cr, meta) {
     meta.specId ? `    writeback-spec-id: ${meta.specId}` : null,
     `    archived-at: "${nowIso()}"`,
   ].filter(Boolean).join('\n');
-  const record = entry + '\n' + enrich + '\n';
+  // CR-2026-027 FR-11/TASK-06：归档事件随 history 条目同批写入（meta.notifyLog 行数组，4 空格基准缩进）
+  const notifyLog = meta.notifyLog && meta.notifyLog.length ? '\n' + meta.notifyLog.join('\n') : '';
+  const record = entry + '\n' + enrich + notifyLog + '\n';
   const newHistory = (normH.trim() === '' ? 'history:' : normH.trimEnd()) + '\n' + record;
   return { newBacklog, newHistory };
+}
+
+// CR-2026-027 FR-11/TASK-06：归档事件行构造（与 editInboxEmit 同构：at/event/to/payload）。
+// 收件人由 resolveArchiveRecipients 解析（owners 三角色去重 → legacy 顶层 owner → 空则硬失败）。
+function buildArchiveNotifyLog(finalStatus, to, payload) {
+  return [
+    '    notify-log:',
+    `      - at: "${nowIso()}"`,
+    `        event: ${finalStatus}`,
+    `        to: ${JSON.stringify(to)}`,
+    `        payload: ${JSON.stringify(payload)}`,
+  ];
+}
+
+// CR-2026-027 FR-11/TASK-06：收件人解析（D-10）。
+function resolveArchiveRecipients(ws, cr) {
+  const snap = loadBacklogEntry(ws, cr);
+  const o = snap.entry.owners || {};
+  const to = [...new Set([o.requirement && o.requirement.id, o.development && o.development.id, o.test && o.test.id].filter(Boolean))];
+  if (to.length === 0 && snap.entry.owner) to.push(String(snap.entry.owner));
+  if (to.length === 0) fail('ARCHIVE_RECIPIENTS_MISSING', `归档事件收件人为空：${cr} 缺少 owners 三角色且无顶层 owner，CAS 前拒绝归档`);
+  return to;
+}
+
+// CR-2026-027 FR-11/TASK-06：_index.yml 终态字段更新（只写 status/archived-at/可选 writeback-spec-id，D-2）。
+function editIndexFinalStatus(text, cr, finalStatus, specId) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, cr);
+  if (!block) fail('INDEX_ENTRY_NOT_FOUND', `${cr} 不在 _index.yml`);
+  const fieldIndent = ' '.repeat(block.indent + 2);
+  let body = block.text;
+  const set = (key, val) => {
+    const re = new RegExp(`^([ \\t]*)${key}:.*$`, 'm');
+    return re.test(body) ? body.replace(re, `$1${key}: ${val}`) : body + `\n${fieldIndent}${key}: ${val}`;
+  };
+  body = set('status', finalStatus);
+  body = set('archived-at', `"${nowIso()}"`);
+  if (specId) body = set('writeback-spec-id', String(specId));
+  return norm.slice(0, block.start) + body + norm.slice(block.end);
 }
 
 
@@ -855,14 +925,21 @@ function updateCrMdStatus(ws, cr, newStatus) {
   const text = readFileChecked(p);
   if (text == null) return { updated: false, why: `cr.md 不存在: ${p}` };
   const hash = sha256(text);
+  const next = crMdStatusText(text, newStatus);
+  if (next == null) return { updated: false, why: 'cr.md 无 frontmatter' };
+  casWrite(p, hash, next);
+  return { updated: true, path: p };
+}
+
+// CR-2026-027 FR-8/TASK-03：cr.md 状态文本生成纯函数（status + updated-at 更新），供 approve 原子提交在内存生成候选文本。
+function crMdStatusText(text, newStatus) {
   const m = matchFrontmatter(text);
-  if (!m) return { updated: false, why: 'cr.md 无 frontmatter' };
+  if (!m) return null;
   let fm = m.body;
   if (/^status:\s*.*$/m.test(fm)) fm = fm.replace(/^status:\s*.*$/m, `status: ${newStatus}`);
   else fm = fm + `\nstatus: ${newStatus}`;
   if (/^updated-at:\s*.*$/m.test(fm)) fm = fm.replace(/^updated-at:\s*.*$/m, `updated-at: "${nowIso()}"`);
-  casWrite(p, hash, text.replace(m.match, `---\n${fm}\n---`));
-  return { updated: true, path: p };
+  return text.replace(m.match, `---\n${fm}\n---`);
 }
 
 /* ────────────────────────── 状态读取收敛（CR-2026-018 FR-2） ──────────────────────────
@@ -892,6 +969,50 @@ function resolveCrState(ws, cr) {
   fail('CR_MD_STATUS_MISSING', `${cr} 在 cr.md 与 _backlog.yml 中均无 status`);
 }
 
+// CR-2026-027 FR-12/TASK-07：终态只读查询——从 _history.yml 找 CR 条目（仅 status/next 使用；写命令不 fallback）。
+// 行级解析（兼容新旧两种缩进：archive-move 旧版 4 空格条目 + 新版 2 空格条目），不依赖 YAML 解析器对嵌套缩进的解析。
+function findHistoryEntry(ws, cr) {
+  const hText = readFileChecked(path.join(ws, 'change-requests', '_history.yml'));
+  if (hText == null) return null;
+  const lines = hText.replaceAll('\r\n', '\n').split('\n');
+  // CR-2026-027 代码评审回修（b1）：先统计同 id 条目数，history 重复 CR → 硬失败，终态查询不得据二义数据判定
+  const idHits = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^"'\s]+)["']?\s*$/);
+    if (m && m[2] === cr) idHits.push(i);
+  }
+  if (idHits.length === 0) return null;
+  if (idHits.length > 1) fail('HISTORY_DUPLICATE_ENTRY', `_history.yml 中 ${cr} 出现 ${idHits.length} 个条目，终态查询拒绝二义数据`, { count: idHits.length });
+  const idLine = idHits[0];
+  const indent = lines[idLine].match(/^([ \t]*)/)[0].length;
+  const entry = { id: cr };
+  for (let i = idLine + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.trim() === '') continue;
+    const ind = l.match(/^[ \t]*/)[0].length;
+    // 同级下一条目（缩进 == indent 的 `- id:` 行）必须停止，否则后续条目字段会覆盖本 CR（b1）
+    if (ind <= indent) break;
+    const km = l.match(/^\s*([a-zA-Z0-9_-]+):\s*(.*)$/);
+    if (km) entry[km[1]] = km[2].replace(/^["']|["']$/g, '').trim();
+  }
+  return entry;
+}
+
+// CR-2026-027 FR-12/TASK-07：终态前置检测（status/next 专用）。命中 history 时：
+// backlog 同存同 CR → CR_LOCATION_CONFLICT 硬失败；history 缺 final-status → 硬失败；否则返回终态条目。
+function resolveTerminalForQuery(ws, cr) {
+  const hist = findHistoryEntry(ws, cr);
+  if (!hist) return null;
+  const bText = readFileChecked(backlogPath(ws));
+  if (bText != null) {
+    const bDoc = parseYaml(bText);
+    const bList = Array.isArray(bDoc) ? bDoc : bDoc['change-requests'] || [];
+    if (bList.some((e) => e && e.id === cr)) fail('CR_LOCATION_CONFLICT', `${cr} 同时存在于 _backlog.yml 与 _history.yml，数据冲突`, { location: 'both' });
+  }
+  if (hist['final-status'] == null) fail('HISTORY_FINAL_STATUS_MISSING', `${cr} 在 _history.yml 中缺少 final-status，终态查询失败`);
+  return hist;
+}
+
 /* ────────────────────────── attempts（review-loop 轮次记账） ────────────────────────── */
 
 function attemptsFilePath(ws, cr) { return path.join(crDir(ws, cr), 'review-loop.yml'); }
@@ -905,8 +1026,13 @@ function readAttempts(ws, cr, loopRef, gates) {
   const text = readFileChecked(attemptsFilePath(ws, cr));
   const data = text ? parseYaml(text) : {};
   const loop = (data && data.loops && data.loops[loopRef]) || { 'current-attempt': 0, attempts: [] };
-  const current = loop['current-attempt'] || 0;
-  return { current, max, attempts: loop.attempts || [], exhausted: current >= max, data: data || {} };
+  // CR-2026-027 FR-16/TASK-08：review cycle 兼容（SDD §2.4）——current-cycle 缺失视为 1；
+  // attempt 缺 cycle 视为 cycle=1（legacy）；current-attempt 只表示当前 cycle 内轮次，attemptsWithinLimit 只查当前 cycle。
+  const cycle = loop['current-cycle'] || 1;
+  const attempts = loop.attempts || [];
+  const cycleAttempts = attempts.filter((a) => (a && a.cycle || 1) === cycle);
+  const current = cycleAttempts.length;
+  return { current, max, attempts, cycle, cycleAttempts, exhausted: current >= max, data: data || {} };
 }
 
 /** review-loop.yml 全量渲染纯函数（CR-2026-025 I-1 拆分：bumpAttempt 与 review-record 共用同一渲染，
@@ -915,9 +1041,13 @@ function renderLoopText(loopsMap) {
   const lines = ['# 由 crctl attempt 维护，请勿手工编辑', 'loops:'];
   for (const [k, v] of Object.entries(loopsMap)) {
     lines.push(`  ${k}:`);
+    lines.push(`    current-cycle: ${v['current-cycle'] || 1}`);
     lines.push(`    current-attempt: ${v['current-attempt']}`);
     lines.push('    attempts:');
-    for (const a of v.attempts) lines.push(`      - { attempt: ${a.attempt}, at: "${a.at}", by: "${a.by}" }`);
+    for (const a of v.attempts) {
+      const c = a && a.cycle ? `, cycle: ${a.cycle}` : '';
+      lines.push(`      - { attempt: ${a.attempt}, at: "${a.at}", by: "${a.by}"${c} }`);
+    }
   }
   return lines.join('\n') + '\n';
 }
@@ -928,13 +1058,16 @@ function bumpAttempt(ws, cr, loopRef, gates) {
   const next = state.current + 1;
   const p = attemptsFilePath(ws, cr);
   const all = state.data.loops ? state.data : { loops: {} };
+  const prev = all.loops[loopRef] || { 'current-cycle': 1, 'current-attempt': 0, attempts: [] };
+  const cycle = prev['current-cycle'] || 1;
   all.loops[loopRef] = {
+    'current-cycle': cycle,
     'current-attempt': next,
-    attempts: [...state.attempts, { attempt: next, at: nowIso(), by: identity(ws) }],
+    attempts: [...state.attempts, { attempt: next, at: nowIso(), by: identity(ws), cycle }],
   };
   // review-loop.yml 由 crctl 全量生成（crctl 独占该文件，无 CAS 冲突面）
   fs.writeFileSync(p, renderLoopText(all.loops), 'utf8');
-  return { loop: loopRef, current: next, max: state.max, file: p };
+  return { loop: loopRef, current: next, max: state.max, cycle, file: p };
 }
 
 /* ────────────────────────── 工作区漂移检测（CR-2026-020 复盘 FR-2） ──────────────────────────
@@ -975,6 +1108,12 @@ function detectStatusDivergence(ws, cr, currentStatus) {
 /* ────────────────────────── 子命令实现 ────────────────────────── */
 
 function cmdStatus(ws, cr, gates, flags) {
+  // CR-2026-027 FR-12/TASK-07：终态只读查询（history final-status 为权威；写命令不 fallback）
+  const terminal = resolveTerminalForQuery(ws, cr);
+  if (terminal) {
+    ok({ cr, status: String(terminal['final-status']), terminal: true, source: { history: 'change-requests/_history.yml' }, legalNext: [], reviewLoops: {}, gateBlockers: {}, next: null });
+    return;
+  }
   const { sm, source } = loadStateMachine(ws);
   const state = resolveCrState(ws, cr);
   const snap = state.snap;
@@ -1082,10 +1221,76 @@ const REJECT_ROLLBACK = {
   code: { to: 'developing', approve: 'approve-code', write: 'implement-code' },
 };
 
+// CR-2026-027 FR-8/TASK-03：候选 cr.md 独立 invariant 校验。
+// 现有目标态 gate（如 tech-design-reviewed）没有任何 checker 读取 cr.md，runGateChecks 只以 targetStatus 选择门禁，
+// 因此候选 cr.md 的目标态一致性必须由本 helper 在 CAS 前直接断言（不假设 gate 消费 cr.md）。
+function assertCandidateStatus(crMdText, expectStatus) {
+  const m = matchFrontmatter(crMdText);
+  if (!m) fail('CANDIDATE_STATUS_MISMATCH', '候选 cr.md 无 frontmatter');
+  const fm = parseYaml(m.body) || {};
+  if (fm.status !== expectStatus) {
+    fail('CANDIDATE_STATUS_MISMATCH', `候选 cr.md status=${fm.status}，目标态应为 ${expectStatus}`);
+  }
+  return true;
+}
+
+// CR-2026-027 FR-8/TASK-03：approval 与 status 的原子提交核心（TTY 与 --grant 共用）。
+// 流程：预检（调用方完成）→ 内存生成候选两文件 → runGateChecks（approval.yml evidence override）→
+// assertCandidateStatus → casWriteMulti 两文件 → controlledGit add/commit 单次提交 → commit 成功后发 status outbox。
+// 失败边界：gate/候选校验失败零写入；CAS 冲突两文件均不写；commit 失败两文件共同留在工作区、不发 outbox、返回结构化恢复信息。
+function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
+  const { approver, via, evidenceHash, grant, outboxEvidence, specId, fromStatus } = ctx;
+  const crMdP = path.join(crDir(ws, cr), 'cr.md');
+  const approvalP = path.join(crDir(ws, cr), 'approval.yml');
+  const crMdText = readFileChecked(crMdP);
+  if (crMdText == null) fail('CR_MD_WRITE_FAILED', `cr.md 不存在: ${crMdP}`);
+  // 1) 内存生成候选文本（零落盘）
+  const approvalText = buildApprovalSectionText(approvalP, stageCfg, approver, evidenceHash, { via, grant });
+  const nextCrMd = crMdStatusText(crMdText, stageCfg.to);
+  if (nextCrMd == null) fail('CANDIDATE_STATUS_MISMATCH', '候选 cr.md 无 frontmatter，无法生成目标态文本');
+  // 2) 按候选 approval 复核目标 gate（evidence override，approval.yml 不落盘）
+  const gate = runGateChecks(ws, cr, stageCfg.to, gates, {
+    specId,
+    evidence: { 'change-requests/{cr}/approval.yml': { text: approvalText } },
+  });
+  if (!gate.pass) {
+    const why = gate.checks.filter((c) => !c.ok).map((c) => c.why).filter(Boolean).join('；');
+    fail('GATE_BLOCKED', `目标状态 ${stageCfg.to} 的门禁未通过，拒绝写入${why ? '：' + why : ''}`, { gate });
+  }
+  // 3) 候选 cr.md 独立 invariant 校验（零写入前提）
+  assertCandidateStatus(nextCrMd, stageCfg.to);
+  // 4) 两文件同一 CAS：全校验→全 temp→连续 rename，任一冲突整体中止
+  const approvalHash = readFileChecked(approvalP) == null ? null : sha256(readFileChecked(approvalP));
+  casWriteMulti([
+    { path: approvalP, expectedHash: approvalHash, newText: approvalText },
+    { path: crMdP, expectedHash: sha256(crMdText), newText: nextCrMd },
+  ]);
+  // 5) 单次 commit（approval.yml + cr.md 同批可见）
+  const addR = controlledGit(ws, 'add', [`change-requests/${cr}/approval.yml`, `change-requests/${cr}/cr.md`], ws, 'crctl-approve');
+  const msg = `[cr] approve ${cr} ${stage} approval+status -> ${stageCfg.to}`;
+  const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-approve') : addR;
+  auditLog(ws, { kind: 'approve', cr, stage, approver, via, result: 'approved', commit: commitR.ok ? msg : 'commit-failed' });
+  const result = { advanced: true, op: 'approve', cr, stage, from: fromStatus, to: stageCfg.to, trigger: stageCfg.trigger, crMd: { updated: true, path: crMdP }, files: [approvalP, crMdP], commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR, note: 'approval.yml 与 cr.md 已同批写入工作区；commit 失败时两文件共同保留、未发 status outbox，请修复后手工经 crctl git 提交' } };
+  // 6) commit 成功后发 status outbox（git 是权威、outbox 只是投影）；commit 失败不发
+  if (commitR.ok) {
+    result.outbox = emitOutboxEvent(ws, {
+      event_kind: 'status', cr_id: cr, from_status: fromStatus, to_status: stageCfg.to,
+      trigger: stageCfg.trigger, commit_sha: gitHeadSha(ws),
+      actor: identity(ws), evidence: outboxEvidence || {},
+    });
+  }
+  ok(result);
+  if (!commitR.ok) process.exit(1);
+}
+
 function cmdApprove(ws, cr, gates, flags) {
   const stage = flags.stage;
   const stageCfg = gates.approvalStages[stage];
   if (!stageCfg) fail('BAD_ARGS', `--stage 必须是 ${Object.keys(gates.approvalStages).join(' | ')}`);
+  // CR-2026-027 代码评审回修（b10）：受控历史审批迁移路径（TTY 人类在环，无旁路）——
+  // 证据定义变更（如 dev-start 剔除 task-index）后既有 approval 段 digest 按旧定义签发，
+  // 门禁复算不一致报 EVIDENCE_DRIFT；--resign 只重算当前定义下 digest 并改写该段，保留审批本体。
+  if (flags.resign !== undefined) return approveResign(ws, cr, gates, flags, stage, stageCfg);
   // grant 模式（P1 签名审批 §B，CR-2026-002 TASK-03）：服务端已完成人类身份校验并签名，
   // crctl 本地验签 + 重算证据摘要后非 TTY 放行——强度不降级，只是"人在环"发生在服务端。
   if (flags.grant) return approveWithGrant(ws, cr, gates, flags, stage, stageCfg);
@@ -1137,12 +1342,12 @@ function cmdApprove(ws, cr, gates, flags) {
       auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined-rolled-back', to: rollback.to });
       fail('APPROVAL_DECLINED_ROLLED_BACK', `审批未通过，CR 已回退到 ${rollback.to}，请重跑 ${rollback.write}`, { rolledBackTo: rollback.to, rerunHint: rollback.write });
     }
-    writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash);
-    auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'approved' });
-    // 证据摘要随级联 advance 的 status 事件进 outbox（一个 approve 只发一条事件，避免与去重键冲突）
-    const outboxEvidence = collectOutboxEvidence(ws, cr, stageCfg);
-    // 级联推进状态（同一 gate 再校验一遍，包含 approval 检查）
-    cmdAdvance(ws, cr, gates, { to: stageCfg.to, trigger: stageCfg.trigger, expect: current, specId: flags['spec-id'], outboxEvidence });
+    // CR-2026-027 FR-8/TASK-03：TTY 确认后走 approveAndAdvance（approval.yml + cr.md 单次原子提交），替代原分提交路径
+    approveAndAdvance(ws, cr, gates, stage, stageCfg, {
+      approver, via: 'crctl-approve', evidenceHash,
+      outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
+      specId: flags['spec-id'], fromStatus: current,
+    });
   });
 }
 
@@ -1184,16 +1389,89 @@ function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
   }
   const sig = verifyGrantSignature(ws, grant);
   if (!sig.ok) fail(sig.code, sig.why);
-  writeApprovalSection(ws, cr, stage, stageCfg, grant.approver, digest || null, { via: 'server-approve', grant });
-  auditLog(ws, { kind: 'approve', cr, stage, approver: grant.approver, via: 'server-approve', keyId: grant.key_id, result: 'approved' });
-  const outboxEvidence = collectOutboxEvidence(ws, cr, stageCfg);
-  cmdAdvance(ws, cr, gates, { to: stageCfg.to, trigger: stageCfg.trigger, expect: current, specId: flags['spec-id'], outboxEvidence });
+  // CR-2026-027 FR-8/TASK-03：grant 验签通过后走 approveAndAdvance（approval.yml + cr.md 单次原子提交），替代原分提交路径
+  approveAndAdvance(ws, cr, gates, stage, stageCfg, {
+    approver: grant.approver, via: 'server-approve', evidenceHash: digest || null, grant,
+    outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
+    specId: flags['spec-id'], fromStatus: current,
+  });
+}
+
+// CR-2026-027 代码评审回修（b10）：受控历史审批迁移 —— `crctl approve <cr> --stage <stage> --resign <reason>`
+// 场景：gates.json evidence 定义变更（如 dev-start 剔除 task-index）后，既有 approval.yml 段仍按旧证据集签发
+// digest，developing 门禁复算不一致报 EVIDENCE_DRIFT（非证据内容被改动，而是证据定义变了）。
+// 约束：① 仅 TTY 人类在环，无旁路（与 approve 同强度）；② 仅迁移 via=crctl-approve 的本地审批；
+// server-approve 必须由服务端按新 digest 重签 grant，禁止保留旧 signature 改 digest；③ 只改写该段的 evidence-digest，
+// 保留 approver/approved-at/via/target-status；④ 追加 resign 审计块（at/by/from-digest/reason）；⑤ CAS + audit + 单次 commit。
+function approveResign(ws, cr, gates, flags, stage, stageCfg) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    fail('APPROVAL_REQUIRES_HUMAN', 'crctl approve --resign 仅接受交互式终端会话（人类在环，无旁路）。模型/管道/脚本直接调用一律拒绝。');
+  }
+  const reason = typeof flags.resign === 'string' && flags.resign.trim() ? flags.resign.trim() : null;
+  if (!reason) fail('BAD_ARGS', '--resign 需要原因说明（--resign <reason>），如 evidence-definition-change（gates.json 证据集调整）');
+  const section = stageCfg.approvalSection;
+  const ap = path.join(crDir(ws, cr), 'approval.yml');
+  const text = readFileChecked(ap);
+  if (text == null) fail('APPROVAL_NOT_FOUND', `approval.yml 不存在: ${ap}`);
+  const doc = parseYaml(text);
+  const sec = doc && doc[section];
+  if (!sec || !sec.approver || !sec['approved-at'] || !['crctl-approve', 'server-approve'].includes(sec.via)) {
+    fail('RESIGN_NO_PRIOR_APPROVAL', `approval.yml#${section} 无既有 crctl approve 审批记录，不能 --resign`);
+  }
+  if (sec.via === 'server-approve') {
+    fail('RESIGN_SERVER_APPROVAL_UNSUPPORTED', `approval.yml#${section} 是 server-approve 签名审批；本地改写 digest 会使原签名失效，必须由服务端按新 digest 重新签发 grant`);
+  }
+  const oldDigest = sec['evidence-digest'] || null;
+  const newDigest = canonicalEvidenceDigest(ws, cr, stageCfg);
+  if (!newDigest) fail('RESIGN_DIGEST_UNAVAILABLE', '按当前 gates.json evidence 定义无法重算 digest（证据文件缺失）');
+  if (newDigest === oldDigest) {
+    ok({ op: 'approve-resign', cr, stage, changed: false, reason: 'digest-already-current' });
+    return;
+  }
+  const approver = flags.approver || identity(ws);
+  process.stdout.write(`\n=== crctl approve --resign · ${cr} · ${stage} ===\n`);
+  process.stdout.write(`证据定义变更（gates.json）导致 evidence-digest 漂移，需受控迁移：\n  旧 digest: ${oldDigest || '(无)'}\n  新 digest: ${newDigest}\n  原因: ${reason}\n`);
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  rl.question(`以 approver=${approver} 确认将该段 evidence-digest 迁移到当前定义？只有输入 yes 才会写入 approval.yml [yes/N] `, (answer) => {
+    rl.close();
+    if (answer.trim().toLowerCase() !== 'yes') {
+      auditLog(ws, { kind: 'approve-resign', cr, stage, approver, result: 'declined' });
+      fail('RESIGN_DECLINED', '人工未确认，approval.yml 未变更');
+    }
+    // 只替换该段 evidence-digest，其余字段原样保留；追加 resign 审计块（幂等：先清旧 resign 子块）
+    const next = resignApprovalSectionText(text, section, newDigest, approver, reason, oldDigest || '');
+    if (next == null) fail('SCHEMA_INVALID', `approval.yml#${section} 无法唯一定位，拒绝 --resign`);
+    casWrite(ap, sha256(text), next);
+    auditLog(ws, { kind: 'approve-resign', cr, stage, approver, via: sec.via, result: 'resigned', from: oldDigest || '', to: newDigest, reason });
+    const addR = controlledGit(ws, 'add', [`change-requests/${cr}/approval.yml`], ws, 'crctl-approve');
+    const msg = `[cr] resign ${cr} ${stage} evidence-digest（${reason}）`;
+    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-approve') : addR;
+    ok({ op: 'approve-resign', cr, stage, changed: true, from: oldDigest || '', to: newDigest, reason, commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR } });
+    if (commitR && !commitR.ok) process.exit(1);
+  });
+}
+
+// CR-2026-027 代码评审回修（b10）：approve --resign 的段文本变换纯函数（供测试提取验证）——
+// 只改写该段 evidence-digest 行，其余字段保留；幂等清旧 resign 子块后追加新 resign 审计块。
+function resignApprovalSectionText(text, section, newDigest, approver, reason, oldDigest) {
+  const normalized = text.replaceAll('\r\n', '\n');
+  const sectionRe = new RegExp(`^${section}:\\n(?:[ \\t]+.*\\n?)*`, 'gm');
+  const matches = [...normalized.matchAll(sectionRe)];
+  if (matches.length !== 1) return null;
+  const match = matches[0];
+  const block = match[0];
+  if ([...block.matchAll(/^  evidence-digest:.*$/gm)].length !== 1) return null;
+  const base = block.replace(/\n  resign:[\s\S]*$/, '');
+  const newBlock = base.replace(/^  evidence-digest:.*$/m, `  evidence-digest: ${yamlStringScalar(newDigest)}`)
+    .replace(/\s*$/, '') + `\n  resign:\n    at: ${yamlStringScalar(nowIso())}\n    by: ${yamlStringScalar(approver)}\n    from-digest: ${yamlStringScalar(oldDigest)}\n    reason: ${yamlStringScalar(reason)}\n`;
+  return normalized.slice(0, match.index) + newBlock + '\n' + normalized.slice(match.index + block.length);
 }
 
 function collectOutboxEvidence(ws, cr, stageCfg) {
   const out = {};
   if (stageCfg.evidence) {
-    for (const rel of Object.values(stageCfg.evidence)) {
+    for (const [k, rel] of Object.entries(stageCfg.evidence)) {
+      if (k === '$comment') continue; // 声明元注释非证据文件，跳过（b9）
       const p = path.join(ws, rel.replaceAll('{cr}', cr));
       const text = readFileChecked(p);
       if (text != null) out[rel.replaceAll('{cr}', cr)] = 'sha256:' + sha256(text.replaceAll('\r\n', '\n'));
@@ -1204,10 +1482,31 @@ function collectOutboxEvidence(ws, cr, stageCfg) {
 
 function writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash, opts = {}) {
   const p = path.join(crDir(ws, cr), 'approval.yml');
+  const existing = readFileChecked(p);
+  const next = buildApprovalSectionText(p, stageCfg, approver, evidenceHash, opts);
+  if (existing == null) {
+    fs.writeFileSync(p, next, 'utf8');
+    return;
+  }
+  casWrite(p, sha256(existing), next);
+}
+
+// CR-2026-027 FR-8/TASK-03：approval.yml 候选文本生成（含既有文件段落合并），供 approve 原子提交在内存构造。
+function buildApprovalSectionText(p, stageCfg, approver, evidenceHash, opts = {}) {
   const section = stageCfg.approvalSection;
   const existing = readFileChecked(p);
+  const block = buildApprovalBlock(stageCfg, approver, evidenceHash, opts);
+  if (existing == null) return `# approval.yml — 人工审批记录（各段仅接受 crctl approve 写入）\n${block}\n`;
+  const re = new RegExp(`^${section}:\\n(?:[ \\t]+.*\\n?)*`, 'm');
+  return re.test(existing)
+    ? existing.replace(re, block + '\n')
+    : existing.replace(/\s*$/, '\n') + block + '\n';
+}
+
+function buildApprovalBlock(stageCfg, approver, evidenceHash, opts = {}) {
+  const section = stageCfg.approvalSection;
   const g = opts.grant || null;
-  const block = [
+  return [
     `${section}:`,
     `  approver: "${approver}"`,
     `  approved-at: "${nowIso()}"`,
@@ -1218,16 +1517,6 @@ function writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash, o
     g ? `  grant-approved-at: "${g.approved_at}"` : null,
     `  target-status: ${stageCfg.to}`,
   ].filter(Boolean).join('\n');
-  if (existing == null) {
-    fs.writeFileSync(p, `# approval.yml — 人工审批记录（各段仅接受 crctl approve 写入）\n${block}\n`, 'utf8');
-    return;
-  }
-  const hash = sha256(existing);
-  const re = new RegExp(`^${section}:\\n(?:[ \\t]+.*\\n?)*`, 'm');
-  const next = re.test(existing)
-    ? existing.replace(re, block + '\n')
-    : existing.replace(/\s*$/, '\n') + block + '\n';
-  casWrite(p, hash, next);
 }
 
 function cmdValidate(ws, target, gates) {
@@ -1377,24 +1666,71 @@ function cmdMergeMetadata(ws, cr, gates, flags) {
 
 function cmdArchiveMove(ws, cr, gates, flags) {
   if (!flags['final-status']) fail('BAD_ARGS', 'archive-move 需要 --final-status <status>');
-  const state = resolveCrState(ws, cr);
-  if (state.status !== 'archived') fail('ILLEGAL_LEDGER_STATE', `archive-move 仅允许在前置态 archived 执行，当前 ${state.status}。请先 crctl advance 到 archived（带 --spec-id）再 archive-move（状态前置强制）`, { current: state.status, expect: ['archived'] });
-  const bp = backlogPath(ws);
+  // CR-2026-027 FR-11/TASK-06：重复调用检测（TD-BL-3 拍板）——先查 history：
+  // 同 CR 且 final-status 一致 → already-archived 幂等（零写入、不发 outbox）；不一致 → FINAL_STATUS_MISMATCH。
   const hp = path.join(ws, 'change-requests', '_history.yml');
+  const hText = readFileChecked(hp);
+  if (hText != null) {
+    const hDoc = parseYaml(hText);
+    const hList = Array.isArray(hDoc) ? hDoc : hDoc['change-requests'] || hDoc['history'] || [];
+    const histEntry = hList.find((e) => e && e.id === cr);
+    if (histEntry) {
+      // CR-2026-027 代码评审回修（b2）：幂等前提是 CR 已移出 backlog；backlog/history 双存是数据冲突，不得静默判为幂等成功
+      const bpText = readFileChecked(backlogPath(ws));
+      if (bpText != null && matchEntryBlock(bpText.replaceAll('\r\n', '\n'), cr)) {
+        fail('CR_LOCATION_CONFLICT', `${cr} 同时存在于 _backlog.yml 与 _history.yml，重复归档判定拒绝（数据冲突，非幂等）`, { location: 'both' });
+      }
+      if (String(histEntry['final-status']) === String(flags['final-status'])) {
+        auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), result: 'already-archived', finalStatus: flags['final-status'] });
+        ok({ op: 'archive-move', cr, result: 'already-archived', finalStatus: flags['final-status'] });
+        return;
+      }
+      fail('FINAL_STATUS_MISMATCH', `history 中 ${cr} 的 final-status=${histEntry['final-status']}，与 --final-status ${flags['final-status']} 不一致`, { current: histEntry['final-status'], expect: flags['final-status'] });
+    }
+  }
+  const state = resolveCrState(ws, cr);
+  // CR-2026-027 FR-11/TASK-06：前置态放宽为三种终态，且 --final-status 必须与 cr.md 当前 status 完全一致（D-8）
+  if (!['archived', 'rejected', 'withdrawn'].includes(state.status)) {
+    fail('ILLEGAL_LEDGER_STATE', `archive-move 仅允许在终态 archived/rejected/withdrawn 执行，当前 ${state.status}。请先 crctl advance 到终态再 archive-move（状态前置强制）`, { current: state.status, expect: ['archived', 'rejected', 'withdrawn'] });
+  }
+  if (String(flags['final-status']) !== String(state.status)) {
+    fail('FINAL_STATUS_MISMATCH', `--final-status ${flags['final-status']} 与 cr.md 当前状态 ${state.status} 不一致`, { current: state.status, expect: flags['final-status'] });
+  }
+  const bp = backlogPath(ws);
+  const ip = path.join(ws, 'change-requests', '_index.yml');
   const textB = readFileChecked(bp);
   if (textB == null) fail('BACKLOG_NOT_FOUND', `缺少 ${bp}`);
-  const textH = readFileChecked(hp);
-  const parts = editArchiveMove(textB, textH, cr, {
+  // 收件人解析（CAS 前，空则硬失败）
+  const to = resolveArchiveRecipients(ws, cr);
+  const payload = {
+    'final-status': flags['final-status'],
+    'archive-reason': flags['archive-reason'] || '',
+    ...(flags['spec-id'] ? { 'writeback-spec-id': flags['spec-id'] } : {}),
+    'archived-at': nowIso(),
+  };
+  const parts = editArchiveMove(textB, hText, cr, {
     finalStatus: flags['final-status'],
     archiveReason: flags['archive-reason'] || '',
     specId: flags['spec-id'] || null,
+    notifyLog: buildArchiveNotifyLog(flags['final-status'], to, payload),
   });
+  // _index.yml 终态更新（D-2：只写 status/archived-at/可选 writeback-spec-id，不复制 history、不删除条目）
+  const textI = readFileChecked(ip);
+  if (textI == null) fail('INDEX_NOT_FOUND', `缺少 ${ip}`);
+  const newIndex = editIndexFinalStatus(textI, cr, flags['final-status'], flags['spec-id'] || null);
+  // 三账本同一 CAS：事件与 backlog/history/index 要么同生要么同灭
   casWriteMulti([
     { path: bp, expectedHash: sha256(textB), newText: parts.newBacklog },
-    { path: hp, expectedHash: textH == null ? null : sha256(textH), newText: parts.newHistory },
+    { path: hp, expectedHash: hText == null ? null : sha256(hText), newText: parts.newHistory },
+    { path: ip, expectedHash: sha256(textI), newText: newIndex },
   ]);
-  auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), before: { inBacklog: true }, after: { inBacklog: false, inHistory: true, finalStatus: flags['final-status'] } });
-  ok({ op: 'archive-move', cr, finalStatus: flags['final-status'], backlog: bp, history: hp });
+  auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), before: { inBacklog: true }, after: { inBacklog: false, inHistory: true, inIndex: true, finalStatus: flags['final-status'] } });
+  // CAS 成功后发 archive outbox（git 是权威、outbox 只是投影）
+  const outbox = emitOutboxEvent(ws, {
+    event_kind: 'archive', cr_id: cr, from_status: state.status, to_status: flags['final-status'],
+    actor: identity(ws), payload,
+  });
+  ok({ op: 'archive-move', cr, finalStatus: flags['final-status'], recipients: to, backlog: bp, history: hp, index: ip, outbox });
 }
 
 function cmdAttempt(ws, cr, gates, flags) {
@@ -1431,6 +1767,24 @@ function resolveDevPlanRoute(payload) {
   return 'normal';
 }
 
+// CR-2026-027 FR-16/TASK-08：post-PASS 设计修订的新审查周期检测（SDD §3.5）。
+// 条件：上一 tech-design annotation 为 PASS + 存在较新的 dev-plan upstream blocker（repair-target=write-tech-design
+// 且 reviewed-at 晚于 sdd 评审）+ 当前 SDD LF digest 与上一 subject-sha256 不同；
+// legacy annotation 无 digest 时以上游时间关系兜底（必须重审）。
+function detectNewTechDesignCycle(ws, cr) {
+  const sddAnn = readEvidenceDoc(ws, cr, 'change-requests/{cr}/review-annotations/sdd.yml');
+  if (!sddAnn.exists || !sddAnn.data || sddAnn.data.verdict !== 'pass') return false;
+  const dpAnn = readEvidenceDoc(ws, cr, 'change-requests/{cr}/review-annotations/dev-plan.yml');
+  if (!dpAnn.exists || !dpAnn.data || dpAnn.data.verdict !== 'block' || dpAnn.data['repair-target'] !== 'write-tech-design') return false;
+  // CR-2026-027 代码评审回修（b4）：epoch 比较替代 ISO 字符串字典序，跨时区偏移不再误判先后
+  if (reviewedAtEpoch(dpAnn.data['reviewed-at'], 'dev-plan reviewed-at') <= reviewedAtEpoch(sddAnn.data['reviewed-at'], 'sdd reviewed-at')) return false;
+  const sddRaw = readFileChecked(path.join(crDir(ws, cr), 'sdd.md'));
+  if (sddRaw == null) return false;
+  const curSha = sha256(sddRaw.replaceAll('\r\n', '\n'));
+  if (sddAnn.data['subject-sha256'] != null && sddAnn.data['subject-sha256'] !== curSha) return true;
+  return sddAnn.data['subject-sha256'] == null; // legacy 无 digest：较新 upstream blocker 已满足时间关系 → 重审
+}
+
 /** traceability reviews.<stage> 投影块渲染（2 空格基准缩进，含尾换行；FR-16 字段集，§2.4）。 */
 function renderReviewsStageBlock(stage, p) {
   const L = [];
@@ -1442,6 +1796,7 @@ function renderReviewsStageBlock(stage, p) {
   L.push(`    annotation: "${p.annotationRel}"`);
   if (p.repairTarget != null) L.push(`    repair-target: ${p.repairTarget}`); // suggestion-1：pass 轨顶层省略
   L.push('    review-loop:');
+  L.push(`      current-cycle: ${p.currentCycle || 1}`); // CR-2026-027 代码评审回修（b3）：投影 cycle 供跨账本历史审计
   L.push(`      current-attempt: ${p.current}`);
   L.push(`      max-attempts: ${p.max}`);
   if (p.attempts.length === 0) {
@@ -1450,6 +1805,7 @@ function renderReviewsStageBlock(stage, p) {
     L.push('      attempts:');
     for (const a of p.attempts) {
       L.push(`        - attempt: ${a.attempt}`);
+      L.push(`          cycle: ${a.cycle || 1}`); // b3：每轮 cycle 投影（legacy 无 cycle 记 1）
       if (a['reviewed-at'] != null) L.push(`          reviewed-at: "${a['reviewed-at']}"`);
       L.push(`          result: ${a.result}`);
       L.push(`          blocker-count: ${a['blocker-count']}`);
@@ -1523,14 +1879,20 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   }
   const loopRef = REVIEW_STAGE_LOOPS[stage];
   const att = readAttempts(ws, cr, loopRef, gates);
-  if (bump && att.exhausted) fail('LOOP_EXHAUSTED', `${loopRef} 已达 maxAttempts=${att.max}，不得继续自修复；请人工处理剩余 blocker`, { current: att.current });
+  // CR-2026-027 FR-16/TASK-08：post-PASS 设计修订自动开启新 review cycle（SDD §3.5）——
+  // tech-design bump 且满足 detectNewTechDesignCycle 时：current-cycle+1、本 cycle attempt 从 1 重新计；
+  // 旧 attempts 仅保留（不删除），legacy 无 cycle 条目按 cycle=1 解释。
+  const newCycle = stage === 'tech-design' && bumpFlag ? detectNewTechDesignCycle(ws, cr) : false;
+  const nextCycleNo = newCycle ? (att.data.loops && att.data.loops[loopRef] && att.data.loops[loopRef]['current-cycle'] || 1) + 1 : null;
+  if (bump && att.exhausted && !newCycle) fail('LOOP_EXHAUSTED', `${loopRef} 已达 maxAttempts=${att.max}，不得继续自修复；请人工处理剩余 blocker`, { current: att.current });
   const recordedAt = nowIso(); // 一次生成，三账本共用（FR-17）
   const reviewer = identity(ws);
   const blockerCount = payload.blockers.length;
   // 上游疑点轨的 repair-target 为 write-tech-design（覆盖映射默认，TD-BL-1：顶层字段落盘）
   const routeRepairTarget = (stage === 'dev-plan' && devPlanRoute === 'upstream') ? 'write-tech-design' : REVIEW_REPAIR_TARGETS[stage];
-  // suggestion-1（code review attempt-1）：pass 轨顶层省略 repair-target（annotation/投影顶层无回修语义），轮次历史保留缺省
-  const repairTarget = (stage === 'dev-plan' && devPlanRoute === 'pass') ? null : routeRepairTarget;
+  // TD-BL-2 真值表（CR-2026-027 FR-13）：任意 stage pass → repairTarget=null（顶层省略）；
+  // block 时按 stage 默认修复目标；dev-plan upstream 轨为 write-tech-design（覆盖映射默认）。
+  const repairTarget = payload.verdict === 'pass' ? null : routeRepairTarget;
 
   // ── traceability：读取 + 结构校验 + attempts 历史合并（全部在任何写入之前，FR-17）──
   const tracePath = path.join(crDir(ws, cr), 'traceability.yml');
@@ -1558,6 +1920,10 @@ function cmdReviewRecord(ws, cr, gates, flags) {
         if (!e || typeof e !== 'object' || Array.isArray(e) || e.attempt == null || !('result' in e) || e['blocker-count'] == null || e['repair-target'] == null) {
           fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 条目形状非法：${JSON.stringify(e)}`);
         }
+        // CR-2026-027 代码评审回修（b3 suggestion）：cycle 若存在必须是正整数（legacy 无 cycle 记 1）
+        if (e.cycle != null && (!Number.isInteger(Number(e.cycle)) || Number(e.cycle) < 1)) {
+          fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 条目 cycle 非法（需正整数）：${JSON.stringify(e)}`);
+        }
       }
       oldAttempts = old;
     }
@@ -1569,19 +1935,19 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     mergedAttempts = oldAttempts;
     projCurrent = att.current;
   } else if (bump) {
-    const nextNo = att.current + 1;
-    if (oldAttempts.some((e) => Number(e.attempt) === nextNo)) {
-      fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 已含第 ${nextNo} 轮，不得静默覆盖历史`);
+    const nextNo = newCycle ? 1 : att.current + 1;
+    if (oldAttempts.some((e) => Number(e.attempt) === nextNo && (e.cycle || 1) === (nextCycleNo || 1))) {
+      fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 已含第 ${nextNo} 轮（cycle ${nextCycleNo || 1}），不得静默覆盖历史`);
     }
-    mergedAttempts = [...oldAttempts, { attempt: nextNo, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': routeRepairTarget }];
+    mergedAttempts = [...oldAttempts, { attempt: nextNo, cycle: nextCycleNo || 1, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': routeRepairTarget }];
     projCurrent = nextNo;
   } else {
     projCurrent = att.current;
     if (att.current > 0) {
       // 刷新当前轮证据：命中整条替换、未命中追加；不新增轮次
-      const entry = { attempt: att.current, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': routeRepairTarget };
-      mergedAttempts = oldAttempts.some((e) => Number(e.attempt) === att.current)
-        ? oldAttempts.map((e) => (Number(e.attempt) === att.current ? entry : e))
+      const entry = { attempt: att.current, cycle: att.cycle, 'reviewed-at': recordedAt, result: payload.verdict, 'blocker-count': blockerCount, 'repair-target': routeRepairTarget };
+      mergedAttempts = oldAttempts.some((e) => Number(e.attempt) === att.current && (e.cycle || 1) === att.cycle)
+        ? oldAttempts.map((e) => (Number(e.attempt) === att.current && (e.cycle || 1) === att.cycle ? entry : e))
         : [...oldAttempts, entry];
     } else {
       mergedAttempts = []; // current-attempt=0 → 投影空历史，不伪造 attempt=1（plan v0.1.1；仅 --bump-attempt 创建首条轮次账本）
@@ -1616,12 +1982,20 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     lines.push(`subject-file: change-requests/${cr}/prd.md`);
     lines.push(`subject-sha256: ${sha256(prdRaw.replaceAll('\r\n', '\n'))}`);
   }
+  if (stage === 'tech-design') {
+    // CR-2026-027 FR-16/TASK-08：SDD subject digest（供 cmdNext tech-design freshness 判定，SDD §3.5）
+    const sddPath = path.join(crDir(ws, cr), 'sdd.md');
+    const sddRaw = readFileChecked(sddPath);
+    if (sddRaw == null) fail('SUBJECT_NOT_FOUND', `tech-design review-record 需要 ${sddPath} 存在（写入 subject-sha256）`);
+    lines.push(`subject-file: change-requests/${cr}/sdd.md`);
+    lines.push(`subject-sha256: ${sha256(sddRaw.replaceAll('\r\n', '\n'))}`);
+  }
   lines.push('');
   const annotationText = lines.join('\n');
   const blockText = renderReviewsStageBlock(stage, {
     reviewer, verdict: payload.verdict, recordedAt, blockerCount,
     annotationRel: `change-requests/${cr}/review-annotations/${fileName}`,
-    repairTarget, current: projCurrent, max: att.max, attempts: mergedAttempts,
+    repairTarget, current: projCurrent, currentCycle: newCycle ? att.cycle + 1 : att.cycle, max: att.max, attempts: mergedAttempts,
   });
   const newTrace = upsertReviewsStage(traceNorm, cr, stage, blockText);
   const writes = [
@@ -1632,7 +2006,14 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     const loopPath = attemptsFilePath(ws, cr);
     const loopRaw = readFileChecked(loopPath);
     const all = att.data.loops ? att.data : { loops: {} };
-    all.loops[loopRef] = { 'current-attempt': projCurrent, attempts: [...att.attempts, { attempt: projCurrent, at: recordedAt, by: reviewer }] };
+    const prev = all.loops[loopRef] || { 'current-cycle': 1, 'current-attempt': 0, attempts: [] };
+    const cycle = newCycle ? (prev['current-cycle'] || 1) + 1 : (prev['current-cycle'] || 1);
+    const attemptNo = newCycle ? 1 : projCurrent;
+    all.loops[loopRef] = {
+      'current-cycle': cycle,
+      'current-attempt': attemptNo,
+      attempts: [...(att.attempts || []), { attempt: attemptNo, at: recordedAt, by: reviewer, cycle }],
+    };
     writes.push({ path: loopPath, expectedHash: loopRaw == null ? null : sha256(loopRaw), newText: renderLoopText(all.loops) });
   }
   casWriteMulti(writes); // 任一前置校验/CAS 失败时本次涉及的受控文件均不落盘；保留 B-18 已声明的连续 rename 极小崩溃窗口，不另造事务
@@ -1643,7 +2024,17 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   });
   // 删除临时 payload（避免残留误提交或跨 CR 串味）——放在写入成功之后，失败路径 payload 保留供重试
   try { fs.rmSync(fromPath, { force: true }); } catch { /* 删除失败不阻塞主结果 */ }
-  ok({ op: 'review-record', cr, stage, file: target.replaceAll('\\', '/'), verdict: payload.verdict, trace: tracePath.replaceAll('\\', '/'), ...(bump ? { attempt: projCurrent } : {}) });
+  // CR-2026-027 FR-13/TASK-08：输出深化（TD-BL-2 真值表 + 真实写入文件 + attempt 信息）
+  const writtenFiles = [target, tracePath];
+  if (bump) writtenFiles.push(attemptsFilePath(ws, cr));
+  const route = payload.verdict === 'pass' ? 'pass'
+    : (stage === 'dev-plan' && devPlanRoute === 'upstream') ? 'upstream' : 'repair';
+  ok({
+    op: 'review-record', cr, stage, file: target.replaceAll('\\', '/'), verdict: payload.verdict, trace: tracePath.replaceAll('\\', '/'),
+    files: writtenFiles.map((f) => f.replaceAll('\\', '/')),
+    attempt: { current: projCurrent, max: att.max, bumped: bump },
+    route, repairTarget,
+  });
 }
 /* ────────────────────────── review-note（S2，CR-2026-021 TASK-03） ──────────────────────────
  * 向 approval.yml 的 supplemental-reviews[] 追加一条补充审查记录（CAS+审计）。
@@ -1898,10 +2289,17 @@ function cmdInboxEmit(ws, cr, gates, flags) {
   const state = resolveCrState(ws, cr);
   const { sm } = loadStateMachine(ws);
   if ((sm.terminal || []).includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `inbox-emit 不允许在终态 ${state.status} 追加通知`, { current: state.status, expect: '非终态' });
+  // CR-2026-027 FR-11 + 代码评审回修（b6）：--to 解析后必须是列表（不接受 JSON 标量包装）；
+  // 逐项 trim、过滤空、去重后为空 → BAD_ARGS（与 Skill 契约对齐，不写无收件人 notify-log）
   let to = [];
-  if (flags.to) {
-    try { to = JSON.parse(flags.to); } catch { to = String(flags.to).split(',').map((s) => s.trim()).filter(Boolean); }
-    if (!Array.isArray(to)) to = [String(to)];
+  if (flags.to !== undefined) {
+    let parsed;
+    try { parsed = JSON.parse(flags.to); } catch { parsed = String(flags.to).split(','); }
+    if (!Array.isArray(parsed)) fail('BAD_ARGS', `inbox-emit --to 解析后必须是列表（不接受 JSON 标量），实际 ${JSON.stringify(flags.to)}`);
+    to = [...new Set(parsed.map((s) => String(s).trim()).filter(Boolean))];
+  }
+  if (flags.to === undefined || to.length === 0) {
+    fail('BAD_ARGS', 'inbox-emit 需要非空 --to <a,b>（缺失、非数组或去重过滤后为空均拒绝，不写无收件人 notify-log）');
   }
   let payload = null;
   if (flags.payload) {
@@ -2303,6 +2701,17 @@ function cmdTest(ws, cr, gates, flags) {
  * 幂等：v2 + 无 status 行时输出 already-migrated，退出码 0。
  */
 
+// CR-2026-027 FR-10/TASK-05：迁移提前返回路径的统一收尾——幽灵清理若删除了条目且非 embedded，需 standalone commit。
+function finishMigrateBacklog(ws, flags, base, ghostResult) {
+  if (ghostResult.ghost && ghostResult.ghost.removed && !flags.embedded && !flags['no-commit']) {
+    const addR = controlledGit(ws, 'add', ['change-requests/_backlog.yml'], ws, 'crctl-migrate');
+    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', `[cr] migrate backlog ghost cleanup: ${ghostResult.ghost.title}`], ws, 'crctl-migrate') : addR;
+    base.commit = commitR.ok ? { message: 'ghost cleanup' } : { failed: true, detail: commitR };
+    if (commitR && !commitR.ok) process.exit(1);
+  }
+  ok({ ...base, ...ghostResult });
+}
+
 function cmdMigrateBacklog(ws, gates, flags) {
   const p = backlogPath(ws);
   const text = readFileChecked(p);
@@ -2313,11 +2722,14 @@ function cmdMigrateBacklog(ws, gates, flags) {
   const schemaVer = (doc && !Array.isArray(doc) && doc.schema) || '';
   const isV2 = schemaVer === 'cr-backlog/v2';
 
-  // 幂等检查：v2 且所有条目无 status/updated-at
+  // 幂等检查：v2 且所有条目无 status/updated-at（仍执行幽灵清理——清理独立于 v1→v2 迁移）
   if (isV2) {
     const hasLegacy = list.some((e) => e && (e.status !== undefined || e['updated-at'] !== undefined));
     if (!hasLegacy) {
-      ok({ migrated: false, reason: 'already-migrated', entries: list.length });
+      const ghostResult = migrateGhostCleanup(ws, text);
+      if (ghostResult.ghost.removed) casWrite(p, hash, ghostResult.cleanedText);
+      auditGhostCleanup(ws, ghostResult); // b10：casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
+      finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
       return;
     }
   }
@@ -2343,7 +2755,10 @@ function cmdMigrateBacklog(ws, gates, flags) {
     fail('MIGRATE_STATUS_MISMATCH', `迁移预检发现 ${diffs.length} 个条目 backlog 与 cr.md 状态不一致，拒绝写入`, { diffs });
   }
   if (!toMigrate.length) {
-    ok({ migrated: false, reason: 'already-migrated', entries: list.length });
+    const ghostResult = migrateGhostCleanup(ws, text);
+    if (ghostResult.ghost.removed) casWrite(p, hash, ghostResult.cleanedText);
+    auditGhostCleanup(ws, ghostResult); // b10：casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
+    finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
     return;
   }
 
@@ -2382,7 +2797,12 @@ function cmdMigrateBacklog(ws, gates, flags) {
     }
   }
 
-  casWrite(p, hash, finalText);
+  // CR-2026-027 FR-10/TASK-05 + 代码评审回修（b5）：幽灵块归属校验必须前置于任何写入——
+  // orphan 时 GHOST_ENTRY_ORPHANED 硬失败且 backlog 文件保持不变；通过则迁移+清理合并为一次 casWrite（原子）。
+  const ghostResult = migrateGhostCleanup(ws, finalText);
+  const writeText = ghostResult.ghost.removed ? ghostResult.cleanedText : finalText;
+  casWrite(p, hash, writeText);
+  auditGhostCleanup(ws, ghostResult); // b10：迁移+清理合并 casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
 
   // 迁移报告（gitignored）
   const reportDir = path.join(ws, '.crctl');
@@ -2406,16 +2826,91 @@ function cmdMigrateBacklog(ws, gates, flags) {
   // standalone commit
   const msg = `[cr] migrate backlog to v2: ${toMigrate.length} entries, status->cr.md`;
   if (flags.embedded || flags['no-commit']) {
-    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, commit: 'embedded：由调用方在同一事务中提交' });
+    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, ...ghostResult, commit: 'embedded：由调用方在同一事务中提交' });
   } else {
     const addR = controlledGit(ws, 'add', ['change-requests/_backlog.yml'], ws, 'crctl-migrate');
     const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-migrate') : addR;
-    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR } });
+    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, ...ghostResult, commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR } });
     if (commitR && !commitR.ok) process.exit(1);
   }
 }
 
+// CR-2026-027 FR-10/TASK-05：幽灵条目清理（幂等；删除依据 = history 存在同 title 归档条目）。
+// B-12 实测形态：幽灵块是某条目块内的重复字段 key（如 title 二次出现，CR-2026-024 归档残留），
+// 后续可能有正常条目（如 CR-2026-027），因此遍历所有条目块，删除范围 = 重复 key 行 到 下一个条目行。
+// CR-2026-027 代码评审回修（b5）：本函数只做幽灵块检测与归属校验（orphan 硬失败），不写盘；
+// 调用方拿到 cleanedText 后再统一 casWrite，保证"失败时文件不变"。
+// 代码评审回修（b10）：审计事件移出本函数——幽灵审计必须发生在 casWrite 成功之后（见 auditGhostCleanup），
+// CAS_CONFLICT 时 _backlog.yml 不变且 audit.log 不得误记已清理（FR-10 一致性边界）。
+function migrateGhostCleanup(ws, text) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const lines = norm.split('\n');
+  // 列表项缩进（'  - id:' 的缩进）与条目字段层缩进（itemIndent+2）
+  let itemIndent = -1;
+  for (const l of lines) {
+    const m = l.match(/^(\s*)-\s+id:/);
+    if (m) { itemIndent = m[1].length; break; }
+  }
+  if (itemIndent < 0) return { ghost: { removed: false, reason: 'no-list-items' } };
+  const fieldIndent = itemIndent + 2;
+  // 所有条目行号
+  const idLines = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(\s*)-\s+id:\s*["']?([^"'\s]+)["']?\s*$/);
+    if (m && m[1].length === itemIndent) idLines.push(i);
+  }
+  if (idLines.length === 0) return { ghost: { removed: false, reason: 'no-list-items' } };
+  // 遍历每个条目块，找第一个重复字段 key（幽灵起点）；只统计字段层缩进（嵌套子字段不参与）
+  let ghostStart = -1, ghostEnd = -1, ghostTitle = '';
+  for (let k = 0; k < idLines.length && ghostStart < 0; k++) {
+    const start = idLines[k] + 1;
+    const end = k + 1 < idLines.length ? idLines[k + 1] : lines.length;
+    const seen = new Set();
+    for (let i = start; i < end; i++) {
+      const l = lines[i];
+      if (l.trim() === '') continue;
+      const ind = l.match(/^[ \t]*/)[0].length;
+      if (ind <= itemIndent) break;
+      if (ind !== fieldIndent) continue;
+      const km = l.match(/^\s*([a-zA-Z0-9_-]+):\s*(.*)$/);
+      if (!km) continue;
+      if (seen.has(km[1])) { ghostStart = i; ghostEnd = end; ghostTitle = km[2].replace(/^["']|["']$/g, '').trim(); break; }
+      seen.add(km[1]);
+    }
+  }
+  if (ghostStart < 0) return { ghost: { removed: false, reason: 'already-clean' } };
+  // 归属判定：_history.yml 存在同 title 的终态条目（行级匹配，不依赖 YAML 解析器对复杂标量的解析）
+  const hText = readFileChecked(path.join(ws, 'change-requests', '_history.yml'));
+  let archived = false;
+  if (hText != null && ghostTitle) {
+    archived = hText.replaceAll('\r\n', '\n').split('\n').some((l) => {
+      const tm = l.match(/^\s*title:\s*(.*)$/);
+      return tm && tm[1].replace(/^["']|["']$/g, '').trim() === ghostTitle;
+    });
+  }
+  if (!archived) {
+    fail('GHOST_ENTRY_ORPHANED', `_backlog.yml 条目块内存在无 id 归属的重复字段块（title=${ghostTitle || '(未解析)'}），但 _history.yml 无对应归档条目，拒绝删除`);
+  }
+  const cleaned = lines.slice(0, ghostStart).concat(lines.slice(ghostEnd)).join('\n').replace(/\s+$/, '') + '\n';
+  return { ghost: { removed: true, title: ghostTitle, reason: 'archived-in-history' }, cleanedText: cleaned };
+}
+
+// CR-2026-027 代码评审回修（b10）：幽灵清理的审计事件必须发生在 casWrite 成功之后——
+// CAS_CONFLICT 时 _backlog.yml 保持不变而 audit.log 不得误记已清理（FR-10 一致性边界）。
+// 调用方在 casWrite 成功后才调用本函数补记审计；迁移+清理合并的单次 casWrite 同样适用。
+function auditGhostCleanup(ws, ghostResult) {
+  if (ghostResult.ghost && ghostResult.ghost.removed) {
+    auditLog(ws, { kind: 'migrate-backlog-ghost', removed: true, title: ghostResult.ghost.title, by: identity(ws) });
+  }
+}
+
 function cmdNext(ws, cr, gates, flags) {
+  // CR-2026-027 FR-12/TASK-07：终态只读查询（next:null 不报错；写命令不 fallback）
+  const terminal = resolveTerminalForQuery(ws, cr);
+  if (terminal) {
+    ok({ cr, status: String(terminal['final-status']), terminal: true, source: { history: 'change-requests/_history.yml' }, legalNext: [], reviewLoops: {}, gateBlockers: {}, next: null, humanApproval: false, why: '终态 CR：无后继节点' });
+    return;
+  }
   const state = resolveCrState(ws, cr);
   const status = state.status;
   const ev = (rel) => readEvidenceDoc(ws, cr, rel);
@@ -2450,15 +2945,41 @@ function cmdNext(ws, cr, gates, flags) {
     }
     case 'tech-design-review-pending': {
       const a = ev('change-requests/{cr}/review-annotations/sdd.yml');
+      if (!a.exists) return suggest('review-tech-design', '缺少 sdd.yml 评审记录，先跑 review-tech-design');
+      // CR-2026-027 FR-16/TASK-07：SDD freshness——subject digest 不一致 → 重审（旧 PASS 不得直接建议审批）
+      const sddPath = path.join(crDir(ws, cr), 'sdd.md');
+      if (fs.existsSync(sddPath) && a.data && a.data['subject-sha256'] != null) {
+        const curSha = sha256(fs.readFileSync(sddPath, 'utf8').replaceAll('\r\n', '\n'));
+        if (curSha !== a.data['subject-sha256']) return suggest('review-tech-design', 'SDD 已修订（subject digest 不一致），重新评审刷新证据');
+      }
+      // CR-2026-027 FR-16/TASK-07：较新的 dev-plan upstream blocker → 重审（即使旧 PASS；legacy 无 digest 同样适用）
+      const dp = ev('change-requests/{cr}/review-annotations/dev-plan.yml');
+      const upstreamStale = dp.exists && dp.data && dp.data.verdict === 'block'
+        && dp.data['repair-target'] === 'write-tech-design'
+        && (!a.data || reviewedAtEpoch(dp.data['reviewed-at'], 'dev-plan reviewed-at') > reviewedAtEpoch(a.data['reviewed-at'], 'sdd reviewed-at'));
+      if (upstreamStale) return suggest('review-tech-design', '存在较新的 dev-plan 上游设计疑点（upstream blocker），技术评审证据过时，重新评审');
       if (passAndClean(a)) return suggest('crctl approve --stage tech-design', '技术评审 pass 且无 blocker，等待人工审批', true);
-      return suggest('write-tech-design', a.exists ? `评审未通过（verdict=${a.data?.verdict}），按 blocker 回修 SDD` : '缺少 sdd.yml 评审记录，先跑 review-tech-design');
+      return suggest('write-tech-design', `评审未通过（verdict=${a.data && a.data.verdict}），按 blocker 回修 SDD`);
     }
     case 'tech-design-reviewed': return suggest('write-dev-plan', '技术设计已审批，编写开发计划');
     case 'task-breakdown': {
       const planOk = fs.existsSync(path.join(crDir(ws, cr), 'plan.md'));
       const tasksOk = fs.existsSync(path.join(crDir(ws, cr), 'tasks'));
-      if (planOk && tasksOk) return suggest('crctl approve --stage dev-start', 'plan 与 tasks 就绪，等待开发启动人工确认', true);
-      return suggest(planOk ? 'write-dev-tasks' : 'write-dev-plan', '开发计划或任务拆分缺失');
+      if (!planOk) return suggest('write-dev-plan', 'plan.md 缺失');
+      if (!tasksOk) return suggest('write-dev-tasks', 'tasks/ 缺失');
+      // CR-2026-027 FR-16/TASK-07：canonical dev-plan.yml 判定（缺失/畸形 → 评审；PASS → 审批；BLOCK → 按 annotation 重算 route）
+      const dp = ev('change-requests/{cr}/review-annotations/dev-plan.yml');
+      if (!dp.exists || !dp.data || !['pass', 'block'].includes(dp.data.verdict) || !Array.isArray(dp.data.blockers)) {
+        return suggest('review-dev-plan', dp.exists ? 'dev-plan.yml 畸形（缺 verdict/blockers），重跑评审' : '缺少 dev-plan.yml 评审记录，先跑 review-dev-plan');
+      }
+      if (dp.data.verdict === 'pass' && dp.data.blockers.length === 0) {
+        return suggest('crctl approve --stage dev-start', '开发计划评审 pass 且无 blocker，等待开发启动人工确认', true);
+      }
+      const route = resolveDevPlanRoute(dp.data);
+      if (route === 'upstream') return suggest('write-tech-design', '开发计划评审发现上游设计疑点（repair-target=write-tech-design），先修订 SDD');
+      const att = readAttempts(ws, cr, 'review-dev-plan', gates);
+      if (att.exhausted) return suggest(null, '开发计划评审已 LOOP_EXHAUSTED（当前 cycle 3/3），需人工处理剩余 blocker', true);
+      return suggest('write-dev-plan', `开发计划评审未通过（blockers=${dp.data.blockers.length} 条），回修 plan/TASK`);
     }
     case 'developing': {
       const tr = ev('change-requests/{cr}/test-report.md');
@@ -2466,6 +2987,8 @@ function cmdNext(ws, cr, gates, flags) {
       if (String(tr.data?.status) !== 'pass') return suggest('implement-code', `test-report.status=${tr.data?.status}，按 replayNodes 回修`);
       const code = ev('change-requests/{cr}/review-annotations/code.yml');
       if (!code.exists) return suggest('push-progress → review-code', '测试证据 pass，推送 checkpoint 后进入代码评审');
+      // CR-2026-027 代码评审回修（b8）：code.yml=block 时属回修轮，应回 implement-code 而非再次评审
+      if (code.data && code.data.verdict === 'block') return suggest('implement-code', `代码评审未通过（blockers=${(code.data.blockers || []).length} 条），按 blocker 回修后重跑测试再重审`);
       return suggest('review-code', '存在旧评审记录，重跑代码评审刷新证据');
     }
     case 'code-reviewing': {
@@ -2535,6 +3058,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
                         [--expect <cur>] [--embedded] [--spec-id <id>]
   crctl approve <cr_id> --stage <requirement|tech-design|dev-start|code>
                         [--approver <id>] [--spec-id <id>]   仅限交互式终端（人类在环）
+  crctl approve <cr_id> --stage <stage> --resign <reason>   受控历史审批迁移：仅限交互式终端迁移 via=crctl-approve；server-approve 必须由服务端重签 grant
   crctl validate <file>                          受控产物 schema 校验（validate-doc 代码化）
   crctl attempt <cr_id> --loop <ref>             review-loop 轮次唯一记账点；超限返回 LOOP_EXHAUSTED
   crctl review-record <cr_id> --stage <requirement|tech-design|code> --from <payload.yml> [--bump-attempt]

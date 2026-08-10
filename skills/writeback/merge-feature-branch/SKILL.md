@@ -29,7 +29,7 @@ description: 按 dir-graph.yaml repositories 动态解析参与仓，通过 dry-
 
 | 事实 | 值 |
 |---|---|
-| 参与仓解析 | 仅 `dir-graph.yaml#repositories` 声明的 active 仓有 worktree；**tools 仓（`../tools`，phase0-tools）不在声明范围内**，但按 CR-2026-002/003/005/018/019 先例参与合并，trunk=**custom/main**（非 main），无 worktree、合并产物直接提交 custom/main |
+| 参与仓解析 | 仅 `dir-graph.yaml#repositories` 声明的 active 仓有 worktree；工具仓自 CR-2026-027 起已声明为参与仓，其 id/trunk/role **一律以 repositories 声明为准**，Skill 不硬编码任何仓的 id/trunk/role：注册、同步、合并、清理均只读 repositories（FR-5，代码评审回修 b7） |
 | 空分支跳过 | 某仓无该 CR 提交时（如纯文档 CR 的 multica），该分支自动跳过合并与 merge-commits 记录（Step 1.6）；其 worktree/远端分支仍由 cr-archive 统一清理 |
 | 分支补齐 | 合并前需确认 `origin/requirement/{cr_id}` 存在（Step 1.4）；开发期未 push 时先补齐 |
 <!-- lint-prompts:ignore --> 描述性：合并流程说明

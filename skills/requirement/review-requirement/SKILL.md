@@ -63,9 +63,13 @@ description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审�
    - 成功后删除临时 payload（避免残留/跨 CR 串味）
 3. **模型不得直接 Write `review-annotations/requirement.yml` 或手写 review-loop**（guard deny + crctl 独占写）。
 
-### Step 4 — 核对 traceability 投影并处理 status
+### Step 4 — 按 review-record 输出组织提交与分流（CR-2026-027 FR-13）
 
-`reviews.requirement` 投影由 `crctl review-record` 在 Step 3 同步写入（annotation + review-loop + traceability 同批，CR-2026-025 FR-16），本步骤只做落盘后核对：确认 `traceability.yml#reviews.requirement` 的 reviewer/verdict/reviewed-at/blocker-count 与 canonical annotation 一致，不一致时中止并报告（禁止手改账本补齐）。
+`crctl review-record` 已同批写入 annotation + review-loop + traceability（三账本原子），成功即表示写入完成，**不再重新读取 traceability 核对**。按返回结果处理：
+
+- 按 `files[]` 组织 git 提交（提交本次实际写入的文件）；
+- 按 `route` 分流：`pass` → 进入 Step 5；`repair` → 输出 `repair-target`/`repair-instructions` 并路由回修；
+- 最后调用 `crctl next {cr_id}` 确认下一步（next 由 crctl 唯一计算）。
 
 ### Step 5 — 更新 CR status
 

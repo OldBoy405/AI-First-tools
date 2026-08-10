@@ -24,7 +24,7 @@ scope: drift-governance
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
 | `advance` | 校验 `(current, next, trigger)` 合法转换 + 目标状态门禁，全过才写 `cr.md` frontmatter 并 commit；否则非零退出且**不写文件**。支持 `--embedded`（历史 commit_mode=embedded 语义） | crctl advance |
 | `gate` | 只校验不写，供预检与 CI 复用 | pipeline JSON `passCondition` |
-| `approve` | **仅限交互式终端**的人工审批：展示证据摘要 → 人类确认 → 写 `approval.yml`（`via: crctl-approve`）→ 级联 advance；回答非 yes 时自动执行状态机 `{stage}:reject` 回退转换（错误码 `APPROVAL_DECLINED_ROLLED_BACK`，extra 含 rolledBackTo/rerunHint；CR-2026-022 FR-12）。非 TTY 调用一律返回 `APPROVAL_REQUIRES_HUMAN`；`--grant` 为 Ed25519 签名授权（服务端人在环），与 TTY 二选一、都不可绕过审批本身 | `human_approval` + `approve-*` |
+| `approve` | **仅限交互式终端**的人工审批：展示证据摘要 → 人类确认 → 写 `approval.yml`（`via: crctl-approve`）→ 级联 advance；回答非 yes 时自动执行状态机 `{stage}:reject` 回退转换（错误码 `APPROVAL_DECLINED_ROLLED_BACK`，extra 含 rolledBackTo/rerunHint；CR-2026-022 FR-12）。非 TTY 调用一律返回 `APPROVAL_REQUIRES_HUMAN`；`--grant` 为 Ed25519 签名授权（服务端人在环），与 TTY 二选一、都不可绕过审批本身。证据定义变更时，`--resign <reason>` 仅可在 TTY 迁移 `via: crctl-approve` 的历史 digest；迁移前规范化 CRLF，审批段或直属 `evidence-digest` 非唯一时以 `SCHEMA_INVALID` 零副作用拒绝；`server-approve` 必须由服务端按新 digest 重签 grant，本地拒绝改写以免旧签名失效 | `human_approval` + `approve-*` |
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
 | `validate` | 受控产物 schema 校验：cr.md / _backlog.yml 的 owners 三角色（id + assigned-at）、review-annotations 的 verdict 枚举与 blockers 结构、test-report / approval / traceability | `validate-doc` |
 | `attempt` | review-loop 轮次唯一记账点（`change-requests/{CR-ID}/review-loop.yml`），maxAttempts 从 pipeline JSON 读取，超限返回 `LOOP_EXHAUSTED` | `reviewLoop.maxAttempts` |
@@ -50,6 +50,7 @@ scope: drift-governance
 node tools/skills/shared/crctl/scripts/crctl.mjs status CR-2026-001
 node tools/skills/shared/crctl/scripts/crctl.mjs advance CR-2026-001 --to code-reviewing --trigger review-code
 node tools/skills/shared/crctl/scripts/crctl.mjs approve CR-2026-001 --stage code        # 仅人类在终端运行
+node tools/skills/shared/crctl/scripts/crctl.mjs approve CR-2026-001 --stage dev-start --resign "evidence definition changed"  # 仅迁移本地审批；服务端审批须重签 grant
 node tools/skills/shared/crctl/scripts/crctl.mjs git status --short --cwd <worktree>
 ```
 

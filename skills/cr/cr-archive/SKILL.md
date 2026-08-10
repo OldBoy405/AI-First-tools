@@ -66,25 +66,17 @@ description: "归档新四阶段 CR：以 cr.md frontmatter status 为 final-sta
    - 不要求 writeback 产物
 7. 其他 status 一律抛出 `CR_ARCHIVE_STATUS_NOT_ALLOWED`
 
-### Step 2 — 先 emit 归档事件（在移出 _backlog 之前）
+### Step 2 — 归档事件（CR-2026-027 FR-11：随 archive-move 同一 CAS，不再独立 inbox-emit）
 
-调用 `inbox-emit`（此时 _backlog 中条目仍存在，notify-log 能正确写入）：
-```yaml
-cr-id: {cr_id}
-event: archived
-to: [submitter, reviewer]   # 从 _backlog 条目中提取
-payload:
-  final-status: {final-status}
-  archive_reason: "{archive_reason 或系统推导}"
-  writeback_spec_id: "{spec_id 或 N/A}"
-```
+归档事件与账本移动是同一业务事实：`archive-move` 在内存构造 archive event（复用 inbox-emit 同构的 notify-log 行，含 `final-status` / `archive-reason` / 可选 `writeback-spec-id` / `archived-at`），与 backlog/history/index 三账本同一 `casWriteMulti` 写入，CAS 成功后发 archive outbox。收件人由 crctl 从 backlog 条目的 `owners.{requirement,development,test}.id` 去重解析（旧条目缺 owners 回退顶层 `owner`；最终为空 → `ARCHIVE_RECIPIENTS_MISSING` 硬失败）。**不得单独调用 `inbox-emit` 发归档事件**（历史缺陷：中文 JSON Shell 转义失败后事件永久丢失，CR-2026-026 实测）。
 
 ### Step 3 — 原子移动 backlog → history（经 crctl archive-move，禁止手写 YAML）
 
 1. 调用 `crctl archive-move <CR-ID> --final-status {final-status} [--archive-reason "{archive_reason 或系统推导}"] [--spec-id {spec_id}] --workspace {knowledgeBaseRepo.path}`
 <!-- lint-prompts:ignore --> 描述性：归档流程说明（实际写入走 crctl archive-move）
-2. archive-move 原子完成：`_backlog.yml` 删除该条目 + `_history.yml` 追加富化条目（原条目字段 + `final-status` / `archive-reason` / `writeback-spec-id` / `archived-at`），双文件 CAS 快照（任一侧读后被改则整体 `CAS_CONFLICT` 中止、两侧均不落盘），并写 `.crctl/audit.log`
-3. 前置守卫：CR status 必须为 `archived`（由 Step 1 的 crctl advance --embedded 推进）；重复归档（history 已含该 CR）返回 `ENTRY_ALREADY_IN_HISTORY`
+2. archive-move 原子完成三账本（CR-2026-027 FR-11）：`_backlog.yml` 删除该条目 + `_history.yml` 追加富化条目（原条目字段 + `final-status` / `archive-reason` / `writeback-spec-id` / `archived-at` + notify-log 归档事件）+ `_index.yml` 更新终态三字段（`status` / `archived-at` / 可选 `writeback-spec-id`，D-2：不复制 history、不删除条目）——同一 `casWriteMulti` 三文件 CAS（任一侧读后被改则整体 `CAS_CONFLICT` 中止、三侧均不落盘），CAS 成功后发 archive outbox，并写 `.crctl/audit.log`
+3. 前置守卫：`--final-status` 必须等于 cr.md 当前终态（`archived` / `rejected` / `withdrawn`，由 Step 1 的 `crctl advance --to archived --trigger cr-archive` 推进）；重复归档（CR 已移出 backlog 且 history final-status 一致）返回 `already-archived` 幂等结果（零写入），不一致返回 `FINAL_STATUS_MISMATCH`（TD-BL-3）
+4. `_index.yml` 为全生命周期轻量目录：归档只更新终态摘要字段，不复制完整 history 条目、不新增 `history-ref`、不删除条目，也不成为新的查询事实源（查询仍读 backlog + history + cr.md）
 <!-- lint-prompts:ignore --> 描述性：归档流程说明（实际写入走 crctl archive-move）
 4. **禁止会话内手写/现写脚本编辑 `_backlog.yml` / `_history.yml`**（纪律 #7）：归档账本唯一写入通道是 `crctl archive-move`
 

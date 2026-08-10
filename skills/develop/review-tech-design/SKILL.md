@@ -66,11 +66,13 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
    - 成功后删除临时 payload（避免残留/跨 CR 串味）
 3. **模型不得直接 Write `review-annotations/sdd.yml` 或手写 review-loop**（guard deny + crctl 独占写）。
 
-### Step 4 — 核对 traceability 投影并处理 status
+### Step 4 — 按 review-record 输出组织提交与分流（CR-2026-027 FR-13）
 
-- 核对 `traceability.yml#reviews.tech-design` 投影与 canonical annotation 一致（由 `crctl review-record` 同步写入，CR-2026-025 FR-16；禁止手改账本补齐）
+`crctl review-record` 已同批写入 annotation + review-loop + traceability（三账本原子），成功即表示写入完成，**不再重新读取 traceability 核对**。按返回结果处理：
 
-- 通过评审（无 blocker）→ 保持 status=`tech-design-review-pending`，允许进入 `human_approval`
+- 按 `files[]` 组织 git 提交（提交本次实际写入的文件）；
+- 按 `route` 分流：`pass` → 保持 `tech-design-review-pending` 允许进入 `human_approval`；`repair` → 输出 `repair-target`/`repair-instructions`；
+- 最后调用 `crctl next {cr_id}` 确认下一步（next 由 crctl 唯一计算）。
 - 有 blocker → 调用 `crctl advance --to tech-designing --trigger "review-tech-design:block -> write-tech-design" --expect tech-design-review-pending`，输出 `repair-target=write-tech-design`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到 SDD 修订节点；不得进入 `human_approval`
 
 ### Step 5 — 输出摘要
