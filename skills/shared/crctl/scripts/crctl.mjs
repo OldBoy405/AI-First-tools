@@ -49,6 +49,15 @@ function nowIso() {
   );
 }
 
+// CR-2026-027 代码评审回修（b4）：reviewed-at 时间戳统一解析为 epoch 毫秒后再比较。
+// ISO 字符串字典序比较在跨时区偏移时会产生错误先后判定（如 +08:00 vs Z）；
+// Date.parse 归一到 UTC epoch，与偏移无关。非法/缺失时间戳硬失败（fail-fast，不静默降级）。
+function reviewedAtEpoch(s, field) {
+  const ms = Date.parse(String(s == null ? '' : s));
+  if (!Number.isFinite(ms)) fail('BAD_TIMESTAMP', `${field} 时间戳非法（无法解析为 epoch）: ${JSON.stringify(s)}`);
+  return ms;
+}
+
 function sha256(text) {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }
@@ -71,7 +80,8 @@ function evidenceSha16(text) {
  * evidenceSha16 自本任务起仅用于历史 approval.yml 的 evidence-sha256-16 兼容复核（已废弃字段）。 */
 function canonicalEvidenceDigest(ws, cr, stageCfg) {
   if (!stageCfg || !stageCfg.evidence) return null;
-  const rels = Object.values(stageCfg.evidence).map((rel) => rel.replaceAll('{cr}', cr)).sort();
+  // `$comment` 为声明内元注释（非证据文件路径），不参与 digest（CR-2026-027 代码评审回修 b9）
+  const rels = Object.entries(stageCfg.evidence).filter(([k]) => k !== '$comment').map(([, rel]) => rel.replaceAll('{cr}', cr)).sort();
   const parts = [];
   for (const rel of rels) {
     const text = readFileChecked(path.join(ws, rel));
@@ -953,20 +963,25 @@ function findHistoryEntry(ws, cr) {
   const hText = readFileChecked(path.join(ws, 'change-requests', '_history.yml'));
   if (hText == null) return null;
   const lines = hText.replaceAll('\r\n', '\n').split('\n');
-  let idLine = -1, indent = 0;
+  // CR-2026-027 代码评审回修（b1）：先统计同 id 条目数，history 重复 CR → 硬失败，终态查询不得据二义数据判定
+  const idHits = [];
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^"'\s]+)["']?\s*$/);
-    if (m && m[2] === cr) { idLine = i; indent = m[1].length; break; }
+    if (m && m[2] === cr) idHits.push(i);
   }
-  if (idLine < 0) return null;
+  if (idHits.length === 0) return null;
+  if (idHits.length > 1) fail('HISTORY_DUPLICATE_ENTRY', `_history.yml 中 ${cr} 出现 ${idHits.length} 个条目，终态查询拒绝二义数据`, { count: idHits.length });
+  const idLine = idHits[0];
+  const indent = lines[idLine].match(/^([ \t]*)/)[0].length;
   const entry = { id: cr };
   for (let i = idLine + 1; i < lines.length; i++) {
     const l = lines[i];
     if (l.trim() === '') continue;
     const ind = l.match(/^[ \t]*/)[0].length;
-    if (ind < indent) break;
+    // 同级下一条目（缩进 == indent 的 `- id:` 行）必须停止，否则后续条目字段会覆盖本 CR（b1）
+    if (ind <= indent) break;
     const km = l.match(/^\s*([a-zA-Z0-9_-]+):\s*(.*)$/);
-    if (km && ind >= indent) entry[km[1]] = km[2].replace(/^["']|["']$/g, '').trim();
+    if (km) entry[km[1]] = km[2].replace(/^["']|["']$/g, '').trim();
   }
   return entry;
 }
@@ -1369,7 +1384,8 @@ function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
 function collectOutboxEvidence(ws, cr, stageCfg) {
   const out = {};
   if (stageCfg.evidence) {
-    for (const rel of Object.values(stageCfg.evidence)) {
+    for (const [k, rel] of Object.entries(stageCfg.evidence)) {
+      if (k === '$comment') continue; // 声明元注释非证据文件，跳过（b9）
       const p = path.join(ws, rel.replaceAll('{cr}', cr));
       const text = readFileChecked(p);
       if (text != null) out[rel.replaceAll('{cr}', cr)] = 'sha256:' + sha256(text.replaceAll('\r\n', '\n'));
@@ -1573,6 +1589,11 @@ function cmdArchiveMove(ws, cr, gates, flags) {
     const hList = Array.isArray(hDoc) ? hDoc : hDoc['change-requests'] || hDoc['history'] || [];
     const histEntry = hList.find((e) => e && e.id === cr);
     if (histEntry) {
+      // CR-2026-027 代码评审回修（b2）：幂等前提是 CR 已移出 backlog；backlog/history 双存是数据冲突，不得静默判为幂等成功
+      const bpText = readFileChecked(backlogPath(ws));
+      if (bpText != null && matchEntryBlock(bpText.replaceAll('\r\n', '\n'), cr)) {
+        fail('CR_LOCATION_CONFLICT', `${cr} 同时存在于 _backlog.yml 与 _history.yml，重复归档判定拒绝（数据冲突，非幂等）`, { location: 'both' });
+      }
       if (String(histEntry['final-status']) === String(flags['final-status'])) {
         auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), result: 'already-archived', finalStatus: flags['final-status'] });
         ok({ op: 'archive-move', cr, result: 'already-archived', finalStatus: flags['final-status'] });
@@ -1669,7 +1690,8 @@ function detectNewTechDesignCycle(ws, cr) {
   if (!sddAnn.exists || !sddAnn.data || sddAnn.data.verdict !== 'pass') return false;
   const dpAnn = readEvidenceDoc(ws, cr, 'change-requests/{cr}/review-annotations/dev-plan.yml');
   if (!dpAnn.exists || !dpAnn.data || dpAnn.data.verdict !== 'block' || dpAnn.data['repair-target'] !== 'write-tech-design') return false;
-  if (String(dpAnn.data['reviewed-at'] || '') <= String(sddAnn.data['reviewed-at'] || '')) return false;
+  // CR-2026-027 代码评审回修（b4）：epoch 比较替代 ISO 字符串字典序，跨时区偏移不再误判先后
+  if (reviewedAtEpoch(dpAnn.data['reviewed-at'], 'dev-plan reviewed-at') <= reviewedAtEpoch(sddAnn.data['reviewed-at'], 'sdd reviewed-at')) return false;
   const sddRaw = readFileChecked(path.join(crDir(ws, cr), 'sdd.md'));
   if (sddRaw == null) return false;
   const curSha = sha256(sddRaw.replaceAll('\r\n', '\n'));
@@ -1688,6 +1710,7 @@ function renderReviewsStageBlock(stage, p) {
   L.push(`    annotation: "${p.annotationRel}"`);
   if (p.repairTarget != null) L.push(`    repair-target: ${p.repairTarget}`); // suggestion-1：pass 轨顶层省略
   L.push('    review-loop:');
+  L.push(`      current-cycle: ${p.currentCycle || 1}`); // CR-2026-027 代码评审回修（b3）：投影 cycle 供跨账本历史审计
   L.push(`      current-attempt: ${p.current}`);
   L.push(`      max-attempts: ${p.max}`);
   if (p.attempts.length === 0) {
@@ -1696,6 +1719,7 @@ function renderReviewsStageBlock(stage, p) {
     L.push('      attempts:');
     for (const a of p.attempts) {
       L.push(`        - attempt: ${a.attempt}`);
+      L.push(`          cycle: ${a.cycle || 1}`); // b3：每轮 cycle 投影（legacy 无 cycle 记 1）
       if (a['reviewed-at'] != null) L.push(`          reviewed-at: "${a['reviewed-at']}"`);
       L.push(`          result: ${a.result}`);
       L.push(`          blocker-count: ${a['blocker-count']}`);
@@ -1810,6 +1834,10 @@ function cmdReviewRecord(ws, cr, gates, flags) {
         if (!e || typeof e !== 'object' || Array.isArray(e) || e.attempt == null || !('result' in e) || e['blocker-count'] == null || e['repair-target'] == null) {
           fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 条目形状非法：${JSON.stringify(e)}`);
         }
+        // CR-2026-027 代码评审回修（b3 suggestion）：cycle 若存在必须是正整数（legacy 无 cycle 记 1）
+        if (e.cycle != null && (!Number.isInteger(Number(e.cycle)) || Number(e.cycle) < 1)) {
+          fail('TRACE_SHAPE', `traceability reviews.${stage} attempts 条目 cycle 非法（需正整数）：${JSON.stringify(e)}`);
+        }
       }
       oldAttempts = old;
     }
@@ -1881,7 +1909,7 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   const blockText = renderReviewsStageBlock(stage, {
     reviewer, verdict: payload.verdict, recordedAt, blockerCount,
     annotationRel: `change-requests/${cr}/review-annotations/${fileName}`,
-    repairTarget, current: projCurrent, max: att.max, attempts: mergedAttempts,
+    repairTarget, current: projCurrent, currentCycle: newCycle ? att.cycle + 1 : att.cycle, max: att.max, attempts: mergedAttempts,
   });
   const newTrace = upsertReviewsStage(traceNorm, cr, stage, blockText);
   const writes = [
@@ -2175,14 +2203,17 @@ function cmdInboxEmit(ws, cr, gates, flags) {
   const state = resolveCrState(ws, cr);
   const { sm } = loadStateMachine(ws);
   if ((sm.terminal || []).includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `inbox-emit 不允许在终态 ${state.status} 追加通知`, { current: state.status, expect: '非终态' });
+  // CR-2026-027 FR-11 + 代码评审回修（b6）：--to 解析后必须是列表（不接受 JSON 标量包装）；
+  // 逐项 trim、过滤空、去重后为空 → BAD_ARGS（与 Skill 契约对齐，不写无收件人 notify-log）
   let to = [];
-  if (flags.to) {
-    try { to = JSON.parse(flags.to); } catch { to = String(flags.to).split(',').map((s) => s.trim()).filter(Boolean); }
-    if (!Array.isArray(to)) to = [String(to)];
+  if (flags.to !== undefined) {
+    let parsed;
+    try { parsed = JSON.parse(flags.to); } catch { parsed = String(flags.to).split(','); }
+    if (!Array.isArray(parsed)) fail('BAD_ARGS', `inbox-emit --to 解析后必须是列表（不接受 JSON 标量），实际 ${JSON.stringify(flags.to)}`);
+    to = [...new Set(parsed.map((s) => String(s).trim()).filter(Boolean))];
   }
-  // CR-2026-027 FR-11/TASK-07：--to 缺失、解析后非列表、去重后为空 → BAD_ARGS（与 Skill 契约对齐，B-13，不写无收件人 notify-log）
-  if (flags.to === undefined || !Array.isArray(to) || to.length === 0) {
-    fail('BAD_ARGS', 'inbox-emit 需要非空 --to <a,b>（缺失或去重后为空均拒绝，不写无收件人 notify-log）');
+  if (flags.to === undefined || to.length === 0) {
+    fail('BAD_ARGS', 'inbox-emit 需要非空 --to <a,b>（缺失、非数组或去重过滤后为空均拒绝，不写无收件人 notify-log）');
   }
   let payload = null;
   if (flags.payload) {
@@ -2609,7 +2640,8 @@ function cmdMigrateBacklog(ws, gates, flags) {
   if (isV2) {
     const hasLegacy = list.some((e) => e && (e.status !== undefined || e['updated-at'] !== undefined));
     if (!hasLegacy) {
-      const ghostResult = migrateGhostCleanup(ws, text, hash, p);
+      const ghostResult = migrateGhostCleanup(ws, text);
+      if (ghostResult.ghost.removed) casWrite(p, hash, ghostResult.cleanedText);
       finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
       return;
     }
@@ -2636,7 +2668,8 @@ function cmdMigrateBacklog(ws, gates, flags) {
     fail('MIGRATE_STATUS_MISMATCH', `迁移预检发现 ${diffs.length} 个条目 backlog 与 cr.md 状态不一致，拒绝写入`, { diffs });
   }
   if (!toMigrate.length) {
-    const ghostResult = migrateGhostCleanup(ws, text, hash, p);
+    const ghostResult = migrateGhostCleanup(ws, text);
+    if (ghostResult.ghost.removed) casWrite(p, hash, ghostResult.cleanedText);
     finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
     return;
   }
@@ -2676,13 +2709,11 @@ function cmdMigrateBacklog(ws, gates, flags) {
     }
   }
 
-  casWrite(p, hash, finalText);
-
-  // CR-2026-027 FR-10/TASK-05：幽灵条目清理阶段（B-12 实测形态：尾部缺 id 的续行块）。
-  // 归属判定：_history.yml 存在同 title 的归档条目（final-status 存在）才允许删除；
-  // 无对应归档 → GHOST_ENTRY_ORPHANED 硬失败（不静默删除）；无幽灵块 → already-clean（幂等）。
-  // 注：迁移已先落盘，清理失败时迁移结果有效、幽灵块保留可重试（清理幂等）。
-  const ghostResult = migrateGhostCleanup(ws, finalText, sha256(finalText), p);
+  // CR-2026-027 FR-10/TASK-05 + 代码评审回修（b5）：幽灵块归属校验必须前置于任何写入——
+  // orphan 时 GHOST_ENTRY_ORPHANED 硬失败且 backlog 文件保持不变；通过则迁移+清理合并为一次 casWrite（原子）。
+  const ghostResult = migrateGhostCleanup(ws, finalText);
+  const writeText = ghostResult.ghost.removed ? ghostResult.cleanedText : finalText;
+  casWrite(p, hash, writeText);
 
   // 迁移报告（gitignored）
   const reportDir = path.join(ws, '.crctl');
@@ -2718,7 +2749,9 @@ function cmdMigrateBacklog(ws, gates, flags) {
 // CR-2026-027 FR-10/TASK-05：幽灵条目清理（幂等；删除依据 = history 存在同 title 归档条目）。
 // B-12 实测形态：幽灵块是某条目块内的重复字段 key（如 title 二次出现，CR-2026-024 归档残留），
 // 后续可能有正常条目（如 CR-2026-027），因此遍历所有条目块，删除范围 = 重复 key 行 到 下一个条目行。
-function migrateGhostCleanup(ws, text, hash, p) {
+// CR-2026-027 代码评审回修（b5）：本函数只做幽灵块检测与归属校验（orphan 硬失败），不写盘；
+// 调用方拿到 cleanedText 后再统一 casWrite，保证“失败时文件不变”。
+function migrateGhostCleanup(ws, text) {
   const norm = text.replaceAll('\r\n', '\n');
   const lines = norm.split('\n');
   // 列表项缩进（'  - id:' 的缩进）与条目字段层缩进（itemIndent+2）
@@ -2768,9 +2801,8 @@ function migrateGhostCleanup(ws, text, hash, p) {
     fail('GHOST_ENTRY_ORPHANED', `_backlog.yml 条目块内存在无 id 归属的重复字段块（title=${ghostTitle || '(未解析)'}），但 _history.yml 无对应归档条目，拒绝删除`);
   }
   const cleaned = lines.slice(0, ghostStart).concat(lines.slice(ghostEnd)).join('\n').replace(/\s+$/, '') + '\n';
-  casWrite(p, hash, cleaned);
   auditLog(ws, { kind: 'migrate-backlog-ghost', removed: true, title: ghostTitle, by: identity(ws) });
-  return { ghost: { removed: true, title: ghostTitle, reason: 'archived-in-history' } };
+  return { ghost: { removed: true, title: ghostTitle, reason: 'archived-in-history' }, cleanedText: cleaned };
 }
 
 function cmdNext(ws, cr, gates, flags) {
@@ -2825,7 +2857,7 @@ function cmdNext(ws, cr, gates, flags) {
       const dp = ev('change-requests/{cr}/review-annotations/dev-plan.yml');
       const upstreamStale = dp.exists && dp.data && dp.data.verdict === 'block'
         && dp.data['repair-target'] === 'write-tech-design'
-        && String(dp.data['reviewed-at'] || '') > String(a.data && a.data['reviewed-at'] || '');
+        && (!a.data || reviewedAtEpoch(dp.data['reviewed-at'], 'dev-plan reviewed-at') > reviewedAtEpoch(a.data['reviewed-at'], 'sdd reviewed-at'));
       if (upstreamStale) return suggest('review-tech-design', '存在较新的 dev-plan 上游设计疑点（upstream blocker），技术评审证据过时，重新评审');
       if (passAndClean(a)) return suggest('crctl approve --stage tech-design', '技术评审 pass 且无 blocker，等待人工审批', true);
       return suggest('write-tech-design', `评审未通过（verdict=${a.data && a.data.verdict}），按 blocker 回修 SDD`);
@@ -2856,6 +2888,8 @@ function cmdNext(ws, cr, gates, flags) {
       if (String(tr.data?.status) !== 'pass') return suggest('implement-code', `test-report.status=${tr.data?.status}，按 replayNodes 回修`);
       const code = ev('change-requests/{cr}/review-annotations/code.yml');
       if (!code.exists) return suggest('push-progress → review-code', '测试证据 pass，推送 checkpoint 后进入代码评审');
+      // CR-2026-027 代码评审回修（b8）：code.yml=block 时属回修轮，应回 implement-code 而非再次评审
+      if (code.data && code.data.verdict === 'block') return suggest('implement-code', `代码评审未通过（blockers=${(code.data.blockers || []).length} 条），按 blocker 回修后重跑测试再重审`);
       return suggest('review-code', '存在旧评审记录，重跑代码评审刷新证据');
     }
     case 'code-reviewing': {

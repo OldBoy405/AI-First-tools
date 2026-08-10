@@ -24,9 +24,9 @@
       "expect": ["task-breakdown"],
       "approvalSection": "development-start",
       "evidence": {
+        "$comment": "不含 task-index：tasks/_index.yml 在开发期随 TASK 标记 done 正常变动，纳入审批 digest 会导致 EVIDENCE_DRIFT、review-code:block 无法回流 developing（CR-2026-027 代码评审回修 b9）。存在性由 requireFiles 单独校验",
         "$default": "change-requests/{cr}/review-annotations/dev-plan.yml",
-        "plan": "change-requests/{cr}/plan.md",
-        "task-index": "change-requests/{cr}/tasks/_index.yml"
+        "plan": "change-requests/{cr}/plan.md"
       },
       "passCondition": { "pipeline": "code-implementation", "nodeRef": "review-dev-plan" },
       "requireFiles": [

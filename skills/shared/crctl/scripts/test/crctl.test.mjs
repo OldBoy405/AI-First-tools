@@ -1086,17 +1086,18 @@ test('archive-move：正常路径 backlog 移除 + history 富化 + index 终态
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-test('archive-move：重复调用（已在 history 且 final-status 一致）→ already-archived 幂等零写入（TD-BL-3）', () => {
+test('archive-move：重复调用（已移出 backlog、history final-status 一致）→ already-archived 幂等零写入（TD-BL-3 + b2 双存冲突）', () => {
   const ws = makeWorkspace();
   try {
-    writeCrEntry(ws, 'CR-T1', 'archived');
+    // CR-T1 已归档：只在 history、不在 backlog（b2：幂等前提是 CR 已移出 backlog）；backlog 保留另一在途 CR
+    writeBacklog(ws, [{ id: 'CR-OTHER', status: 'drafting' }]);
     const backlogPath = path.join(ws, 'change-requests', '_backlog.yml');
     const historyPath = path.join(ws, 'change-requests', '_history.yml');
     writeFileSync(historyPath, 'history:\n  - id: CR-T1\n    final-status: archived\n');
     const backlogBefore = readFileSync(backlogPath, 'utf8');
     const historyBefore = readFileSync(historyPath, 'utf8');
     const r = runCrctl(['archive-move', 'CR-T1', '--final-status', 'archived', '--workspace', ws]);
-    assert.equal(r.status, 0);
+    assert.equal(r.status, 0, r.rawStderr);
     assert.equal(r.stdout.result, 'already-archived');
     assert.equal(r.stdout.finalStatus, 'archived');
     assert.equal(readFileSync(backlogPath, 'utf8'), backlogBefore, 'backlog 不得被写');
@@ -1105,6 +1106,11 @@ test('archive-move：重复调用（已在 history 且 final-status 一致）→
     const r2 = runCrctl(['archive-move', 'CR-T1', '--final-status', 'rejected', '--workspace', ws]);
     assert.equal(r2.status, 1);
     assert.equal(r2.stderr.error.code, 'FINAL_STATUS_MISMATCH');
+    // b2：backlog/history 双存 → CR_LOCATION_CONFLICT（数据冲突，非幂等）
+    writeBacklog(ws, [{ id: 'CR-OTHER', status: 'drafting' }, { id: 'CR-T1', status: 'archived' }]);
+    const r3 = runCrctl(['archive-move', 'CR-T1', '--final-status', 'archived', '--workspace', ws]);
+    assert.equal(r3.status, 1);
+    assert.equal(r3.stderr.error.code, 'CR_LOCATION_CONFLICT');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -2518,8 +2524,10 @@ test('CR-2026-027 FR-16：post-PASS SDD 修订 + 较新 upstream blocker → tec
     // cycle 1 末轮 PASS（attempt 3 刷新为 pass）
     writeReviewPayload(ws, 'CR-T1', 'tech-design', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
     assert.equal(runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--workspace', ws]).status, 0);
-    // 较新的 dev-plan upstream blocker（reviewed-at 晚于 sdd 评审）
-    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', 'cr-id: CR-T1\nreview-type: dev-plan\nreviewer: "r"\nreviewed-at: "2026-08-10T10:00:00+08:00"\nverdict: block\nrepair-target: write-tech-design\nblockers:\n  - "upstream"\n');
+    // 较新的 dev-plan upstream blocker：reviewed-at 用动态未来时间（UTC Z 偏移）——
+    // epoch 比较下无论时区偏移均晚于 sdd 的 nowIso()，避免写死时刻导致的时间依赖（b4）
+    const futureAt = new Date(Date.now() + 3600000).toISOString();
+    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', `cr-id: CR-T1\nreview-type: dev-plan\nreviewer: "r"\nreviewed-at: "${futureAt}"\nverdict: block\nrepair-target: write-tech-design\nblockers:\n  - "upstream"\n`);
     // SDD 修订（digest 变化）
     writeEvidence(ws, 'CR-T1', 'sdd.md', '---\nid: CR-T1-sdd\n---\nv2\n');
     // tech-design bump → 新 cycle：cycle=2/attempt=1，旧 attempts 保留
@@ -2781,10 +2789,10 @@ function makeDevStartWorkspace() {
 }
 
 function devStartEvidenceTexts(ws) {
+  // CR-2026-027 代码评审回修（b9）：dev-start 证据集不含 tasks/_index.yml（开发期可变，避免 EVIDENCE_DRIFT），与 gates.json 声明对齐
   return [
     readFileSync(path.join(ws, 'change-requests', 'CR-D1', 'plan.md'), 'utf8'),
     readFileSync(path.join(ws, 'change-requests', 'CR-D1', 'review-annotations', 'dev-plan.yml'), 'utf8'),
-    readFileSync(path.join(ws, 'change-requests', 'CR-D1', 'tasks', '_index.yml'), 'utf8'),
   ];
 }
 
@@ -2881,5 +2889,113 @@ test('CR-2026-026 ⑨: 三轮普通 BLOCK 后第 4 轮 --bump-attempt → LOOP_E
     const r4 = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
     assert.equal(r4.status, 1);
     assert.equal(r4.stderr.error.code, 'LOOP_EXHAUSTED');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-027 代码评审回修（b1~b9 覆盖 test-coverage 缺口）──
+test('CR-2026-027 回修 b1：findHistoryEntry 在同级下一条目停止（不被后续条目字段覆盖）+ history 重复 CR 硬失败', () => {
+  const ws = makeWorkspace();
+  try {
+    writeBacklog(ws, [{ id: 'CR-LIVE', status: 'drafting' }]);
+    writeCrMd(ws, 'CR-LIVE', 'drafting');
+    writeFileSync(path.join(ws, 'change-requests', '_history.yml'),
+      'history:\n  - id: CR-A\n    title: A\n    final-status: archived\n  - id: CR-B\n    title: B\n    final-status: rejected\n');
+    const stA = runCrctl(['status', 'CR-A', '--workspace', ws]);
+    assert.equal(stA.status, 0, stA.rawStderr);
+    assert.equal(stA.stdout.status, 'archived', 'CR-A 终态不被后续 CR-B 的 final-status 覆盖');
+    const stB = runCrctl(['status', 'CR-B', '--workspace', ws]);
+    assert.equal(stB.stdout.status, 'rejected');
+    writeFileSync(path.join(ws, 'change-requests', '_history.yml'),
+      'history:\n  - id: CR-A\n    final-status: archived\n  - id: CR-A\n    final-status: rejected\n');
+    const dup = runCrctl(['status', 'CR-A', '--workspace', ws]);
+    assert.equal(dup.status, 1);
+    assert.equal(dup.stderr.error.code, 'HISTORY_DUPLICATE_ENTRY');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 回修 b5：v1 迁移叠加 orphan ghost → GHOST_ENTRY_ORPHANED 且 backlog 文件保持不变', () => {
+  const ws = makeWorkspace();
+  try {
+    writeFileSync(path.join(ws, 'change-requests', '_backlog.yml'),
+      'change-requests:\n  - id: CR-V1\n    status: drafting\n    title: "孤儿幽灵"\n    title: "孤儿幽灵"\n');
+    writeCrMd(ws, 'CR-V1', 'drafting');
+    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
+    const r = runCrctl(['migrate-backlog', '--no-commit', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'GHOST_ENTRY_ORPHANED');
+    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before, 'b5：失败时 backlog 文件不变');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 回修 b6：inbox-emit JSON 标量拒绝 + 空元素去重后为空 → BAD_ARGS，去重列表放行', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    const r1 = runCrctl(['inbox-emit', 'CR-T1', '--event', 'x', '--to', '"alice"', '--workspace', ws]);
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'BAD_ARGS');
+    const r2 = runCrctl(['inbox-emit', 'CR-T1', '--event', 'x', '--to', '["", " "]', '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'BAD_ARGS');
+    const r3 = runCrctl(['inbox-emit', 'CR-T1', '--event', 'x', '--to', '["a","a","b"]', '--workspace', ws]);
+    assert.equal(r3.status, 0, r3.rawStderr);
+    assert.deepEqual(r3.stdout.to, ['a', 'b']);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 回修 b4：tech-design freshness 用 epoch 比较——跨时区偏移（+08:00 vs Z）正确判定较新上游 blocker，非法时间戳硬失败', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-review-pending');
+    const sddBody = '---\nid: CR-T1-sdd\n---\nbody\n';
+    writeEvidence(ws, 'CR-T1', 'sdd.md', sddBody);
+    const sddDigest = createHash('sha256').update(sddBody.replaceAll('\r\n', '\n'), 'utf8').digest('hex');
+    writeEvidence(ws, 'CR-T1', 'review-annotations/sdd.yml', `cr-id: CR-T1\nreview-type: tech-design\nverdict: pass\nblockers: []\nreviewed-at: "2026-08-10T10:00:00+08:00"\nsubject-file: change-requests/CR-T1/sdd.md\nsubject-sha256: ${sddDigest}\n`);
+    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', 'cr-id: CR-T1\nreview-type: dev-plan\nverdict: block\nrepair-target: write-tech-design\nblockers:\n  - "up"\nreviewed-at: "2026-08-10T03:00:00Z"\n');
+    const r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.next, 'review-tech-design', 'epoch 判定上游 blocker 较新 → 重审（字符串序会误判为较旧）');
+    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', 'cr-id: CR-T1\nreview-type: dev-plan\nverdict: block\nrepair-target: write-tech-design\nblockers:\n  - "up"\nreviewed-at: "not-a-date"\n');
+    const bad = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(bad.status, 1);
+    assert.equal(bad.stderr.error.code, 'BAD_TIMESTAMP');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 回修 b3：traceability review-loop 投影含 current-cycle 与 attempts[].cycle', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    writePrd(ws, 'CR-T1', '# prd\n');
+    writeReviewPayload(ws, 'CR-T1', 'requirement', 'verdict: block\nblockers:\n  - "x"\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'requirement', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    const tr = readTrace(ws, 'CR-T1');
+    assert.match(tr, /current-cycle: 1/, 'review-loop 投影含 current-cycle');
+    assert.match(tr, /cycle: 1/, 'attempts 条目含 cycle');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 回修 b8：developing 且 code.yml verdict=block → next=implement-code（回修而非再评审）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeEvidence(ws, 'CR-T1', 'test-report.md', '---\nstatus: pass\n---\n');
+    writeEvidence(ws, 'CR-T1', 'review-annotations/code.yml', 'cr-id: CR-T1\nreview-type: code\nverdict: block\nblockers:\n  - "b"\n');
+    const r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.next, 'implement-code', 'code.yml block → 回修 implement-code');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 回修 b9：tasks/_index.yml 开发期变动不触发 development-start EVIDENCE_DRIFT', () => {
+  const ws = makeDevStartWorkspace().ws;
+  try {
+    writeDevStartApproval(ws); // digest 只覆盖 plan+dev-plan（不含 task-index）
+    const idxP = path.join(ws, 'change-requests', 'CR-D1', 'tasks', '_index.yml');
+    writeFileSync(idxP, readFileSync(idxP, 'utf8') + '# task done marker\n');
+    const g = runCrctl(['gate', 'CR-D1', '--for', 'developing', '--workspace', ws]);
+    const check = g.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(check.ok, true, 'b9：task-index 不入 digest，_index.yml 变动不产生 EVIDENCE_DRIFT');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
