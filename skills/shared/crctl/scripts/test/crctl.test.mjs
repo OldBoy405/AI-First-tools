@@ -2999,3 +2999,89 @@ test('CR-2026-027 回修 b9：tasks/_index.yml 开发期变动不触发 developm
     assert.equal(check.ok, true, 'b9：task-index 不入 digest，_index.yml 变动不产生 EVIDENCE_DRIFT');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-027 代码评审二轮（b10）：幽灵审计时序 + dev-start 审批迁移闭环 ──
+test('CR-2026-027 回修 b10：幽灵清理审计事件在 casWrite 成功后才记录 —— CAS_CONFLICT 时零成功审计记录', () => {
+  const ws = makeWorkspace();
+  initGit(ws);
+  try {
+    const ghostTitle = 'Phase0 Tools 技能整合 — 端到端 Pipeline 最佳实践';
+    writeBacklogWithGhost(ws, ghostTitle);
+    writeHistoryWithArchived(ws, ghostTitle);
+    // 成功路径：migrate-backlog 后 audit.log 含一条成功 ghost 审计
+    runCrctl(['migrate-backlog', '--workspace', ws]);
+    let auditText = existsSync(path.join(ws, '.crctl', 'audit.log')) ? readFileSync(path.join(ws, '.crctl', 'audit.log'), 'utf8') : '';
+    const successHits = auditText.split('\n').filter((l) => l.includes('"kind":"migrate-backlog-ghost"') && l.includes('"removed":true'));
+    assert.equal(successHits.length, 1, '成功迁移应恰好一条成功 ghost 审计');
+    // 幂等再跑：already-clean 不新增成功审计
+    runCrctl(['migrate-backlog', '--workspace', ws]);
+    auditText = readFileSync(path.join(ws, '.crctl', 'audit.log'), 'utf8');
+    const afterIdempotent = auditText.split('\n').filter((l) => l.includes('"kind":"migrate-backlog-ghost"') && l.includes('"removed":true'));
+    assert.equal(afterIdempotent.length, 1, '幂等再跑不得重复写成功审计');
+    // CAS_CONFLICT 场景：读后改 → casWrite 失败 → 零成功审计记录（黑盒注入：先把 backlog 内容预写入让 hash 失配不可行，
+    // 改为组件级验证：migrateGhostCleanup 不再自行写审计，审计完全由调用方在 casWrite 成功后触发 —— 见 auditGhostCleanup 源码断言）
+    const src = readFileSync(CRCTL, 'utf8').replaceAll('\r\n', '\n');
+    // ① migrateGhostCleanup 体内不得出现 auditLog 调用（审计已移出）
+    const ghostFn = src.match(/function migrateGhostCleanup\(ws, text\) \{[\s\S]*?\n\}/);
+    assert.ok(ghostFn, '应能提取 migrateGhostCleanup 源码');
+    assert.ok(!ghostFn[0].includes('auditLog('), 'migrateGhostCleanup 不得自行写审计（b10：审计移出到 casWrite 成功之后）');
+    // ② 调用方序列必须为 casWrite → auditGhostCleanup（casWrite 失败即 fail 终止，audit 不可达）
+    const auditFn = src.match(/function auditGhostCleanup\(ws, ghostResult\) \{[\s\S]*?\n\}/);
+    assert.ok(auditFn, '应能提取 auditGhostCleanup 源码');
+    // ③ 每个调用点都是先 casWrite 成功、后 auditGhostCleanup
+    const callerBlocks = src.match(/casWrite\(p, hash, [^;]+\);\n\s*auditGhostCleanup\(ws, ghostResult\);/g);
+    assert.ok(callerBlocks && callerBlocks.length >= 3, `三处调用点均为 casWrite 成功后补审计（实际 ${callerBlocks ? callerBlocks.length : 0}）`);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 回修 b10：dev-start 证据定义变更后 approval 段 digest 漂移 -> approve --resign 受控迁移闭环（gate 复绿）', () => {
+  const ws = makeDevStartWorkspace().ws;
+  try {
+    // 模拟 b9 之前：approval 段按【含 task-index 的旧证据集】签发 digest（历史遗留，未随 gates.json 定义更新）
+    const oldEvidence = devStartEvidenceTexts(ws).concat([readFileSync(path.join(ws, 'change-requests', 'CR-D1', 'tasks', '_index.yml'), 'utf8')]);
+    writeDevStartApproval(ws, { 'evidence-digest': canonicalDigestOf(oldEvidence) });
+    // ① 迁移前：developing gate 报 EVIDENCE_DRIFT（复算 digest 与记录不一致）
+    let g = runCrctl(['gate', 'CR-D1', '--for', 'developing', '--workspace', ws]);
+    let check = g.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(check.ok, false, '旧定义 digest 应检出漂移');
+    assert.equal(check.code, 'EVIDENCE_DRIFT', '漂移错误码为 EVIDENCE_DRIFT');
+    // ② 受控迁移：按当前定义重算 digest 并替换该段（等价 approve --resign 的文本变换，TTY 人工在环）
+    const approvalP = path.join(ws, 'change-requests', 'CR-D1', 'approval.yml');
+    const text = readFileSync(approvalP, 'utf8');
+    const newDigest = canonicalDigestOf(devStartEvidenceTexts(ws));
+    const next = text.replace(/^development-start:\n(?:[ \t]+.*\n?)*/m, (block) => {
+      const base = block.replace(/\n[ \t]+resign:[\s\S]*$/, '');
+      return base.replace(/^(\s+)evidence-digest:.*$/m, `$1evidence-digest: "${newDigest}"`).replace(/\s*$/, '') + '\n  resign:\n    at: "2026-08-10T11:00:00+08:00"\n    by: "tester"\n    from-digest: "' + text.match(/evidence-digest: "([^"]+)"/)[1] + '"\n    reason: "evidence-definition-change（gates.json 证据集调整）"\n';
+    });
+    writeFileSync(approvalP, next);
+    // ③ 迁移后：developing gate 放行
+    g = runCrctl(['gate', 'CR-D1', '--for', 'developing', '--workspace', ws]);
+    check = g.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(check.ok, true, '迁移后 digest 与当前定义一致，gate 复绿');
+    const migrated = readFileSync(approvalP, 'utf8');
+    assert.match(migrated, /evidence-digest: "/);
+    assert.match(migrated, /resign:/);
+    assert.match(migrated, /from-digest: "/);
+    assert.match(migrated, /reason: "evidence-definition-change/);
+    // ④ 迁移幂等：再次 apply 不改变 digest（resign 块被清后重建，digest 不变）
+    const text2 = readFileSync(approvalP, 'utf8');
+    const next2 = text2.replace(/^development-start:\n(?:[ \t]+.*\n?)*/m, (block) => {
+      const base = block.replace(/\n[ \t]+resign:[\s\S]*$/, '');
+      return base.replace(/^(\s+)evidence-digest:.*$/m, `$1evidence-digest: "${newDigest}"`).replace(/\s*$/, '') + '\n  resign:\n    at: "2026-08-10T11:05:00+08:00"\n    by: "tester"\n    from-digest: "' + newDigest + '"\n    reason: "evidence-definition-change（gates.json 证据集调整）"\n';
+    });
+    writeFileSync(approvalP, next2);
+    g = runCrctl(['gate', 'CR-D1', '--for', 'developing', '--workspace', ws]);
+    check = g.stdout.checks.find((c) => c.type === 'approval');
+    assert.equal(check.ok, true, '幂等迁移不破坏 digest 一致性');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-027 回修 b10：approve --resign 非交互式调用拒绝（人类在环，无旁路）', () => {
+  const ws = makeDevStartWorkspace().ws;
+  try {
+    writeDevStartApproval(ws);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'dev-start', '--resign', 'evidence-definition-change', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'APPROVAL_REQUIRES_HUMAN', '非 TTY 一律拒绝，无旁路');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

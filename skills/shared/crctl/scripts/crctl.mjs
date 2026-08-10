@@ -1275,6 +1275,10 @@ function cmdApprove(ws, cr, gates, flags) {
   const stage = flags.stage;
   const stageCfg = gates.approvalStages[stage];
   if (!stageCfg) fail('BAD_ARGS', `--stage 必须是 ${Object.keys(gates.approvalStages).join(' | ')}`);
+  // CR-2026-027 代码评审回修（b10）：受控历史审批迁移路径（TTY 人类在环，无旁路）——
+  // 证据定义变更（如 dev-start 剔除 task-index）后既有 approval 段 digest 按旧定义签发，
+  // 门禁复算不一致报 EVIDENCE_DRIFT；--resign 只重算当前定义下 digest 并改写该段，保留审批本体。
+  if (flags.resign !== undefined) return approveResign(ws, cr, gates, flags, stage, stageCfg);
   // grant 模式（P1 签名审批 §B，CR-2026-002 TASK-03）：服务端已完成人类身份校验并签名，
   // crctl 本地验签 + 重算证据摘要后非 TTY 放行——强度不降级，只是"人在环"发生在服务端。
   if (flags.grant) return approveWithGrant(ws, cr, gates, flags, stage, stageCfg);
@@ -1379,6 +1383,68 @@ function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
     outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
     specId: flags['spec-id'], fromStatus: current,
   });
+}
+
+// CR-2026-027 代码评审回修（b10）：受控历史审批迁移 —— `crctl approve <cr> --stage <stage> --resign <reason>`
+// 场景：gates.json evidence 定义变更（如 dev-start 剔除 task-index）后，既有 approval.yml 段仍按旧证据集签发
+// digest，developing 门禁复算不一致报 EVIDENCE_DRIFT（非证据内容被改动，而是证据定义变了）。
+// 约束：① 仅 TTY 人类在环，无旁路（与 approve 同强度）；② 审批段必须已存在且曾由 crctl approve 写入；
+// ③ 只改写该段的 evidence-digest（按当前 gates.json 定义重算），保留 approver/approved-at/via/target-status；
+// ④ 追加 resign 审计块（at/by/from-digest/reason），记录迁移事实；⑤ CAS + audit + 单次 commit。
+function approveResign(ws, cr, gates, flags, stage, stageCfg) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    fail('APPROVAL_REQUIRES_HUMAN', 'crctl approve --resign 仅接受交互式终端会话（人类在环，无旁路）。模型/管道/脚本直接调用一律拒绝。');
+  }
+  const reason = typeof flags.resign === 'string' && flags.resign.trim() ? flags.resign.trim() : null;
+  if (!reason) fail('BAD_ARGS', '--resign 需要原因说明（--resign <reason>），如 evidence-definition-change（gates.json 证据集调整）');
+  const section = stageCfg.approvalSection;
+  const ap = path.join(crDir(ws, cr), 'approval.yml');
+  const text = readFileChecked(ap);
+  if (text == null) fail('APPROVAL_NOT_FOUND', `approval.yml 不存在: ${ap}`);
+  const doc = parseYaml(text);
+  const sec = doc && doc[section];
+  if (!sec || !sec.approver || !sec['approved-at'] || !['crctl-approve', 'server-approve'].includes(sec.via)) {
+    fail('RESIGN_NO_PRIOR_APPROVAL', `approval.yml#${section} 无既有 crctl approve 审批记录，不能 --resign`);
+  }
+  const oldDigest = sec['evidence-digest'] || null;
+  const newDigest = canonicalEvidenceDigest(ws, cr, stageCfg);
+  if (!newDigest) fail('RESIGN_DIGEST_UNAVAILABLE', '按当前 gates.json evidence 定义无法重算 digest（证据文件缺失）');
+  if (newDigest === oldDigest) {
+    ok({ op: 'approve-resign', cr, stage, changed: false, reason: 'digest-already-current' });
+    return;
+  }
+  const approver = flags.approver || identity(ws);
+  process.stdout.write(`\n=== crctl approve --resign · ${cr} · ${stage} ===\n`);
+  process.stdout.write(`证据定义变更（gates.json）导致 evidence-digest 漂移，需受控迁移：\n  旧 digest: ${oldDigest || '(无)'}\n  新 digest: ${newDigest}\n  原因: ${reason}\n`);
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  rl.question(`以 approver=${approver} 确认将该段 evidence-digest 迁移到当前定义？只有输入 yes 才会写入 approval.yml [yes/N] `, (answer) => {
+    rl.close();
+    if (answer.trim().toLowerCase() !== 'yes') {
+      auditLog(ws, { kind: 'approve-resign', cr, stage, approver, result: 'declined' });
+      fail('RESIGN_DECLINED', '人工未确认，approval.yml 未变更');
+    }
+    // 只替换该段 evidence-digest，其余字段原样保留；追加 resign 审计块（幂等：先清旧 resign 子块）
+    const next = resignApprovalSectionText(text, section, newDigest, approver, reason, oldDigest || '');
+    casWrite(ap, sha256(text), next);
+    auditLog(ws, { kind: 'approve-resign', cr, stage, approver, via: sec.via, result: 'resigned', from: oldDigest || '', to: newDigest, reason });
+    const addR = controlledGit(ws, 'add', [`change-requests/${cr}/approval.yml`], ws, 'crctl-approve');
+    const msg = `[cr] resign ${cr} ${stage} evidence-digest（${reason}）`;
+    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-approve') : addR;
+    ok({ op: 'approve-resign', cr, stage, changed: true, from: oldDigest || '', to: newDigest, reason, commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR } });
+    if (commitR && !commitR.ok) process.exit(1);
+  });
+}
+
+// CR-2026-027 代码评审回修（b10）：approve --resign 的段文本变换纯函数（供测试提取验证）——
+// 只改写该段 evidence-digest 行，其余字段保留；幂等清旧 resign 子块后追加新 resign 审计块。
+function resignApprovalSectionText(text, section, newDigest, approver, reason, oldDigest) {
+  const sectionRe = new RegExp(`^${section}:\\n(?:[ \\t]+.*\\n?)*`, 'm');
+  const block = sectionRe.exec(text)?.[0];
+  if (!block) return null;
+  const base = block.replace(/\n[ \t]+resign:[\s\S]*$/, '');
+  const newBlock = base.replace(/^(\s+)evidence-digest:.*$/m, `$1evidence-digest: "${newDigest}"`)
+    .replace(/\s*$/, '') + `\n  resign:\n    at: "${nowIso()}"\n    by: "${approver}"\n    from-digest: "${oldDigest}"\n    reason: "${reason}"\n`;
+  return text.replace(sectionRe, newBlock + '\n');
 }
 
 function collectOutboxEvidence(ws, cr, stageCfg) {
@@ -2642,6 +2708,7 @@ function cmdMigrateBacklog(ws, gates, flags) {
     if (!hasLegacy) {
       const ghostResult = migrateGhostCleanup(ws, text);
       if (ghostResult.ghost.removed) casWrite(p, hash, ghostResult.cleanedText);
+      auditGhostCleanup(ws, ghostResult); // b10：casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
       finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
       return;
     }
@@ -2670,6 +2737,7 @@ function cmdMigrateBacklog(ws, gates, flags) {
   if (!toMigrate.length) {
     const ghostResult = migrateGhostCleanup(ws, text);
     if (ghostResult.ghost.removed) casWrite(p, hash, ghostResult.cleanedText);
+    auditGhostCleanup(ws, ghostResult); // b10：casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
     finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
     return;
   }
@@ -2714,6 +2782,7 @@ function cmdMigrateBacklog(ws, gates, flags) {
   const ghostResult = migrateGhostCleanup(ws, finalText);
   const writeText = ghostResult.ghost.removed ? ghostResult.cleanedText : finalText;
   casWrite(p, hash, writeText);
+  auditGhostCleanup(ws, ghostResult); // b10：迁移+清理合并 casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
 
   // 迁移报告（gitignored）
   const reportDir = path.join(ws, '.crctl');
@@ -2750,7 +2819,9 @@ function cmdMigrateBacklog(ws, gates, flags) {
 // B-12 实测形态：幽灵块是某条目块内的重复字段 key（如 title 二次出现，CR-2026-024 归档残留），
 // 后续可能有正常条目（如 CR-2026-027），因此遍历所有条目块，删除范围 = 重复 key 行 到 下一个条目行。
 // CR-2026-027 代码评审回修（b5）：本函数只做幽灵块检测与归属校验（orphan 硬失败），不写盘；
-// 调用方拿到 cleanedText 后再统一 casWrite，保证“失败时文件不变”。
+// 调用方拿到 cleanedText 后再统一 casWrite，保证"失败时文件不变"。
+// 代码评审回修（b10）：审计事件移出本函数——幽灵审计必须发生在 casWrite 成功之后（见 auditGhostCleanup），
+// CAS_CONFLICT 时 _backlog.yml 不变且 audit.log 不得误记已清理（FR-10 一致性边界）。
 function migrateGhostCleanup(ws, text) {
   const norm = text.replaceAll('\r\n', '\n');
   const lines = norm.split('\n');
@@ -2801,8 +2872,16 @@ function migrateGhostCleanup(ws, text) {
     fail('GHOST_ENTRY_ORPHANED', `_backlog.yml 条目块内存在无 id 归属的重复字段块（title=${ghostTitle || '(未解析)'}），但 _history.yml 无对应归档条目，拒绝删除`);
   }
   const cleaned = lines.slice(0, ghostStart).concat(lines.slice(ghostEnd)).join('\n').replace(/\s+$/, '') + '\n';
-  auditLog(ws, { kind: 'migrate-backlog-ghost', removed: true, title: ghostTitle, by: identity(ws) });
   return { ghost: { removed: true, title: ghostTitle, reason: 'archived-in-history' }, cleanedText: cleaned };
+}
+
+// CR-2026-027 代码评审回修（b10）：幽灵清理的审计事件必须发生在 casWrite 成功之后——
+// CAS_CONFLICT 时 _backlog.yml 保持不变而 audit.log 不得误记已清理（FR-10 一致性边界）。
+// 调用方在 casWrite 成功后才调用本函数补记审计；迁移+清理合并的单次 casWrite 同样适用。
+function auditGhostCleanup(ws, ghostResult) {
+  if (ghostResult.ghost && ghostResult.ghost.removed) {
+    auditLog(ws, { kind: 'migrate-backlog-ghost', removed: true, title: ghostResult.ghost.title, by: identity(ws) });
+  }
 }
 
 function cmdNext(ws, cr, gates, flags) {
@@ -2959,6 +3038,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
                         [--expect <cur>] [--embedded] [--spec-id <id>]
   crctl approve <cr_id> --stage <requirement|tech-design|dev-start|code>
                         [--approver <id>] [--spec-id <id>]   仅限交互式终端（人类在环）
+  crctl approve <cr_id> --stage <stage> --resign <reason>   受控历史审批迁移：gates.json 证据定义变更后重签该段 evidence-digest（仅限交互式终端，保留原审批本体）
   crctl validate <file>                          受控产物 schema 校验（validate-doc 代码化）
   crctl attempt <cr_id> --loop <ref>             review-loop 轮次唯一记账点；超限返回 LOOP_EXHAUSTED
   crctl review-record <cr_id> --stage <requirement|tech-design|code> --from <payload.yml> [--bump-attempt]
