@@ -4,7 +4,7 @@
 
 ## 1. 安装 hooks
 
-把 [settings.template.json](settings.template.json) 的 `hooks` 段合并进目标 workspace 的 `.claude/settings.json`（团队共享）或 `.claude/settings.local.json`（个人）。模板假设 tools 包安装在 workspace 的 `tools/` 下；路径不同请同步修改三处 `command`。
+把 [settings.template.json](settings.template.json) 的 `hooks` 段合并进目标 workspace 的 `.claude/settings.json`（团队共享）或 `.claude/settings.local.json`（个人）。模板中 `{TOOLS_ROOT}` 安装时物化为 tools 包绝对路径（来源 `dir-graph.yaml#workspace.tools_package_path`），同步替换三处 `command` 中的占位符。
 
 生效后：
 
@@ -30,7 +30,7 @@ hooks 无法通用地推断「哪些目录是主工作区代码目录」。在�
 ## 3. 验证安装
 
 ```bash
-node tools/skills/shared/crctl/scripts/crctl.mjs status <CR-ID>
+node "{TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs" status <CR-ID>
 ```
 
 然后在 Claude Code 会话里让模型尝试 `git commit`（应被 deny 并提示改用 `crctl git`）、尝试直接编辑 `change-requests/_backlog.yml`（应被 deny）。

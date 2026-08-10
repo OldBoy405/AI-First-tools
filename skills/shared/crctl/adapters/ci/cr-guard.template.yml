@@ -7,7 +7,7 @@
 # 本地 IDE 无论怎么漂，漂移产物到不了 trunk：merge-feature-branch 前置要求本 workflow 绿灯
 #（在仓库设置里把 cr-guard 设为 required status check）。
 #
-# 假设：workspace 根即仓库根，tools 包安装在 tools/。路径不同请调整 CRCTL 变量。
+# 假设：workspace 根即仓库根；tools 包检出到 tools/ 目录（安装物化位置，来源 dir-graph.yaml#workspace.tools_package_path），以 $TOOLS_ROOT 环境变量表达，勿在命令里假设 workspace 内其它安装点。
 
 name: cr-guard
 on:
@@ -19,7 +19,7 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     env:
-      CRCTL: node tools/skills/shared/crctl/scripts/crctl.mjs
+      TOOLS_ROOT: ${{ github.workspace }}/tools
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,7 +37,7 @@ jobs:
           node-version: 20
 
       - name: Validate backlog schema
-        run: $CRCTL validate change-requests/_backlog.yml --workspace .
+        run: node "$TOOLS_ROOT/skills/shared/crctl/scripts/crctl.mjs" validate change-requests/_backlog.yml --workspace .
 
       - name: Validate changed controlled artifacts
         run: |
@@ -53,7 +53,7 @@ jobs:
               */cr.md|*/approval.yml|*/test-report.md|*review-annotations/*.yml|*review-annotations/*.yaml)
                 if [ -f "$f" ]; then
                   echo "::group::crctl validate $f"
-                  $CRCTL validate "$f" --workspace . || rc=1
+                  node "$TOOLS_ROOT/skills/shared/crctl/scripts/crctl.mjs" validate "$f" --workspace . || rc=1
                   echo "::endgroup::"
                 fi
                 ;;
@@ -68,7 +68,7 @@ jobs:
           if [[ "$msg" =~ ^\[cr\]\ status\ ([^\ ]+)\ ([^\ ]+)\ -\>\ ([^\ ]+)$ ]]; then
             cr="${BASH_REMATCH[1]}"; to="${BASH_REMATCH[3]}"
             echo "检测到状态推进 commit：$cr -> $to，复核门禁"
-            $CRCTL gate "$cr" --for "$to" --workspace .
+            node "$TOOLS_ROOT/skills/shared/crctl/scripts/crctl.mjs" gate "$cr" --for "$to" --workspace .
           else
             echo "HEAD 非状态推进 commit，跳过 gate 复核"
           fi
@@ -76,5 +76,5 @@ jobs:
       - name: Lint prompts against crctl (enforce)
         run: |
           echo "::group::lint-prompts enforce"
-          node tools/skills/shared/crctl/scripts/lint-prompts.mjs --mode enforce --root tools || exit 1
+          node "$TOOLS_ROOT/skills/shared/crctl/scripts/lint-prompts.mjs" --mode enforce --root "$TOOLS_ROOT" || exit 1
           echo "::endgroup::"

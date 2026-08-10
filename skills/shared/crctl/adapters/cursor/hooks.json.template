@@ -1,15 +1,15 @@
 {
-  "$comment": "漂移治理 v2 组件 B — Cursor hooks 模板（原生格式）。放置于目标 workspace 的 .cursor/hooks.json（项目级）或 ~/.cursor/hooks.json（用户级）。Cursor 事件名 camelCase：sessionStart / preToolUse / postToolUse / beforeSubmitPrompt / preCompact / stop。项目级 hooks 从项目根运行，路径相对项目根；用户级相对 ~/.cursor/。{TOOLS} 替换为 tools 包所在目录的绝对路径（正斜杠）。",
+  "$comment": "漂移治理 v2 组件 B — Cursor hooks 模板（原生格式）。放置于目标 workspace 的 .cursor/hooks.json（项目级）或 ~/.cursor/hooks.json（用户级）。Cursor 事件名 camelCase：sessionStart / preToolUse / postToolUse / beforeSubmitPrompt / preCompact / stop。项目级 hooks 从项目根运行，路径相对项目根；用户级相对 ~/.cursor/。{TOOLS_ROOT} 替换为 tools 包绝对路径（来源 workspace.tools_package_path）（正斜杠）。",
   "version": 1,
   "hooks": {
     "sessionStart": [
       {
-        "command": "node \"{TOOLS}/tools/skills/shared/crctl/adapters/cursor/hooks/session-start-ctx.mjs\""
+        "command": "node \"{TOOLS_ROOT}/skills/shared/crctl/adapters/cursor/hooks/session-start-ctx.mjs\""
       }
     ],
     "preToolUse": [
       {
-        "command": "node \"{TOOLS}/tools/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs\"",
+        "command": "node \"{TOOLS_ROOT}/skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs\"",
         "matcher": "Shell|Write"
       }
     ]

@@ -72,7 +72,7 @@ if (active.length === 0) process.exit(0);
 const ctx = [
   '[crctl 权威指针注入] 以下为 change-requests/{CR-ID}/cr.md 的实时状态（勿凭记忆自报 status）：',
   ...active.map((c) => `- ${c.id}: status=${c.status}${c.updated ? ` (updated-at ${c.updated})` : ''}`),
-  '状态推进/审批/git 必须经 crctl：node tools/skills/shared/crctl/scripts/crctl.mjs（status|advance|gate|approve|validate|attempt|test|next|git）。',
+  '状态推进/审批/git 必须经 crctl：crctl（经 Tools Root 解析：{TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs，status|advance|gate|approve|validate|attempt|test|next|git）。',
   '完整指针与门禁缺口请运行：crctl status <CR-ID>。',
 ].join('\n');
 
