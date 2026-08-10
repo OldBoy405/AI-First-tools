@@ -3353,3 +3353,34 @@ test('配置来源恒由 ws/tools_package_path 决定：真实 checkout 脚本 +
     assert.equal(r.stdout.to, 'sentinel-reviewing');
   } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-028 AC-8：源码审查断言（四 loader 同一 resolver、成功值缓存、无 module-scope 全局）──
+
+test('AC-8：四 loader 均显式接收 ws 并调用同一 resolveToolsRoot(ws)；main/controlledGit 各自接线（源码静态断言）', () => {
+  const src = readFileSync(CRCTL, 'utf8').replace(/\r\n/g, '\n');
+  // 四个 loader 定义均带 ws 参数
+  for (const sig of ['function loadStateMachine(ws)', 'function loadGates(ws)', 'function loadPipeline(ws, id)', 'function loadShellRules(ws)']) {
+    assert.ok(src.includes(sig), `定义存在: ${sig}`);
+  }
+  // 四个 loader 内部调用同一 resolver
+  const loaderBodies = ['loadStateMachine', 'loadGates', 'loadPipeline', 'loadShellRules']
+    .map((f) => src.slice(src.indexOf(`function ${f}(`)));
+  for (const body of loaderBodies) {
+    assert.ok(body.slice(0, body.indexOf('\nfunction ')) .includes('resolveToolsRoot('), `${body.slice(0, 20)} 调用 resolveToolsRoot`);
+  }
+  // main() eager loadGates(ws)；controlledGit 内 loadShellRules(ws)
+  const mainTail = src.slice(src.indexOf('function main()'));
+  assert.ok(mainTail.includes('loadGates(ws)'), 'main() eager loadGates(ws)');
+  const cg = src.slice(src.indexOf('function controlledGit('), src.indexOf('function controlledGit(') + 1200);
+  assert.ok(cg.includes('loadShellRules(ws)'), 'controlledGit 内 loadShellRules(ws)');
+  // toolsRootCache：单值成功缓存；_shellRules 独立；无 module-scope workspace 全局
+  const cacheDecl = src.slice(src.indexOf('let toolsRootCache'), src.indexOf('let toolsRootCache') + 160);
+  assert.match(cacheDecl, /undefined=未解析, string=成功/, 'toolsRootCache 仅成功值');
+  assert.equal((src.match(/toolsRootCache = /g) || []).length, 1, 'toolsRootCache 仅一处赋值');
+  assert.ok(src.includes('let _shellRules;'), '_shellRules 独立声明');
+  assert.ok(!/^let ws\s*=|^const ws\s*=/m.test(src), '无 module-scope workspace 全局');
+  // resolver/loader 区域无 Map 缓存（全文件 new Map 仅 task 索引用途）
+  const resolverZone = src.slice(src.indexOf('let toolsRootCache'), src.indexOf('function loadShellRules(ws)'));
+  assert.ok(!resolverZone.includes('new Map('), 'Tools Root 区域无 Map 缓存');
+  assert.ok(!src.includes('telemetry'), '无 telemetry');
+});
