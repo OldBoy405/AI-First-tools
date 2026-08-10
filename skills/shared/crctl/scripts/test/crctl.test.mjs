@@ -17,6 +17,9 @@ import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
 const CRCTL = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
+// 真实 tools 包根（test → scripts → crctl → shared → skills → tools 共 5 层）：
+// 既有测试默认通过 ws/dir-graph.yaml#workspace.tools_package_path 指向它（CR-2026-028 FR-1/FR-4 后配置来源收敛）
+const PACKAGE_ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
 
 function sha16(text) {
   // 与 crctl.mjs 的 evidenceSha16 同口径：行尾规范化后哈希（防 autocrlf 误报）
@@ -64,10 +67,86 @@ fs.readFileSync = (file, ...args) => {
   return runCrctlWrapped(['migrate-backlog', '--no-commit', '--workspace', ws], `import path from 'node:path';\n${prelude}`);
 }
 
-/** 建一个一次性临时 workspace；返回目录路径，调用方负责在 test 结束时 rmSync。 */
-function makeWorkspace() {
+/** 建一个一次性临时 workspace；返回目录路径，调用方负责在 test 结束时 rmSync。
+ * 默认写入 dir-graph.yaml 声明 workspace.tools_package_path 指向真实 tools 包（CR-2026-028 FR-1），
+ * 使既有测试语义不变（仍读真实 tools 配置），同时覆盖 resolver 契约；
+ * 传 opts.toolsRoot 可指向定制 fixture（sentinel / 失败场景）。 */
+function makeWorkspace(opts = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'crctl-test-'));
   mkdirSync(path.join(dir, 'change-requests'), { recursive: true });
+  const toolsRoot = opts.toolsRoot || PACKAGE_ROOT;
+  writeFileSync(path.join(dir, 'dir-graph.yaml'),
+    `workspace:\n  tools_package_path: ${JSON.stringify(toolsRoot)}\n`, 'utf8');
+  return dir;
+}
+
+/* ── CR-2026-028 FR-9：最小 tools 包 fixture（四标志 + sentinel 配置，不修改真实 checkout）── */
+
+const FIXTURE_DIR_GRAPH = [
+  'change-request-track:',
+  '  state_machine:',
+  '    field: "status"',
+  '    transitions:',
+  '      - { from: sentinel-drafting, to: sentinel-reviewing, trigger: "sentinel-advance" }',
+].join('\n') + '\n';
+
+const FIXTURE_GATES = {
+  approvalStages: {},
+  statusGates: {},
+  reviewLoops: {},
+  evidence: { 'sentinel': 'change-requests/{cr}/sentinel-evidence.md' },
+};
+
+const FIXTURE_PIPELINE = {
+  id: 'sentinel',
+  nodes: [{ ref: 'sentinel-node', reviewLoop: { maxAttempts: 3, passCondition: { allOf: [
+    { path: 'verdict', equals: 'pass' }, { path: 'blockers', isEmpty: true } ] } } }],
+};
+
+// setupBriefWs 专用：requirement 审批门禁（对齐真实 gates.json 的 requirement 段，供回显测试触发 passCondition）
+const BRIEF_GATES = {
+  approvalStages: {
+    requirement: {
+      to: 'requirement-approved',
+      trigger: 'approve-requirement',
+      expect: ['requirement-reviewing'],
+      approvalSection: 'requirement',
+      evidence: { $default: 'change-requests/{cr}/review-annotations/requirement.yml' },
+      passCondition: { pipeline: 'requirement-authoring', nodeRef: 'review-requirement' },
+    },
+  },
+  statusGates: {
+    'requirement-reviewing': [
+      { type: 'fileExists', path: 'change-requests/{cr}/prd.md' },
+      { type: 'passCondition', stage: 'requirement' },
+    ],
+    'requirement-approved': [
+      { type: 'passCondition', stage: 'requirement' },
+      { type: 'approval', section: 'requirement' },
+    ],
+  },
+  reviewLoops: { 'review-requirement': { pipeline: 'requirement-authoring' } },
+};
+
+const FIXTURE_RULES = {
+  git: [{ sub: 'status', shapes: ['--sentinel-shape'] }],
+  forbiddenFlags: ['--push'],
+};
+
+/** 建一次性最小 tools 包 fixture（四标志齐全 + sentinel 配置）。 */
+function makeToolsFixture() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'crctl-tools-fixture-'));
+  writeFileSync(path.join(dir, 'AGENTS.md'), '# fixture tools\n', 'utf8');
+  writeFileSync(path.join(dir, 'dir-graph.yaml'), FIXTURE_DIR_GRAPH, 'utf8');
+  mkdirSync(path.join(dir, 'skills'), { recursive: true });
+  writeFileSync(path.join(dir, 'skills', '_index.yml'), 'skills: []\n', 'utf8');
+  mkdirSync(path.join(dir, 'skills', 'shared', 'crctl', 'scripts'), { recursive: true });
+  writeFileSync(path.join(dir, 'skills', 'shared', 'crctl', 'scripts', 'crctl.mjs'), '// fixture marker\n', 'utf8');
+  writeFileSync(path.join(dir, 'skills', 'shared', 'crctl', 'gates.json'), JSON.stringify(FIXTURE_GATES), 'utf8');
+  mkdirSync(path.join(dir, 'pipeline-templates'), { recursive: true });
+  writeFileSync(path.join(dir, 'pipeline-templates', 'sentinel.pipeline.json'), JSON.stringify(FIXTURE_PIPELINE), 'utf8');
+  mkdirSync(path.join(dir, 'skills', 'shared', 'controlled-shell'), { recursive: true });
+  writeFileSync(path.join(dir, 'skills', 'shared', 'controlled-shell', 'rules.json'), JSON.stringify(FIXTURE_RULES), 'utf8');
   return dir;
 }
 
@@ -2205,8 +2284,15 @@ const LONG_ANNOTATION = 'verdict: block\nblockers:\n' + LONG_BLOCKERS.map((b) =>
 
 function setupBriefWs(cr, status, annotation) {
   const ws = makeWorkspace();
-  writeCrEntry(ws, cr, status);
-  writeFileSync(path.join(ws, 'dir-graph.yaml'), [
+  // 定制 tools fixture（CR-2026-028 FR-1：配置来源收敛后，pipeline 与状态机从 Tools Root 读）
+  const fixture = path.join(ws, '_fixture-tools');
+  mkdirSync(path.join(fixture, 'skills', 'shared', 'crctl', 'scripts'), { recursive: true });
+  writeFileSync(path.join(fixture, 'AGENTS.md'), '# fixture tools\n', 'utf8');
+  writeFileSync(path.join(fixture, 'skills', '_index.yml'), 'skills: []\n', 'utf8');
+  writeFileSync(path.join(fixture, 'skills', 'shared', 'crctl', 'scripts', 'crctl.mjs'), '// marker\n', 'utf8');
+  writeFileSync(path.join(fixture, 'skills', 'shared', 'crctl', 'gates.json'), JSON.stringify(BRIEF_GATES), 'utf8');
+  mkdirSync(path.join(fixture, 'pipeline-templates'), { recursive: true });
+  writeFileSync(path.join(fixture, 'dir-graph.yaml'), [
     'change-request-track:',
     '  state_machine:',
     '    field: "status"',
@@ -2214,12 +2300,14 @@ function setupBriefWs(cr, status, annotation) {
     '      - { from: drafting, to: requirement-reviewing, trigger: "review-requirement" }',
     '      - { from: requirement-reviewing, to: requirement-approved, trigger: "approve-requirement" }',
   ].join('\n') + '\n');
-  mkdirSync(path.join(ws, 'tools', 'pipeline-templates'), { recursive: true });
-  writeFileSync(path.join(ws, 'tools', 'pipeline-templates', 'requirement-authoring.pipeline.json'), JSON.stringify({
+  writeFileSync(path.join(fixture, 'pipeline-templates', 'requirement-authoring.pipeline.json'), JSON.stringify({
     id: 'requirement-authoring',
     nodes: [{ ref: 'review-requirement', reviewLoop: { maxAttempts: 3, passCondition: { allOf: [
       { path: 'verdict', equals: 'pass' }, { path: 'blockers', isEmpty: true } ] } } }],
   }));
+  writeFileSync(path.join(ws, 'dir-graph.yaml'),
+    `workspace:\n  tools_package_path: ${JSON.stringify(fixture)}\n`, 'utf8');
+  writeCrEntry(ws, cr, status);
   writeEvidence(ws, cr, 'prd.md', '# prd\n');
   if (annotation != null) writeEvidence(ws, cr, 'review-annotations/requirement.yml', annotation);
   return ws;
@@ -3166,4 +3254,102 @@ test('CR-2026-027 回修 b10：approve --resign 非交互式调用拒绝（人�
     assert.equal(r.status, 1);
     assert.equal(r.stderr.error.code, 'APPROVAL_REQUIRES_HUMAN', '非 TTY 一律拒绝，无旁路');
   } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-028 FR-1/FR-3/FR-4：Tools Root 唯一解析（TASK-02/03，AC-6/AC-7/AC-8）──
+
+test('resolveToolsRoot：缺失/无效 tools_package_path 硬失败 TOOLS_PACKAGE_NOT_FOUND（表驱动，零回退）', () => {
+  const cases = [
+    { name: '缺 dir-graph.yaml', mutate: (ws) => rmSync(path.join(ws, 'dir-graph.yaml')) },
+    { name: '字段缺失', mutate: (ws) => writeFileSync(path.join(ws, 'dir-graph.yaml'), 'workspace:\n  other: 1\n') },
+    { name: '非字符串', mutate: (ws) => writeFileSync(path.join(ws, 'dir-graph.yaml'), 'workspace:\n  tools_package_path: [a, b]\n') },
+    { name: '空值', mutate: (ws) => writeFileSync(path.join(ws, 'dir-graph.yaml'), 'workspace:\n  tools_package_path: ""\n') },
+    { name: '路径不存在', mutate: (ws) => writeFileSync(path.join(ws, 'dir-graph.yaml'), 'workspace:\n  tools_package_path: "C:/no/such/tools"\n') },
+  ];
+  for (const c of cases) {
+    const ws = makeWorkspace();
+    try {
+      writeCrEntry(ws, 'CR-T1', 'drafting');
+      c.mutate(ws);
+      const r = runCrctl(['status', 'CR-T1', '--workspace', ws]);
+      assert.equal(r.status, 1, c.name);
+      assert.equal(r.stderr.error.code, 'TOOLS_PACKAGE_NOT_FOUND', c.name);
+      assert.ok(r.stderr.error.instRoot, `${c.name} detail 含 instRoot`);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+});
+
+test('resolveToolsRoot：四标志任一缺失 → TOOLS_PACKAGE_NOT_FOUND（identity-marker-missing）', () => {
+  for (const rel of ['AGENTS.md', 'dir-graph.yaml', 'skills/_index.yml', 'skills/shared/crctl/scripts/crctl.mjs']) {
+    const fixture = makeToolsFixture();
+    const ws = makeWorkspace({ toolsRoot: fixture });
+    try {
+      writeCrEntry(ws, 'CR-T1', 'drafting');
+      rmSync(path.join(fixture, rel), { recursive: true, force: true });
+      const r = runCrctl(['status', 'CR-T1', '--workspace', ws]);
+      assert.equal(r.status, 1, `缺 ${rel}`);
+      assert.equal(r.stderr.error.code, 'TOOLS_PACKAGE_NOT_FOUND', `缺 ${rel}`);
+      assert.ok((r.stderr.error.missing || []).includes(rel), `missing 含 ${rel}`);
+    } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
+  }
+});
+
+test('四类配置来自同一 Tools Root：状态机 sentinel 转换可 advance（AC-6）', () => {
+  const fixture = makeToolsFixture();
+  const ws = makeWorkspace({ toolsRoot: fixture });
+  try {
+    writeCrEntry(ws, 'CR-S1', 'sentinel-drafting');
+    const r = runCrctl(['advance', 'CR-S1', '--to', 'sentinel-reviewing', '--trigger', 'sentinel-advance', '--no-commit', '--workspace', ws]);
+    assert.equal(r.status, 0, `fixture 状态机转换生效: ${r.rawStderr}`);
+    assert.equal(r.stdout.to, 'sentinel-reviewing');
+  } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('四类配置来自同一 Tools Root：gates sentinel statusGate + pipeline sentinel nodeRef（AC-6）', () => {
+  const fixture = makeToolsFixture();
+  const gates = {
+    ...FIXTURE_GATES,
+    statusGates: { 'sentinel-state': [
+      { type: 'fileExists', path: 'change-requests/{cr}/sentinel-evidence.md' },
+      { type: 'passCondition', stage: 'sentinel' },
+    ] },
+    approvalStages: { sentinel: {
+      evidence: { $default: 'change-requests/{cr}/review-annotations/sentinel.yml' },
+      passCondition: { pipeline: 'sentinel', nodeRef: 'sentinel-node' },
+    } },
+  };
+  writeFileSync(path.join(fixture, 'skills/shared/crctl/gates.json'), JSON.stringify(gates));
+  const ws = makeWorkspace({ toolsRoot: fixture });
+  try {
+    writeCrEntry(ws, 'CR-S1', 'sentinel-state');
+    mkdirSync(path.join(ws, 'change-requests', 'CR-S1', 'review-annotations'), { recursive: true });
+    writeFileSync(path.join(ws, 'change-requests', 'CR-S1', 'sentinel-evidence.md'), 'sentinel\n');
+    writeFileSync(path.join(ws, 'change-requests', 'CR-S1', 'review-annotations', 'sentinel.yml'), 'verdict: pass\nblockers: []\n');
+    const r = runCrctl(['gate', 'CR-S1', '--for', 'sentinel-state', '--workspace', ws]);
+    assert.equal(r.status, 0, `fixture gates+pipeline 生效: ${r.rawStderr}`);
+    assert.equal(r.stdout.pass, true);
+    const pc = r.stdout.checks.find((c) => c.type === 'passCondition');
+    assert.equal(pc.ok, true, 'sentinel pipeline passCondition 来自 fixture');
+  } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('四类配置来自同一 Tools Root：rules sentinel 形状生效（AC-6）', () => {
+  const fixture = makeToolsFixture();
+  const ws = makeWorkspace({ toolsRoot: fixture });
+  try {
+    const r = runCrctl(['git', 'status', '--short', '--workspace', ws]);
+    assert.equal(r.status, 1, 'fixture rules 只允许 --sentinel-shape');
+    assert.equal(r.stderr.error.code, 'FORBIDDEN_SUBCOMMAND', 'git status 无 sentinel 形状 → 拒绝（rules 来自 fixture 而非真实 tools）');
+  } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
+});
+
+test('配置来源恒由 ws/tools_package_path 决定：真实 checkout 脚本 + fixture 配置仍生效（AC-6）', () => {
+  const fixture = makeToolsFixture();
+  const ws = makeWorkspace({ toolsRoot: fixture });
+  try {
+    writeCrEntry(ws, 'CR-S1', 'sentinel-drafting');
+    const r = runCrctl(['advance', 'CR-S1', '--to', 'sentinel-reviewing', '--trigger', 'sentinel-advance', '--no-commit', '--workspace', ws]);
+    assert.equal(r.status, 0, `真实 checkout 脚本 + fixture 配置仍生效: ${r.rawStderr}`);
+    assert.equal(r.stdout.to, 'sentinel-reviewing');
+  } finally { rmSync(ws, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }); }
 });

@@ -21,8 +21,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PACKAGE_ROOT = path.resolve(__dirname, '..', '..', '..', '..'); // tools 包根
-const GATES_PATH = path.resolve(__dirname, '..', 'gates.json');
+const PACKAGE_ROOT = path.resolve(__dirname, '..', '..', '..', '..'); // tools 包根（仅帮助/回退说明等静态引用；配置来源见 resolveToolsRoot）
 
 /* ────────────────────────── 通用输出 / 错误 ────────────────────────── */
 
@@ -321,33 +320,73 @@ function readFileChecked(p) {
   return fs.readFileSync(p, 'utf8');
 }
 
+/* ────────────────────────── Tools Root 唯一解析（CR-2026-028 FR-1/FR-3） ──────────────────────────
+ * 权威声明：{InstWS}/dir-graph.yaml#workspace.tools_package_path。无任何回退（不做 ws/tools、cwd、PACKAGE_ROOT）。
+ * 仅缓存成功值；失败由 fail() 直接结束进程，不缓存失败（进程内无第二次调用）。
+ * 四标志只证明“这是一个 tools 包”，不校验内容/branch/SHA（FR-3）；目标文件由各 loader 按需校验。
+ */
+let toolsRootCache; // undefined=未解析, string=成功
+
+const TOOLS_ROOT_MARKERS = [
+  'AGENTS.md',
+  'dir-graph.yaml',
+  'skills/_index.yml',
+  'skills/shared/crctl/scripts/crctl.mjs',
+];
+
+function resolveToolsRoot(opWs) {
+  if (toolsRootCache) return toolsRootCache;
+  const inst = deriveInstallRoot(opWs);
+  const cfgPath = path.join(inst, 'dir-graph.yaml');
+  const text = readFileChecked(cfgPath);
+  if (!text) fail('TOOLS_PACKAGE_NOT_FOUND', `缺少 ${cfgPath}，无法解析 workspace.tools_package_path`,
+    { instRoot: inst, field: 'workspace.tools_package_path', reason: 'dir-graph-missing' });
+  const doc = parseYaml(text);
+  const v = getPath(doc, 'workspace.tools_package_path');
+  if (typeof v !== 'string' || v.trim() === '') {
+    fail('TOOLS_PACKAGE_NOT_FOUND', 'workspace.tools_package_path 缺失、非字符串或为空',
+      { instRoot: inst, field: 'workspace.tools_package_path', reason: 'missing-or-invalid' });
+  }
+  const raw = path.isAbsolute(v) ? v : path.resolve(inst, v);
+  let real;
+  try { real = fs.realpathSync(raw); }
+  catch { fail('TOOLS_PACKAGE_NOT_FOUND', `tools 包路径不存在: ${raw}`,
+    { instRoot: inst, field: 'workspace.tools_package_path', reason: 'path-not-exists', resolved: raw }); }
+  const missing = TOOLS_ROOT_MARKERS.filter((rel) => !fs.existsSync(path.join(real, rel)));
+  if (missing.length) {
+    fail('TOOLS_PACKAGE_NOT_FOUND', `tools 包缺少身份标志: ${missing.join(', ')}`,
+      { instRoot: inst, field: 'workspace.tools_package_path', reason: 'identity-marker-missing', missing });
+  }
+  toolsRootCache = real;
+  return real;
+}
+
 function loadStateMachine(ws) {
-  // 权威：目标 workspace 的 dir-graph.yaml；回退：本 tools 包自带的 dir-graph.yaml
-  for (const p of [path.join(ws, 'dir-graph.yaml'), path.join(ws, 'tools', 'dir-graph.yaml'), path.join(PACKAGE_ROOT, 'dir-graph.yaml')]) {
-    const text = readFileChecked(p);
-    if (!text) continue;
+  // 权威：Tools Root 的 dir-graph.yaml（CR-2026-028 FR-4）。无 workspace/tools、PACKAGE_ROOT 回退。
+  const p = path.join(resolveToolsRoot(ws), 'dir-graph.yaml');
+  const text = readFileChecked(p);
+  if (text) {
     const doc = parseYaml(text);
     const sm = getPath(doc, 'change-request-track.state_machine');
     if (sm && sm.transitions) return { sm, source: p };
   }
-  fail('STATE_MACHINE_NOT_FOUND', '任何可达的 dir-graph.yaml 中都没有 change-request-track.state_machine');
+  fail('STATE_MACHINE_NOT_FOUND', `缺少 ${p} 中的 change-request-track.state_machine`);
 }
 
-function loadGates() {
-  const text = readFileChecked(GATES_PATH);
-  if (!text) fail('GATES_NOT_FOUND', `缺少 ${GATES_PATH}`);
+function loadGates(ws) {
+  // 权威：Tools Root 的 gates.json（CR-2026-028 FR-4）。
+  const p = path.join(resolveToolsRoot(ws), 'skills', 'shared', 'crctl', 'gates.json');
+  const text = readFileChecked(p);
+  if (!text) fail('GATES_NOT_FOUND', `缺少 ${p}`);
   return JSON.parse(text);
 }
 
 function loadPipeline(ws, id) {
-  for (const p of [
-    path.join(ws, 'tools', 'pipeline-templates', `${id}.pipeline.json`),
-    path.join(PACKAGE_ROOT, 'pipeline-templates', `${id}.pipeline.json`),
-  ]) {
-    const text = readFileChecked(p);
-    if (text) return { doc: JSON.parse(text), source: p };
-  }
-  fail('PIPELINE_NOT_FOUND', `找不到 pipeline 模板 ${id}.pipeline.json`);
+  // 权威：Tools Root 的 pipeline-templates（CR-2026-028 FR-4）。无 ws/tools 候选回退。
+  const p = path.join(resolveToolsRoot(ws), 'pipeline-templates', `${id}.pipeline.json`);
+  const text = readFileChecked(p);
+  if (!text) fail('PIPELINE_NOT_FOUND', `找不到 pipeline 模板 ${id}.pipeline.json（期望 ${p}）`);
+  return { doc: JSON.parse(text), source: p };
 }
 
 function crDir(ws, cr) { return path.join(ws, 'change-requests', cr); }
@@ -461,18 +500,19 @@ function gitHeadSha(ws, cwd) {
 
 /* ────────────────────────── 受控 git（组件 A 的 gitwrap） ──────────────────────────
  * 三元白名单：子命令 + 形态（正则）+ 调用者。
- * 单一事实源：skills/shared/controlled-shell/rules.json（CR-2026-002 TASK-01）。
- * 本文件不再内联规则表；rules.json 缺失/损坏时返回 SHELL_UNAVAILABLE，不静默放行。
+ * 单一事实源：{toolsRoot}/skills/shared/controlled-shell/rules.json（CR-2026-002 TASK-01；来源改 Tools Root，CR-2026-028 FR-4）。
+ * CRCTL_RULES_PATH 显式覆盖时优先（唯一覆盖入口）。
+ * rules.json 缺失/损坏时返回 SHELL_UNAVAILABLE，不静默放行。
  */
 
-const RULES_PATH = process.env.CRCTL_RULES_PATH
-  || path.resolve(__dirname, '..', '..', 'controlled-shell', 'rules.json');
+const RULES_PATH = process.env.CRCTL_RULES_PATH; // undefined=未设置 → 从 Tools Root 派生
 
 let _shellRules; // undefined=未加载, null=加载失败, object=已加载
-function loadShellRules() {
+function loadShellRules(ws) {
   if (_shellRules !== undefined) return _shellRules;
+  const rulesPath = RULES_PATH || path.join(resolveToolsRoot(ws), 'skills', 'shared', 'controlled-shell', 'rules.json');
   try {
-    const j = JSON.parse(fs.readFileSync(RULES_PATH, 'utf8'));
+    const j = JSON.parse(fs.readFileSync(rulesPath, 'utf8'));
     const whitelist = {};
     for (const entry of j.git) {
       whitelist[entry.sub] = entry.shapes.map((s) =>
@@ -489,10 +529,10 @@ function loadShellRules() {
 function controlledGit(ws, sub, args, cwd, caller) {
   const joined = args.join(' ');
   const record = { kind: 'git', caller: caller || null, sub, args: joined, cwd };
-  const rules = loadShellRules();
+  const rules = loadShellRules(ws);
   if (!rules) {
     auditLog(ws, { ...record, result: 'SHELL_UNAVAILABLE' });
-    return { ok: false, code: 'SHELL_UNAVAILABLE', message: `controlled-shell 规则文件缺失或损坏，拒绝执行任何 git: ${RULES_PATH}` };
+    return { ok: false, code: 'SHELL_UNAVAILABLE', message: `controlled-shell 规则文件缺失或损坏，拒绝执行任何 git` };
   }
   const patterns = rules.whitelist[sub];
   for (const a of args) {
@@ -3137,7 +3177,7 @@ function main() {
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') { process.stdout.write(HELP); return; }
   const { flags, positional } = cmd === 'git' ? parseGitArgs(rest) : parseArgs(rest);
   const ws = detectWorkspace(flags.workspace);
-  const gates = loadGates();
+  const gates = loadGates(ws);
   switch (cmd) {
     case 'status': return cmdStatus(ws, requireCr(positional), gates, flags);
     case 'gate': return cmdGate(ws, requireCr(positional), gates, { ...flags, specId: flags['spec-id'] });
