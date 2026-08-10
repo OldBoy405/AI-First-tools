@@ -131,10 +131,16 @@ function stripComment(line) {
   for (let i = 0; i < line.length; i++) {
     const c = line[i];
     if (c === "'" && !inD) inS = !inS;
-    else if (c === '"' && !inS) inD = !inD;
+    else if (c === '"' && !inS && !isEscaped(line, i)) inD = !inD;
     else if (c === '#' && !inS && !inD && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i);
   }
   return line;
+}
+
+function isEscaped(text, index) {
+  let slashes = 0;
+  for (let i = index - 1; i >= 0 && text[i] === '\\'; i--) slashes++;
+  return slashes % 2 === 1;
 }
 
 function parseBlock(lines, idx, minIndent) {
@@ -258,10 +264,10 @@ function parseFlow(s) {
 }
 
 function unquote(s) {
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
-    const inner = s.slice(1, -1);
-    return s.startsWith('"') ? inner.replace(/\\(.)/g, '$1') : inner;
+  if (s.startsWith('"') && s.endsWith('"')) {
+    try { return JSON.parse(s); } catch { return s.slice(1, -1).replace(/\\(.)/g, '$1'); }
   }
+  if (s.startsWith("'") && s.endsWith("'")) return s.slice(1, -1);
   return s;
 }
 
@@ -275,6 +281,12 @@ function parseScalar(s) {
   if (/^-?\d+$/.test(s)) return parseInt(s, 10);
   if (/^-?\d+\.\d+$/.test(s)) return parseFloat(s);
   return unquote(s);
+}
+
+// Dynamic YAML strings use JSON's quoted-string form, which is valid YAML and
+// safely escapes quotes, backslashes, control characters, and line breaks.
+function yamlStringScalar(value) {
+  return JSON.stringify(String(value));
 }
 
 function getPath(obj, dotted) {
@@ -1388,9 +1400,9 @@ function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
 // CR-2026-027 代码评审回修（b10）：受控历史审批迁移 —— `crctl approve <cr> --stage <stage> --resign <reason>`
 // 场景：gates.json evidence 定义变更（如 dev-start 剔除 task-index）后，既有 approval.yml 段仍按旧证据集签发
 // digest，developing 门禁复算不一致报 EVIDENCE_DRIFT（非证据内容被改动，而是证据定义变了）。
-// 约束：① 仅 TTY 人类在环，无旁路（与 approve 同强度）；② 审批段必须已存在且曾由 crctl approve 写入；
-// ③ 只改写该段的 evidence-digest（按当前 gates.json 定义重算），保留 approver/approved-at/via/target-status；
-// ④ 追加 resign 审计块（at/by/from-digest/reason），记录迁移事实；⑤ CAS + audit + 单次 commit。
+// 约束：① 仅 TTY 人类在环，无旁路（与 approve 同强度）；② 仅迁移 via=crctl-approve 的本地审批；
+// server-approve 必须由服务端按新 digest 重签 grant，禁止保留旧 signature 改 digest；③ 只改写该段的 evidence-digest，
+// 保留 approver/approved-at/via/target-status；④ 追加 resign 审计块（at/by/from-digest/reason）；⑤ CAS + audit + 单次 commit。
 function approveResign(ws, cr, gates, flags, stage, stageCfg) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     fail('APPROVAL_REQUIRES_HUMAN', 'crctl approve --resign 仅接受交互式终端会话（人类在环，无旁路）。模型/管道/脚本直接调用一律拒绝。');
@@ -1405,6 +1417,9 @@ function approveResign(ws, cr, gates, flags, stage, stageCfg) {
   const sec = doc && doc[section];
   if (!sec || !sec.approver || !sec['approved-at'] || !['crctl-approve', 'server-approve'].includes(sec.via)) {
     fail('RESIGN_NO_PRIOR_APPROVAL', `approval.yml#${section} 无既有 crctl approve 审批记录，不能 --resign`);
+  }
+  if (sec.via === 'server-approve') {
+    fail('RESIGN_SERVER_APPROVAL_UNSUPPORTED', `approval.yml#${section} 是 server-approve 签名审批；本地改写 digest 会使原签名失效，必须由服务端按新 digest 重新签发 grant`);
   }
   const oldDigest = sec['evidence-digest'] || null;
   const newDigest = canonicalEvidenceDigest(ws, cr, stageCfg);
@@ -1425,6 +1440,7 @@ function approveResign(ws, cr, gates, flags, stage, stageCfg) {
     }
     // 只替换该段 evidence-digest，其余字段原样保留；追加 resign 审计块（幂等：先清旧 resign 子块）
     const next = resignApprovalSectionText(text, section, newDigest, approver, reason, oldDigest || '');
+    if (next == null) fail('SCHEMA_INVALID', `approval.yml#${section} 无法唯一定位，拒绝 --resign`);
     casWrite(ap, sha256(text), next);
     auditLog(ws, { kind: 'approve-resign', cr, stage, approver, via: sec.via, result: 'resigned', from: oldDigest || '', to: newDigest, reason });
     const addR = controlledGit(ws, 'add', [`change-requests/${cr}/approval.yml`], ws, 'crctl-approve');
@@ -1438,13 +1454,17 @@ function approveResign(ws, cr, gates, flags, stage, stageCfg) {
 // CR-2026-027 代码评审回修（b10）：approve --resign 的段文本变换纯函数（供测试提取验证）——
 // 只改写该段 evidence-digest 行，其余字段保留；幂等清旧 resign 子块后追加新 resign 审计块。
 function resignApprovalSectionText(text, section, newDigest, approver, reason, oldDigest) {
-  const sectionRe = new RegExp(`^${section}:\\n(?:[ \\t]+.*\\n?)*`, 'm');
-  const block = sectionRe.exec(text)?.[0];
-  if (!block) return null;
-  const base = block.replace(/\n[ \t]+resign:[\s\S]*$/, '');
-  const newBlock = base.replace(/^(\s+)evidence-digest:.*$/m, `$1evidence-digest: "${newDigest}"`)
-    .replace(/\s*$/, '') + `\n  resign:\n    at: "${nowIso()}"\n    by: "${approver}"\n    from-digest: "${oldDigest}"\n    reason: "${reason}"\n`;
-  return text.replace(sectionRe, newBlock + '\n');
+  const normalized = text.replaceAll('\r\n', '\n');
+  const sectionRe = new RegExp(`^${section}:\\n(?:[ \\t]+.*\\n?)*`, 'gm');
+  const matches = [...normalized.matchAll(sectionRe)];
+  if (matches.length !== 1) return null;
+  const match = matches[0];
+  const block = match[0];
+  if ([...block.matchAll(/^  evidence-digest:.*$/gm)].length !== 1) return null;
+  const base = block.replace(/\n  resign:[\s\S]*$/, '');
+  const newBlock = base.replace(/^  evidence-digest:.*$/m, `  evidence-digest: ${yamlStringScalar(newDigest)}`)
+    .replace(/\s*$/, '') + `\n  resign:\n    at: ${yamlStringScalar(nowIso())}\n    by: ${yamlStringScalar(approver)}\n    from-digest: ${yamlStringScalar(oldDigest)}\n    reason: ${yamlStringScalar(reason)}\n`;
+  return normalized.slice(0, match.index) + newBlock + '\n' + normalized.slice(match.index + block.length);
 }
 
 function collectOutboxEvidence(ws, cr, stageCfg) {
@@ -3038,7 +3058,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
                         [--expect <cur>] [--embedded] [--spec-id <id>]
   crctl approve <cr_id> --stage <requirement|tech-design|dev-start|code>
                         [--approver <id>] [--spec-id <id>]   仅限交互式终端（人类在环）
-  crctl approve <cr_id> --stage <stage> --resign <reason>   受控历史审批迁移：gates.json 证据定义变更后重签该段 evidence-digest（仅限交互式终端，保留原审批本体）
+  crctl approve <cr_id> --stage <stage> --resign <reason>   受控历史审批迁移：仅限交互式终端迁移 via=crctl-approve；server-approve 必须由服务端重签 grant
   crctl validate <file>                          受控产物 schema 校验（validate-doc 代码化）
   crctl attempt <cr_id> --loop <ref>             review-loop 轮次唯一记账点；超限返回 LOOP_EXHAUSTED
   crctl review-record <cr_id> --stage <requirement|tech-design|code> --from <payload.yml> [--bump-attempt]
