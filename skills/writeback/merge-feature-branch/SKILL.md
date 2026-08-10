@@ -172,7 +172,7 @@ push 前再次对每个 repo 执行：
    - runGit: { subcommand: "push", args: ["origin", "{knowledgeBaseRepo.trunk}"], cwd: "{knowledgeBaseRepo.path}" }
    ```
 5. 若 metadata commit/push 失败：
-   - 先 `fetch origin {knowledgeBaseRepo.trunk}`，确认 metadata commit SHA 是否已包含在 `origin/{knowledgeBaseRepo.trunk}`；若已包含，视为 metadata 发布成功，继续 Step 6。
+   - 先 `fetch origin {knowledgeBaseRepo.trunk}`，确认 metadata commit SHA 是否已包含在 `origin/{knowledgeBaseRepo.trunk}`；若已包含，视为 metadata 发布成功，继续 Step 6（发布联调走查）。
    - 若未包含，必须对全部已 push 的代码 repo 执行 Step 4 的补偿 revert。
 <!-- lint-prompts:ignore --> 描述性：合并流程说明
    - 代码 repo 补偿全部成功后，必须回滚 knowledge-base 本地 metadata 变更，使 `_backlog.yml` 与 `cr.md` 恢复 `code-approved` 且移除本次 `merge-commits`；若 metadata commit 已产生，使用 `git revert --no-edit {metadata-sha}` 生成显式回滚提交，并尝试推送 `[cr] rollback merge metadata {cr_id}`。
@@ -180,13 +180,32 @@ push 前再次对每个 repo 执行：
    - 若代码 repo 补偿任一失败，输出 `MERGE_METADATA_PUBLISH_COMPENSATION_FAILED`，写入 `merge-recovery` 记录，列出已合并 repo、补偿状态和阻塞原因；不得进入 writeback 或清理分支。
    - 若代码 repo 补偿成功但 metadata 本地回滚或回滚发布失败，输出 `MERGE_METADATA_ROLLBACK_FAILED`，写入 `merge-recovery` 记录，列出 metadata-sha、rollback-sha（若有）与下一次自动恢复入口；不得进入 writeback。
 
-### Step 6 — 输出摘要
+### Step 6 — 发布联调走查（完成证据落盘，CR-2026-029）
+
+全部 repo push 与 metadata 发布成功后，执行发布联调走查并把结果作为 merge pipeline 的完成证据落盘。**发布联调、merge 验证类工作归本步骤（merge pipeline），不创建开发 TASK**（`task done` 前置态仅 developing，发布类任务不应出现在开发期任务清单）。
+
+1. 各仓 trunk 已包含本 CR 合并结果；从 knowledge-base 主 checkout 与 CR worktree 分别执行只读验证：
+   - `crctl status {cr_id} --workspace <主checkout>`：状态为 `merging`；主 checkout 出现 `STATUS_DIVERGED` 属预期（worktree 分支与 trunk 快照分离），不作为异常；
+   - `crctl status {cr_id} --workspace <CR worktree>`：**不得**有 `STATUS_DIVERGED`；
+   - `crctl worktree-path {cr_id} --repo <repo.id> --workspace <主checkout>`：三仓路径以主 checkout 为根，`path` 不得含 `.rayai-worktrees/.rayai-worktrees` 嵌套；
+   - `crctl next {cr_id} --workspace <CR worktree>`：输出结构正常（写回期以 `crctl next` 为准，不手写映射）。
+2. multica（或其他代码仓）CUSTOM.md 台账核账：`grep CR-{id}` 条目与实际代码一致；无代码改动仓标注“天然一致”。
+3. 把走查结果写入 `change-requests/{cr_id}/merge-verification.md`（frontmatter 由执行者按 §2.1 契约填写：`cr/verified-at/verified-by/repos[repo/trunk/merge-sha]`，正文含走查命令与结论、台账核账、异常与处理），提交到 knowledge-base trunk：
+   ```yaml
+   - runGit: { subcommand: "add", args: ["change-requests/{cr_id}/merge-verification.md"], cwd: "{knowledgeBaseRepo.path}" }
+   - runGit: { subcommand: "commit", args: ["-m", "[cr] merge verification {cr_id}"], cwd: "{knowledgeBaseRepo.path}" }
+   - runGit: { subcommand: "push", args: ["origin", "{knowledgeBaseRepo.trunk}"], cwd: "{knowledgeBaseRepo.path}" }
+   ```
+4. 走查发现异常时按对应纪律回写（SDD 修订走 review-tech-design 链路；不得手改评审记录），并在 merge-verification.md 中记录异常与处理；异常不影响合并结果时完成证据仍可落盘。
+
+### Step 7 — 输出摘要
 
 ```
 ✅ 分支合并完成
    CR                  : {cr_id}
    merge commits       : [{repo.id}:{sha8}, ...]
    skipped repos       : [{repo.id}, ...]（无改动仓：未合并，worktree/分支交由 cr-archive Step 7 清理）
+   merge-verification  : change-requests/{cr_id}/merge-verification.md（发布联调完成证据，已提交 trunk）
    Worktree            : 保留，等待 cr-archive 统一清理
    下一步              : 以 `crctl next {cr_id}` 为准
 ```
