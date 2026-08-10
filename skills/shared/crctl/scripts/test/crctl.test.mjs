@@ -1849,6 +1849,36 @@ test('worktree-path：确定性路径输出且不写任何文件（AC-6）', () 
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('worktree-path：linked worktree 内调用以主 checkout 为根、无嵌套 .rayai-worktrees（CR-2026-028 FR-2）', () => {
+  const ws = makeWorkspace();
+  const wt = path.join(ws, 'linked-worktree');
+  try {
+    // 初始化 git 主仓并提交，使 linked worktree 的 common-dir 指向主 checkout 的 .git
+    spawnSync('git', ['init', '-b', 'main'], { cwd: ws, encoding: 'utf8', shell: false });
+    spawnSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ws, encoding: 'utf8', shell: false });
+    spawnSync('git', ['config', 'user.name', 'test'], { cwd: ws, encoding: 'utf8', shell: false });
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    spawnSync('git', ['add', '.'], { cwd: ws, encoding: 'utf8', shell: false });
+    const ci = spawnSync('git', ['commit', '-m', 'init'], { cwd: ws, encoding: 'utf8', shell: false });
+    assert.equal(ci.status, 0, '主仓初始提交成功');
+
+    const wa = spawnSync('git', ['worktree', 'add', '-b', 'requirement/CR-T1', wt], { cwd: ws, encoding: 'utf8', shell: false });
+    assert.equal(wa.status, 0, `linked worktree 创建成功: ${wa.stderr}`);
+
+    // 从 linked worktree 内调用：根基准必须是主 checkout（ws），不得拼出 <wt>/.rayai-worktrees/...
+    const r = runCrctl(['worktree-path', 'CR-T1', '--repo', 'ai-first-platform-docs', '--workspace', wt]);
+    assert.equal(r.status, 0, `linked worktree 调用成功: ${r.rawStderr}`);
+    const p = r.stdout.path.replaceAll('\\', '/');
+    assert.ok(p.startsWith(ws.replaceAll('\\', '/') + '/.rayai-worktrees/'), `以主 checkout 为根: ${p}`);
+    assert.ok(!p.includes('/.rayai-worktrees/.rayai-worktrees/'), `无嵌套 .rayai-worktrees: ${p}`);
+    assert.ok(p.endsWith('.rayai-worktrees/knowledge-base/requirement/CR-T1'), `路径模板不变: ${p}`);
+
+    // 主 checkout 调用行为不变
+    const r2 = runCrctl(['worktree-path', 'CR-T1', '--repo', 'multica', '--workspace', ws]);
+    assert.ok(r2.stdout.path.replaceAll('\\', '/').endsWith('.rayai-worktrees/multica/requirement/CR-T1'));
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
 test('report/cr-metrics：状态直方图 + 周期活动计数（AC-6）', () => {
   const ws = makeWorkspace();
   try {

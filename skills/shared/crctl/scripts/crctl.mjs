@@ -2488,20 +2488,36 @@ function cmdTaskAllocate(ws, cr, gates, flags) {
   ok({ op: 'task-allocate', cr, task: taskId, slug, file: p });
 }
 
-/* ────────────────────────── worktree-path / report / cr-metrics（S9/S11，CR-2026-021 TASK-08） ──────────────────────────
- * 两个只读子命令（SDD §3.2）：不写任何文件、无 CAS。
+/* ────────────────────────── worktree-path / report / cr-metrics（S9/S11，CR-2026-021 TASK-08 + CR-2026-028 FR-2） ──────────────────────────
+ * 只读子命令（SDD §3.2/§3.3）：不写任何文件、无 CAS。
  * - worktree-path <cr> --repo <r>：唯一权威拼接规则（从 requirement-register 等 4+ 处 SKILL prose 提炼）：
- *   bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id；path = {ws}/.rayai-worktrees/{bucket}/requirement/{cr}
+ *   bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id；path = {installRoot}/.rayai-worktrees/{bucket}/requirement/{cr}
+ *   installRoot = Installation Workspace（deriveInstallRoot）：linked worktree 场景由 git common-dir 派生主 checkout，
+ *   避免从 CR worktree 内部再拼出第二个 .rayai-worktrees（CR-2026-028 FR-2 实测 bug）。
  * - report / cr-metrics [--period <N>d]：跨 CR 聚合（对齐 cr-dashboard Step 2 口径）——
  *   状态直方图（在途 cr.md frontmatter + _history.yml 归档 final-status，累计口径，不受 --period 影响）、
  *   周期活动计数 periodActivity（按 archived-at，仅当传 --period 时按窗口过滤，格式仅支持 <N>d 如 7d/30d，
  *   非法格式 BAD_ARGS 硬拒而非静默忽略）、SLA 阈值比较（change-requests/_config.yml#sla，缺省跳过，累计口径）。
  */
 
+/**
+ * Installation Workspace（InstWS）：Tools Root 相对路径与 .rayai-worktrees/ 的解析基准（CR-2026-028 FR-2）。
+ * linked worktree 场景 git common-dir 指向主 checkout 的 .git，其 dirname 即主 checkout 根；
+ * 非 git 目录（普通 checkout / 测试临时目录）回退 opWs。仅 spawn git 只读查询，无副作用。
+ */
+function deriveInstallRoot(opWs) {
+  const r = spawnSync('git', ['rev-parse', '--git-common-dir'], { cwd: opWs, encoding: 'utf8', shell: false });
+  if (r.status === 0 && r.stdout && r.stdout.trim()) {
+    const commonDir = path.resolve(opWs, r.stdout.trim());
+    return path.dirname(commonDir);
+  }
+  return opWs;
+}
+
 function cmdWorktreePath(ws, cr, gates, flags) {
   if (!flags.repo) fail('BAD_ARGS', 'worktree-path 需要 --repo <repo-id>');
   const bucket = flags.repo === 'knowledge-base' || flags.repo === 'ai-first-platform-docs' ? 'knowledge-base' : flags.repo;
-  const p = path.join(ws, '.rayai-worktrees', bucket, 'requirement', cr);
+  const p = path.join(deriveInstallRoot(ws), '.rayai-worktrees', bucket, 'requirement', cr);
   ok({ op: 'worktree-path', cr, repo: flags.repo, bucket, path: p });
 }
 
