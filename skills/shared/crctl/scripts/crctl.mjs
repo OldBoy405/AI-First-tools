@@ -21,7 +21,10 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 // CR-2026-031 TASK-03：YAML 子集解析器与 workspace 基础设施同源共享（lib/ 下，禁止在 crctl.mjs 复刻）。
 import { parseYaml } from './lib/yaml-subset.mjs';
-import { deriveInstallRoot, TxError } from './lib/workspace-transactions.mjs';
+import {
+  deriveInstallRoot, TxError, resolveRepositories, getRepository, registerCr, ensureWorkspace,
+  scanMaxCrNumber, formatCrId, buildRegistrationTexts, assertSupportedBacklogSchemaText,
+} from './lib/workspace-transactions.mjs';
 import { FAULT_POINTS, faultPoint, nowIso } from './lib/durable-tx.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -228,10 +231,9 @@ function backlogPath(ws) { return path.join(ws, 'change-requests', '_backlog.yml
 // CR-2026-031 TASK-02：最低支持 schema = cr-backlog/v2。v1 / 缺声明一律硬失败（UNSUPPORTED_BACKLOG_SCHEMA），
 // migrate-backlog 永久迁移兼容已删除；TASK-05/09 的所有账本事务复用本检查。
 function assertSupportedBacklogSchema(text) {
-  const norm = String(text).replaceAll('\r\n', '\n');
-  const m = norm.match(/^schema:\s*["']?([^\s"'#]+)["']?\s*$/m);
-  if (!m || m[1] !== 'cr-backlog/v2') {
-    fail('UNSUPPORTED_BACKLOG_SCHEMA', `_backlog.yml schema=${m ? m[1] : '(missing)'}：仅支持 cr-backlog/v2（v1 兼容与 migrate-backlog 已随 CR-2026-031 TASK-02 删除）`, { schema: m ? m[1] : null });
+  try { assertSupportedBacklogSchemaText(text); } catch (e) {
+    if (e instanceof TxError) fail(e.code, e.message, e.extra);
+    throw e;
   }
 }
 
@@ -2509,21 +2511,7 @@ function cmdInboxEmit(ws, cr, gates, flags) {
  * 唯一并发冲突码是 CAS_CONFLICT；正常路径无 CR_ALREADY_EXISTS（无外部传入 id，无 TOCTOU）。
  */
 
-function scanMaxCrNumber(ws, year) {
-  const re = new RegExp('^CR-' + year + '-(\\d{3})$');
-  let max = 0;
-  for (const p of [path.join(ws, 'change-requests', '_index.yml'), backlogPath(ws)]) {
-    const text = readFileChecked(p);
-    if (text == null) continue;
-    for (const m of text.matchAll(/^\s*- id:\s*["']?(CR-\d{4}-\d{3})["']?\s*$/gm)) {
-      const mm = m[1].match(re);
-      if (mm) max = Math.max(max, Number(mm[1]));
-    }
-  }
-  return max;
-}
-
-function formatCrId(year, n) { return `CR-${year}-${String(n).padStart(3, '0')}`; }
+// CR-ID 分配与注册模板已下沉 lib/workspace-transactions.mjs（TASK-05）；cr-init（TASK-10 删除）与 register 共用。
 
 function cmdCrInit(ws, gates, flags) {
   if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]');
@@ -2542,72 +2530,19 @@ function cmdCrInit(ws, gates, flags) {
   const summary = flags.summary ?? '';
   const source = flags.source ?? 'manual';
   const tv = flags['target-version'] ?? 'tbd';
-  // FR-1：同一个注册时间戳 now 复用于三角色当前 Owner 与三条 initial-assignment history
-  const ownerSlot = (id, indent) => [`${' '.repeat(indent)}id: ${id}`, `${' '.repeat(indent)}assigned-at: "${now}"`];
-  // cr.md 全量 frontmatter（owners/owner-history/时间戳全 crctl 生成）
-  const fm = [
-    '---',
-    `id: ${cr}`,
-    `title: ${flags.title.replaceAll('"', '\\"')}`,
-    `summary: ${yamlScalar(summary)}`,
-    `owner: ${req}`,
-    'owners:',
-    '  requirement:',
-    ...ownerSlot(req, 4),
-    '  development:',
-    ...ownerSlot(dev, 4),
-    '  test:',
-    ...ownerSlot(tst, 4),
-    `target-version: ${yamlScalar(tv)}`,
-    `source: ${yamlScalar(source)}`,
-    'status: drafting',
-    `created: "${now}"`,
-    `updated: "${now}"`,
-    'remote-ref: ""',
-    'last-push-at: ""',
-    'last-push-by: ""',
-    'owner-history:',
-    `  - { role: requirement, from: "", to: ${req}, at: "${now}", reason: initial-assignment }`,
-    `  - { role: development, from: "", to: ${dev}, at: "${now}", reason: initial-assignment }`,
-    `  - { role: test, from: "", to: ${tst}, at: "${now}", reason: initial-assignment }`,
-    'handover-history: []',
-    '---',
-    '',
-  ].join('\n');
+  // 注册三账本模板唯一实现在 lib buildRegistrationTexts（TASK-05 下沉；cr-init 与 register 共用）
+  const texts = buildRegistrationTexts({ cr, title: flags.title, summary, source, targetVersion: tv, owners: { requirement: req, development: dev, test: tst }, now });
+  const fm = texts.crMdText;
   // _backlog 条目追加
   const bp = backlogPath(ws);
   const backlogText = readFileChecked(bp);
   if (backlogText == null) fail('BACKLOG_NOT_FOUND', `缺少 ${bp}`);
-  const backlogEntry = [
-    `  - id: ${cr}`,
-    `    title: ${flags.title.replaceAll('"', '\\"')}`,
-    `    summary: ${yamlScalar(summary)}`,
-    `    owner: ${req}`,
-    '    owners:',
-    '      requirement:',
-    ...ownerSlot(req, 8),
-    '      development:',
-    ...ownerSlot(dev, 8),
-    '      test:',
-    ...ownerSlot(tst, 8),
-    `    target-version: ${yamlScalar(tv)}`,
-    `    source: ${yamlScalar(source)}`,
-    '    prd-path: ""',
-    `    created: "${now}"`,
-    `    updated: "${now}"`,
-  ].join('\n');
-  const newBacklog = backlogText.trimEnd() + '\n' + backlogEntry + '\n';
+  const newBacklog = backlogText.trimEnd() + '\n' + texts.backlogEntry + '\n';
   // _index 条目追加
   const ip = path.join(ws, 'change-requests', '_index.yml');
   const indexText = readFileChecked(ip);
   if (indexText == null) fail('INDEX_NOT_FOUND', `缺少 ${ip}`);
-  const indexEntry = [
-    `  - id: ${cr}`,
-    `    title: ${flags.title.replaceAll('"', '\\"')}`,
-    '    status: drafting',
-    `    created: "${now}"`,
-  ].join('\n');
-  const newIndex = indexText.trimEnd() + '\n' + indexEntry + '\n';
+  const newIndex = indexText.trimEnd() + '\n' + texts.indexEntry + '\n';
   // 原子三文件写：cr.md 期望不存在（创建冲突即 CAS_CONFLICT）；_backlog/_index 用读时 sha256
   const crDirPath = crDir(ws, cr);
   fs.mkdirSync(crDirPath, { recursive: true });
@@ -3050,6 +2985,49 @@ function cmdGit(ws, argv, flags) {
 
 /* ────────────────────────── CLI 入口 ────────────────────────── */
 
+/* ──────────────────── CR-2026-031 TASK-05：幂等 register 与 workspace 生命周期 ────────────────────
+ * 事务逻辑唯一实现在 lib/workspace-transactions.mjs；本处只做 flag 解析、TxError→fail 转换与 audit 登记。
+ * TASK-10 统一切换后 cr-init 删除，register 成为注册唯一入口。 */
+async function runTxAsync(promise) {
+  try { return await promise; } catch (e) {
+    if (e instanceof TxError) fail(e.code, e.message, e.extra);
+    throw e;
+  }
+}
+
+async function cmdRegister(ws, flags) {
+  for (const f of ['registration-key', 'title', 'owner-requirement', 'owner-development', 'owner-test']) {
+    if (!flags[f]) fail('BAD_ARGS', `register 需要 --${f} <v>`);
+  }
+  const input = {
+    registrationKey: String(flags['registration-key']),
+    title: String(flags.title),
+    summary: flags.summary == null ? undefined : String(flags.summary),
+    source: flags.source == null ? undefined : String(flags.source),
+    targetVersion: flags['target-version'] == null ? undefined : String(flags['target-version']),
+    year: flags.year ? String(flags.year) : undefined,
+    workspace: ws,
+    owners: { requirement: String(flags['owner-requirement']), development: String(flags['owner-development']), test: String(flags['owner-test']) },
+  };
+  const ctx = resolveRepositories(ws);
+  const result = await runTxAsync(registerCr(ctx, input));
+  auditLog(ws, { kind: 'ledger', op: 'register', cr: result.cr, txId: result.txId, actor: identity(ws), title: input.title, phase: result.phase, changed: result.changed });
+  ok({ op: 'register', ...result });
+}
+
+async function cmdWorkspace(ws, positional, flags) {
+  const sub = positional[0];
+  const cr = positional[1];
+  if (!['inspect', 'ensure', 'cleanup'].includes(sub)) fail('BAD_ARGS', 'workspace 支持 inspect|ensure|cleanup <CR-ID> [--mode <m>]');
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'workspace 需要 CR-ID');
+  if (sub === 'ensure' && flags.mode !== 'resume') fail('BAD_ARGS', 'workspace ensure 需要 --mode resume');
+  if (sub === 'cleanup' && !['partial', 'archived'].includes(flags.mode)) fail('BAD_ARGS', 'workspace cleanup 需要 --mode partial|archived');
+  const ctx = resolveRepositories(ws);
+  const mode = sub === 'inspect' ? 'inspect' : sub === 'ensure' ? 'resume' : flags.mode;
+  const result = await runTxAsync(ensureWorkspace(ctx, { cr, mode }));
+  ok({ op: `workspace-${sub}`, cr, mode, ...result });
+}
+
 const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
 
 用法:
@@ -3069,6 +3047,11 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   双投影 owners 更新 + 正式移交 commit（非终态）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
+  crctl register  --registration-key <k> --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
+                        [--summary <s>] [--source <s>] [--target-version <v>] [--year Y]   幂等注册事务：CR-ID+三账本+commit/lease push+worktree ensure（TASK-05，TASK-10 起取代 cr-init）
+  crctl workspace inspect <cr_id>                  各 active repo workspace 事实分类（只读）
+  crctl workspace ensure  <cr_id> --mode resume    只补齐可证明缺失的 workspace 资源（零删除）
+  crctl workspace cleanup <cr_id> --mode partial|archived   只删干净 worktree；dirty/unknown/未合并 ref 保留
   crctl cr-init     --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
                         [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
   crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
@@ -3116,7 +3099,7 @@ function parseGitArgs(argv) {
   return { flags, positional };
 }
 
-function main() {
+async function main() {
   const wantFault = process.env.CRCTL_FAULT_POINT;
   if (wantFault && !FAULT_POINTS.includes(wantFault))
     fail('UNKNOWN_FAULT_POINT', `未知故障注入点: ${wantFault}（已登记: ${FAULT_POINTS.join(', ')}）`, { known: FAULT_POINTS });
@@ -3142,6 +3125,8 @@ function main() {
     case 'backlog-set': return cmdBacklogSet(ws, requireCr(positional), gates, flags);
     case 'inbox-emit': return cmdInboxEmit(ws, requireCr(positional), gates, flags);
     case 'cr-init': return cmdCrInit(ws, gates, flags);
+    case 'register': return cmdRegister(ws, flags);
+    case 'workspace': return cmdWorkspace(ws, positional, flags);
     case 'worktree-path': return cmdWorktreePath(ws, requireCr(positional), gates, flags);
     case 'report': return cmdReport(ws, gates, flags);
     case 'task': {
@@ -3163,4 +3148,4 @@ function requireCr(positional) {
   return positional[0];
 }
 
-main();
+main().catch((e) => { fail('INTERNAL_ERROR', e && e.stack ? e.stack : String(e)); });

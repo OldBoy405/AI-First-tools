@@ -17,6 +17,11 @@ export const FAULT_POINTS = [
   'ledger-cas-multi-between-rename', // crctl.mjs 旧 casWriteMulti 连续 rename 间隙（TASK-10 随该函数删除）
   'tx-apply-between-rename',         // write-set 连续 rename 间隙的崩溃窗口（TASK-04）
   'tx-apply-before-complete',        // 全部 rename 完成、complete 标记前的崩溃窗口（TASK-04）
+  'register-after-allocate',         // CR-ID 分配落盘后、账本写前（TASK-05）
+  'register-after-ledgers',          // 三账本 write-set 完成后、commit 前（TASK-05）
+  'register-after-commit',           // registration commit 后、lease push 前（TASK-05）
+  'register-after-push',             // lease push 后、worktree ensure 前（TASK-05）
+  'register-between-worktrees',      // 每个 worktree ensure 落盘后、下一仓前（TASK-05）
 ];
 export function faultPoint(point, context) {
   if (process.env.CRCTL_FAULT_POINT === point) {
