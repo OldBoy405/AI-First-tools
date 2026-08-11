@@ -1652,15 +1652,23 @@ test('checkpoint-add：终态拒绝零写；非终态（含 drafting）可用（
 });
 
 test('owner-set：更新 owners.{role}.id + assigned-at（AC-3）', () => {
-  const ws = makeWorkspace();
+  const ws = makeGitWorkspace();
   try {
-    writeCrEntry(ws, 'CR-T1', 'drafting');
+    // CR-2026-030 TASK-03：owner-set 收敛为正式移交原语——需要真实 git 仓 + 双投影一致的完整 Owner fixture
+    writeOwnerEntry(ws, 'CR-T1', 'drafting');
+    git(ws, ['add', '-A']);
+    git(ws, ['commit', '-m', '[cr] seed']);
     const r = runCrctl(['owner-set', 'CR-T1', '--role', 'development', '--id', 'Alice', '--workspace', ws]);
-    assert.equal(r.status, 0);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.changed, true);
     const out = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
-    assert.ok(out.includes('id: Alice'), '新负责人写入');
+    assert.ok(out.includes('id: Alice'), '新负责人写入 backlog');
     assert.ok(out.match(/assigned-at: "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00"/), 'assigned-at 由 crctl 生成');
     assert.ok(out.includes('id: Ray'), '其他角色 owner 不受影响');
+    const md = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'cr.md'), 'utf8');
+    assert.ok(md.includes('id: Alice'), '新负责人同步写入 cr.md（双投影）');
+    assert.ok(md.includes('reason: formal-handover'), 'owner-history 追加一条正式移交');
+    assert.ok(r.stdout.commit && r.stdout.commit.sha, '形成隔离 commit');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -3534,21 +3542,22 @@ function writeOwnerEntry(ws, cr, status, opts = {}) {
   writeFileSync(path.join(ws, 'change-requests', '_backlog.yml'), bl.join('\n') + '\n');
 }
 
-/** 构造 owner-set dirty fixture（kind: staged-only|unstaged-only|mixed-same|mixed-diff）。 */
+/** 构造 owner-set dirty fixture（kind: staged-only|unstaged-only|mixed-same|mixed-diff）。
+ * 两个 tracked 文件 prd.md/sdd.md 在 seed 提交中；untracked 另造 scratch.txt。 */
 function dirtyOwnerFixture(kind) {
   const ws = makeGitWorkspace();
   writeOwnerEntry(ws, 'CR-T1', 'drafting');
   writeFileSync(path.join(ws, 'change-requests', 'CR-T1', 'prd.md'), '# prd\n');
+  writeFileSync(path.join(ws, 'change-requests', 'CR-T1', 'sdd.md'), '# sdd\n');
   git(ws, ['add', '-A']);
   git(ws, ['commit', '-m', '[cr] seed']);
-  const other = path.join(ws, 'change-requests', 'CR-T1', 'prd.md');
-  if (kind === 'staged-only') git(ws, ['add', 'change-requests/CR-T1/prd.md']);
-  else if (kind === 'unstaged-only') writeFileSync(other, '# prd v2\n');
-  else if (kind === 'mixed-same') { git(ws, ['add', 'change-requests/CR-T1/prd.md']); writeFileSync(other, '# prd v3\n'); }
-  else if (kind === 'mixed-diff') {
-    git(ws, ['add', 'change-requests/CR-T1/prd.md']);
-    writeFileSync(path.join(ws, 'change-requests', 'CR-T1', 'sdd.md'), '# sdd\n');
-  }
+  writeFileSync(path.join(ws, 'scratch.txt'), 'untracked\n'); // 恒定 untracked 存在：验证其不阻塞 dirty 判定
+  const prd = path.join(ws, 'change-requests', 'CR-T1', 'prd.md');
+  const sdd = path.join(ws, 'change-requests', 'CR-T1', 'sdd.md');
+  if (kind === 'staged-only') { writeFileSync(prd, '# prd v2\n'); git(ws, ['add', 'change-requests/CR-T1/prd.md']); }
+  else if (kind === 'unstaged-only') writeFileSync(prd, '# prd v2\n');
+  else if (kind === 'mixed-same') { writeFileSync(prd, '# prd v2\n'); git(ws, ['add', 'change-requests/CR-T1/prd.md']); writeFileSync(prd, '# prd v3\n'); }
+  else if (kind === 'mixed-diff') { writeFileSync(prd, '# prd v2\n'); git(ws, ['add', 'change-requests/CR-T1/prd.md']); writeFileSync(sdd, '# sdd v2\n'); }
   return ws;
 }
 
@@ -3740,7 +3749,7 @@ test('CR-2026-030 TASK-01：owner-set 真实移交——双投影同步、owner-
     const md = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'cr.md'), 'utf8');
     assert.ok(md.includes('owner: Ray'), 'requirement 兼容 owner 不受 development 移交影响');
     assert.ok(md.includes('id: Alice'), 'cr.md development 投影更新');
-    const hist = [...md.matchAll(/^- \{ role: development, from: Ray, to: Alice, at: "([^"]+)", reason: formal-handover \}$/gm)];
+    const hist = [...md.matchAll(/^\s*- \{ role: development, from: Ray, to: Alice, at: "([^"]+)", reason: formal-handover \}$/gm)];
     assert.equal(hist.length, 1, 'owner-history 只追加一条 formal-handover');
     assert.equal(hist[0][1], r.stdout.handoverAt, 'history at == 本次唯一时间戳');
     assert.ok(!md.includes('handover-history:\n  -'), 'handover-history 不追加');
@@ -3875,7 +3884,7 @@ test('CR-2026-030 TASK-01：owner-set commit 失败 → OWNER_COMMIT_FAILED/chan
     assert.equal(r.stderr.error.rolled_back, true);
     assert.equal(readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'cr.md'), 'utf8'), md0, 'cr.md 恢复原文');
     assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), bl0, 'backlog 恢复原文');
-    assert.equal(git(ws, ['status', '--short']), '', 'tracked clean baseline 恢复');
+    assert.equal(git(ws, ['status', '--porcelain', '--untracked-files=no']), '', 'tracked clean baseline 恢复（untracked 不算 dirty）');
     assert.equal(git(ws, ['rev-parse', 'HEAD']), head0, 'HEAD 不变');
     assert.equal(auditLines(ws).filter((a) => a.op === 'owner-set' && a.result === 'ok').length, 0, '无成功 audit');
     assert.equal(outboxFiles(ws).length, 0, '无 outbox');
