@@ -1201,7 +1201,10 @@ function cmdGate(ws, cr, gates, flags) {
   if (!result.pass) process.exit(1);
 }
 
-function cmdAdvance(ws, cr, gates, flags) {
+// CR-2026-030 TASK-04（SDD §4.9）：advance 内核——不打印 JSON，供 cmdAdvance 与 reject 回退共用。
+// “Git 是权威”：standalone commit 失败时不得发 status outbox；只有 commit 成功（或 embedded 由调用方提交）
+// 才返回 committed=true 并以真实/占位 SHA 发 outbox。返回 {committed, commitDetail, ...}。
+function performAdvance(ws, cr, gates, flags) {
   if (!flags.to || !flags.trigger) fail('BAD_ARGS', 'advance 需要 --to <status> --trigger <trigger>');
   const { sm } = loadStateMachine(ws);
   const state = resolveCrState(ws, cr);
@@ -1240,7 +1243,8 @@ function cmdAdvance(ws, cr, gates, flags) {
     const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-advance') : addR;
     result.commit = commitR.ok ? { message: msg } : { failed: true, detail: commitR, note: '状态文件已写入但 commit 失败，请修复后手工经 crctl git 提交' };
   }
-  // outbox：状态事件。--embedded/--no-commit 时 commit_sha 留空，由 push 的 checkpoint 事件补全（§A.5）
+  // outbox：状态事件。--embedded/--no-commit 时 commit_sha 留空，由 push 的 checkpoint 事件补全（§A.5）；
+  // standalone commit 失败不发 outbox（Git 才是权威事实，SDD §4.9）。
   const committed = result.commit && result.commit.message;
   // 证据快照：进入某审批阶段的 expect 状态（待审批）时附带该阶段证据摘要——
   // 服务端签发 grant 前靠它确定"批的是哪一版证据"（P1 §B.1 ①，TASK-08 补挂）。
@@ -1251,11 +1255,26 @@ function cmdAdvance(ws, cr, gates, flags) {
       (s) => Array.isArray(s.expect) && s.expect.includes(flags.to) && s.evidence);
     if (pendingStage) outboxEvidence = collectOutboxEvidence(ws, cr, pendingStage);
   }
-  result.outbox = emitOutboxEvent(ws, {
-    event_kind: 'status', cr_id: cr, from_status: current, to_status: flags.to,
-    trigger: flags.trigger, commit_sha: committed ? gitHeadSha(ws) : pendingCommitSha(),
-    actor: identity(ws), evidence: outboxEvidence,
-  });
+  if (flags.embedded || flags['no-commit']) {
+    result.outbox = emitOutboxEvent(ws, {
+      event_kind: 'status', cr_id: cr, from_status: current, to_status: flags.to,
+      trigger: flags.trigger, commit_sha: pendingCommitSha(),
+      actor: identity(ws), evidence: outboxEvidence,
+    });
+  } else if (committed) {
+    result.outbox = emitOutboxEvent(ws, {
+      event_kind: 'status', cr_id: cr, from_status: current, to_status: flags.to,
+      trigger: flags.trigger, commit_sha: gitHeadSha(ws),
+      actor: identity(ws), evidence: outboxEvidence,
+    });
+  }
+  result.committed = !!committed;
+  result.commitDetail = result.commit && result.commit.failed ? result.commit.detail : null;
+  return result;
+}
+
+function cmdAdvance(ws, cr, gates, flags) {
+  const result = performAdvance(ws, cr, gates, flags);
   ok(result);
   if (result.commit && result.commit.failed) process.exit(1);
 }
@@ -1381,11 +1400,12 @@ function cmdApprove(ws, cr, gates, flags) {
       auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined' });
       // FR-12（CR-2026-022）：驳回必须真正执行状态机已声明的 {stage}:reject 回退转换（AGENTS.md 强制），不再只是 fail
       const rollback = REJECT_ROLLBACK[stage];
-      const { sm } = loadStateMachine(ws);
       const trigger = `${rollback.approve}:reject -> ${rollback.write}`;
-      const t = findTransition(sm, current, rollback.to, trigger);
-      if (!t) fail('APPROVAL_DECLINED', '审批人未确认，且状态机未声明该阶段回退转换', { stage, current });
-      cmdAdvance(ws, cr, gates, { to: rollback.to, trigger, expect: current });
+      // CR-2026-030 TASK-04（SDD §4.9）：TTY reject 复用 performAdvance 内核，仅 committed=true 才返回统一业务 decline
+      const adv = performAdvance(ws, cr, gates, { to: rollback.to, trigger, expect: current });
+      if (!adv.committed) {
+        fail('ADVANCE_COMMIT_FAILED', '驳回回退提交失败，未产生权威回退事实（不发送 status outbox）', { detail: adv.commitDetail });
+      }
       auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined-rolled-back', to: rollback.to });
       fail('APPROVAL_DECLINED_ROLLED_BACK', `审批未通过，CR 已回退到 ${rollback.to}，请重跑 ${rollback.write}`, { rolledBackTo: rollback.to, rerunHint: rollback.write });
     }
@@ -1398,6 +1418,54 @@ function cmdApprove(ws, cr, gates, flags) {
   });
 }
 
+/* ────────────────────────── 签名 grant 双模式与 reject（CR-2026-030 TASK-04，SDD §2.6/§3.7/§4.8~§4.10） ──────────────────────────
+ * approve/reject 共用 v1 grant 完整验证（schema/decision → 归属 → 状态分类 → evidence digest → key/signature），
+ * 合法 reject 复用 REJECT_ROLLBACK + 权威状态机 trigger 完成回退；仅权威 commit 成功后返回业务 decline。
+ * approve/reject 紧邻结果态重放必须再次验签并证明结果账本已在 HEAD（assertResultLedgersCommitted）。
+ */
+
+/** 当前状态分类：fresh（审批前置态）| adjacent-approve | adjacent-reject | mismatch。 */
+function classifyGrantState(current, stageCfg, rollback, decision) {
+  if (decision === 'approve') {
+    if (stageCfg.expect && stageCfg.expect.includes(current)) return 'fresh';
+    if (current === stageCfg.to) return 'adjacent-approve';
+    return 'mismatch';
+  }
+  if (stageCfg.expect && stageCfg.expect.includes(current)) return 'fresh';
+  if (current === rollback.to) return 'adjacent-reject';
+  return 'mismatch';
+}
+
+/** FR-7：approve 紧邻目标态重放的持久化字段精确比较（approval.yml 对应 section 六字段全等）。 */
+function assertAdjacentApprove(ws, cr, stageCfg, grant, current) {
+  const section = stageCfg.approvalSection;
+  const ap = path.join(crDir(ws, cr), 'approval.yml');
+  const text = readFileChecked(ap);
+  const doc = text == null ? {} : (parseYaml(text) || {});
+  const sec = doc[section];
+  const okv = sec
+    && sec.via === 'server-approve'
+    && sec.approver === grant.approver
+    && sec['key-id'] === grant.key_id
+    && sec.signature === grant.signature
+    && sec['grant-approved-at'] === grant.approved_at
+    && sec['evidence-digest'] === grant.evidence_digest
+    && sec['target-status'] === stageCfg.to;
+  if (!okv) fail('GRANT_STATE_MISMATCH', `approval.yml#${section} 持久化字段与 grant 不一致（或缺少 server-approve 段），不能按幂等成功消费`, { current });
+}
+
+/** FR-7/AC-22：幂等重放前证明结果账本已在 HEAD——porcelain 输出中出现目标路径即 GRANT_STATE_UNCOMMITTED。
+ * 无 audit 的受控只读查询，白名单与 fail-closed 仍全部执行。 */
+function assertResultLedgersCommitted(ws, relPaths) {
+  const r = controlledGit(ws, 'status', ['--short'], ws, 'crctl-approve', { audit: false });
+  if (!r.ok) fail('GRANT_LEDGER_CHECK_FAILED', '受控 Git 只读查询失败，无法证明审批结果账本已在 HEAD', { detail: r.code || r.exit });
+  const porcelain = (r.stdout || '').replaceAll('\r\n', '\n').split('\n').map((l) => l.slice(3).trim()).filter(Boolean);
+  const dirty = relPaths.filter((p) => porcelain.includes(p));
+  if (dirty.length) {
+    fail('GRANT_STATE_UNCOMMITTED', `审批结果账本尚未提交到 HEAD（工作区存在 staged/unstaged/untracked 目标文件），不得按幂等成功消费: ${dirty.join(', ')}`, { uncommitted: dirty });
+  }
+}
+
 function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
   // 裸 --grant（无值）= 用 daemon 投递的标准落点 .crctl/grants/{cr}-{stage}.grant.json
   const grantArg = typeof flags.grant === 'string' ? flags.grant : path.join('.crctl', 'grants', `${cr}-${stage}.grant.json`);
@@ -1406,41 +1474,73 @@ function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
   if (text == null) fail('GRANT_UNREADABLE', `grant 文件不存在或不可读: ${gp}`);
   let grant;
   try { grant = JSON.parse(text); } catch { fail('GRANT_UNREADABLE', `grant 不是合法 JSON: ${gp}`); }
+  // 1) schema v1 + decision 枚举（reject 与 approve 同构，统一在此校验）
   if (grant.v !== 1) fail('GRANT_UNSUPPORTED', `grant schema v=${grant.v}，当前仅支持 v1`);
-  if (grant.decision === 'reject') {
-    fail('GRANT_DECISION_REJECT', '驳回 grant 不走 approve：由编排方按状态机既有回退转移执行 advance，并把 reject_reason 作为 review_feedback 注入修复节点');
-  }
-  if (grant.decision !== 'approve') fail('GRANT_UNSUPPORTED', `decision=${grant.decision} 不在 [approve, reject]`);
+  if (!['approve', 'reject'].includes(grant.decision)) fail('GRANT_UNSUPPORTED', `decision=${grant.decision} 不在 [approve, reject]`);
+  // 2) 归属：签名绑定 cr_id+stage，禁止挪用
   if (grant.cr_id !== cr || grant.stage !== stage) {
     fail('GRANT_MISMATCH', `grant 归属 (${grant.cr_id}, ${grant.stage})，当前审批 (${cr}, ${stage}) —— 签名绑定 cr_id+stage，禁止挪用`);
   }
+  // 3) 状态分类（非前置态且非合法紧邻结果态 → GRANT_STATE_MISMATCH）
   const state = resolveCrState(ws, cr);
   const current = state.status;
-  if (stageCfg.expect && !stageCfg.expect.includes(current)) {
-    fail('CR_STATUS_CURRENT_MISMATCH', `审批阶段 ${stage} 要求当前状态 ∈ [${stageCfg.expect.join(', ')}]，实际 ${current}`);
+  const rollback = REJECT_ROLLBACK[stage];
+  const cls = classifyGrantState(current, stageCfg, rollback, grant.decision);
+  if (cls === 'mismatch') {
+    fail('GRANT_STATE_MISMATCH', `当前状态 ${current} 既不是 ${stage} 审批前置态，也不是合法紧邻结果态，grant 不可消费`, { current, decision: grant.decision });
   }
-  if (stageCfg.passCondition) {
-    const r = evaluatePassCondition(ws, cr, stageCfg, gates);
-    if (!r.pass) fail('GATE_BLOCKED', '自动评审证据未达标，禁止审批（grant 不豁免 blocker 检查）');
-  }
-  if (stageCfg.requireFiles) {
-    for (const rel of stageCfg.requireFiles) {
-      const p = path.join(ws, rel.replaceAll('{cr}', cr));
-      if (!fs.existsSync(p)) fail('GATE_BLOCKED', `审批前置产物缺失: ${p}`);
+  // 4) approve 才跑 passCondition/requireFiles；reject 跳过（blocker 是合法驳回原因，SDD §4.8）
+  if (grant.decision === 'approve') {
+    if (stageCfg.passCondition) {
+      const r = evaluatePassCondition(ws, cr, stageCfg, gates);
+      if (!r.pass) fail('GATE_BLOCKED', '自动评审证据未达标，禁止审批（grant 不豁免 blocker 检查）');
+    }
+    if (stageCfg.requireFiles) {
+      for (const rel of stageCfg.requireFiles) {
+        const p = path.join(ws, rel.replaceAll('{cr}', cr));
+        if (!fs.existsSync(p)) fail('GATE_BLOCKED', `审批前置产物缺失: ${p}`);
+      }
     }
   }
-  // 本地重算证据摘要：grant 签发的是"这一版证据"的批准，证据变了 grant 即失效
+  // 5) 本地重算证据摘要：grant 签发的是"这一版证据"的决定，证据变了 grant 即失效（approve/reject 同校验）
   const digest = canonicalEvidenceDigest(ws, cr, stageCfg) || '';
   if (digest !== (grant.evidence_digest || '')) {
     fail('EVIDENCE_DRIFT', `grant 签发时证据摘要 ${grant.evidence_digest || '(空)'}，当前重算 ${digest || '(空)'} —— 证据在签发后被改动或缺失`);
   }
+  // 6) key + Ed25519 signature
   const sig = verifyGrantSignature(ws, grant);
   if (!sig.ok) fail(sig.code, sig.why);
-  // CR-2026-027 FR-8/TASK-03：grant 验签通过后走 approveAndAdvance（approval.yml + cr.md 单次原子提交），替代原分提交路径
-  approveAndAdvance(ws, cr, gates, stage, stageCfg, {
-    approver: grant.approver, via: 'server-approve', evidenceHash: digest || null, grant,
-    outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
-    specId: flags['spec-id'], fromStatus: current,
+  // 7) 副作用 / 幂等分支
+  if (grant.decision === 'approve') {
+    if (cls === 'fresh') {
+      // approveAndAdvance 内部已 ok() 输出成功结果并处理 commit 失败退出，这里直接返回
+      approveAndAdvance(ws, cr, gates, stage, stageCfg, {
+        approver: grant.approver, via: 'server-approve', evidenceHash: digest || null, grant,
+        outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
+        specId: flags['spec-id'], fromStatus: current,
+      });
+      return;
+    }
+    assertAdjacentApprove(ws, cr, stageCfg, grant, current);
+    assertResultLedgersCommitted(ws, [`change-requests/${cr}/approval.yml`, `change-requests/${cr}/cr.md`]);
+    ok({ op: 'approve', cr, stage, changed: false, reason: 'grant-already-applied', status: current });
+    return;
+  }
+  // reject 分支
+  const trigger = `${rollback.approve}:reject -> ${rollback.write}`;
+  if (cls === 'fresh') {
+    const adv = performAdvance(ws, cr, gates, { to: rollback.to, trigger, expect: current });
+    if (!adv.committed) {
+      fail('ADVANCE_COMMIT_FAILED', '驳回回退提交失败，未产生权威回退事实（不发送 status outbox）', { detail: adv.commitDetail });
+    }
+    fail('APPROVAL_DECLINED_ROLLED_BACK', `审批人驳回，CR 已回退到 ${rollback.to}`, {
+      decision: 'reject', stage, rolledBackTo: rollback.to, trigger, changed: true,
+    });
+  }
+  // 紧邻回退态重放：grant/evidence/signature 已再次验证，证明 cr.md 已在 HEAD 后返回 changed=false
+  assertResultLedgersCommitted(ws, [`change-requests/${cr}/cr.md`]);
+  fail('APPROVAL_DECLINED_ROLLED_BACK', `驳回 grant 已在紧邻回退态消费（${rollback.to}），本次重放无副作用`, {
+    decision: 'reject', stage, rolledBackTo: rollback.to, trigger, changed: false,
   });
 }
 

@@ -4041,9 +4041,9 @@ test('CR-2026-030 TASK-01：reject grant 跨 CR → GRANT_MISMATCH；证据漂�
     let r = runCrctl(['approve', 'CR-G1', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
     assert.equal(r.status, 1);
     assert.equal(r.stderr.error.code, 'GRANT_MISMATCH');
-    // 证据漂移：签发后改动证据文件（digest 按旧内容签发）
-    writeEvidence(ws, 'CR-G1', 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n# changed\n');
+    // 证据漂移：先按原证据签发 grant，再改动证据文件（digest 失配）
     gp = makeStageGrant(ws, privateKey, 'requirement', { decision: 'reject' });
+    writeEvidence(ws, 'CR-G1', 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n# changed\n');
     r = runCrctl(['approve', 'CR-G1', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
     assert.equal(r.status, 1);
     assert.equal(r.stderr.error.code, 'EVIDENCE_DRIFT');
