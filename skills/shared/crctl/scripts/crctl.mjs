@@ -34,6 +34,19 @@ function ok(obj) {
   process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
 }
 
+/* ──────────── CR-2026-031 TASK-01：确定性故障注入（仅测试启用）────────────
+ * CRCTL_FAULT_POINT 未设置 → 生产零行为（fault() 立即返回）；
+ * 设置且命中挂接点 → 结构化 FAULT_INJECTED 退出；
+ * 设置为未登记 point → main() 入口 UNKNOWN_FAULT_POINT 硬失败（防拼写错误静默成「没注入」）。
+ * FAULT_POINTS 为唯一登记表：后续 TASK 嵌入调用时在此追加一行（SDD §9.1）。 */
+const FAULT_POINTS = [
+  'ledger-cas-multi-between-rename', // casWriteMulti 连续 rename 间隙的旧半状态窗口（TASK-02 随该函数删除）
+];
+function fault(point) {
+  if (process.env.CRCTL_FAULT_POINT === point)
+    fail('FAULT_INJECTED', `确定性故障注入 point=${point}（CR-2026-031 测试专用）`, { point });
+}
+
 function nowIso() {
   // 本地时区 ISO 8601（含偏移），由代码生成，不接受外部传入（治理⑩）
   const d = new Date();
@@ -794,7 +807,10 @@ function casWriteMulti(writes) {
     fs.writeFileSync(tmp, w.newText, 'utf8');
     return { tmp, dst: w.path };
   });
-  for (const s of staged) fs.renameSync(s.tmp, s.dst);
+  for (let i = 0; i < staged.length; i++) {
+    fs.renameSync(staged[i].tmp, staged[i].dst);
+    if (i === 0 && staged.length > 1) fault('ledger-cas-multi-between-rename');
+  }
 }
 /* ────────────────────────── 账本编辑纯函数（CR-2026-019） ──────────────────────────
  * 行级正则改写，纯 string→string（SDD §1.1）；匹配不到一律 fail 硬失败（纪律 #1），
@@ -3579,6 +3595,9 @@ function parseGitArgs(argv) {
 }
 
 function main() {
+  const wantFault = process.env.CRCTL_FAULT_POINT;
+  if (wantFault && !FAULT_POINTS.includes(wantFault))
+    fail('UNKNOWN_FAULT_POINT', `未知故障注入点: ${wantFault}（已登记: ${FAULT_POINTS.join(', ')}）`, { known: FAULT_POINTS });
   const [cmd, ...rest] = process.argv.slice(2);
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') { process.stdout.write(HELP); return; }
   const { flags, positional } = cmd === 'git' ? parseGitArgs(rest) : parseArgs(rest);

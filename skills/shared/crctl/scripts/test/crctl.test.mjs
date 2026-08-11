@@ -1298,6 +1298,7 @@ test('casWriteMulti：任一侧 CAS 失配则全部不落盘，无 write/rename�
     const moduleText = [
       "const calls = [];",
       "const fail = (code, msg) => { throw new Error(code + ': ' + msg); };",
+      "const fault = () => {};", // CR-2026-031 TASK-01：故障注入在本组件级测试中关闭
       "const readFileChecked = (p) => { calls.push(['read', p]); return p.endsWith('ok.txt') ? 'orig-a' : 'tampered-b'; };",
       "const sha256 = (t) => t;",
       "const fs = {",
