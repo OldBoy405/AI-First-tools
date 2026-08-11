@@ -33,12 +33,13 @@ description: 在新电脑或新成员环境下，按 CR-ID 与 dir-graph.yaml re
 
 1. 读取 `AGENTS.md`、`dir-graph.yaml#repositories`。
 2. 选择 `active != false` 的 repo。
-3. 对每个 repo：branch 与 worktreePath 统一经 `crctl worktree-path {cr_id} --repo {repo.id} --workspace <ws>` 取权威值（FR-29②，CR-2026-022——不再手拼 bucket/worktreePath/branch；bucket 规则由 crctl 唯一派生；CR-2026-030 FR-2 起 branch 也由原语返回）
-4. 对所有 active repo 执行远端分支预检；任一 repo 缺少远端分支则整体 abort，不创建任何 worktree。**去重（FR-32，CR-2026-022）**：resume-cr 流水线场景下节点 1（list-remote-checkpoints）已产出各 repo 存在性结论（含 checkpoints[] SHA 漂移告警），此处直接复用其 node-1.md 结论、不再重复 ls-remote 预检；独立调用场景才自行预检。
+3. 对每个 repo 先调用 `crctl worktree-path {cr_id} --repo {repo.id} --workspace <ws>`，保存返回的 `wt.branch`、`wt.path`；后续所有远端分支和 worktree 操作只使用该返回值。
+4. 对每个 repo 执行远端分支预检；任一 repo 缺少远端分支则整体 abort，不创建任何 worktree。**去重（FR-32，CR-2026-022）**：resume-cr 流水线场景下节点 1（list-remote-checkpoints）已产出各 repo 存在性结论（含 checkpoints[] SHA 漂移告警），此处直接复用其 node-1.md 结论、不再重复 ls-remote 预检；独立调用场景才自行预检。
 
 ```ts
+const wt = await runCrctl(["worktree-path", crId, "--repo", repo.id, "--workspace", workspaceRoot]);
 const ls = await runGit({ subcommand: "ls-remote",
-  args: ["--heads", "origin", `requirement/${crId}`],
+  args: ["--heads", "origin", wt.branch],
   cwd: repo.path });
 if (!ls.ok || ls.stdout.trim().length === 0) {
   // 远端分支不存在：停止执行
@@ -49,10 +50,9 @@ if (!ls.ok || ls.stdout.trim().length === 0) {
 
 ### Step 2 — 重建所有 active repo worktree（受控 shell）
 
-对每个 active repo 执行：
+对每个 active repo 使用 Step 1 已取得的 `wt.path` 与 `wt.branch`：
 
 ```ts
-const wt = await runCrctl(["worktree-path", crId, "--repo", repo.id, "--workspace", workspaceRoot]);
 await runGit({ subcommand: "fetch", args: ["origin"], cwd: repo.path });
 await runGit({ subcommand: "worktree",
   args: ["add", wt.path,

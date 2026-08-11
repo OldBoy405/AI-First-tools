@@ -3591,7 +3591,8 @@ test('CR-2026-030 TASK-01：cr-init 三 Owner 原子注册——三角色显式�
     assert.equal(new Set(hist.map((m) => m[3])).size, 1, '三条 history 共用同一时间戳');
     const bl = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
     assert.ok(bl.includes('owner: R1'), 'backlog 兼容 owner 只等于 requirement');
-    assert.ok(bl.includes('id: D2') && bl.includes('id: T3'), 'backlog 三角色显式写入');
+    assert.match(bl, /    owners:\n      requirement:\n        id: R1\n        assigned-at: "[^"]+"\n      development:\n        id: D2\n        assigned-at: "[^"]+"\n      test:\n        id: T3\n        assigned-at: "[^"]+"/, 'backlog owners 必须保持正确 YAML 层级');
+    assert.equal(bl.match(/^        id:/gm)?.length, 3, 'backlog 三个 owner slot 均为八空格缩进');
     assert.equal(auditLines(ws).filter((a) => a.op === 'cr-init').length, 1);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });

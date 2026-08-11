@@ -314,6 +314,18 @@ const BROKEN_DIR_GRAPHS = {
   truncated: 'change-request-track:\n  state_machine:\n    transitions:\n      - { from: task-breakdown, to: tech-design-reviewed, trigger: "review-dev-plan',
 };
 
+test('R7 transitions duplicate → STATE_MACHINE_PARSE_FAILED 非零退出（AC-28）', () => {
+  const transition = '      - { from: task-breakdown, to: tech-design-reviewed, trigger: "review-dev-plan:block -> write-dev-plan" }';
+  const dir = makeFixture({
+    'dir-graph.yaml': `change-request-track:\n  state_machine:\n    transitions:\n${transition}\n    transitions:\n${transition}\n`,
+    'skills/x/SKILL.md': '# t\n\ncrctl advance --to X --trigger Y\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.ok(r.stderr.includes('STATE_MACHINE_PARSE_FAILED'), r.stderr);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 for (const [name, dg] of Object.entries(BROKEN_DIR_GRAPHS)) {
   test(`R7 transitions ${name} → STATE_MACHINE_PARSE_FAILED 非零退出（AC-28）`, () => {
     const dir = makeFixture({

@@ -52,7 +52,9 @@ function loadAuthorityTransitions(root) {
   const crt = findKey(0, 'change-request-track');
   const sm = crt ? findKey(crt.idx + 1, 'state_machine') : null;
   const tr = sm ? findKey(sm.idx + 1, 'transitions') : null;
+  const transitionHeaders = lines.filter((line) => /^\s*transitions:\s*$/.test(line));
   if (!crt || !sm || !tr) failParse('dir-graph.yaml 缺少 change-request-track.state_machine.transitions 块');
+  if (transitionHeaders.length !== 1) failParse(`dir-graph.yaml transitions 块必须唯一，实际找到 ${transitionHeaders.length} 个`);
   const pairs = new Set();
   let seen = 0;
   for (let i = tr.idx + 1; i < lines.length; i++) {

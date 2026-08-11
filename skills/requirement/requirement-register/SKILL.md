@@ -16,7 +16,7 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
 1. 生成唯一 CR-ID（格式 `CR-YYYY-NNN`，NNN 自增）
 2. 在 `change-requests/_backlog.yml` 注册 CR 条目（不含 status/updated-at，status 只落 cr.md），并在 `change-requests/_index.yml` 追加条目<!-- lint-prompts:ignore --> 描述性：登记由 crctl cr-init 原子完成（Step 2）
 3. 将注册记录提交到 knowledge-base trunk，保证 main 可感知在途 CR
-4. 按 `dir-graph.yaml#repositories` 为所有 `active != false` 的 repo 创建同名 worktree 分支 `requirement/CR-YYYY-NNN`（不切换当前 HEAD）
+4. 按 `dir-graph.yaml#repositories` 为所有 `active != false` 的 repo 创建由 `crctl worktree-path` 返回的 worktree 分支（不切换当前 HEAD）
 
 ---
 
@@ -97,12 +97,12 @@ await runGit({ subcommand: "worktree",
 ```
 ✅ CR 已注册
    CR-ID       : {CR-ID}
-   分支        : requirement/{CR-ID}
+   分支        : {execution_context.branch}
    需求负责人  : {requirement_owner} @ {timestamp}
    开发负责人  : {dev_owner} @ {timestamp}
    测试负责人  : {test_owner} @ {timestamp}
    注册提交    : knowledge-base trunk 已包含 cr.md / _backlog.yml
-   Worktree    : [{repo.id}: .rayai-worktrees/{bucket}/requirement/{CR-ID}, ...]
+   Worktree    : {execution_context.repo_worktrees}
 <!-- lint-prompts:ignore --> 输出摘要：仅展示路径
    cr.md       : change-requests/{CR-ID}/cr.md
    下一步      : 以 `crctl next {cr_id}` 为准（在 worktree 中继续撰写 PRD）
@@ -111,12 +111,9 @@ await runGit({ subcommand: "worktree",
 ```yaml
 execution_context:
   cr_id: {CR-ID}
-  branch: requirement/{CR-ID}
-  knowledge_base_worktree: {workspaceRoot}/.rayai-worktrees/knowledge-base/requirement/{CR-ID}
-  repo_worktrees:
-    - repo: knowledge-base
-      role: knowledge-base
-      path: {workspaceRoot}/.rayai-worktrees/knowledge-base/requirement/{CR-ID}
+  branch: {execution_context.branch}
+  knowledge_base_worktree: {execution_context.knowledge_base_worktree}
+  repo_worktrees: {execution_context.repo_worktrees}
 ```
 
 ---

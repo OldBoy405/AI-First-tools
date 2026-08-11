@@ -2710,7 +2710,7 @@ function cmdCrInit(ws, gates, flags) {
   const source = flags.source ?? 'manual';
   const tv = flags['target-version'] ?? 'tbd';
   // FR-1：同一个注册时间戳 now 复用于三角色当前 Owner 与三条 initial-assignment history
-  const ownerSlot = (id) => [`    id: ${id}`, `    assigned-at: "${now}"`];
+  const ownerSlot = (id, indent) => [`${' '.repeat(indent)}id: ${id}`, `${' '.repeat(indent)}assigned-at: "${now}"`];
   // cr.md 全量 frontmatter（owners/owner-history/时间戳全 crctl 生成）
   const fm = [
     '---',
@@ -2720,11 +2720,11 @@ function cmdCrInit(ws, gates, flags) {
     `owner: ${req}`,
     'owners:',
     '  requirement:',
-    ...ownerSlot(req),
+    ...ownerSlot(req, 4),
     '  development:',
-    ...ownerSlot(dev),
+    ...ownerSlot(dev, 4),
     '  test:',
-    ...ownerSlot(tst),
+    ...ownerSlot(tst, 4),
     `target-version: ${yamlScalar(tv)}`,
     `source: ${yamlScalar(source)}`,
     'status: drafting',
@@ -2752,11 +2752,11 @@ function cmdCrInit(ws, gates, flags) {
     `    owner: ${req}`,
     '    owners:',
     '      requirement:',
-    ...ownerSlot(req),
+    ...ownerSlot(req, 8),
     '      development:',
-    ...ownerSlot(dev),
+    ...ownerSlot(dev, 8),
     '      test:',
-    ...ownerSlot(tst),
+    ...ownerSlot(tst, 8),
     `    target-version: ${yamlScalar(tv)}`,
     `    source: ${yamlScalar(source)}`,
     '    prd-path: ""',
@@ -3060,7 +3060,8 @@ function cmdTest(ws, cr, gates, flags) {
   }
   const allPass = runs.every((r) => r.exit === 0);
   const reportPath = path.join(crDir(ws, cr), 'test-report.md');
-  const tester = identity(ws);
+  const md = readCrMdFrontmatter(ws, cr);
+  const tester = md?.owners?.test?.id ? String(md.owners.test.id) : identity(ws);
   const lines = [
     '---',
     `cr: ${cr}`,
@@ -3508,10 +3509,11 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
                                                 schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）
   crctl review-note  <cr_id> [--stage <s>] --note <text>  approval.yml supplemental-reviews[] 追加（不接受 --by，身份 crctl 生成）
   crctl checkpoint-add <cr_id> --repo <r> --sha <sha> [--remote-ref <ref>]   _backlog checkpoints[] 追加 + 推送元数据（developing~writing-back）
-  crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   _backlog owners.{role} 指派（非终态）
+  crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   双投影 owners 更新 + 正式移交 commit（非终态）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
-  crctl cr-init     --title <t> --owner-requirement <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
+  crctl cr-init     --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
+                        [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
   crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
   crctl report | crctl cr-metrics [--period <N>d]   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
