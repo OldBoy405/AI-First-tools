@@ -409,10 +409,21 @@ function loadPipeline(ws, id) {
 function crDir(ws, cr) { return path.join(ws, 'change-requests', cr); }
 function backlogPath(ws) { return path.join(ws, 'change-requests', '_backlog.yml'); }
 
+// CR-2026-031 TASK-02：最低支持 schema = cr-backlog/v2。v1 / 缺声明一律硬失败（UNSUPPORTED_BACKLOG_SCHEMA），
+// migrate-backlog 永久迁移兼容已删除；TASK-05/09 的所有账本事务复用本检查。
+function assertSupportedBacklogSchema(text) {
+  const norm = String(text).replaceAll('\r\n', '\n');
+  const m = norm.match(/^schema:\s*["']?([^\s"'#]+)["']?\s*$/m);
+  if (!m || m[1] !== 'cr-backlog/v2') {
+    fail('UNSUPPORTED_BACKLOG_SCHEMA', `_backlog.yml schema=${m ? m[1] : '(missing)'}：仅支持 cr-backlog/v2（v1 兼容与 migrate-backlog 已随 CR-2026-031 TASK-02 删除）`, { schema: m ? m[1] : null });
+  }
+}
+
 function loadBacklogEntry(ws, cr) {
   const p = backlogPath(ws);
   const text = readFileChecked(p);
   if (!text) fail('BACKLOG_NOT_FOUND', `缺少 ${p}`);
+  assertSupportedBacklogSchema(text);
   const doc = parseYaml(text);
   const list = Array.isArray(doc) ? doc : doc['change-requests'] || doc.backlog || doc.items || doc.crs;
   if (!Array.isArray(list)) fail('BACKLOG_SHAPE', `_backlog.yml 顶层既不是序列也没有 change-requests/backlog/items 键`);
@@ -1031,9 +1042,8 @@ function resolveCrState(ws, cr) {
     const mixed = snap.entry.status && snap.entry.status !== md.status;
     return { snap, status: md.status, statusSource: 'cr.md', mixedLayout: mixed };
   }
-  if (snap.entry.status)                             // 迁移期兼容读（FR-2，deprecated）
-    return { snap, status: snap.entry.status, statusSource: '_backlog.yml', legacySource: true, mixedLayout: false };
-  fail('CR_MD_STATUS_MISSING', `${cr} 在 cr.md 与 _backlog.yml 中均无 status`);
+  // CR-2026-031 TASK-02：v1 回退读（backlog entry.status）随永久迁移兼容一并删除；cr.md 是状态唯一权威。
+  fail('CR_MD_STATUS_MISSING', `${cr} 的 cr.md 缺少 status 字段（_backlog.yml 不再是状态来源）`);
 }
 
 // CR-2026-027 FR-12/TASK-07：终态只读查询——从 _history.yml 找 CR 条目（仅 status/next 使用；写命令不 fallback）。
@@ -1198,14 +1208,12 @@ function cmdStatus(ws, cr, gates, flags) {
     }
   }
   const warnings = [];
-  if (state.mixedLayout) warnings.push({ code: 'MIXED_LAYOUT_WARN', message: `cr.md status=${current} 与 _backlog.yml status=${snap.entry.status} 不一致，以 cr.md 为准；workspace 可能被新旧 crctl 混用，建议统一版本后执行 migrate-backlog` });
-  if (state.legacySource) warnings.push({ code: 'MIXED_LAYOUT_WARN', message: `状态从 _backlog.yml 回退读取（cr.md 无 status），workspace 布局为旧版；建议执行 migrate-backlog 升级到 v2` });
+  if (state.mixedLayout) warnings.push({ code: 'MIXED_LAYOUT_WARN', message: `cr.md status=${current} 与 _backlog.yml status=${snap.entry.status} 不一致，以 cr.md 为准；_backlog.yml 条目中的 status 行是 v2 schema 下的残留字段，应清除` });
   const diverged = detectStatusDivergence(ws, cr, current);
   if (diverged) warnings.push(diverged);
   ok({
     cr, status: current,
     source: { backlog: snap.path, backlogSha256: snap.hash.slice(0, 12), crMd: path.join(crDir(ws, cr), 'cr.md'), stateMachine: source },
-    ...(state.legacySource ? { legacySource: '_backlog.yml' } : {}),
     owners: snap.entry.owners || null,
     legalNext: nexts,
     reviewLoops: loops,
@@ -1647,17 +1655,6 @@ function collectOutboxEvidence(ws, cr, stageCfg) {
   return out;
 }
 
-function writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash, opts = {}) {
-  const p = path.join(crDir(ws, cr), 'approval.yml');
-  const existing = readFileChecked(p);
-  const next = buildApprovalSectionText(p, stageCfg, approver, evidenceHash, opts);
-  if (existing == null) {
-    fs.writeFileSync(p, next, 'utf8');
-    return;
-  }
-  casWrite(p, sha256(existing), next);
-}
-
 // CR-2026-027 FR-8/TASK-03：approval.yml 候选文本生成（含既有文件段落合并），供 approve 原子提交在内存构造。
 function buildApprovalSectionText(p, stageCfg, approver, evidenceHash, opts = {}) {
   const section = stageCfg.approvalSection;
@@ -1721,28 +1718,15 @@ function cmdValidate(ws, target, gates) {
       validateOwners(fm.owners, 'cr.md');
     }
   } else if (base === '_backlog.yml') {
+    assertSupportedBacklogSchema(text); // CR-2026-031 TASK-02：v1 布局不再支持，validate 同样硬失败
     const doc = parseYaml(text);
     const list = Array.isArray(doc) ? doc : doc['change-requests'] || doc.backlog || doc.items || [];
-    const schemaVer = (doc && !Array.isArray(doc) && doc.schema) || '';
-    const isV2 = schemaVer === 'cr-backlog/v2';
-    const { sm } = loadStateMachine(ws);
-    const allStatuses = new Set([...(sm.transitions || []).flatMap((t) => [t.from, t.to]), ...(sm.terminal || [])]);
     for (const e of list) {
       const where = `_backlog.yml#${e?.id || '?'}`;
       pushIf(!e.id, `${where}: 缺少 id`);
-      if (isV2) {
-        // v2 布局：status/updated-at 已撤出，不应再出现
-        warnIf(e.status !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 status 行（值=${e.status}），应执行 migrate-backlog 清除`);
-        warnIf(e['updated-at'] !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 updated-at 行，应执行 migrate-backlog 清除`);
-      } else {
-        // v1 布局（迁移期）：status 必填，但与 cr.md 不一致时告警
-        pushIf(!e.status, `${where}: 缺少 status`);
-        pushIf(e.status && !allStatuses.has(e.status), `${where}: status=${e.status} 不在状态机枚举内`);
-        if (e.id && e.status) {
-          const md = readCrMdFrontmatter(ws, e.id);
-          warnIf(md && md.status && md.status !== e.status, `${where}: 漂移 — backlog status=${e.status} 与 cr.md status=${md.status} 不一致，以 cr.md 为准；建议执行 migrate-backlog`);
-        }
-      }
+      // v2 布局：status/updated-at 已撤出，不应再出现
+      warnIf(e.status !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 status 行（值=${e.status}），应清除`);
+      warnIf(e['updated-at'] !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 updated-at 行，应清除`);
       validateOwners(e.owners, where);
     }
   } else if (/review-annotations[\\/].+\.yml$/.test(p) || ['requirement.yml', 'sdd.yml', 'code.yml'].includes(base)) {
@@ -2834,62 +2818,13 @@ function cmdCrInit(ws, gates, flags) {
   });
 }
 
-/* ────────────────────────── task allocate（S7，CR-2026-021 TASK-07） ──────────────────────────
- * 扩展现有 task 子命令族：CAS 保护的 TASK-ID 分配（SDD §2.3）。
- * 分配即写、不接受调用方传入编号：内部扫 tasks/_index.yml 现有 max → {cr}-TASK-{NN+1}，
- * slug 缺失回退 task-{NN}（与 writeback-tasks.mjs 的 slug 兜底风格对齐）。唯一并发冲突码 CAS_CONFLICT。
- */
-function scanMaxTaskNumber(text, cr) {
-  const re = new RegExp('- id:\\s*["\']?' + cr + '-TASK-(\\d+)', 'g');
-  let max = 0;
-  for (const m of text.matchAll(re)) max = Math.max(max, Number(m[1]));
-  return max;
-}
-
-/** tasks/_index.yml 追加最小条目 {id, slug, status: pending}（title/estimate/depends-on 由 write-dev-tasks 后续填充）。 */
-function appendTaskEntry(text, cr, taskId, slug) {
-  const norm = text.replaceAll('\r\n', '\n');
-  const lines = norm.split('\n');
-  const idx = lines.findIndex((l) => /^tasks:/.test(l));
-  if (idx === -1) fail('TASK_INDEX_SHAPE', 'tasks/_index.yml 缺少 tasks: 段，结构异常');
-  if (lines.some((l) => new RegExp('- id:\\s*["\']?' + taskId + '["\']?\\s*$').test(l))) {
-    fail('TASK_ALREADY_EXISTS', `${taskId} 已存在于 tasks/_index.yml`);
-  }
-  const entry = `  - id: ${taskId}\n    slug: ${slug}\n    status: pending`;
-  // 定位 tasks: 段尾（下一个顶层键或 EOF）
-  let tail = lines.length;
-  for (let i = idx + 1; i < lines.length; i++) {
-    const m = lines[i].match(/^[ \t]*/)[0];
-    if (m.length === 0 && /^[A-Za-z0-9_-]+:/.test(lines[i])) { tail = i; break; }
-  }
-  lines.splice(tail, 0, entry);
-  return lines.join('\n');
-}
-
-function cmdTaskAllocate(ws, cr, gates, flags) {
-  const state = resolveCrState(ws, cr);
-  const LEGAL = ['task-breakdown', 'developing'];
-  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `task allocate 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
-  const p = path.join(crDir(ws, cr), 'tasks', '_index.yml');
-  const text = readFileChecked(p);
-  if (text == null) fail('TASK_INDEX_NOT_FOUND', `缺少 ${p}（请先由 write-dev-tasks 创建 tasks/_index.yml 骨架）`);
-  const n = scanMaxTaskNumber(text, cr) + 1;
-  const nn = String(n).padStart(2, '0');
-  const taskId = `${cr}-TASK-${nn}`;
-  const slug = flags.slug || `task-${nn}`;
-  const newText = appendTaskEntry(text, cr, taskId, slug);
-  casWrite(p, sha256(text), newText);
-  auditLog(ws, { kind: 'ledger', op: 'task-allocate', cr, actor: identity(ws), task: taskId, slug });
-  ok({ op: 'task-allocate', cr, task: taskId, slug, file: p });
-}
-
-/* ────────────────────────── worktree-path / report / cr-metrics（S9/S11，CR-2026-021 TASK-08 + CR-2026-028 FR-2） ──────────────────────────
+/* ────────────────────────── worktree-path / report（S9/S11，CR-2026-021 TASK-08 + CR-2026-028 FR-2） ──────────────────────────
  * 只读子命令（SDD §3.2/§3.3）：不写任何文件、无 CAS。
  * - worktree-path <cr> --repo <r>：唯一权威拼接规则（从 requirement-register 等 4+ 处 SKILL prose 提炼）：
  *   bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id；path = {installRoot}/.rayai-worktrees/{bucket}/requirement/{cr}
  *   installRoot = Installation Workspace（deriveInstallRoot）：linked worktree 场景由 git common-dir 派生主 checkout，
  *   避免从 CR worktree 内部再拼出第二个 .rayai-worktrees（CR-2026-028 FR-2 实测 bug）。
- * - report / cr-metrics [--period <N>d]：跨 CR 聚合（对齐 cr-dashboard Step 2 口径）——
+ * - report [--period <N>d]：跨 CR 聚合（对齐 cr-dashboard Step 2 口径）——
  *   状态直方图（在途 cr.md frontmatter + _history.yml 归档 final-status，累计口径，不受 --period 影响）、
  *   周期活动计数 periodActivity（按 archived-at，仅当传 --period 时按窗口过滤，格式仅支持 <N>d 如 7d/30d，
  *   非法格式 BAD_ARGS 硬拒而非静默忽略）、SLA 阈值比较（change-requests/_config.yml#sla，缺省跳过，累计口径）。
@@ -2980,10 +2915,6 @@ function cmdReport(ws, gates, flags) {
   });
 }
 
-function cmdCrMetrics(ws, gates, flags) {
-  const period = flags.period || '7d';
-  return cmdReport(ws, gates, { ...flags, period });
-}
 
 /* ────────────────────────── git commit --template（S10，CR-2026-021 TASK-09） ──────────────────────────
  * 给既有 git commit 分支加格式化模板（不是新顶层子命令）：
@@ -3125,215 +3056,6 @@ function cmdTest(ws, cr, gates, flags) {
   fs.writeFileSync(reportPath, lines.join('\n'), 'utf8');
   ok({ report: reportPath, status: allPass ? 'pass' : 'block', tester, runs });
   if (!allPass) process.exit(1);
-}
-
-/* ────────────────────────── migrate-backlog（CR-2026-018 FR-5） ──────────────────────────
- * 一次性迁移命令：_backlog.yml 从 v1（含 status/updated-at）升为 v2（注册索引）。
- * 预检逐条目比对 backlog status 与 cr.md status，不一致则硬失败不写文件（纪律#1）。
- * 幂等：v2 + 无 status 行时输出 already-migrated，退出码 0。
- */
-
-// CR-2026-027 FR-10/TASK-05：迁移提前返回路径的统一收尾——幽灵清理若删除了条目且非 embedded，需 standalone commit。
-function finishMigrateBacklog(ws, flags, base, ghostResult) {
-  if (ghostResult.ghost && ghostResult.ghost.removed && !flags.embedded && !flags['no-commit']) {
-    const addR = controlledGit(ws, 'add', ['change-requests/_backlog.yml'], ws, 'crctl-migrate');
-    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', `[cr] migrate backlog ghost cleanup: ${ghostResult.ghost.title}`], ws, 'crctl-migrate') : addR;
-    base.commit = commitR.ok ? { message: 'ghost cleanup' } : { failed: true, detail: commitR };
-    if (commitR && !commitR.ok) process.exit(1);
-  }
-  ok({ ...base, ...ghostResult });
-}
-
-function cmdMigrateBacklog(ws, gates, flags) {
-  const p = backlogPath(ws);
-  const text = readFileChecked(p);
-  if (!text) fail('BACKLOG_NOT_FOUND', `缺少 ${p}`);
-  const hash = sha256(text);
-  const doc = parseYaml(text);
-  const list = Array.isArray(doc) ? doc : doc['change-requests'] || doc.backlog || doc.items || [];
-  const schemaVer = (doc && !Array.isArray(doc) && doc.schema) || '';
-  const isV2 = schemaVer === 'cr-backlog/v2';
-
-  // 幂等检查：v2 且所有条目无 status/updated-at（仍执行幽灵清理——清理独立于 v1→v2 迁移）
-  if (isV2) {
-    const hasLegacy = list.some((e) => e && (e.status !== undefined || e['updated-at'] !== undefined));
-    if (!hasLegacy) {
-      const ghostResult = migrateGhostCleanup(ws, text);
-      if (ghostResult.ghost.removed) casWrite(p, hash, ghostResult.cleanedText);
-      auditGhostCleanup(ws, ghostResult); // b10：casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
-      finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
-      return;
-    }
-  }
-
-  // 预检：逐条目比对 backlog status 与 cr.md status
-  const diffs = [];
-  const toMigrate = [];
-  for (const e of list) {
-    if (!e || !e.id) continue;
-    if (e.status === undefined && e['updated-at'] === undefined) continue; // 已迁移
-    const md = readCrMdFrontmatter(ws, e.id);
-    if (!md || !md.status) {
-      diffs.push({ id: e.id, backlogStatus: e.status, crMdStatus: null, why: 'cr.md 缺失或无 status' });
-      continue;
-    }
-    if (e.status !== undefined && e.status !== md.status) {
-      diffs.push({ id: e.id, backlogStatus: e.status, crMdStatus: md.status, why: 'backlog 与 cr.md status 不一致' });
-      continue;
-    }
-    toMigrate.push(e.id);
-  }
-  if (diffs.length) {
-    fail('MIGRATE_STATUS_MISMATCH', `迁移预检发现 ${diffs.length} 个条目 backlog 与 cr.md 状态不一致，拒绝写入`, { diffs });
-  }
-  if (!toMigrate.length) {
-    const ghostResult = migrateGhostCleanup(ws, text);
-    if (ghostResult.ghost.removed) casWrite(p, hash, ghostResult.cleanedText);
-    auditGhostCleanup(ws, ghostResult); // b10：casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
-    finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
-    return;
-  }
-
-  // 行级定点删除各条目 status:/updated-at: 行
-  const lines = text.split(/\r?\n/);
-  const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const removed = [];
-  for (const crId of toMigrate) {
-    let entryStart = -1, entryIndent = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(/^(\s*)-\s+id:\s*["']?([^"'\s]+)["']?\s*$/);
-      if (m && m[2] === crId) { entryStart = i; entryIndent = m[1].length; break; }
-    }
-    if (entryStart < 0) continue;
-    let entryEnd = lines.length;
-    for (let i = entryStart + 1; i < lines.length; i++) {
-      const m = lines[i].match(/^(\s*)-\s+id:\s*/);
-      if (m && m[1].length <= entryIndent) { entryEnd = i; break; }
-    }
-    // 从尾到头删，避免行号偏移
-    for (let i = entryEnd - 1; i >= entryStart; i--) {
-      if (/^\s*status:\s*/.test(lines[i]) || /^\s*updated-at:\s*/.test(lines[i])) {
-        removed.push(lines[i].trim());
-        lines.splice(i, 1);
-      }
-    }
-  }
-
-  // 顶层 schema 升 v2
-  let finalText = lines.join(eol);
-  if (!isV2) {
-    if (/^schema:\s*.+$/m.test(finalText)) {
-      finalText = finalText.replace(/^schema:\s*.+$/m, 'schema: cr-backlog/v2');
-    } else {
-      finalText = 'schema: cr-backlog/v2\n' + finalText;
-    }
-  }
-
-  // CR-2026-027 FR-10/TASK-05 + 代码评审回修（b5）：幽灵块归属校验必须前置于任何写入——
-  // orphan 时 GHOST_ENTRY_ORPHANED 硬失败且 backlog 文件保持不变；通过则迁移+清理合并为一次 casWrite（原子）。
-  const ghostResult = migrateGhostCleanup(ws, finalText);
-  const writeText = ghostResult.ghost.removed ? ghostResult.cleanedText : finalText;
-  casWrite(p, hash, writeText);
-  auditGhostCleanup(ws, ghostResult); // b10：迁移+清理合并 casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
-
-  // 迁移报告（gitignored）
-  const reportDir = path.join(ws, '.crctl');
-  fs.mkdirSync(reportDir, { recursive: true });
-  const gi = path.join(reportDir, '.gitignore');
-  if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n');
-  const report = {
-    'migrated-at': nowIso(),
-    entries: toMigrate.map((id) => ({ id, 'status-at-migration': 'consistent', consistent: true })),
-    'removed-lines': removed.length,
-    schema: 'cr-backlog/v1 -> cr-backlog/v2',
-  };
-  fs.writeFileSync(path.join(reportDir, 'migrate-backlog-report.yml'),
-    Object.entries(report).map(([k, v]) => {
-      if (Array.isArray(v)) return `${k}:\n${v.map((e) => `  - { id: ${e.id}, status-at-migration: ${e['status-at-migration']}, consistent: ${e.consistent} }`).join('\n')}`;
-      return `${k}: ${v}`;
-    }).join('\n') + '\n', 'utf8');
-
-  auditLog(ws, { kind: 'migrate-backlog', entries: toMigrate.length, removedLines: removed.length, by: identity(ws) });
-
-  // standalone commit
-  const msg = `[cr] migrate backlog to v2: ${toMigrate.length} entries, status->cr.md`;
-  if (flags.embedded || flags['no-commit']) {
-    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, ...ghostResult, commit: 'embedded：由调用方在同一事务中提交' });
-  } else {
-    const addR = controlledGit(ws, 'add', ['change-requests/_backlog.yml'], ws, 'crctl-migrate');
-    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-migrate') : addR;
-    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, ...ghostResult, commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR } });
-    if (commitR && !commitR.ok) process.exit(1);
-  }
-}
-
-// CR-2026-027 FR-10/TASK-05：幽灵条目清理（幂等；删除依据 = history 存在同 title 归档条目）。
-// B-12 实测形态：幽灵块是某条目块内的重复字段 key（如 title 二次出现，CR-2026-024 归档残留），
-// 后续可能有正常条目（如 CR-2026-027），因此遍历所有条目块，删除范围 = 重复 key 行 到 下一个条目行。
-// CR-2026-027 代码评审回修（b5）：本函数只做幽灵块检测与归属校验（orphan 硬失败），不写盘；
-// 调用方拿到 cleanedText 后再统一 casWrite，保证"失败时文件不变"。
-// 代码评审回修（b10）：审计事件移出本函数——幽灵审计必须发生在 casWrite 成功之后（见 auditGhostCleanup），
-// CAS_CONFLICT 时 _backlog.yml 不变且 audit.log 不得误记已清理（FR-10 一致性边界）。
-function migrateGhostCleanup(ws, text) {
-  const norm = text.replaceAll('\r\n', '\n');
-  const lines = norm.split('\n');
-  // 列表项缩进（'  - id:' 的缩进）与条目字段层缩进（itemIndent+2）
-  let itemIndent = -1;
-  for (const l of lines) {
-    const m = l.match(/^(\s*)-\s+id:/);
-    if (m) { itemIndent = m[1].length; break; }
-  }
-  if (itemIndent < 0) return { ghost: { removed: false, reason: 'no-list-items' } };
-  const fieldIndent = itemIndent + 2;
-  // 所有条目行号
-  const idLines = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s*)-\s+id:\s*["']?([^"'\s]+)["']?\s*$/);
-    if (m && m[1].length === itemIndent) idLines.push(i);
-  }
-  if (idLines.length === 0) return { ghost: { removed: false, reason: 'no-list-items' } };
-  // 遍历每个条目块，找第一个重复字段 key（幽灵起点）；只统计字段层缩进（嵌套子字段不参与）
-  let ghostStart = -1, ghostEnd = -1, ghostTitle = '';
-  for (let k = 0; k < idLines.length && ghostStart < 0; k++) {
-    const start = idLines[k] + 1;
-    const end = k + 1 < idLines.length ? idLines[k + 1] : lines.length;
-    const seen = new Set();
-    for (let i = start; i < end; i++) {
-      const l = lines[i];
-      if (l.trim() === '') continue;
-      const ind = l.match(/^[ \t]*/)[0].length;
-      if (ind <= itemIndent) break;
-      if (ind !== fieldIndent) continue;
-      const km = l.match(/^\s*([a-zA-Z0-9_-]+):\s*(.*)$/);
-      if (!km) continue;
-      if (seen.has(km[1])) { ghostStart = i; ghostEnd = end; ghostTitle = km[2].replace(/^["']|["']$/g, '').trim(); break; }
-      seen.add(km[1]);
-    }
-  }
-  if (ghostStart < 0) return { ghost: { removed: false, reason: 'already-clean' } };
-  // 归属判定：_history.yml 存在同 title 的终态条目（行级匹配，不依赖 YAML 解析器对复杂标量的解析）
-  const hText = readFileChecked(path.join(ws, 'change-requests', '_history.yml'));
-  let archived = false;
-  if (hText != null && ghostTitle) {
-    archived = hText.replaceAll('\r\n', '\n').split('\n').some((l) => {
-      const tm = l.match(/^\s*title:\s*(.*)$/);
-      return tm && tm[1].replace(/^["']|["']$/g, '').trim() === ghostTitle;
-    });
-  }
-  if (!archived) {
-    fail('GHOST_ENTRY_ORPHANED', `_backlog.yml 条目块内存在无 id 归属的重复字段块（title=${ghostTitle || '(未解析)'}），但 _history.yml 无对应归档条目，拒绝删除`);
-  }
-  const cleaned = lines.slice(0, ghostStart).concat(lines.slice(ghostEnd)).join('\n').replace(/\s+$/, '') + '\n';
-  return { ghost: { removed: true, title: ghostTitle, reason: 'archived-in-history' }, cleanedText: cleaned };
-}
-
-// CR-2026-027 代码评审回修（b10）：幽灵清理的审计事件必须发生在 casWrite 成功之后——
-// CAS_CONFLICT 时 _backlog.yml 保持不变而 audit.log 不得误记已清理（FR-10 一致性边界）。
-// 调用方在 casWrite 成功后才调用本函数补记审计；迁移+清理合并的单次 casWrite 同样适用。
-function auditGhostCleanup(ws, ghostResult) {
-  if (ghostResult.ghost && ghostResult.ghost.removed) {
-    auditLog(ws, { kind: 'migrate-backlog-ghost', removed: true, title: ghostResult.ghost.title, by: identity(ws) });
-  }
 }
 
 function cmdNext(ws, cr, gates, flags) {
@@ -3548,15 +3270,13 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl cr-init     --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
                         [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
   crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
-  crctl report | crctl cr-metrics [--period <N>d]   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
+  crctl report [--period <N>d]                   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
-  crctl migrate-backlog                          _backlog.yml v1->v2 迁移（撤出 status/updated-at，升 schema）
   crctl git     <sub> [args...] [--cwd <p>] [--caller <skill>]   controlled-shell 白名单执行
                 （git commit 可加 --template <register|task-breakdown|writeback> [--cr <CR-ID>] 生成规范 message；--cr 显式直传，缺省走分支/subject 反向解析）
   crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
-  crctl task allocate <cr_id> [--slug <s>]   tasks/_index.yml CAS 分配 TASK-ID（task-breakdown/developing 态）
   crctl merge-metadata <cr_id> --repo <r> --trunk <t> --sha <sha>
                                                 _backlog.yml merge-commits[] 追加（merging/writing-back 态）
   crctl archive-move <cr_id> --final-status <s> [--archive-reason <r>] [--spec-id <id>]
@@ -3622,18 +3342,15 @@ function main() {
     case 'cr-init': return cmdCrInit(ws, gates, flags);
     case 'worktree-path': return cmdWorktreePath(ws, requireCr(positional), gates, flags);
     case 'report': return cmdReport(ws, gates, flags);
-    case 'cr-metrics': return cmdCrMetrics(ws, gates, flags);
     case 'task': {
       if (positional[0] === 'done') return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
-      if (positional[0] === 'allocate') return cmdTaskAllocate(ws, requireCr(positional.slice(1)), gates, flags);
-      fail('BAD_ARGS', 'task 仅支持子命令 done/allocate：crctl task done <CR-ID> --task <TASK-ID> | crctl task allocate <CR-ID> [--slug <s>]');
+      fail('BAD_ARGS', 'task 仅支持子命令 done：crctl task done <CR-ID> --task <TASK-ID>');
     }
     case 'merge-metadata': return cmdMergeMetadata(ws, requireCr(positional), gates, flags);
     case 'archive-move': return cmdArchiveMove(ws, requireCr(positional), gates, flags);
 
     case 'test': return cmdTest(ws, requireCr(positional), gates, flags);
     case 'next': return cmdNext(ws, requireCr(positional), gates, flags);
-    case 'migrate-backlog': return cmdMigrateBacklog(ws, gates, flags);
     case 'git': return cmdGit(ws, positional, flags);
     default: fail('BAD_ARGS', `未知子命令 ${cmd}。运行 crctl help 查看用法`);
   }

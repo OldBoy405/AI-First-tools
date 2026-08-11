@@ -45,7 +45,7 @@ function writeCrEntry(ws, cr, status) {
   const owners = ['requirement', 'development', 'test']
     .flatMap((k) => [`${k}:`, `  id: Ray`, `  assigned-at: "2026-08-04T12:00:00+08:00"`]);
   writeFileSync(path.join(ws, 'change-requests', '_backlog.yml'),
-    ['change-requests:', `  - id: ${cr}`, `    status: ${status}`, '    owners:',
+    ['schema: cr-backlog/v2', 'change-requests:', `  - id: ${cr}`, '    owners:',
       ...owners.map((l) => '      ' + l)].join('\n') + '\n');
   const dir = path.join(ws, 'change-requests', cr);
   mkdirSync(dir, { recursive: true });
