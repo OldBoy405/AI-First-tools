@@ -1754,7 +1754,7 @@ test('cr-init：权威原子分配 — 三文件建档登记，返回分配到�
     writeBacklog(ws, [{ id: 'CR-2026-001', status: 'drafting' }]);
     writeCrMd(ws, 'CR-2026-001', 'drafting');
     writeFileSync(path.join(ws, 'change-requests', '_index.yml'), 'change-requests:\n  - id: CR-2026-001\n    title: x\n    status: drafting\n    created: "2026-08-01T00:00:00+08:00"\n');
-    const r = runCrctl(['cr-init', '--title', '测试 CR', '--owner-requirement', 'Ray', '--year', '2026', '--workspace', ws]);
+    const r = runCrctl(['cr-init', '--title', '测试 CR', '--owner-requirement', 'Ray', '--owner-development', 'Ray', '--owner-test', 'Ray', '--year', '2026', '--workspace', ws]);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stdout.cr, 'CR-2026-002');
     const crMd = readFileSync(path.join(ws, 'change-requests', 'CR-2026-002', 'cr.md'), 'utf8');
@@ -1766,7 +1766,7 @@ test('cr-init：权威原子分配 — 三文件建档登记，返回分配到�
     const index = readFileSync(path.join(ws, 'change-requests', '_index.yml'), 'utf8');
     assert.ok(index.includes('- id: CR-2026-002') && index.includes('status: drafting'), 'index 登记');
     // 无显式 cr-id 入参：传入位置参数应被忽略或报错（签名核对）
-    const r2 = runCrctl(['cr-init', 'CR-X', '--title', 't', '--owner-requirement', 'R', '--year', '2026', '--workspace', ws]);
+    const r2 = runCrctl(['cr-init', 'CR-X', '--title', 't', '--owner-requirement', 'R', '--owner-development', 'R', '--owner-test', 'R', '--year', '2026', '--workspace', ws]);
     assert.equal(r2.status, 0, 'cr-init 无 <cr-id> 位置参数（多余位置参数不影响）');
     assert.equal(r2.stdout.cr, 'CR-2026-003', '仍按内部 max+1 分配');
   } finally { rmSync(ws, { recursive: true, force: true }); }
@@ -1844,7 +1844,7 @@ test('cr-init：--summary/--source/--target-version 一次写齐，缺省值与�
     writeCrMd(ws, 'CR-2026-001', 'drafting');
     writeFileSync(path.join(ws, 'change-requests', '_index.yml'), 'change-requests:\n  - id: CR-2026-001\n    title: x\n    status: drafting\n    created: "2026-08-01T00:00:00+08:00"\n');
     // 带旗标：三字段一次原子写齐（cr.md + _backlog）
-    const r = runCrctl(['cr-init', '--title', 'T', '--owner-requirement', 'Ray', '--year', '2026', '--summary', 'S: 含冒号', '--source', 'docs/analysis/x.md', '--target-version', '0.99', '--workspace', ws]);
+    const r = runCrctl(['cr-init', '--title', 'T', '--owner-requirement', 'Ray', '--owner-development', 'Ray', '--owner-test', 'Ray', '--year', '2026', '--summary', 'S: 含冒号', '--source', 'docs/analysis/x.md', '--target-version', '0.99', '--workspace', ws]);
     assert.equal(r.status, 0, r.stderr);
     const crMd = readFileSync(path.join(ws, 'change-requests', 'CR-2026-002', 'cr.md'), 'utf8');
     assert.ok(crMd.includes('summary: "S: 含冒号"'), 'summary 引号包裹写入 cr.md（含冒号不破坏 YAML）');
@@ -1853,7 +1853,7 @@ test('cr-init：--summary/--source/--target-version 一次写齐，缺省值与�
     const backlog = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
     assert.ok(backlog.includes('summary: "S: 含冒号"') && backlog.includes('source: docs/analysis/x.md') && backlog.includes('target-version: 0.99'), '_backlog 三字段同步');
     // 不带旗标：缺省值与旧硬编码同义（向后兼容）
-    const r2 = runCrctl(['cr-init', '--title', 'T2', '--owner-requirement', 'Ray', '--year', '2026', '--workspace', ws]);
+    const r2 = runCrctl(['cr-init', '--title', 'T2', '--owner-requirement', 'Ray', '--owner-development', 'Ray', '--owner-test', 'Ray', '--year', '2026', '--workspace', ws]);
     assert.equal(r2.status, 0, r2.stderr);
     const crMd2 = readFileSync(path.join(ws, 'change-requests', 'CR-2026-003', 'cr.md'), 'utf8');
     assert.ok(crMd2.includes('summary: ""'), '缺省 summary 为空串');
@@ -3575,7 +3575,7 @@ test('CR-2026-030 TASK-01：cr-init 三 Owner 原子注册——三角色显式�
     const crMd = readFileSync(path.join(ws, 'change-requests', 'CR-2026-001', 'cr.md'), 'utf8');
     assert.ok(crMd.includes('owner: R1'), '顶层兼容 owner 只等于 requirement Owner');
     assert.ok(crMd.includes('id: R1') && crMd.includes('id: D2') && crMd.includes('id: T3'), '三角色显式写入 cr.md');
-    const hist = [...crMd.matchAll(/^- \{ role: (\w+), from: "", to: (\S+), at: "([^"]+)", reason: initial-assignment \}$/gm)];
+    const hist = [...crMd.matchAll(/^\s*- \{ role: (\w+), from: "", to: (\S+), at: "([^"]+)", reason: initial-assignment \}$/gm)];
     assert.equal(hist.length, 3, '三条 initial-assignment history');
     assert.deepEqual(hist.map((m) => m[1]).sort(), ['development', 'requirement', 'test']);
     assert.deepEqual(hist.map((m) => m[2]).sort(), ['D2', 'R1', 'T3']);
@@ -3628,7 +3628,9 @@ test('CR-2026-030 TASK-01：cr-init 不发 outbox；register commit 后 status+o
     assert.equal(rc.status, 0, rc.rawStderr);
     const head = git(ws, ['rev-parse', 'HEAD']);
     assert.match(head, /^[0-9a-f]{40}$/);
-    assert.equal(rc.stdout.commit.sha, head, 'register commit 返回真实 HEAD SHA');
+    // git commit 的 stdout 混有 git 自身输出，JSON 结果在末尾（既有 cmdGit 设计）
+    const out = JSON.parse(rc.rawStdout.slice(rc.rawStdout.indexOf('{')));
+    assert.equal(out.commit.sha, head, 'register commit 返回真实 HEAD SHA');
     const events = outboxEvents(ws);
     assert.equal(events.length, 2, '注册提交产生 status + owners 两条事件');
     const st = events.find((e) => e.event_kind === 'status');
@@ -3678,7 +3680,7 @@ test('CR-2026-030 TASK-01：register outbox 写出失败 → commit 保留、war
     git(ws, ['add', '-A']);
     const rc = runCrctlWrapped(['git', 'commit', '--template', 'register', '--cr', 'CR-2026-001', '-m', 'register CR-2026-001', '--cwd', ws, '--workspace', ws], prelude);
     assert.equal(rc.status, 0, rc.rawStderr);
-    const out = JSON.parse(rc.rawStdout);
+    const out = JSON.parse(rc.rawStdout.slice(rc.rawStdout.indexOf('{')));
     const head = git(ws, ['rev-parse', 'HEAD']);
     assert.equal(out.commit.sha, head, 'outbox 失败不回滚 commit，真实 SHA 保留');
     assert.ok(out.outbox && out.outbox.status === null && out.outbox.owners === null, '失败事件以 null 呈现');

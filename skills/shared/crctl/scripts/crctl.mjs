@@ -60,6 +60,11 @@ function sha256(text) {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
+// CR-2026-030 TASK-02：最小标量转义（原 cmdCrInit 局部定义提升为文件内通用 helper，供注册/移交共用）
+function yamlScalar(v) {
+  return /^[\w./-]+$/.test(String(v)) ? String(v) : `"${String(v).replaceAll('"', '\\"')}"`;
+}
+
 // 证据摘要专用：行尾规范化后再哈希。同一份证据在 LF 的 worktree 里审批、
 // 合并后被 Windows autocrlf 检出为 CRLF，字节级哈希会产生 EVIDENCE_DRIFT
 // 误报（CR-2026-001 回写期实测触发）。证据漂移关心的是内容篡改，不是
@@ -2380,35 +2385,38 @@ function scanMaxCrNumber(ws, year) {
 function formatCrId(year, n) { return `CR-${year}-${String(n).padStart(3, '0')}`; }
 
 function cmdCrInit(ws, gates, flags) {
-  if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]');
-  if (!flags['owner-requirement']) fail('BAD_ARGS', 'cr-init 需要 --owner-requirement <id>（被指派人业务身份）');
+  if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]');
+  // FR-1（CR-2026-030）：三角色显式必填，缺任一参数在读取/创建任何文件之前零写入；不保留复制兼容路径
+  const req = String(flags['owner-requirement'] || '');
+  const dev = String(flags['owner-development'] || '');
+  const tst = String(flags['owner-test'] || '');
+  if (!req || !dev || !tst) {
+    fail('BAD_ARGS', 'cr-init 需要显式 --owner-requirement <id> --owner-development <id> --owner-test <id>（三角色独立指定，无隐式继承）');
+  }
   const year = flags.year || String(new Date().getFullYear());
   const cr = formatCrId(year, scanMaxCrNumber(ws, year) + 1);
   const now = nowIso();
   const by = identity(ws);
-  const ownerId = String(flags['owner-requirement']);
   // FR-9（CR-2026-022）：注册元信息可选旗标，缺省值与旧硬编码同义（summary="" / source=manual / target-version=tbd），向后兼容
-  const yamlScalar = (v) => (/^[\w./-]+$/.test(String(v)) ? String(v) : `"${String(v).replaceAll('"', '\\"')}"`);
   const summary = flags.summary ?? '';
   const source = flags.source ?? 'manual';
   const tv = flags['target-version'] ?? 'tbd';
+  // FR-1：同一个注册时间戳 now 复用于三角色当前 Owner 与三条 initial-assignment history
+  const ownerSlot = (id) => [`    id: ${id}`, `    assigned-at: "${now}"`];
   // cr.md 全量 frontmatter（owners/owner-history/时间戳全 crctl 生成）
   const fm = [
     '---',
     `id: ${cr}`,
     `title: ${flags.title.replaceAll('"', '\\"')}`,
     `summary: ${yamlScalar(summary)}`,
-    `owner: ${ownerId}`,
+    `owner: ${req}`,
     'owners:',
-    `  requirement:`,
-    `    id: ${ownerId}`,
-    `    assigned-at: "${now}"`,
-    `  development:`,
-    `    id: ${ownerId}`,
-    `    assigned-at: "${now}"`,
-    `  test:`,
-    `    id: ${ownerId}`,
-    `    assigned-at: "${now}"`,
+    '  requirement:',
+    ...ownerSlot(req),
+    '  development:',
+    ...ownerSlot(dev),
+    '  test:',
+    ...ownerSlot(tst),
     `target-version: ${yamlScalar(tv)}`,
     `source: ${yamlScalar(source)}`,
     'status: drafting',
@@ -2418,9 +2426,9 @@ function cmdCrInit(ws, gates, flags) {
     'last-push-at: ""',
     'last-push-by: ""',
     'owner-history:',
-    `  - { role: requirement, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
-    `  - { role: development, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
-    `  - { role: test, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
+    `  - { role: requirement, from: "", to: ${req}, at: "${now}", reason: initial-assignment }`,
+    `  - { role: development, from: "", to: ${dev}, at: "${now}", reason: initial-assignment }`,
+    `  - { role: test, from: "", to: ${tst}, at: "${now}", reason: initial-assignment }`,
     'handover-history: []',
     '---',
     '',
@@ -2433,17 +2441,14 @@ function cmdCrInit(ws, gates, flags) {
     `  - id: ${cr}`,
     `    title: ${flags.title.replaceAll('"', '\\"')}`,
     `    summary: ${yamlScalar(summary)}`,
-    `    owner: ${ownerId}`,
+    `    owner: ${req}`,
     '    owners:',
-    `      requirement:`,
-    `        id: ${ownerId}`,
-    `        assigned-at: "${now}"`,
-    `      development:`,
-    `        id: ${ownerId}`,
-    `        assigned-at: "${now}"`,
-    `      test:`,
-    `        id: ${ownerId}`,
-    `        assigned-at: "${now}"`,
+    '      requirement:',
+    ...ownerSlot(req),
+    '      development:',
+    ...ownerSlot(dev),
+    '      test:',
+    ...ownerSlot(tst),
     `    target-version: ${yamlScalar(tv)}`,
     `    source: ${yamlScalar(source)}`,
     '    prd-path: ""',
@@ -2470,12 +2475,22 @@ function cmdCrInit(ws, gates, flags) {
     { path: bp, expectedHash: sha256(backlogText), newText: newBacklog },
     { path: ip, expectedHash: sha256(indexText), newText: newIndex },
   ]);
-  auditLog(ws, { kind: 'ledger', op: 'cr-init', cr, actor: by, title: flags.title });
-  emitOutboxEvent(ws, {
-    event_kind: 'cr-init', cr_id: cr, actor: by,
-    payload: { title: flags.title, ownerRequirement: ownerId },
+  // FR-1/FR-2：成功 audit 记录完整 Owner 投影与三项初始变化；不记录 branch/worktree/commit SHA/outbox 成功事实（尚未发生）
+  auditLog(ws, {
+    kind: 'ledger', op: 'cr-init', cr, actor: by, title: flags.title,
+    owners: { requirement: req, development: dev, test: tst },
+    changes: ['requirement', 'development', 'test'].map((role) => ({ role, from: '', to: role === 'requirement' ? req : role === 'development' ? dev : tst, at: now, reason: 'initial-assignment' })),
   });
-  ok({ op: 'cr-init', cr, title: flags.title, status: 'drafting', files: { crMd: path.join('change-requests', cr, 'cr.md'), backlog: bp, index: ip } });
+  // FR-2：cr-init 自身不发 outbox——注册事实由 register commit 成功后以真实 SHA 产生
+  ok({
+    op: 'cr-init', cr, title: flags.title, status: 'drafting',
+    owners: {
+      requirement: { id: req, 'assigned-at': now },
+      development: { id: dev, 'assigned-at': now },
+      test: { id: tst, 'assigned-at': now },
+    },
+    files: { crMd: path.join('change-requests', cr, 'cr.md'), backlog: bp, index: ip },
+  });
 }
 
 /* ────────────────────────── task allocate（S7，CR-2026-021 TASK-07） ──────────────────────────
@@ -2557,7 +2572,8 @@ function cmdWorktreePath(ws, cr, gates, flags) {
   if (!flags.repo) fail('BAD_ARGS', 'worktree-path 需要 --repo <repo-id>');
   const bucket = flags.repo === 'knowledge-base' || flags.repo === 'ai-first-platform-docs' ? 'knowledge-base' : flags.repo;
   const p = path.join(deriveInstallRoot(ws), '.rayai-worktrees', bucket, 'requirement', cr);
-  ok({ op: 'worktree-path', cr, repo: flags.repo, bucket, path: p });
+  // CR-2026-030 TASK-02（FR-2/AC-5）：canonical branch 只在此处生成，Skill/Pipeline 不再拼接
+  ok({ op: 'worktree-path', cr, repo: flags.repo, bucket, branch: `requirement/${cr}`, path: p });
 }
 
 /** 解析 --period（仅支持 <N>d，如 7d/30d），返回该窗口起始的日期字符串（YYYY-MM-DD）；无 period 输入返回 null。 */
@@ -2655,6 +2671,24 @@ function resolveTemplateCr(ws, cwd, subject) {
   fail('BAD_ARGS', 'git commit --template 无法确定 cr：--cwd 分支非 requirement/CR-* 且 subject 不含 CR 编号');
 }
 
+// CR-2026-030 TASK-02：cr.md 权威 Owner 投影读取（register commit 后置事件的数据源）。
+// 软失败变体：commit 已是权威事实，Owner 校验失败只返回结构化原因，由调用方记 warning + SKIPPED audit（SDD §4.2）。
+function tryReadCrOwnerProjection(ws, cr) {
+  try {
+    const md = readCrMdFrontmatter(ws, cr);
+    if (!md || !md.owners) return { ok: false, why: `cr.md 缺少 owners 投影: ${cr}` };
+    const slots = {};
+    for (const role of ['requirement', 'development', 'test']) {
+      const s = md.owners[role];
+      if (!s || !s.id) return { ok: false, why: `cr.md owners.${role} 缺失，无法产生注册事件` };
+      slots[role] = { id: String(s.id), 'assigned-at': s['assigned-at'] ? String(s['assigned-at']) : '' };
+    }
+    return { ok: true, owners: slots };
+  } catch (e) {
+    return { ok: false, why: String(e && e.message || e) };
+  }
+}
+
 function applyCommitTemplate(ws, argv, flags) {
   const kind = flags.template;
   const tpl = COMMIT_TEMPLATES[kind];
@@ -2675,7 +2709,8 @@ function applyCommitTemplate(ws, argv, flags) {
     cr = resolveTemplateCr(ws, flags.cwd ? path.resolve(flags.cwd) : ws, subject);
   }
   argv[mi + 1] = tpl(cr, subject);
-  return argv;
+  // CR-2026-030 TASK-02：返回模板上下文（register 模板在 commit 成功后触发真实 SHA 注册事件）
+  return { args: argv, templateContext: { kind, cr } };
 }
 
 /** 行级追加 supplemental-reviews 段条目（硬失败：无该段则创建，段结构异常则报错）。 */
@@ -3076,11 +3111,55 @@ function cmdGit(ws, argv, flags) {
   if (!sub) fail('BAD_ARGS', 'git 需要子命令，如 crctl git status --short --cwd <path>');
   let args = argv.slice(1);
   // S10（CR-2026-021 TASK-09）：git commit --template <kind> 生成规范 message（可选分支，不影响 -m 直传白名单校验）
-  if (sub === 'commit' && flags.template) args = applyCommitTemplate(ws, args, flags);
+  let templateContext = null;
+  if (sub === 'commit' && flags.template) {
+    const t = applyCommitTemplate(ws, args, flags);
+    args = t.args;
+    templateContext = t.templateContext;
+  }
   const r = controlledGit(ws, sub, args, flags.cwd ? path.resolve(flags.cwd) : ws, flags.caller);
   if (r.code === 'FORBIDDEN_SUBCOMMAND') fail('FORBIDDEN_SUBCOMMAND', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   if (r.code === 'SHELL_UNAVAILABLE') fail('SHELL_UNAVAILABLE', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   let outbox = null;
+  let registerMeta = null;
+  // CR-2026-030 TASK-02（FR-2）：register commit 成功后，以真实 HEAD SHA 产生 status + owners 两类注册事件。
+  // commit 失败不读 HEAD、不发事件；单个 outbox 写出失败对应 null + warnings EMIT_FAILED，commit 不回滚（Git 是权威）。
+  if (r.ok && sub === 'commit' && templateContext && templateContext.kind === 'register') {
+    const cwd = flags.cwd ? path.resolve(flags.cwd) : ws;
+    const cr = templateContext.cr;
+    const sha = gitHeadSha(ws, cwd);
+    const warnings = [];
+    const emit = (ev) => {
+      const name = emitOutboxEvent(ws, ev);
+      if (!name) warnings.push({ code: 'EMIT_FAILED', event_kind: ev.event_kind });
+      return name;
+    };
+    try {
+      const proj = tryReadCrOwnerProjection(ws, cr);
+      if (!proj.ok) {
+        auditLog(ws, { kind: 'register-events', cr, result: 'SKIPPED', why: proj.why });
+        registerMeta = { commit: { sha }, outbox: { status: null, owners: null }, warnings: [{ code: 'REGISTER_EVENTS_SKIPPED', why: proj.why }] };
+      } else {
+        const owners = proj.owners;
+        const changes = ['requirement', 'development', 'test'].map((role) => ({
+          role, from: '', to: owners[role].id, at: owners[role]['assigned-at'], reason: 'initial-assignment',
+        }));
+        registerMeta = {
+          commit: { sha },
+          outbox: {
+            status: emit({ event_kind: 'status', cr_id: cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: sha, actor: identity(ws) }),
+            owners: emit({ event_kind: 'owners', cr_id: cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: sha, actor: identity(ws), payload: { owners, changes } }),
+          },
+          warnings,
+        };
+      }
+    } catch (e) {
+      // commit 已是权威事实，不回滚；事件构造异常仅结构化 warning + audit（SDD §4.2）
+      const why = String(e && e.message || e);
+      auditLog(ws, { kind: 'register-events', cr, result: 'SKIPPED', why });
+      registerMeta = { commit: { sha }, outbox: { status: null, owners: null }, warnings: [{ code: 'REGISTER_EVENTS_SKIPPED', why }] };
+    }
+  }
   if (r.ok && sub === 'push' && !args.includes('--delete')) {
     // checkpoint 事件：携带被推送仓的 HEAD sha，供 worker 补全 --embedded 状态事件的空 commit_sha（§A.5）。
     // CR 上下文从 HEAD 提交信息或分支参数提取；提不到（非 CR 相关推送）则不发。
@@ -3098,7 +3177,8 @@ function cmdGit(ws, argv, flags) {
   }
   process.stdout.write(r.stdout || '');
   process.stderr.write(r.stderr || '');
-  ok(outbox ? { ok: r.ok, exit: r.exit, outbox } : { ok: r.ok, exit: r.exit });
+  const extra = registerMeta ? { commit: registerMeta.commit, outbox: registerMeta.outbox, warnings: registerMeta.warnings } : (outbox ? { outbox } : {});
+  ok({ ok: r.ok, exit: r.exit, ...extra });
   if (!r.ok) process.exit(r.exit || 1);
 }
 
