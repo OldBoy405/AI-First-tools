@@ -21,7 +21,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 // CR-2026-031 TASK-03：YAML 子集解析器与 workspace 基础设施同源共享（lib/ 下，禁止在 crctl.mjs 复刻）。
 import { parseYaml } from './lib/yaml-subset.mjs';
-import { deriveInstallRoot } from './lib/workspace-transactions.mjs';
+import { deriveInstallRoot, TxError } from './lib/workspace-transactions.mjs';
+import { FAULT_POINTS, faultPoint, nowIso } from './lib/durable-tx.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -37,31 +38,18 @@ function ok(obj) {
   process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
 }
 
-/* ──────────── CR-2026-031 TASK-01：确定性故障注入（仅测试启用）────────────
- * CRCTL_FAULT_POINT 未设置 → 生产零行为（fault() 立即返回）；
- * 设置且命中挂接点 → 结构化 FAULT_INJECTED 退出；
- * 设置为未登记 point → main() 入口 UNKNOWN_FAULT_POINT 硬失败（防拼写错误静默成「没注入」）。
- * FAULT_POINTS 为唯一登记表：后续 TASK 嵌入调用时在此追加一行（SDD §9.1）。 */
-const FAULT_POINTS = [
-  'ledger-cas-multi-between-rename', // casWriteMulti 连续 rename 间隙的旧半状态窗口（TASK-02 随该函数删除）
-];
+/* ──────────── CR-2026-031 TASK-01/04：确定性故障注入（仅测试启用）────────────
+ * CRCTL_FAULT_POINT 未设置 → 生产零行为；命中 → FAULT_INJECTED 退出。
+ * FAULT_POINTS 唯一登记表已随 TASK-04 下沉到 lib/durable-tx.mjs（re-import）；
+ * lib 抛 TxError，本入口统一转 JSON fail，保持单进程输出契约。 */
 function fault(point) {
-  if (process.env.CRCTL_FAULT_POINT === point)
-    fail('FAULT_INJECTED', `确定性故障注入 point=${point}（CR-2026-031 测试专用）`, { point });
+  try { faultPoint(point); } catch (e) {
+    if (e instanceof TxError) fail(e.code, e.message, e.extra);
+    throw e;
+  }
 }
 
-function nowIso() {
-  // 本地时区 ISO 8601（含偏移），由代码生成，不接受外部传入（治理⑩）
-  const d = new Date();
-  const pad = (n, w = 2) => String(Math.abs(n)).padStart(w, '0');
-  const off = -d.getTimezoneOffset();
-  const sign = off >= 0 ? '+' : '-';
-  return (
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
-    `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}` +
-    `${sign}${pad(Math.floor(off / 60))}:${pad(off % 60)}`
-  );
-}
+// nowIso 自 TASK-04 起 re-import 自 lib/durable-tx.mjs（唯一实现）。
 
 // CR-2026-027 代码评审回修（b4）：reviewed-at 时间戳统一解析为 epoch 毫秒后再比较。
 // ISO 字符串字典序比较在跨时区偏移时会产生错误先后判定（如 +08:00 vs Z）；
