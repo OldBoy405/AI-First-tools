@@ -3062,6 +3062,54 @@ test('CR-2026-026 ⑨: 三轮普通 BLOCK 后第 4 轮 --bump-attempt → LOOP_E
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+// CR-2026-030 review repair（pass-at-max）：attempt 计数到顶但最新一轮评审 verdict=pass 时
+// 无需再自修复，advance 不得被 LOOP_EXHAUSTED 阻断（与 review-code SKILL「pass 即可推进」契约一致）；
+// verdict=block 时仍必须 LOOP_EXHAUSTED 阻断。
+test('CR-2026-030 review repair：review-code pass at maxAttempts 可推进 code-reviewing；block at max 仍阻断（AC-13 边界）', () => {
+  const seedLoop = (ws, attempts) => writeEvidence(ws, 'CR-T1', 'review-loop.yml',
+    '# 由 crctl attempt 维护，请勿手工编辑\nloops:\n  review-code:\n    current-cycle: 1\n' +
+    `    current-attempt: ${attempts}\n    attempts:\n` +
+    Array.from({ length: attempts }, (_, i) =>
+      `      - { attempt: ${i + 1}, at: \"2026-08-11T10:00:0${i}+08:00\", by: \"tester\", cycle: 1 }`).join('\n') + '\n');
+  // ① pass at max（3/3）→ 推进 code-reviewing 成功
+  const ws1 = makeWorkspace();
+  try {
+    writeCrEntry(ws1, 'CR-T1', 'developing');
+    seedLoop(ws1, 3);
+    writeEvidence(ws1, 'CR-T1', 'review-annotations/code.yml', 'verdict: pass\nblockers: []\n');
+    writeEvidence(ws1, 'CR-T1', 'test-report.md', '---\nstatus: pass\n---\n');
+    const r = runCrctl(['advance', 'CR-T1', '--to', 'code-reviewing', '--trigger', 'review-code', '--expect', 'developing', '--workspace', ws1, '--no-commit']);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.advanced, true);
+  } finally { rmSync(ws1, { recursive: true, force: true }); }
+  // ② block at max（3/3）→ attemptsWithinLimit 仍为 LOOP_EXHAUSTED 阻断
+  const ws2 = makeWorkspace();
+  try {
+    writeCrEntry(ws2, 'CR-T1', 'developing');
+    seedLoop(ws2, 3);
+    writeEvidence(ws2, 'CR-T1', 'review-annotations/code.yml', 'verdict: block\nblockers:\n  - \"still broken\"\n');
+    writeEvidence(ws2, 'CR-T1', 'test-report.md', '---\nstatus: pass\n---\n');
+    const r = runCrctl(['advance', 'CR-T1', '--to', 'code-reviewing', '--trigger', 'review-code', '--expect', 'developing', '--workspace', ws2, '--no-commit']);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'GATE_BLOCKED');
+    const att = r.stderr.error.gate.checks.find((c) => c.type === 'attemptsWithinLimit');
+    assert.ok(att, 'gate 必须包含 attemptsWithinLimit 检查');
+    assert.equal(att.ok, false, 'block at max 必须仍 LOOP_EXHAUSTED');
+    assert.equal(att.why, 'LOOP_EXHAUSTED：自修复轮次已用尽，禁止继续推进，须人工处理');
+  } finally { rmSync(ws2, { recursive: true, force: true }); }
+  // ③ pass at 2/3（未耗尽）→ 正常推进（回归）
+  const ws3 = makeWorkspace();
+  try {
+    writeCrEntry(ws3, 'CR-T1', 'developing');
+    seedLoop(ws3, 2);
+    writeEvidence(ws3, 'CR-T1', 'review-annotations/code.yml', 'verdict: pass\nblockers: []\n');
+    writeEvidence(ws3, 'CR-T1', 'test-report.md', '---\nstatus: pass\n---\n');
+    const r = runCrctl(['advance', 'CR-T1', '--to', 'code-reviewing', '--trigger', 'review-code', '--expect', 'developing', '--workspace', ws3, '--no-commit']);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.advanced, true);
+  } finally { rmSync(ws3, { recursive: true, force: true }); }
+});
+
 // ── CR-2026-027 代码评审回修（b1~b9 覆盖 test-coverage 缺口）──
 test('CR-2026-027 回修 b1：findHistoryEntry 在同级下一条目停止（不被后续条目字段覆盖）+ history 重复 CR 硬失败', () => {
   const ws = makeWorkspace();

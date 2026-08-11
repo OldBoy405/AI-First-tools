@@ -736,7 +736,11 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
       });
     } else if (check.type === 'attemptsWithinLimit') {
       const r = readAttempts(ws, cr, check.loop, gates);
-      const okv = !r.exhausted;
+      // CR-2026-030 review repair（pass-at-max）：轮次到顶但最新评审 verdict=pass 时不判 exhausted——
+      // pass 无需再自修复（与 review-code SKILL「pass 即可推进 code-reviewing」契约一致）；
+      // block/缺证据仍 LOOP_EXHAUSTED 阻断，须人工处理。
+      const passedAtLimit = r.exhausted && latestReviewVerdict(ws, cr, check.loop) === 'pass';
+      const okv = !r.exhausted || passedAtLimit;
       out.checks.push({ type: check.type, loop: check.loop, ok: okv, current: r.current, max: r.max, why: okv ? null : 'LOOP_EXHAUSTED：自修复轮次已用尽，禁止继续推进，须人工处理' });
     } else {
       out.checks.push({ type: check.type, ok: false, why: '未知门禁类型' });
@@ -1895,6 +1899,18 @@ function cmdAttempt(ws, cr, gates, flags) {
  */
 const REVIEW_STAGE_FILES = { requirement: 'requirement.yml', 'tech-design': 'sdd.yml', code: 'code.yml', 'dev-plan': 'dev-plan.yml' };
 const REVIEW_STAGE_LOOPS = { requirement: 'review-requirement', 'tech-design': 'review-tech-design', code: 'review-code', 'dev-plan': 'review-dev-plan' };
+
+// CR-2026-030 review repair（pass-at-max）：attempt 计数到顶但最新一轮评审 verdict=pass 时无需再自修复。
+// loop→stage 反查 REVIEW_STAGE_LOOPS，读取对应 canonical 评审文件的 verdict；非评审 loop 或文件缺失/不可解析返回 null（fail-closed，不豁免）。
+function latestReviewVerdict(ws, cr, loopRef) {
+  const stage = Object.keys(REVIEW_STAGE_LOOPS).find((s) => REVIEW_STAGE_LOOPS[s] === loopRef) || null;
+  if (!stage) return null;
+  const p = path.join(crDir(ws, cr), 'review-annotations', REVIEW_STAGE_FILES[stage]);
+  const text = readFileChecked(p);
+  if (text == null) return null;
+  const doc = parseYaml(text.replaceAll('\r\n', '\n')) || {};
+  return typeof doc.verdict === 'string' ? doc.verdict : null;
+}
 // 前置态与各 review-* SKILL 的 Step 顺序对齐（先 review-record 落盘证据、后 advance 进评审态）：
 // - requirement：评审在 drafting 执行（block 回 drafting 重审；requirement-reviewing 保留兼容重跑）
 // - tech-design：write-tech-design 落盘后先进 tech-design-review-pending（其 statusGate 只需 sdd.md），再评审
