@@ -15,14 +15,6 @@
       "description": "写入 cr.md title 字段"
     },
     {
-      "key": "cr_id",
-      "label": "CR ID（可选）",
-      "type": "text",
-      "required": false,
-      "placeholder": "留空则自动生成，如 CR-2026-001",
-      "description": "显式指定 CR-ID；为空时由 requirement-register 根据 _index.yml 自动生成"
-    },
-    {
       "key": "summary",
       "label": "需求摘要",
       "type": "multiline",
@@ -85,7 +77,7 @@
       "kind": "skill",
       "label": "注册需求并派生 worktree",
       "ref": "requirement-register",
-      "prompt": "执行 requirement-register：\n- cr_id: {{inputs.cr_id}}\n- title: {{inputs.title}}\n- summary: {{inputs.summary}}\n- source: {{inputs.source}}\n- target_version: {{inputs.target_version}}\n- requirement_owner: {{inputs.requirement_owner}}\n- dev_owner: {{inputs.dev_owner}}\n- test_owner: {{inputs.test_owner}}\n\n动作：\n1. 读取 dir-graph.yaml repositories[*]（active≠false），解析 knowledge-base repo、各 repo.trunk 与 worktree bucket；若返回 REPO_TRUNK_UNRESOLVED 则 abort\n2. cr_id 为可选透传参数（cr-init 权威分配，忽略显式值，不校验格式/占用——僵尸参数已随 CR-2026-022 FR-9 移除）\n3. 经 `crctl cr-init --title \"...\" --owner-requirement ... --summary \"...\" --source ... --target-version ...`（--workspace <ws>）在 knowledge-base trunk 原子建档并登记（cr.md + _backlog + _index，casWriteMulti 三文件，返回 cr-id；模型不得手写账本）。注册元信息 summary/source/target-version 一次传齐，不得建档后二次补写 frontmatter（CR-2026-028 FR-6）\n4. 通过 controlled-shell 提交并推送 registration commit 到 knowledge-base trunk，确保 trunk 可感知在途 CR，且后续 worktree 能包含 cr.md\n5. 对每个 active repo 创建 worktree 到 workspace 根目录的 `.rayai-worktrees/{bucket}/requirement/{cr_id}`；role=knowledge-base 的仓固定 bucket=`knowledge-base`，其他仓 bucket=repo.id；不得切换主工作区 HEAD\n\n在 node-1.md 末尾必须输出机器可读 YAML：\n```yaml\nexecution_context:\n  cr_id: CR-YYYY-NNN\n  branch: requirement/CR-YYYY-NNN\n  owners:\n    requirement:\n      id: {{inputs.requirement_owner}}\n      assigned-at: ISO-8601\n    development:\n      id: {{inputs.dev_owner}}\n      assigned-at: ISO-8601\n    test:\n      id: {{inputs.test_owner}}\n      assigned-at: ISO-8601\n  knowledge_base_worktree: /abs/path/.rayai-worktrees/knowledge-base/requirement/CR-YYYY-NNN\n  repo_worktrees:\n    - repo: knowledge-base\n      role: knowledge-base\n      path: /abs/path/.rayai-worktrees/knowledge-base/requirement/CR-YYYY-NNN\n```\n后续节点只能从 execution_context.cr_id、execution_context.owners 与 knowledge_base_worktree 取值。",
+      "prompt": "执行 requirement-register：\n- title: {{inputs.title}}\n- summary: {{inputs.summary}}\n- source: {{inputs.source}}\n- target_version: {{inputs.target_version}}\n- requirement_owner: {{inputs.requirement_owner}}\n- dev_owner: {{inputs.dev_owner}}\n- test_owner: {{inputs.test_owner}}\n\n动作：\n1. 读取 dir-graph.yaml repositories[*]（active≠false），解析 knowledge-base repo、各 repo.trunk 与 worktree bucket；若返回 REPO_TRUNK_UNRESOLVED 则 abort\n3. 经 `crctl cr-init --title \"...\" --owner-requirement ... --owner-development ... --owner-test ... --summary \"...\" --source ... --target-version ...`（--workspace <ws>）在 knowledge-base trunk 原子建档并登记（三 Owner 显式必填，CR-2026-030 FR-1）（cr.md + _backlog + _index，casWriteMulti 三文件，返回 cr-id；模型不得手写账本）。注册元信息 summary/source/target-version 一次传齐，不得建档后二次补写 frontmatter（CR-2026-028 FR-6）\n4. 通过 controlled-shell 提交并推送 registration commit 到 knowledge-base trunk，确保 trunk 可感知在途 CR，且后续 worktree 能包含 cr.md\n5. 对每个 active repo 经 `crctl worktree-path {cr_id} --repo {repo.id}` 取权威 bucket/branch/path 后创建 worktree；不得手拼 bucket/branch/path；role=knowledge-base 的仓固定 bucket=`knowledge-base`；不得切换主工作区 HEAD\n\n在 node-1.md 末尾必须输出机器可读 YAML：\n```yaml\nexecution_context:\n  cr_id: CR-YYYY-NNN\n  branch: requirement/CR-YYYY-NNN\n  owners:\n    requirement:\n      id: {{inputs.requirement_owner}}\n      assigned-at: ISO-8601\n    development:\n      id: {{inputs.dev_owner}}\n      assigned-at: ISO-8601\n    test:\n      id: {{inputs.test_owner}}\n      assigned-at: ISO-8601\n  knowledge_base_worktree: /abs/path/.rayai-worktrees/knowledge-base/requirement/CR-YYYY-NNN\n  repo_worktrees:\n    - repo: knowledge-base\n      role: knowledge-base\n      path: /abs/path/.rayai-worktrees/knowledge-base/requirement/CR-YYYY-NNN\n```\n后续节点只能从 execution_context.cr_id、execution_context.owners 与 knowledge_base_worktree 取值。",
       "onFail": "abort",
       "timeoutMinutes": 10
     },

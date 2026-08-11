@@ -47,10 +47,10 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
 
 ### Step 2 — 权威注册：crctl cr-init（S8，唯一权威分配与建档）
 
-1. 运行 `crctl cr-init --title "{title}" --owner-requirement {requirement_owner} --summary "{summary}" --source {source} --target-version {target_version} [--year Y] --workspace <ws>`（**不取显式 cr-id 入参**——SDD-BLOCK-001 语义：内部分配 `CR-{Y}-{NNN+1}`，以 `casWriteMulti` 原子写 `cr.md`(新建) + `_backlog.yml`(追加) + `_index.yml`(登记)，成功后在输出 JSON 返回分配到的 `cr`）。
-   - `cr.md` frontmatter 全量由 crctl 生成（owners/owner-history/时间戳 = identity(ws)/nowIso()）；`--owner-requirement` 只提供被指派人业务身份；`--summary`/`--source`/`--target-version` 为注册元信息旗标（CR-2026-022 FR-9，缺省 summary="" / source=manual / target-version=tbd），**一次传齐，不得建档后二次补写**（CR-2026-028 FR-6）。
+1. 运行 `crctl cr-init --title "{title}" --owner-requirement {requirement_owner} --owner-development {dev_owner} --owner-test {test_owner} --summary "{summary}" --source {source} --target-version {target_version} [--year Y] --workspace <ws>`（**不取显式 cr-id 入参**——SDD-BLOCK-001 语义：内部分配 `CR-{Y}-{NNN+1}`，以 `casWriteMulti` 原子写 `cr.md`(新建) + `_backlog.yml`(追加) + `_index.yml`(登记)，成功后在输出 JSON 返回分配到的 `cr` 与完整三角色 `owners`）。
+   - `cr.md` frontmatter 全量由 crctl 生成（owners/owner-history/时间戳 = identity(ws)/nowIso()）；**三角色 Owner 显式必填**（CR-2026-030 FR-1：缺任一角色 BAD_ARGS 零写入，无隐式继承）；`--summary`/`--source`/`--target-version` 为注册元信息旗标（CR-2026-022 FR-9，缺省 summary="" / source=manual / target-version=tbd），**一次传齐，不得建档后二次补写**（CR-2026-028 FR-6）。
    - 并发下后到者见 `_index`/`_backlog` hash 已变 → `CAS_CONFLICT`，三文件全不落盘 → **重跑 cr-init**（重读 max、自动拿新号），不撞号。
-   - `cr_id` 变量 = cr-init 返回的 `cr` 字段。
+   - `cr_id` 变量 = cr-init 返回的 `cr` 字段；三个 owner 变量 = cr-init 返回的 `owners` 投影。
 2. **模型不得手写 `cr.md`/追加 `_backlog.yml`/登记 `_index.yml`**（guard deny + cr-init 独占，含 CAS+审计）。`summary`/`source`/`target-version` 已随 cr-init 写入 `cr.md` frontmatter（CR-2026-028 FR-6 废除建档后手工补 frontmatter）。
 
 ### Step 3 — 提交注册记录到 knowledge-base trunk
@@ -64,7 +64,9 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
 ```ts
 <!-- lint-prompts:ignore --> 受控 shell 代码块：runGit = 受控 git 适配器（S10 模板经 crctl git commit）
 await runGit({ subcommand: "add", args: ["change-requests/_backlog.yml", "change-requests/_index.yml", `change-requests/${crId}/cr.md`], cwd: knowledgeBaseRepo.path });
-await runGit({ subcommand: "commit", args: ["--template", "register", "--cr", crId, "-m", title], cwd: knowledgeBaseRepo.path });  // S10（FR-10）：--cr 直传 cr-init 返回的已知 CR 号，跳过分支探测/subject 正则反向解析
+const registerCommit = await runGit({ subcommand: "commit", args: ["--template", "register", "--cr", crId, "-m", title], cwd: knowledgeBaseRepo.path });  // S10（FR-10）：--cr 直传 cr-init 返回的已知 CR 号，跳过分支探测/subject 正则反向解析
+// CR-2026-030 FR-2：register commit 成功后 crctl 以真实 HEAD SHA 产生 status((new)->drafting) + owners(initial-assignment x3) 两类注册事件；
+// 只消费返回 JSON 的 commit.sha / outbox / warnings，不自行读 HEAD、不拼 branch/path/SHA/事件（AC-5）
 await runGit({ subcommand: "push", args: ["origin", knowledgeBaseRepo.trunk], cwd: knowledgeBaseRepo.path });
 ```
 
@@ -77,11 +79,12 @@ await runGit({ subcommand: "push", args: ["origin", knowledgeBaseRepo.trunk], cw
 **受控 shell 调用序列**：
 
 ```ts
-// 路径拼接用 crctl worktree-path 的唯一权威规则（S9）：bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id
+// 路径拼接用 crctl worktree-path 的唯一权威规则（S9）：bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id；branch 由 worktree-path 返回
 const wt = await runCrctl(["worktree-path", crId, "--repo", repo.id, "--workspace", workspaceRoot]);
+const branch = wt.branch; // CR-2026-030 FR-2：canonical branch 只由原语返回，不在 Skill 内拼接
 await runGit({ subcommand: "fetch", args: ["origin"], cwd: repo.path });
 await runGit({ subcommand: "worktree",
-  args: ["add", "-b", `requirement/${crId}`,
+  args: ["add", "-b", branch,
          wt.path,
          repo.trunk],
   cwd: repo.path });
@@ -129,3 +132,4 @@ execution_context:
 | 受控 shell 不可用（`SHELL_UNAVAILABLE`） | 停止执行，返回结构化错误；**禁止**输出「请在终端运行」提示 |
 | git 命令执行失败（`EXEC_FAILED`） | 展示 stderr；对 `worktree add` 重复分支错误，回退到「分支已存在」分支处理 |
 | 单仓 `fetch` 失败（如 SSL 证书校验失败，`EXEC_FAILED` 之外） | 降级为「从本地 trunk 派生 worktree，并在输出摘要中标注 `STALE_BASE`」——不 abort，也不静默视为成功（基线滞后必须显式提示；后续 push 前先补 fetch）（CR-2026-022 FR-14，注册实录坐实） |
+| commit/push/worktree 任一步失败（`REGISTRATION_INCOMPLETE`，CR-2026-030 FR-2/AC-6） | `cr-init` 成功后锁定 `cr_id`，**不得再次调用 cr-init**、不输出成功 execution_context；返回 `{code: REGISTRATION_INCOMPLETE, cr_id, failed_step, completed_steps, commit_sha, created_worktrees, warnings}`，含已完成的步骤与已创建 worktree；不回收 CR-ID，不做跨进程续跑 |

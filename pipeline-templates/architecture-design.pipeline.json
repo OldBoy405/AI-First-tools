@@ -83,7 +83,7 @@
       "kind": "skill",
       "label": "记录架构审批并推进状态",
       "ref": "approve-tech-design",
-      "prompt": "在 human_approval 通过后执行 approve-tech-design：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n校验 cr.md 中 owners.development.id 与 assigned-at 均存在；经 `crctl approve --stage tech-design`（仅人类交互式终端）完成：校验评审证据、写 approval.yml、级联 advance 到 tech-design-reviewed。在 node-4.md 输出审批记录路径、当前 status、开发负责人和下一步 coding pipeline 指令。",
+      "prompt": "在 human_approval 通过后执行 approve-tech-design：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n只传递审批决定：平台非 TTY 用默认 grant 落点（`crctl approve {cr_id} --stage tech-design --grant`），本地无 grant 时要求交互式终端（`crctl approve {cr_id} --stage tech-design`）。crctl 完成评审证据校验、写 approval.yml、级联 advance 到 tech-design-reviewed；不复制 grant 路径、CLI 算法或 reject 回退命令。\n\n失败语义：grant 缺失/签名错误/归属不符/证据漂移为技术失败 → 立即 abort；grant decision=reject 返回 `APPROVAL_DECLINED_ROLLED_BACK`（业务结果，回退已完成）→ 中止当前正向 pipeline，不得伪装成技术失败。\n\n在 node-4.md 输出审批记录路径、当前 status、开发负责人和下一步 coding pipeline 指令。",
       "onFail": "abort",
       "timeoutMinutes": 5
     },
