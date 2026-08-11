@@ -12,8 +12,20 @@ import os from 'node:os';
 const LINT = path.resolve(import.meta.dirname, '..', 'lint-prompts.mjs');
 const RULES = path.resolve(import.meta.dirname, '..', '..', '..', 'controlled-shell', 'rules.json');
 
+// CR-2026-030 TASK-01：R7 权威字面量校验的 fixture 最小合法 dir-graph.yaml（缺省写入，可被 files 覆盖）
+const MINI_DIR_GRAPH = [
+  'change-request-track:',
+  '  state_machine:',
+  '    field: "status"',
+  '    transitions:',
+  '      - { from: task-breakdown, to: tech-design-reviewed, trigger: "review-dev-plan:block -> write-dev-plan" }',
+  '      - { from: task-breakdown, to: tech-design-review-pending, trigger: "review-dev-plan:upstream-design-blocker" }',
+  '      - { from: code-approved, to: merging, trigger: "merge-feature-branch" }',
+].join('\n') + '\n';
+
 function makeFixture(files) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'lint-prompts-'));
+  if (files['dir-graph.yaml'] === undefined) files['dir-graph.yaml'] = MINI_DIR_GRAPH;
   for (const [rel, content] of Object.entries(files)) {
     const p = path.join(dir, rel);
     mkdirSync(path.dirname(p), { recursive: true });
@@ -130,7 +142,7 @@ test('enforce 模式：有 CONTRADICTS/STALE-REF → exit 1 + LINT_DRIFT', () =>
 
 test('enforce 模式：零漂移 → exit 0', () => {
   const dir = makeFixture({
-    'skills/x/SKILL.md': '# 推进\n\n使用 crctl advance --to X --trigger Y 推进状态。\n',
+    'skills/x/SKILL.md': '# 推进\n\n使用 `crctl advance --to tech-design-reviewed --trigger "review-dev-plan:block -> write-dev-plan" --embedded` 推进状态。\n',
   });
   try {
     const r = runLint(['--mode', 'enforce', '--root', dir]);
@@ -238,3 +250,104 @@ test('R9 记述性豁免：CR 上下文域内无 skill id 的「下一步」行�
     assert.ok(!r.stdout.includes('R9'), `记述性「下一步」行不报: ${r.stdout}`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// ── CR-2026-030 TASK-01：R7 权威 trigger 字面量校验（FR-9/AC-27~AC-29）──
+
+test('R7 权威字面量：完整 NORMAL pair 通过；短 trigger → CONTRADICTS（AC-27）', () => {
+  const dir = makeFixture({
+    'skills/develop/review-dev-plan/SKILL.md': '# 推进\n\n调用 `crctl advance --to tech-design-reviewed --trigger "review-dev-plan:block -> write-dev-plan" --expect task-breakdown --embedded` 推进。\n',
+    'skills/develop/x/SKILL.md': '# 推进\n\n调用 `crctl advance --to tech-design-reviewed --trigger review-dev-plan:block --expect task-breakdown --embedded` 推进。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('skills/develop/x/SKILL.md') && r.stdout.includes('CONTRADICTS'), `短 trigger 应命中 R7: ${r.stdout}`);
+    assert.ok(!r.stdout.includes('review-dev-plan/SKILL.md'), '完整 pair 不报');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R7：trigger 存在但 to 不匹配 → CONTRADICTS（AC-27）', () => {
+  const dir = makeFixture({
+    'skills/x/SKILL.md': '# 推进\n\n调用 `crctl advance --to developing --trigger "review-dev-plan:block -> write-dev-plan" --expect task-breakdown --embedded` 推进。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('CONTRADICTS'), `to 错配应命中: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R7：to/trigger 含模板变量 → 跳过 literal 校验（AC-29）', () => {
+  const dir = makeFixture({
+    'skills/x/SKILL.md': '# 推进\n\n调用 `crctl advance --to {to_status} --trigger {trigger} --expect {current}` 推进。\n\n# 混合\n\n调用 `crctl advance --to tech-design-reviewed --trigger "{trigger}" --embedded` 推进。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(!r.stdout.includes('CONTRADICTS'), `模板变量应跳过: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R7：LF/CRLF 输入等价（AC-28）', () => {
+  const skillBody = '# 推进\n\n调用 `crctl advance --to tech-design-reviewed --trigger review-dev-plan:block --embedded` 推进。\n';
+  const lfDir = makeFixture({ 'skills/x/SKILL.md': skillBody });
+  const crlfDir = makeFixture({});
+  try {
+    const p = path.join(crlfDir, 'skills', 'x', 'SKILL.md');
+    mkdirSync(path.dirname(p), { recursive: true });
+    writeFileSync(p, skillBody.replaceAll('\n', '\r\n'));
+    writeFileSync(path.join(crlfDir, 'dir-graph.yaml'), MINI_DIR_GRAPH.replaceAll('\n', '\r\n'));
+    const rl = runLint(['--mode', 'report', '--root', lfDir]);
+    const rc = runLint(['--mode', 'report', '--root', crlfDir]);
+    assert.ok(rl.stdout.includes('CONTRADICTS'), `LF 应命中: ${rl.stdout}`);
+    assert.ok(rc.stdout.includes('CONTRADICTS'), `CRLF 应命中: ${rc.stdout}`);
+    assert.equal(
+      rc.stdout.split('\n').filter((l) => l.includes('CONTRADICTS')).length,
+      rl.stdout.split('\n').filter((l) => l.includes('CONTRADICTS')).length,
+      'LF/CRLF 命中数一致',
+    );
+  } finally { rmSync(lfDir, { recursive: true, force: true }); rmSync(crlfDir, { recursive: true, force: true }); }
+});
+
+// transitions 缺失/空/畸形/截断 → STATE_MACHINE_PARSE_FAILED（AC-28）
+const BROKEN_DIR_GRAPHS = {
+  missing: 'change-request-track:\n  state_machine:\n    field: "status"\n',
+  empty: 'change-request-track:\n  state_machine:\n    transitions:\n',
+  malformed: 'change-request-track:\n  state_machine:\n    transitions:\n      - { from: x }\n',
+  truncated: 'change-request-track:\n  state_machine:\n    transitions:\n      - { from: task-breakdown, to: tech-design-reviewed, trigger: "review-dev-plan',
+};
+
+test('R7 transitions 错层 → STATE_MACHINE_PARSE_FAILED 非零退出（AC-28）', () => {
+  const dir = makeFixture({
+    'dir-graph.yaml': 'change-request-track:\n  note: no-state-machine-here\nunrelated:\n  state_machine:\n    transitions:\n      - { from: x, to: y, trigger: "wrong-scope" }\n',
+    'skills/x/SKILL.md': '# t\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.ok(r.stderr.includes('STATE_MACHINE_PARSE_FAILED'), r.stderr);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R7 transitions duplicate → STATE_MACHINE_PARSE_FAILED 非零退出（AC-28）', () => {
+  const transition = '      - { from: task-breakdown, to: tech-design-reviewed, trigger: "review-dev-plan:block -> write-dev-plan" }';
+  const dir = makeFixture({
+    'dir-graph.yaml': `change-request-track:\n  state_machine:\n    transitions:\n${transition}\n    transitions:\n${transition}\n`,
+    'skills/x/SKILL.md': '# t\n\ncrctl advance --to X --trigger Y\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.equal(r.status, 1, r.stdout);
+    assert.ok(r.stderr.includes('STATE_MACHINE_PARSE_FAILED'), r.stderr);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+for (const [name, dg] of Object.entries(BROKEN_DIR_GRAPHS)) {
+  test(`R7 transitions ${name} → STATE_MACHINE_PARSE_FAILED 非零退出（AC-28）`, () => {
+    const dir = makeFixture({
+      'dir-graph.yaml': dg,
+      'skills/x/SKILL.md': '# t\n\ncrctl advance --to X --trigger Y\n',
+    });
+    try {
+      const r = runLint(['--mode', 'report', '--root', dir]);
+      assert.equal(r.status, 1, `${name}: ${r.stdout}`);
+      assert.ok(r.stderr.includes('STATE_MACHINE_PARSE_FAILED'), `${name}: ${r.stderr}`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+}

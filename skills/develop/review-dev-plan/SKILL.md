@@ -79,8 +79,8 @@ suggestions: []
 按 annotation 顶层 `repair-target`（或 review-record 输出的 route）分流：
 
 - **PASS**（verdict=pass 且 blockers=[]）：保持 `task-breakdown`，输出摘要，进入现有 push-progress → human_approval → approve-dev-start。
-- **NORMAL**（repair-target=write-dev-plan，缺省）：调用 `crctl advance --to tech-design-reviewed --trigger review-dev-plan:block`（--embedded），pipeline 按 write-dev-plan → write-dev-tasks → review-dev-plan 重放（≤3 轮）；逐条输出 fixed-blockers。
-- **UPSTREAM**（repair-target=write-tech-design）：调用 `crctl advance --to tech-design-review-pending --trigger review-dev-plan:upstream-design-blocker`（--embedded），停止自动重放，输出 upstream-design-blocker；由人工走既有技术设计修订、重新评审与审批流程。本节点不得修改或覆盖 `review-annotations/sdd.yml`（US-5）。
+- **NORMAL**（repair-target=write-dev-plan，缺省）：调用 `crctl advance --to tech-design-reviewed --trigger "review-dev-plan:block -> write-dev-plan" --expect task-breakdown --embedded` 完成回退（CR-2026-030 FR-8：权威完整 trigger），pipeline 按 write-dev-plan → write-dev-tasks → review-dev-plan 重放（≤3 轮）；逐条输出 fixed-blockers。
+- **UPSTREAM**（repair-target=write-tech-design）：调用 `crctl advance --to tech-design-review-pending --trigger review-dev-plan:upstream-design-blocker --expect task-breakdown --embedded` 回退到 `tech-design-review-pending`，停止自动重放，输出结构化业务结果 `UPSTREAM_DESIGN_BLOCKER`（含 route=upstream、verdict=block、review feedback 与回退状态），由人工走既有技术设计修订、重新评审与审批流程。本节点不得修改或覆盖 `review-annotations/sdd.yml`（US-5）。
 
 ### Step 5 — 输出摘要
 

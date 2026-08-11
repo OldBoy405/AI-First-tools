@@ -13,26 +13,6 @@
       "required": true,
       "placeholder": "CR-2026-001",
       "description": "要接手的 CR-ID；origin 必须存在同名 requirement/{CR-ID} 分支"
-    },
-    {
-      "key": "new_owner",
-      "label": "新 Owner",
-      "type": "text",
-      "required": false,
-      "description": "若本次接手伴随正式移交，填入新 owner 后会自动更新指定角色 owner 与 handover-history"
-    },
-    {
-      "key": "new_owner_role",
-      "label": "接手角色",
-      "type": "select",
-      "required": false,
-      "default": "development",
-      "options": [
-        "requirement",
-        "development",
-        "test"
-      ],
-      "description": "new_owner 非空时生效；默认接手开发负责人"
     }
   ],
   "nodes": [
@@ -50,7 +30,7 @@
       "kind": "skill",
       "label": "从远端恢复 worktree",
       "ref": "resume-from-remote",
-      "prompt": "读取 dir-graph.yaml repositories[*]（active≠false），对每个仓执行恢复：\n1. 通过 controlled-shell 在对应 repo.path fetch origin\n2. 将 worktree 恢复到 workspace 根目录的 `.rayai-worktrees/{bucket}/requirement/{{inputs.cr_id}}`；role=knowledge-base 的仓固定 bucket=`knowledge-base`，其他仓 bucket=repo.id；必须使用 controlled-shell worktree add，不输出手工命令\n3. 若 {{inputs.new_owner}} 非空：经 `crctl owner-set --role {role} --id {id}` 恢复 owners（S4；模型不得手改 cr.md owners）{{inputs.new_owner_role || 'development'}}.id 与 assigned-at；若角色为 requirement，同步顶层兼容字段 owner；在 _backlog.yml.owner-history / handover-history 追加 {role, from, to, at}\n\n在 node-2.md 输出各仓 worktree 绝对路径、当前 HEAD、三角色 owner、是否有未合并改动。",
+      "prompt": "读取 dir-graph.yaml repositories[*]（active≠false），对每个仓执行恢复：\n1. 通过 controlled-shell 在对应 repo.path fetch origin\n2. 将 worktree 恢复到 workspace 根目录的 `.rayai-worktrees/{bucket}/requirement/{{inputs.cr_id}}`；role=knowledge-base 的仓固定 bucket=`knowledge-base`，其他仓 bucket=repo.id；必须使用 controlled-shell worktree add，不输出手工命令\n3. **恢复只读，不改变任何 Owner（CR-2026-030 FR-4/AC-12）**：本节点输入与正文均不包含 Owner 变更参数或写入动作；正式移交只走 handover-cr 唯一入口\n\n在 node-2.md 输出各仓 worktree 绝对路径、当前 HEAD、三角色 owner、是否有未合并改动。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },

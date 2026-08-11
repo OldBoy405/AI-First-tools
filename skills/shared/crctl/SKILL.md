@@ -24,7 +24,7 @@ scope: drift-governance
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
 | `advance` | 校验 `(current, next, trigger)` 合法转换 + 目标状态门禁，全过才写 `cr.md` frontmatter 并 commit；否则非零退出且**不写文件**。支持 `--embedded`（历史 commit_mode=embedded 语义） | crctl advance |
 | `gate` | 只校验不写，供预检与 CI 复用 | pipeline JSON `passCondition` |
-| `approve` | **仅限交互式终端**的人工审批：展示证据摘要 → 人类确认 → 写 `approval.yml`（`via: crctl-approve`）→ 级联 advance；回答非 yes 时自动执行状态机 `{stage}:reject` 回退转换（错误码 `APPROVAL_DECLINED_ROLLED_BACK`，extra 含 rolledBackTo/rerunHint；CR-2026-022 FR-12）。非 TTY 调用一律返回 `APPROVAL_REQUIRES_HUMAN`；`--grant` 为 Ed25519 签名授权（服务端人在环），与 TTY 二选一、都不可绕过审批本身。证据定义变更时，`--resign <reason>` 仅可在 TTY 迁移 `via: crctl-approve` 的历史 digest；迁移前规范化 CRLF，审批段或直属 `evidence-digest` 非唯一时以 `SCHEMA_INVALID` 零副作用拒绝；`server-approve` 必须由服务端按新 digest 重签 grant，本地拒绝改写以免旧签名失效 | `human_approval` + `approve-*` |
+| `approve` | **仅限交互式终端**的人工审批：展示证据摘要 → 人类确认 → 写 `approval.yml`（`via: crctl-approve`）→ 级联 advance；回答非 yes 时自动执行状态机 `{stage}:reject` 回退转换（错误码 `APPROVAL_DECLINED_ROLLED_BACK`，extra 含 rolledBackTo/rerunHint；CR-2026-022 FR-12）。非 TTY 调用一律返回 `APPROVAL_REQUIRES_HUMAN`；`--grant` 为 Ed25519 签名授权（服务端人在环），与 TTY 二选一、都不可绕过审批本身。**grant 双模式（CR-2026-030 FR-6~FR-7）**：approve/reject 共用完整验证（schema/归属/状态/evidence digest/Ed25519 签名），合法 reject 复用 `REJECT_ROLLBACK` 执行权威回退并返回 `APPROVAL_DECLINED_ROLLED_BACK`（含 decision/stage/rolledBackTo/trigger/changed，无 rerunHint）；approve/reject 紧邻结果态重放返回 `changed=false` 幂等（approve 要求 approval.yml 六字段与 grant 完全一致）；commit 失败重放返回 `GRANT_STATE_UNCOMMITTED`，非邻接状态 `GRANT_STATE_MISMATCH`，回退 commit 失败 `ADVANCE_COMMIT_FAILED`。证据定义变更时，`--resign <reason>` 仅可在 TTY 迁移 `via: crctl-approve` 的历史 digest；迁移前规范化 CRLF，审批段或直属 `evidence-digest` 非唯一时以 `SCHEMA_INVALID` 零副作用拒绝；`server-approve` 必须由服务端按新 digest 重签 grant，本地拒绝改写以免旧签名失效 | `human_approval` + `approve-*` |
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
 | `validate` | 受控产物 schema 校验：cr.md / _backlog.yml 的 owners 三角色（id + assigned-at）、review-annotations 的 verdict 枚举与 blockers 结构、test-report / approval / traceability | `validate-doc` |
 | `attempt` | review-loop 轮次唯一记账点（`change-requests/{CR-ID}/review-loop.yml`），maxAttempts 从 pipeline JSON 读取，超限返回 `LOOP_EXHAUSTED` | `reviewLoop.maxAttempts` |
@@ -32,7 +32,7 @@ scope: drift-governance
 | `review-record` | 评审判断落盘：canonical annotation + `review-loop.yml` + `traceability.yml#reviews.<stage>` 投影同批写入（同一 recordedAt）；requirement 阶段额外写 `subject-sha256` 供 next 路由（CR-2026-025 FR-16~FR-19）；`--stage dev-plan` 支持顶层 `repair-target`（缺省 write-dev-plan / write-tech-design 上游疑点轨，枚举校验），bump 前双轨路由、upstream 跳过 bump（CR-2026-026 FR-4/FR-14） | review-* Skill 评审记录 |
 | `test` | 代执行 lint/test/build 命令，按真实退出码生成 `test-report.md` 骨架（status/tester/commands 段模型不得改写），原始输出落盘 `test-evidence/` | `write-test-report` 证据部分 |
 | `next` | 按 status + 评审/测试证据输出下一个该跑的节点；blocker 未清空**绝不**返回 `human_approval`；writing-back 态改查 specs/{spec}/traceability.yml（FR-21） | 最小 pipeline-runner |
-| `cr-init` | 唯一权威原子分配与建档：`--title <t> --owner-requirement <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]`（三注册元信息旗标一次写齐，CR-2026-022 FR-9） | requirement-register |
+| `cr-init` | 唯一权威原子分配与建档：`--title <t> --owner-requirement <id> --owner-development <id> --owner-test <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]`——**三角色 Owner 显式必填**（CR-2026-030 FR-1：缺任一角色 BAD_ARGS 零写入，无隐式继承；成功返回含完整 `owners` 投影与三文件路径；自身不发 outbox，注册事实由 register commit 以真实 SHA 产生）；注册元信息旗标一次写齐（CR-2026-022 FR-9） | requirement-register |
 | `checkpoint-add` | 逐仓记录推送 checkpoint（remote-ref/last-push/checkpoints）；前置态 = 状态机派生全非终态（FR-11） | push-progress |
 | `git` | controlled-shell 白名单的 IDE 运行时适配器：按「子命令 + 形态 + 调用者」三元放行，越界返回 `FORBIDDEN_SUBCOMMAND`，全量审计日志；`commit --template` 支持 `--cr` 显式直传（FR-10） | `controlled-shell` |
 
@@ -64,7 +64,7 @@ node {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs git status --short --cwd
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
 - **写入**：`cr.md` frontmatter 的 status/updated（行级定点编辑，写前 sha256 CAS 复核，防并发覆盖）；`approval.yml`（仅 approve）；`review-loop.yml`（仅 attempt）；`test-report.md` 与 `test-evidence/`（仅 test）；`.crctl/audit.log`（审计，自动 gitignore）。时间戳与执行者身份一律由本工具生成，**拒绝调用方传入**。
 - **状态推进**：只经 `advance`；`standalone` 模式自动 commit `[cr] status {CR-ID} {from} -> {to}`（经自身 git 白名单执行），`--embedded` 只写文件由调用方同事务提交。
-- **失败处理**：结构化 JSON 错误到 stderr + 非零退出。错误码：`CR_STATUS_NOT_FOUND` / `CR_STATUS_CURRENT_MISMATCH` / `CR_STATUS_TRANSITION_NOT_ALLOWED` / `GATE_BLOCKED` / `APPROVAL_REQUIRES_HUMAN` / `APPROVAL_DECLINED` / `LOOP_EXHAUSTED` / `FORBIDDEN_SUBCOMMAND` / `CAS_CONFLICT` 等。任何校验失败都不写文件。
+- **失败处理**：结构化 JSON 错误到 stderr + 非零退出。错误码：`CR_STATUS_NOT_FOUND` / `CR_STATUS_CURRENT_MISMATCH` / `CR_STATUS_TRANSITION_NOT_ALLOWED` / `GATE_BLOCKED` / `APPROVAL_REQUIRES_HUMAN` / `APPROVAL_DECLINED` / `LOOP_EXHAUSTED` / `FORBIDDEN_SUBCOMMAND` / `CAS_CONFLICT` / `OWNER_WORKTREE_DIRTY` / `OWNER_PROJECTION_DRIFT` / `OWNER_COMMIT_FAILED` / `OWNER_COMMIT_ROLLBACK_FAILED` / `GRANT_STATE_MISMATCH` / `GRANT_STATE_UNCOMMITTED` / `ADVANCE_COMMIT_FAILED` / `APPROVAL_DECLINED_ROLLED_BACK` 等。任何校验失败都不写文件。
 
 ## IDE 适配器（adapters/）
 

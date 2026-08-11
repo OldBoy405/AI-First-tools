@@ -168,6 +168,10 @@ owners:
 ```
 
 | 角色 | 作用 | 首次写入 | 后续使用 |
+
+- **注册**：`cr-init` 显式接收三个角色 Owner（`--owner-requirement --owner-development --owner-test`，缺任一参数零写入），注册提交成功后以真实 commit SHA 产生 status + owners 注册事件（CR-2026-030 FR-1/FR-2）。
+- **移交**：Owner 变更唯一业务入口是 `handover-cr`（`owner-set -> push-progress` 固定顺序）：crctl 原子更新双投影、追加唯一责任历史 `owner-history`、形成只含两份账本的隔离 commit，并以同一 SHA 发出 owners/inbox 事件；`resume-from-remote` 只恢复 worktree，不改变 Owner（CR-2026-030 FR-3~FR-5）。
+- **审批**：四阶段人工审批支持平台签名 grant 与本地 TTY 双模式；签名驳回（decision=reject）在完整验签后执行状态机既有回退并返回 `APPROVAL_DECLINED_ROLLED_BACK` 业务结果，紧邻结果态重放幂等（CR-2026-030 FR-6~FR-7）。
 |------|------|----------|----------|
 | `requirement` | 需求负责人，负责 PRD、需求评审响应与需求审批 | `/requirement` 的 `requirement_owner` | `approve-requirement`、需求收件箱、需求类看板 |
 | `development` | 开发负责人，负责 SDD、任务拆分、编码与代码审批 | `/requirement` 的 `dev_owner` | `approve-tech-design`、`approve-dev-start`、`implement-code`、`approve-code` |

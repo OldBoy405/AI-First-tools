@@ -30,7 +30,75 @@ const SKILLS_INDEX_PATH = path.resolve(__dirname, '..', '..', '..', '_index.yml'
 
 /* ────────────────────────── 判据加载（直读 rules.json / 字面黑名单） ────────────────────────── */
 
-function loadJudgements() {
+// CR-2026-030 TASK-05（FR-9/AC-27~AC-29）：权威状态机转移声明的严格 loader。
+// 读取 root/dir-graph.yaml#change-request-track.state_machine.transitions；读入先 CRLF 归一（纪律 #1）。
+// 逐条解析完整 inline mapping；块缺失、空、重复、截断或任一声明无法解析均 STATE_MACHINE_PARSE_FAILED，
+// 禁止降级为空集合（T04 教训：跨行解析失败必须硬失败）。返回 Set(to + NUL + trigger)。
+function loadAuthorityTransitions(root) {
+  const p = path.join(root, 'dir-graph.yaml');
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch { throw new Error(`dir-graph.yaml 不可读: ${p}`); }
+  const norm = text.replaceAll('\r\n', '\n');
+  const lines = norm.split('\n');
+  const failParse = (why) => { throw new Error(why); };
+  const rootHits = lines
+    .map((line, idx) => ({ line, idx }))
+    .filter(({ line }) => /^change-request-track:\s*$/.test(line));
+  if (rootHits.length !== 1) failParse(`dir-graph.yaml change-request-track 块必须唯一，实际找到 ${rootHits.length} 个`);
+  const childHits = (parent, key) => {
+    const hits = [];
+    const re = new RegExp('^' + ' '.repeat(parent.indent + 2) + key + ':\\s*$');
+    for (let i = parent.idx + 1; i < lines.length; i++) {
+      if (!lines[i].trim()) continue;
+      const ind = lines[i].match(/^[ \t]*/)[0].length;
+      if (ind <= parent.indent) break;
+      if (re.test(lines[i])) hits.push({ idx: i, indent: ind });
+    }
+    return hits;
+  };
+  const crt = { idx: rootHits[0].idx, indent: 0 };
+  const smHits = childHits(crt, 'state_machine');
+  if (smHits.length !== 1) failParse(`dir-graph.yaml change-request-track.state_machine 块必须唯一，实际找到 ${smHits.length} 个`);
+  const sm = smHits[0];
+  const trHits = childHits(sm, 'transitions');
+  if (trHits.length !== 1) failParse(`dir-graph.yaml change-request-track.state_machine.transitions 块必须唯一，实际找到 ${trHits.length} 个`);
+  const tr = trHits[0];
+  const pairs = new Set();
+  let seen = 0;
+  for (let i = tr.idx + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.trim()) continue;
+    const ind = l.match(/^[ \t]*/)[0].length;
+    if (ind <= tr.indent) break; // 离开 transitions 块
+    const mm = l.match(/^[ \t]*- \{ from: (\S+), to: (\S+), trigger: (.*) \}$/);
+    if (!mm) failParse(`transitions 第 ${i + 1} 行无法完整解析 inline mapping: ${l.trim()}`);
+    const trigger = mm[3].trim();
+    if (trigger.length < 2 || trigger[0] !== trigger[trigger.length - 1] || !['"', "'"].includes(trigger[0])) {
+      failParse(`transitions 第 ${i + 1} 行 trigger 引号不完整: ${trigger}`);
+    }
+    pairs.add(mm[2].trim() + '\u0000' + trigger.slice(1, -1));
+    seen += 1;
+  }
+  if (seen === 0) failParse('transitions 为空（至少需要一条声明）');
+  return pairs;
+}
+
+/** R7 命令字面量解析：--to/--trigger 支持单引号/双引号/无引号 token；返回 {to, trigger} 或含模板变量时 {dynamic:true}。 */
+function parseAdvanceLiterals(cmd) {
+  const val = (flag) => {
+    const m = cmd.match(new RegExp('--' + flag + '\\s+("([^"]*)"|\'([^\']*)\'|(\\S+))'));
+    if (!m) return null;
+    return m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : m[4]);
+  };
+  const to = val('to');
+  const trigger = val('trigger');
+  if (to === null || trigger === null) return null;
+  const isDynamic = (s) => /[{$]/.test(s) || /^\{.*\}$/.test(s);
+  if (isDynamic(to) || isDynamic(trigger)) return { dynamic: true };
+  return { to, trigger };
+}
+
+function loadJudgements(root) {
   const j = JSON.parse(fs.readFileSync(RULES_PATH, 'utf8'));
   // R1 行内匹配用无锚版本：deny 正则的 ^$ 锚只对整文件路径成立，prompt 行内目标文件后常跟其他文本
   const denyFilesLoose = (j.protectedPaths?.deny || []).map((re) => new RegExp(re.replace(/^\^/, '').replace(/\$/, ''), 'i'));
@@ -46,7 +114,9 @@ function loadJudgements() {
   // R9 判据：全部 skill id 直读 skills/_index.yml（CR-2026-023，零派生物，新增 skill 自动覆盖）
   const skillIndex = fs.readFileSync(SKILLS_INDEX_PATH, 'utf8').replaceAll('\r\n', '\n');
   const skillIds = new Set([...skillIndex.matchAll(/^\s*-\s*id:\s*([\w-]+)/gm)].map((m) => m[1]));
-  return { denyFilesLoose, gitSubs, backlogSetFields, inboxEvents, skillIds };
+  // CR-2026-030 TASK-05（FR-9）：R7 权威 trigger 字面量判据直读 root/dir-graph.yaml（单一事实源，零复制常量）
+  const transitions = loadAuthorityTransitions(root);
+  return { denyFilesLoose, gitSubs, backlogSetFields, inboxEvents, skillIds, transitions };
 }
 
 const LITERAL_BLACKLIST = {
@@ -170,13 +240,23 @@ function runRules(para, ctx) {
     const l = lines[li];
     if (l.includes('crctl advance')) {
       const span = backtickSpan(l, 'crctl advance');
-      const cmd = span !== null ? span : l;
+      // CR-2026-030 TASK-05：span 含包裹反引号，剥离后解析（否则收尾 token 会带 `）
+      const cmd = (span !== null ? span : l).replace(/^`|`$/g, '');
       if (/--/.test(cmd)) {
         if (!/\s--to\s+\S+/.test(cmd) || !/\s--trigger\s+\S+/.test(cmd)) {
           findings.push({ rule: 'R7', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: 'crctl advance 必须含 --to 与 --trigger（权威旗标，--expect 可省略）' });
         }
         if (/[，、）]/.test(cmd) || /`(trigger|expected_current_status|commit_mode)=/.test(cmd)) {
           findings.push({ rule: 'R7', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: 'crctl advance 参数形态违例（全角分隔符/伪旗标反引号包裹）' });
+        }
+        // CR-2026-030 TASK-05（FR-9/AC-27~AC-29）：静态 (to, trigger) 字面量必须命中权威状态机转移声明；
+        // 含模板变量（{...}/$...）的 to/trigger 跳过 literal 校验；不推断 from，完整合法性由运行时裁决。
+        const lit = parseAdvanceLiterals(cmd);
+        if (lit && !lit.dynamic) {
+          const pair = lit.to + '\u0000' + lit.trigger;
+          if (!ctx.transitions.has(pair)) {
+            findings.push({ rule: 'R7', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: `crctl advance (--to ${lit.to} --trigger ${lit.trigger}) 不在权威状态机转移声明（dir-graph.yaml#change-request-track.state_machine.transitions）` });
+          }
         }
       }
     }
@@ -254,7 +334,14 @@ function main() {
     process.exit(1);
   }
   const root = path.resolve(flags.root || PACKAGE_ROOT);
-  const ctx = { ...loadJudgements() };
+  let ctx;
+  try {
+    ctx = { ...loadJudgements(root) };
+  } catch (e) {
+    // CR-2026-030 TASK-05（FR-9/AC-28）：transitions 缺失/空/畸形/截断 → STATE_MACHINE_PARSE_FAILED 非零退出，禁止空集合降级
+    process.stderr.write(JSON.stringify({ error: { code: 'STATE_MACHINE_PARSE_FAILED', message: `状态机 transitions 解析失败：${String(e && e.message || e)}` } }, null, 2) + '\n');
+    process.exit(1);
+  }
   const findings = [];
   for (const p of walkFiles(root)) {
     const text = fs.readFileSync(p, 'utf8');

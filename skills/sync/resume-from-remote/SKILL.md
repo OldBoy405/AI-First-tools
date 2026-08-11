@@ -22,8 +22,6 @@ description: 在新电脑或新成员环境下，按 CR-ID 与 dir-graph.yaml re
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `cr_id` | string | ✅ | 目标 CR-ID（如 CR-2026-001） |
-| `new_owner` | string | 否 | 接手人标识；若指定则同时更新指定角色 owner（建议配合 `handover-cr` 使用） |
-| `new_owner_role` | enum | 否 | 接手角色：`requirement` / `development` / `test`，默认 `development` |
 
 ---
 
@@ -35,12 +33,13 @@ description: 在新电脑或新成员环境下，按 CR-ID 与 dir-graph.yaml re
 
 1. 读取 `AGENTS.md`、`dir-graph.yaml#repositories`。
 2. 选择 `active != false` 的 repo。
-3. 对每个 repo：`branch = requirement/{cr_id}`，worktreePath 经 `crctl worktree-path {cr_id} --repo {repo.id} --workspace <ws>` 取权威值（FR-29②，CR-2026-022——不再手拼 bucket/worktreePath；bucket 规则由 crctl 唯一派生）
-4. 对所有 active repo 执行远端分支预检；任一 repo 缺少远端分支则整体 abort，不创建任何 worktree。**去重（FR-32，CR-2026-022）**：resume-cr 流水线场景下节点 1（list-remote-checkpoints）已产出各 repo 存在性结论（含 checkpoints[] SHA 漂移告警），此处直接复用其 node-1.md 结论、不再重复 ls-remote 预检；独立调用场景才自行预检。
+3. 对每个 repo 先调用 `crctl worktree-path {cr_id} --repo {repo.id} --workspace <ws>`，保存返回的 `wt.branch`、`wt.path`；后续所有远端分支和 worktree 操作只使用该返回值。
+4. 对每个 repo 执行远端分支预检；任一 repo 缺少远端分支则整体 abort，不创建任何 worktree。**去重（FR-32，CR-2026-022）**：resume-cr 流水线场景下节点 1（list-remote-checkpoints）已产出各 repo 存在性结论（含 checkpoints[] SHA 漂移告警），此处直接复用其 node-1.md 结论、不再重复 ls-remote 预检；独立调用场景才自行预检。
 
 ```ts
+const wt = await runCrctl(["worktree-path", crId, "--repo", repo.id, "--workspace", workspaceRoot]);
 const ls = await runGit({ subcommand: "ls-remote",
-  args: ["--heads", "origin", `requirement/${crId}`],
+  args: ["--heads", "origin", wt.branch],
   cwd: repo.path });
 if (!ls.ok || ls.stdout.trim().length === 0) {
   // 远端分支不存在：停止执行
@@ -51,35 +50,31 @@ if (!ls.ok || ls.stdout.trim().length === 0) {
 
 ### Step 2 — 重建所有 active repo worktree（受控 shell）
 
-对每个 active repo 执行：
+对每个 active repo 使用 Step 1 已取得的 `wt.path` 与 `wt.branch`：
 
 ```ts
 await runGit({ subcommand: "fetch", args: ["origin"], cwd: repo.path });
 await runGit({ subcommand: "worktree",
-  args: ["add", repo.worktreePath,
-         "-b", `requirement/${crId}`,
-         "--track", `origin/requirement/${crId}`],
+  args: ["add", wt.path,
+         "-b", wt.branch,
+         "--track", `origin/${wt.branch}`],
   cwd: repo.path });
 ```
 
 > 若本地已存在同名 worktree，返回结构化错误（`EXEC_FAILED`，stderr 含 "already exists"），提示改用 `pull-progress`；若确需重建，必须先走受控清理入口移除已有 worktree。
 
-### Step 3 — 读取 CR 状态
+### Step 3 — 读取 CR 状态（只读恢复，不改变任何 Owner）
 
 <!-- lint-prompts:ignore --> 描述性：远端恢复说明
 从 knowledge-base CR worktree 的 `change-requests/{cr_id}/cr.md` 读取：
 - `status`：当前阶段
 - `owners`：requirement / development / test 三类负责人及 assigned-at
 - `last-push-at`：最后推送时间
-- `handover-history`：历史转交记录
+- `handover-history`：历史转交记录（只读兼容）
 
-### Step 4 — 更新角色 owner（若 new_owner 指定）
+**恢复过程不承担 Owner 变更**（CR-2026-030 FR-4/AC-12）：本 Skill 的输入、正文与执行路径均不含 `new_owner`/`new_owner_role`/`owner-set`；正式移交只走 `handover-cr` 唯一入口。
 
-若指定了 `new_owner`：
-1. 将 `new_owner_role` 默认为 `development`，并校验取值为 `requirement` / `development` / `test`
-2. 运行 `crctl owner-set {cr_id} --role {new_owner_role} --id {new_owner} --workspace <worktree>`——crctl 原子更新 `owners.{role}.id`/`assigned-at`（含顶层 `owner` 兼容字段与 owner-history/handover-history 追加，CAS+审计）；**禁止手工编辑** owners 字段（FR-20，CR-2026-022；与 handover-cr 同一唯一写入口）
-
-### Step 5 — 输出摘要
+### Step 4 — 输出摘要
 
 ```
 ✅ 工作区恢复完成
@@ -87,7 +82,6 @@ await runGit({ subcommand: "worktree",
    当前状态        : {status}
    worktrees       : [{repo.id}: .rayai-worktrees/{bucket}/requirement/{cr_id}, ...]
    owners          : requirement={id@assigned-at}, development={id@assigned-at}, test={id@assigned-at}
-   新 owner        : {new_owner_role}:{new_owner}（如已指定）
    最后推送时间    : {last-push-at}
 
 ➡️  按当前状态和评审证据继续（CR-2026-021 D8：状态→下一节点判断唯一收敛为 `crctl next`，不再本地维护硬编码映射表）：

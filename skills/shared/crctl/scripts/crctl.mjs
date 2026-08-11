@@ -60,6 +60,11 @@ function sha256(text) {
   return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
+// CR-2026-030 TASK-02：最小标量转义（原 cmdCrInit 局部定义提升为文件内通用 helper，供注册/移交共用）
+function yamlScalar(v) {
+  return /^[\w./-]+$/.test(String(v)) ? String(v) : `"${String(v).replaceAll('"', '\\"')}"`;
+}
+
 // 证据摘要专用：行尾规范化后再哈希。同一份证据在 LF 的 worktree 里审批、
 // 合并后被 Windows autocrlf 检出为 CRLF，字节级哈希会产生 EVIDENCE_DRIFT
 // 误报（CR-2026-001 回写期实测触发）。证据漂移关心的是内容篡改，不是
@@ -459,7 +464,7 @@ function emitOutboxEvent(ws, ev) {
     fs.renameSync(tmp, path.join(dir, name)); // 原子可见：先写临时名再 rename，防半写
     return name;
   } catch (e) {
-    try { auditLog(ws, { kind: 'outbox', result: 'EMIT_FAILED', why: String(e && e.message || e) }); } catch { /* 双重失败只能放弃 */ }
+    try { auditLog(ws, { kind: 'outbox', cr: ev.cr_id, event_kind: ev.event_kind, result: 'EMIT_FAILED', why: String(e && e.message || e) }); } catch { /* 双重失败只能放弃 */ }
     return null;
   }
 }
@@ -525,32 +530,35 @@ function loadShellRules(ws) {
   return _shellRules;
 }
 
-function controlledGit(ws, sub, args, cwd, caller) {
+function controlledGit(ws, sub, args, cwd, caller, options = {}) {
   const joined = args.join(' ');
   const record = { kind: 'git', caller: caller || null, sub, args: joined, cwd };
+  // CR-2026-030 TASK-03（SDD §3.6）：options.audit=false 只用于 owner-set 的纯只读 clean 查询——
+  // dirty 拒绝与同值幂等路径必须零审计副作用；白名单/forbidden flags/fail-closed 仍全部执行。
+  const audit = options.audit !== false;
   const rules = loadShellRules(ws);
   if (!rules) {
-    auditLog(ws, { ...record, result: 'SHELL_UNAVAILABLE' });
+    if (audit) auditLog(ws, { ...record, result: 'SHELL_UNAVAILABLE' });
     return { ok: false, code: 'SHELL_UNAVAILABLE', message: `controlled-shell 规则文件缺失或损坏，拒绝执行任何 git` };
   }
   const patterns = rules.whitelist[sub];
   for (const a of args) {
     if (rules.forbiddenFlags.includes(a) || rules.forbiddenFlags.some((f) => a.startsWith(f + '='))) {
-      auditLog(ws, { ...record, result: 'FORBIDDEN_FLAG' });
+      if (audit) auditLog(ws, { ...record, result: 'FORBIDDEN_FLAG' });
       return { ok: false, code: 'FORBIDDEN_SUBCOMMAND', message: `参数 ${a} 属于配置注入类，禁止透传` };
     }
   }
   if (!patterns) {
-    auditLog(ws, { ...record, result: 'FORBIDDEN_SUBCOMMAND' });
+    if (audit) auditLog(ws, { ...record, result: 'FORBIDDEN_SUBCOMMAND' });
     return { ok: false, code: 'FORBIDDEN_SUBCOMMAND', message: `git ${sub} 不在 controlled-shell 白名单中` };
   }
   if (!patterns.some((re) => re.test(joined))) {
-    auditLog(ws, { ...record, result: 'FORBIDDEN_FORM' });
+    if (audit) auditLog(ws, { ...record, result: 'FORBIDDEN_FORM' });
     return { ok: false, code: 'FORBIDDEN_SUBCOMMAND', message: `git ${sub} ${joined} 不匹配白名单允许的任何形态` };
   }
   const r = spawnSync('git', [sub, ...args], { cwd: cwd || ws, encoding: 'utf8', shell: false, env: { ...process.env, GIT_EDITOR: 'true', EDITOR: 'true', GIT_TERMINAL_PROMPT: '0' } });
   const out = { ok: r.status === 0, exit: r.status, stdout: (r.stdout || '').slice(0, 20000), stderr: (r.stderr || '').slice(0, 20000) };
-  auditLog(ws, { ...record, result: out.ok ? 'ok' : `exit=${r.status}` });
+  if (audit) auditLog(ws, { ...record, result: out.ok ? 'ok' : `exit=${r.status}` });
   return out;
 }
 
@@ -728,7 +736,11 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
       });
     } else if (check.type === 'attemptsWithinLimit') {
       const r = readAttempts(ws, cr, check.loop, gates);
-      const okv = !r.exhausted;
+      // CR-2026-030 review repair（pass-at-max）：轮次到顶但最新评审 verdict=pass 时不判 exhausted——
+      // pass 无需再自修复（与 review-code SKILL「pass 即可推进 code-reviewing」契约一致）；
+      // block/缺证据仍 LOOP_EXHAUSTED 阻断，须人工处理。
+      const passedAtLimit = r.exhausted && latestReviewVerdict(ws, cr, check.loop) === 'pass';
+      const okv = !r.exhausted || passedAtLimit;
       out.checks.push({ type: check.type, loop: check.loop, ok: okv, current: r.current, max: r.max, why: okv ? null : 'LOOP_EXHAUSTED：自修复轮次已用尽，禁止继续推进，须人工处理' });
     } else {
       out.checks.push({ type: check.type, ok: false, why: '未知门禁类型' });
@@ -1193,7 +1205,10 @@ function cmdGate(ws, cr, gates, flags) {
   if (!result.pass) process.exit(1);
 }
 
-function cmdAdvance(ws, cr, gates, flags) {
+// CR-2026-030 TASK-04（SDD §4.9）：advance 内核——不打印 JSON，供 cmdAdvance 与 reject 回退共用。
+// “Git 是权威”：standalone commit 失败时不得发 status outbox；只有 commit 成功（或 embedded 由调用方提交）
+// 才返回 committed=true 并以真实/占位 SHA 发 outbox。返回 {committed, commitDetail, ...}。
+function performAdvance(ws, cr, gates, flags) {
   if (!flags.to || !flags.trigger) fail('BAD_ARGS', 'advance 需要 --to <status> --trigger <trigger>');
   const { sm } = loadStateMachine(ws);
   const state = resolveCrState(ws, cr);
@@ -1232,7 +1247,8 @@ function cmdAdvance(ws, cr, gates, flags) {
     const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-advance') : addR;
     result.commit = commitR.ok ? { message: msg } : { failed: true, detail: commitR, note: '状态文件已写入但 commit 失败，请修复后手工经 crctl git 提交' };
   }
-  // outbox：状态事件。--embedded/--no-commit 时 commit_sha 留空，由 push 的 checkpoint 事件补全（§A.5）
+  // outbox：状态事件。--embedded/--no-commit 时 commit_sha 留空，由 push 的 checkpoint 事件补全（§A.5）；
+  // standalone commit 失败不发 outbox（Git 才是权威事实，SDD §4.9）。
   const committed = result.commit && result.commit.message;
   // 证据快照：进入某审批阶段的 expect 状态（待审批）时附带该阶段证据摘要——
   // 服务端签发 grant 前靠它确定"批的是哪一版证据"（P1 §B.1 ①，TASK-08 补挂）。
@@ -1243,11 +1259,26 @@ function cmdAdvance(ws, cr, gates, flags) {
       (s) => Array.isArray(s.expect) && s.expect.includes(flags.to) && s.evidence);
     if (pendingStage) outboxEvidence = collectOutboxEvidence(ws, cr, pendingStage);
   }
-  result.outbox = emitOutboxEvent(ws, {
-    event_kind: 'status', cr_id: cr, from_status: current, to_status: flags.to,
-    trigger: flags.trigger, commit_sha: committed ? gitHeadSha(ws) : pendingCommitSha(),
-    actor: identity(ws), evidence: outboxEvidence,
-  });
+  if (flags.embedded || flags['no-commit']) {
+    result.outbox = emitOutboxEvent(ws, {
+      event_kind: 'status', cr_id: cr, from_status: current, to_status: flags.to,
+      trigger: flags.trigger, commit_sha: pendingCommitSha(),
+      actor: identity(ws), evidence: outboxEvidence,
+    });
+  } else if (committed) {
+    result.outbox = emitOutboxEvent(ws, {
+      event_kind: 'status', cr_id: cr, from_status: current, to_status: flags.to,
+      trigger: flags.trigger, commit_sha: gitHeadSha(ws),
+      actor: identity(ws), evidence: outboxEvidence,
+    });
+  }
+  result.committed = !!committed;
+  result.commitDetail = result.commit && result.commit.failed ? result.commit.detail : null;
+  return result;
+}
+
+function cmdAdvance(ws, cr, gates, flags) {
+  const result = performAdvance(ws, cr, gates, flags);
   ok(result);
   if (result.commit && result.commit.failed) process.exit(1);
 }
@@ -1373,11 +1404,12 @@ function cmdApprove(ws, cr, gates, flags) {
       auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined' });
       // FR-12（CR-2026-022）：驳回必须真正执行状态机已声明的 {stage}:reject 回退转换（AGENTS.md 强制），不再只是 fail
       const rollback = REJECT_ROLLBACK[stage];
-      const { sm } = loadStateMachine(ws);
       const trigger = `${rollback.approve}:reject -> ${rollback.write}`;
-      const t = findTransition(sm, current, rollback.to, trigger);
-      if (!t) fail('APPROVAL_DECLINED', '审批人未确认，且状态机未声明该阶段回退转换', { stage, current });
-      cmdAdvance(ws, cr, gates, { to: rollback.to, trigger, expect: current });
+      // CR-2026-030 TASK-04（SDD §4.9）：TTY reject 复用 performAdvance 内核，仅 committed=true 才返回统一业务 decline
+      const adv = performAdvance(ws, cr, gates, { to: rollback.to, trigger, expect: current });
+      if (!adv.committed) {
+        fail('ADVANCE_COMMIT_FAILED', '驳回回退提交失败，未产生权威回退事实（不发送 status outbox）', { detail: adv.commitDetail });
+      }
       auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined-rolled-back', to: rollback.to });
       fail('APPROVAL_DECLINED_ROLLED_BACK', `审批未通过，CR 已回退到 ${rollback.to}，请重跑 ${rollback.write}`, { rolledBackTo: rollback.to, rerunHint: rollback.write });
     }
@@ -1390,6 +1422,54 @@ function cmdApprove(ws, cr, gates, flags) {
   });
 }
 
+/* ────────────────────────── 签名 grant 双模式与 reject（CR-2026-030 TASK-04，SDD §2.6/§3.7/§4.8~§4.10） ──────────────────────────
+ * approve/reject 共用 v1 grant 完整验证（schema/decision → 归属 → 状态分类 → evidence digest → key/signature），
+ * 合法 reject 复用 REJECT_ROLLBACK + 权威状态机 trigger 完成回退；仅权威 commit 成功后返回业务 decline。
+ * approve/reject 紧邻结果态重放必须再次验签并证明结果账本已在 HEAD（assertResultLedgersCommitted）。
+ */
+
+/** 当前状态分类：fresh（审批前置态）| adjacent-approve | adjacent-reject | mismatch。 */
+function classifyGrantState(current, stageCfg, rollback, decision) {
+  if (decision === 'approve') {
+    if (stageCfg.expect && stageCfg.expect.includes(current)) return 'fresh';
+    if (current === stageCfg.to) return 'adjacent-approve';
+    return 'mismatch';
+  }
+  if (stageCfg.expect && stageCfg.expect.includes(current)) return 'fresh';
+  if (current === rollback.to) return 'adjacent-reject';
+  return 'mismatch';
+}
+
+/** FR-7：approve 紧邻目标态重放的持久化字段精确比较（approval.yml 对应 section 六字段全等）。 */
+function assertAdjacentApprove(ws, cr, stageCfg, grant, current) {
+  const section = stageCfg.approvalSection;
+  const ap = path.join(crDir(ws, cr), 'approval.yml');
+  const text = readFileChecked(ap);
+  const doc = text == null ? {} : (parseYaml(text) || {});
+  const sec = doc[section];
+  const okv = sec
+    && sec.via === 'server-approve'
+    && sec.approver === grant.approver
+    && sec['key-id'] === grant.key_id
+    && sec.signature === grant.signature
+    && sec['grant-approved-at'] === grant.approved_at
+    && sec['evidence-digest'] === grant.evidence_digest
+    && sec['target-status'] === stageCfg.to;
+  if (!okv) fail('GRANT_STATE_MISMATCH', `approval.yml#${section} 持久化字段与 grant 不一致（或缺少 server-approve 段），不能按幂等成功消费`, { current });
+}
+
+/** FR-7/AC-22：幂等重放前证明结果账本已在 HEAD——porcelain 输出中出现目标路径即 GRANT_STATE_UNCOMMITTED。
+ * 无 audit 的受控只读查询，白名单与 fail-closed 仍全部执行。 */
+function assertResultLedgersCommitted(ws, relPaths) {
+  const r = controlledGit(ws, 'status', ['--short'], ws, 'crctl-approve', { audit: false });
+  if (!r.ok) fail('GRANT_LEDGER_CHECK_FAILED', '受控 Git 只读查询失败，无法证明审批结果账本已在 HEAD', { detail: r.code || r.exit });
+  const porcelain = (r.stdout || '').replaceAll('\r\n', '\n').split('\n').map((l) => l.slice(3).trim()).filter(Boolean);
+  const dirty = relPaths.filter((p) => porcelain.includes(p));
+  if (dirty.length) {
+    fail('GRANT_STATE_UNCOMMITTED', `审批结果账本尚未提交到 HEAD（工作区存在 staged/unstaged/untracked 目标文件），不得按幂等成功消费: ${dirty.join(', ')}`, { uncommitted: dirty });
+  }
+}
+
 function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
   // 裸 --grant（无值）= 用 daemon 投递的标准落点 .crctl/grants/{cr}-{stage}.grant.json
   const grantArg = typeof flags.grant === 'string' ? flags.grant : path.join('.crctl', 'grants', `${cr}-${stage}.grant.json`);
@@ -1398,41 +1478,73 @@ function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
   if (text == null) fail('GRANT_UNREADABLE', `grant 文件不存在或不可读: ${gp}`);
   let grant;
   try { grant = JSON.parse(text); } catch { fail('GRANT_UNREADABLE', `grant 不是合法 JSON: ${gp}`); }
+  // 1) schema v1 + decision 枚举（reject 与 approve 同构，统一在此校验）
   if (grant.v !== 1) fail('GRANT_UNSUPPORTED', `grant schema v=${grant.v}，当前仅支持 v1`);
-  if (grant.decision === 'reject') {
-    fail('GRANT_DECISION_REJECT', '驳回 grant 不走 approve：由编排方按状态机既有回退转移执行 advance，并把 reject_reason 作为 review_feedback 注入修复节点');
-  }
-  if (grant.decision !== 'approve') fail('GRANT_UNSUPPORTED', `decision=${grant.decision} 不在 [approve, reject]`);
+  if (!['approve', 'reject'].includes(grant.decision)) fail('GRANT_UNSUPPORTED', `decision=${grant.decision} 不在 [approve, reject]`);
+  // 2) 归属：签名绑定 cr_id+stage，禁止挪用
   if (grant.cr_id !== cr || grant.stage !== stage) {
     fail('GRANT_MISMATCH', `grant 归属 (${grant.cr_id}, ${grant.stage})，当前审批 (${cr}, ${stage}) —— 签名绑定 cr_id+stage，禁止挪用`);
   }
+  // 3) 状态分类（非前置态且非合法紧邻结果态 → GRANT_STATE_MISMATCH）
   const state = resolveCrState(ws, cr);
   const current = state.status;
-  if (stageCfg.expect && !stageCfg.expect.includes(current)) {
-    fail('CR_STATUS_CURRENT_MISMATCH', `审批阶段 ${stage} 要求当前状态 ∈ [${stageCfg.expect.join(', ')}]，实际 ${current}`);
+  const rollback = REJECT_ROLLBACK[stage];
+  const cls = classifyGrantState(current, stageCfg, rollback, grant.decision);
+  if (cls === 'mismatch') {
+    fail('GRANT_STATE_MISMATCH', `当前状态 ${current} 既不是 ${stage} 审批前置态，也不是合法紧邻结果态，grant 不可消费`, { current, decision: grant.decision });
   }
-  if (stageCfg.passCondition) {
-    const r = evaluatePassCondition(ws, cr, stageCfg, gates);
-    if (!r.pass) fail('GATE_BLOCKED', '自动评审证据未达标，禁止审批（grant 不豁免 blocker 检查）');
-  }
-  if (stageCfg.requireFiles) {
-    for (const rel of stageCfg.requireFiles) {
-      const p = path.join(ws, rel.replaceAll('{cr}', cr));
-      if (!fs.existsSync(p)) fail('GATE_BLOCKED', `审批前置产物缺失: ${p}`);
+  // 4) approve 才跑 passCondition/requireFiles；reject 跳过（blocker 是合法驳回原因，SDD §4.8）
+  if (grant.decision === 'approve') {
+    if (stageCfg.passCondition) {
+      const r = evaluatePassCondition(ws, cr, stageCfg, gates);
+      if (!r.pass) fail('GATE_BLOCKED', '自动评审证据未达标，禁止审批（grant 不豁免 blocker 检查）');
+    }
+    if (stageCfg.requireFiles) {
+      for (const rel of stageCfg.requireFiles) {
+        const p = path.join(ws, rel.replaceAll('{cr}', cr));
+        if (!fs.existsSync(p)) fail('GATE_BLOCKED', `审批前置产物缺失: ${p}`);
+      }
     }
   }
-  // 本地重算证据摘要：grant 签发的是"这一版证据"的批准，证据变了 grant 即失效
+  // 5) 本地重算证据摘要：grant 签发的是"这一版证据"的决定，证据变了 grant 即失效（approve/reject 同校验）
   const digest = canonicalEvidenceDigest(ws, cr, stageCfg) || '';
   if (digest !== (grant.evidence_digest || '')) {
     fail('EVIDENCE_DRIFT', `grant 签发时证据摘要 ${grant.evidence_digest || '(空)'}，当前重算 ${digest || '(空)'} —— 证据在签发后被改动或缺失`);
   }
+  // 6) key + Ed25519 signature
   const sig = verifyGrantSignature(ws, grant);
   if (!sig.ok) fail(sig.code, sig.why);
-  // CR-2026-027 FR-8/TASK-03：grant 验签通过后走 approveAndAdvance（approval.yml + cr.md 单次原子提交），替代原分提交路径
-  approveAndAdvance(ws, cr, gates, stage, stageCfg, {
-    approver: grant.approver, via: 'server-approve', evidenceHash: digest || null, grant,
-    outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
-    specId: flags['spec-id'], fromStatus: current,
+  // 7) 副作用 / 幂等分支
+  if (grant.decision === 'approve') {
+    if (cls === 'fresh') {
+      // approveAndAdvance 内部已 ok() 输出成功结果并处理 commit 失败退出，这里直接返回
+      approveAndAdvance(ws, cr, gates, stage, stageCfg, {
+        approver: grant.approver, via: 'server-approve', evidenceHash: digest || null, grant,
+        outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
+        specId: flags['spec-id'], fromStatus: current,
+      });
+      return;
+    }
+    assertAdjacentApprove(ws, cr, stageCfg, grant, current);
+    assertResultLedgersCommitted(ws, [`change-requests/${cr}/approval.yml`, `change-requests/${cr}/cr.md`]);
+    ok({ op: 'approve', cr, stage, changed: false, reason: 'grant-already-applied', status: current });
+    return;
+  }
+  // reject 分支
+  const trigger = `${rollback.approve}:reject -> ${rollback.write}`;
+  if (cls === 'fresh') {
+    const adv = performAdvance(ws, cr, gates, { to: rollback.to, trigger, expect: current });
+    if (!adv.committed) {
+      fail('ADVANCE_COMMIT_FAILED', '驳回回退提交失败，未产生权威回退事实（不发送 status outbox）', { detail: adv.commitDetail });
+    }
+    fail('APPROVAL_DECLINED_ROLLED_BACK', `审批人驳回，CR 已回退到 ${rollback.to}`, {
+      decision: 'reject', stage, rolledBackTo: rollback.to, trigger, changed: true,
+    });
+  }
+  // 紧邻回退态重放：grant/evidence/signature 已再次验证，证明 cr.md 已在 HEAD 后返回 changed=false
+  assertResultLedgersCommitted(ws, [`change-requests/${cr}/cr.md`]);
+  fail('APPROVAL_DECLINED_ROLLED_BACK', `驳回 grant 已在紧邻回退态消费（${rollback.to}），本次重放无副作用`, {
+    decision: 'reject', stage, rolledBackTo: rollback.to, trigger, changed: false,
   });
 }
 
@@ -1787,6 +1899,18 @@ function cmdAttempt(ws, cr, gates, flags) {
  */
 const REVIEW_STAGE_FILES = { requirement: 'requirement.yml', 'tech-design': 'sdd.yml', code: 'code.yml', 'dev-plan': 'dev-plan.yml' };
 const REVIEW_STAGE_LOOPS = { requirement: 'review-requirement', 'tech-design': 'review-tech-design', code: 'review-code', 'dev-plan': 'review-dev-plan' };
+
+// CR-2026-030 review repair（pass-at-max）：attempt 计数到顶但最新一轮评审 verdict=pass 时无需再自修复。
+// loop→stage 反查 REVIEW_STAGE_LOOPS，读取对应 canonical 评审文件的 verdict；非评审 loop 或文件缺失/不可解析返回 null（fail-closed，不豁免）。
+function latestReviewVerdict(ws, cr, loopRef) {
+  const stage = Object.keys(REVIEW_STAGE_LOOPS).find((s) => REVIEW_STAGE_LOOPS[s] === loopRef) || null;
+  if (!stage) return null;
+  const p = path.join(crDir(ws, cr), 'review-annotations', REVIEW_STAGE_FILES[stage]);
+  const text = readFileChecked(p);
+  if (text == null) return null;
+  const doc = parseYaml(text.replaceAll('\r\n', '\n')) || {};
+  return typeof doc.verdict === 'string' ? doc.verdict : null;
+}
 // 前置态与各 review-* SKILL 的 Step 顺序对齐（先 review-record 落盘证据、后 advance 进评审态）：
 // - requirement：评审在 drafting 执行（block 回 drafting 重审；requirement-reviewing 保留兼容重跑）
 // - tech-design：write-tech-design 落盘后先进 tech-design-review-pending（其 statusGate 只需 sdd.md），再评审
@@ -2191,30 +2315,170 @@ function editCheckpointAdd(text, cr, meta) {
 }
 
 /** owner-set：块内 owners.{role} 的 id + assigned-at 更新（crctl 生成时间戳）。 */
-function editOwnerSet(text, cr, role, id) {
+/* ────────────────────────── Owner 正式移交原语（CR-2026-030 TASK-03，SDD §2.2~§2.5/§3.5/§4.4~§4.7） ──────────────────────────
+ * owner-set 收敛为受控账本原语：tracked clean 前置 → 双投影一致性校验 → 唯一时间戳两账本候选 →
+ * 一次 casWriteMulti → 只 add 两受控路径并复核 staged set → 一次隔离正式 commit → 成功后同 SHA 发 owners/inbox 事件。
+ * 失败回滚以候选 hash 为 CAS 前提恢复原始快照并复核 clean baseline；禁止 reset/checkout/补偿 commit。
+ */
+
+/** tracked 变更只读快照（FR-3/FR-5）：staged=git diff --name-only --cached，unstaged=git diff --name-only -- .。
+ * 路径统一 Git 输出的 / 分隔形式，过滤空行去重排序；untracked 不属于该结构。
+ * 纯只读查询传 audit:false——dirty 拒绝与同值幂等路径必须零审计副作用（SDD §3.6）。 */
+function queryTrackedChanges(ws, opts = {}) {
+  const run = (args) => controlledGit(ws, 'diff', args, ws, 'crctl-owner-set', { audit: opts.audit !== false });
+  const staged = run(['--name-only', '--cached']);
+  const unstaged = run(['--name-only', '--', '.']);
+  if (!staged.ok || !unstaged.ok) {
+    return { ok: false, code: 'OWNER_GIT_CHECK_FAILED', detail: { staged: staged.code || staged.exit, unstaged: unstaged.code || unstaged.exit } };
+  }
+  const norm = (s) => [...new Set(String(s || '').replaceAll('\r\n', '\n').split('\n').map((l) => l.trim()).filter(Boolean))].sort();
+  return { ok: true, staged: norm(staged.stdout), unstaged: norm(unstaged.stdout) };
+}
+
+/** 双投影读取：cr.md + _backlog.yml 的 path/text/hash/owners/兼容 owner。 */
+function readOwnerState(ws, cr) {
+  const snap = loadBacklogEntry(ws, cr);
+  const crMdP = path.join(crDir(ws, cr), 'cr.md');
+  const crMdText = readFileChecked(crMdP);
+  if (crMdText == null) fail('CR_MD_WRITE_FAILED', `cr.md 不存在: ${crMdP}`);
+  const m = matchFrontmatter(crMdText);
+  const md = m ? parseYaml(m.body) || {} : {};
+  const be = snap.entry || {};
+  return {
+    crMd: { path: crMdP, text: crMdText, hash: sha256(crMdText), owners: md.owners, compatibilityOwner: md.owner },
+    backlog: { path: snap.path, text: snap.text, hash: snap.hash, owners: be.owners, compatibilityOwner: be.owner },
+  };
+}
+
+function ownerSlotId(slot) {
+  return slot && slot.id !== undefined && slot.id !== null ? String(slot.id) : null;
+}
+
+/** FR-3：cr.md 与 _backlog.yml 的三个当前 Owner 及顶层兼容 owner 必须逐项一致；任一漂移结构化错误且零写入。 */
+function assertOwnerProjectionConsistent(state) {
+  const bad = [];
+  for (const role of ['requirement', 'development', 'test']) {
+    const a = ownerSlotId(state.crMd.owners?.[role]);
+    const b = ownerSlotId(state.backlog.owners?.[role]);
+    if (a === null || b === null || a !== b) bad.push(role);
+  }
+  if (ownerSlotId(state.crMd.owners?.requirement) !== String(state.crMd.compatibilityOwner ?? '')) bad.push('cr.md.owner');
+  if (ownerSlotId(state.backlog.owners?.requirement) !== String(state.backlog.compatibilityOwner ?? '')) bad.push('backlog.owner');
+  if (bad.length) {
+    fail('OWNER_PROJECTION_DRIFT', `Owner 双投影不一致（漂移字段: ${bad.join(', ')}），拒绝写入（不自动修复）`, { changed: false, drifted: bad });
+  }
+}
+
+/** 行级替换 owners.{role} slot 内的 id/assigned-at 两行（slot 块必须完整，缺失即 LEDGER_PARSE_FAILED）。
+ * 块尾判定必须含缩进（findBlockEnd 的 key 正则无 \s 前缀，只识别 0 缩进键——会越过同缩进的下一个 slot）。 */
+function slotBlockEnd(lines, idx) {
+  const keyIndent = lines[idx].match(/^[ \t]*/)[0].length;
+  for (let i = idx + 1; i < lines.length; i++) {
+    const l = lines[i];
+    const ind = l.match(/^[ \t]*/)[0].length;
+    if (ind <= keyIndent && /^[ \t]*[A-Za-z0-9_-]+:/.test(l)) return i;
+  }
+  return lines.length;
+}
+
+function replaceOwnerSlot(lines, role, newId, slotIndent, at) {
+  const out = [...lines];
+  const re = new RegExp('^' + ' '.repeat(slotIndent) + role + ':');
+  const idx = out.findIndex((l) => re.test(l));
+  if (idx === -1) fail('LEDGER_PARSE_FAILED', `owners.${role} 块缺失`);
+  const segEnd = slotBlockEnd(out, idx);
+  let idReplaced = false;
+  let atReplaced = false;
+  for (let i = idx + 1; i < segEnd; i++) {
+    if (/^[ \t]*id:/.test(out[i])) { out[i] = out[i].replace(/^( *)(id:).*$/, `$1$2 ${newId}`); idReplaced = true; }
+    else if (/^[ \t]*assigned-at:/.test(out[i])) { out[i] = out[i].replace(/^( *)(assigned-at:).*$/, `$1$2 "${at}"`); atReplaced = true; }
+  }
+  if (!idReplaced || !atReplaced) fail('LEDGER_PARSE_FAILED', `owners.${role} 块缺少 id/assigned-at`);
+  return { out, segEnd };
+}
+
+/** owner-history 块追加一项（缺块则创建）。 */
+function appendOwnerHistory(lines, entryLine) {
+  const idx = lines.findIndex((l) => /^owner-history:/.test(l));
+  if (idx === -1) return [...lines, 'owner-history:', entryLine];
+  const out = [...lines];
+  if (/^owner-history:\s*\[\]\s*$/.test(out[idx])) out[idx] = 'owner-history:';
+  const segEnd = findBlockEnd(out, idx);
+  let lastItem = -1;
+  for (let i = segEnd - 1; i > idx; i--) { if (/^[ \t]*- /.test(out[i])) { lastItem = i; break; } }
+  out.splice(lastItem === -1 ? idx + 1 : lastItem + 1, 0, entryLine);
+  return out;
+}
+
+/** cr.md 候选：slot 更新 + requirement 顶层兼容 owner 同步 + owner-history 追加一条（note 可含）。 */
+function editCrOwnerProjection(text, cr, role, newId, historyEntry, handoverAt) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const m = matchFrontmatter(norm);
+  if (!m) fail('LEDGER_PARSE_FAILED', `cr.md 无 frontmatter: ${cr}`);
+  const lines = m.body.split('\n');
+  if (role === 'requirement') {
+    const oi = lines.findIndex((l) => /^owner:/.test(l));
+    if (oi === -1) fail('LEDGER_PARSE_FAILED', 'cr.md 缺少顶层 owner 兼容字段');
+    lines[oi] = lines[oi].replace(/^( *)(owner:).*$/, `$1$2 ${newId}`);
+  }
+  const { out } = replaceOwnerSlot(lines, role, newId, 2, handoverAt);
+  const entryLine = `  - { role: ${historyEntry.role}, from: ${historyEntry.from || '""'}, to: ${historyEntry.to}, at: "${historyEntry.at}", reason: ${historyEntry.reason}${historyEntry.note ? `, note: ${yamlScalar(historyEntry.note)}` : ''} }`;
+  const body = appendOwnerHistory(out, entryLine).join('\n');
+  return norm.replace(m.match, '---\n' + body + '\n---');
+}
+
+/** _backlog.yml 候选：slot 更新 + requirement 顶层兼容 owner 同步 + notify-log 追加/notify-pending 合并（复用 inbox-emit 结构，时间戳显式传入）。 */
+function editBacklogOwnerProjection(text, cr, role, newId, inboxPayload, handoverAt) {
   const norm = text.replaceAll('\r\n', '\n');
   const block = matchEntryBlock(norm, cr);
   if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
-  const roleRe = new RegExp('^([ \\t]*)' + role + ':', 'm');
-  if (!roleRe.test(block.text)) fail('OWNER_ROLE_MISSING', `${cr} 条目中缺少 owners.${role} 块，结构异常`);
-  const subIndent = ' '.repeat(block.indent + 6);
   const lines = block.text.split('\n');
-  const roleIdx = lines.findIndex((l) => new RegExp('^[ \\t]*' + role + ':').test(l));
-  const endIdx = findBlockEnd(lines, roleIdx);
-  const seg = lines.slice(roleIdx + 1, endIdx);
-  const hasId = seg.some((l) => /^\s*id:/.test(l));
-  const hasAt = seg.some((l) => /^\s*assigned-at:/.test(l));
-  const out = [];
-  for (let i = roleIdx + 1; i < endIdx; i++) {
-    const l = lines[i];
-    if (/^\s*id:/.test(l)) out.push(l.replace(/^(\s*)id:.*$/, `$1id: ${id}`));
-    else if (/^\s*assigned-at:/.test(l)) out.push(l.replace(/^(\s*)assigned-at:.*$/, `$1assigned-at: "${nowIso()}"`));
-    else out.push(l);
+  const { out } = replaceOwnerSlot(lines, role, newId, block.indent + 4, handoverAt);
+  if (role === 'requirement') {
+    const oi = out.findIndex((l) => /^[ \t]*owner:/.test(l));
+    if (oi === -1) fail('LEDGER_PARSE_FAILED', 'backlog 条目缺少顶层 owner 兼容字段');
+    out[oi] = out[oi].replace(/^( *)(owner:).*$/, `$1$2 ${newId}`);
   }
-  if (!hasId) out.unshift(`${subIndent}id: ${id}`);
-  if (!hasAt) out.splice(1, 0, `${subIndent}assigned-at: "${nowIso()}"`);
-  const nb = lines.slice(0, roleIdx + 1).concat(out, lines.slice(endIdx)).join('\n');
-  return norm.slice(0, block.start) + nb + '\n' + norm.slice(block.end);
+  const nb = norm.slice(0, block.start) + out.join('\n') + norm.slice(block.end);
+  return editInboxEmit(nb, cr, { at: handoverAt, event: 'owner-handover', to: inboxPayload.to, payload: inboxPayload });
+}
+
+/** casWriteMulti 的软失败变体（回滚专用，SDD §4.7）：语义一致（全校验→全 temp→连续 rename），失败抛 Error 而非 process.exit。 */
+function tryCasWriteMulti(writes) {
+  for (const w of writes) {
+    const cur = readFileChecked(w.path);
+    if (cur == null && w.expectedHash == null) continue;
+    if (cur == null) throw new Error(`写入前文件消失: ${w.path}`);
+    if (w.expectedHash == null || sha256(cur) !== w.expectedHash) {
+      throw new Error(`${w.path} CAS 失配（候选 hash ${String(w.expectedHash).slice(0, 8)}…），疑似并发修改`);
+    }
+  }
+  const staged = writes.map((w) => {
+    const tmp = w.path + `.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, w.newText, 'utf8');
+    return { tmp, dst: w.path };
+  });
+  for (const s of staged) fs.renameSync(s.tmp, s.dst);
+}
+
+/** FR-5 失败回滚：以候选 hash 为 CAS 前提恢复两原始快照，撤销本次暂存，复核 clean baseline。
+ * 任一步失败 → OWNER_COMMIT_ROLLBACK_FAILED（不吞外部并发变化，不 reset/checkout）。 */
+function rollbackOwnerWrite(ws, os, candidateHashes, rels) {
+  try {
+    tryCasWriteMulti([
+      { path: os.crMd.path, expectedHash: candidateHashes.crMd, newText: os.crMd.text },
+      { path: os.backlog.path, expectedHash: candidateHashes.backlog, newText: os.backlog.text },
+    ]);
+    const unR = controlledGit(ws, 'add', rels, ws, 'crctl-owner-set'); // 原文等于 HEAD → 清除本次 staged diff
+    if (!unR.ok) throw new Error(`撤销本次暂存失败: git add ${rels.join(' ')}`);
+    const clean = queryTrackedChanges(ws, { audit: true });
+    if (!clean.ok || clean.staged.length || clean.unstaged.length) {
+      throw new Error(`clean baseline 复核失败 staged=[${(clean.staged || []).join(',')}] unstaged=[${(clean.unstaged || []).join(',')}]`);
+    }
+  } catch (e) {
+    fail('OWNER_COMMIT_ROLLBACK_FAILED', `正式移交提交失败后的恢复未完成：${String(e && e.message || e)}`, { affected: rels });
+  }
+  fail('OWNER_COMMIT_FAILED', '正式移交提交失败，已恢复两个原始快照并撤销本次暂存（tracked clean baseline 已复原），请修复后重试', { changed: false, rolled_back: true });
 }
 
 /** backlog-set：白名单标量字段 prd-path/sdd-path 替换或插入。 */
@@ -2249,16 +2513,82 @@ function cmdCheckpointAdd(ws, cr, gates, flags) {
 }
 
 function cmdOwnerSet(ws, cr, gates, flags) {
-  if (!flags.role || !flags.id) fail('BAD_ARGS', 'owner-set 需要 --role <requirement|development|test> --id <id>');
+  if (!flags.role || !flags.id) fail('BAD_ARGS', 'owner-set 需要 --role <requirement|development|test> --id <id> [--note <text>]');
   if (!['requirement', 'development', 'test'].includes(flags.role)) fail('BAD_ARGS', `--role 必须是 requirement|development|test（当前 ${flags.role}）`);
   const state = resolveCrState(ws, cr);
   const { sm } = loadStateMachine(ws);
   if ((sm.terminal || []).includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `owner-set 不允许在终态 ${state.status} 修改负责人`, { current: state.status, expect: '非终态' });
-  const snap = loadBacklogEntry(ws, cr);
-  const newText = editOwnerSet(snap.text, cr, flags.role, flags.id);
-  casWrite(snap.path, snap.hash, newText);
-  auditLog(ws, { kind: 'ledger', op: 'owner-set', cr, actor: identity(ws), role: flags.role, to: flags.id });
-  ok({ op: 'owner-set', cr, role: flags.role, id: flags.id, file: snap.path });
+  // FR-3：tracked clean 前置（untracked 不阻塞）；任一 tracked staged/unstaged 变更 → 零副作用拒绝
+  const dirty = queryTrackedChanges(ws, { audit: false });
+  if (!dirty.ok) {
+    fail(dirty.code, '受控 Git 只读查询失败，无法确认 tracked clean 前置', { changed: false, detail: dirty.detail });
+  }
+  if (dirty.staged.length || dirty.unstaged.length) {
+    fail('OWNER_WORKTREE_DIRTY', '仓库存在 tracked 变更：正式移交要求 tracked index 与 tracked working tree 均 clean（untracked 不阻塞）。请先提交、暂存外移或丢弃自己的 tracked 变更', { changed: false, staged: dirty.staged, unstaged: dirty.unstaged });
+  }
+  // FR-3：双投影一致性校验（cr.md 与 _backlog.yml 三角色 + 顶层兼容 owner）
+  const os = readOwnerState(ws, cr);
+  assertOwnerProjectionConsistent(os);
+  const from = ownerSlotId(os.crMd.owners[flags.role]);
+  const newId = String(flags.id);
+  if (newId === from) {
+    // FR-3：同值重放仅在双投影一致且 tracked clean 时返回 changed=false，零副作用
+    ok({ op: 'owner-set', cr, changed: false, role: flags.role, id: newId });
+    return;
+  }
+  // FR-3：真实变化只生成一次时间戳，复用于两处 slot、requirement 两处兼容 owner、history、notify、audit、outbox
+  const handoverAt = nowIso();
+  const note = typeof flags.note === 'string' && flags.note.trim() ? flags.note.trim() : null;
+  const ownerChange = { role: flags.role, from, to: newId, at: handoverAt, reason: 'formal-handover' };
+  const historyEntry = note ? { ...ownerChange, note } : ownerChange;
+  const inboxPayload = { event: 'owner-handover', to: [newId], role: flags.role, from, owner: newId, handover_at: handoverAt, ...(note ? { note } : {}) };
+  const newCrMd = editCrOwnerProjection(os.crMd.text, cr, flags.role, newId, historyEntry, handoverAt);
+  const newBacklog = editBacklogOwnerProjection(os.backlog.text, cr, flags.role, newId, inboxPayload, handoverAt);
+  const relCrMd = path.relative(ws, os.crMd.path).split(path.sep).join('/');
+  const relBacklog = path.relative(ws, os.backlog.path).split(path.sep).join('/');
+  const rels = [relCrMd, relBacklog];
+  const expected = [...rels].sort();
+  const candidateHashes = { crMd: sha256(newCrMd), backlog: sha256(newBacklog) };
+  // FR-5：两账本候选一次 CAS 写入
+  casWriteMulti([
+    { path: os.crMd.path, expectedHash: os.crMd.hash, newText: newCrMd },
+    { path: os.backlog.path, expectedHash: os.backlog.hash, newText: newBacklog },
+  ]);
+  // FR-5：只 add 两受控路径，commit 前复核 staged set 恰好等于两文件且无其他 tracked working-tree 变化
+  const addR = controlledGit(ws, 'add', rels, ws, 'crctl-owner-set');
+  if (addR.ok) {
+    const iso = queryTrackedChanges(ws, { audit: false });
+    if (iso.ok && iso.unstaged.length === 0 && JSON.stringify(iso.staged) === JSON.stringify(expected)) {
+      const msg = `[cr] owner handover ${cr} ${flags.role} ${from} -> ${newId}`;
+      const commitR = controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-owner-set');
+      if (commitR.ok) {
+        const sha = gitHeadSha(ws);
+        auditLog(ws, { kind: 'ledger', op: 'owner-set', cr, actor: identity(ws), role: flags.role, from, to: newId, handover_at: handoverAt, result: 'ok' });
+        // FR-5：同一真实 SHA 分别尝试 owners + inbox 事件；outbox 失败只 warning，不回滚 commit
+        const warnings = [];
+        const emit = (ev) => {
+          const n = emitOutboxEvent(ws, ev);
+          if (!n) warnings.push({ code: 'EMIT_FAILED', event_kind: ev.event_kind });
+          return n;
+        };
+        const proj = {};
+        for (const role of ['requirement', 'development', 'test']) {
+          const s = os.crMd.owners[role];
+          proj[role] = role === flags.role
+            ? { id: newId, 'assigned-at': handoverAt }
+            : { id: String(s.id), 'assigned-at': s['assigned-at'] ? String(s['assigned-at']) : '' };
+        }
+        const outbox = {
+          owners: emit({ event_kind: 'owners', cr_id: cr, from_status: state.status, to_status: state.status, trigger: 'owner-handover', commit_sha: sha, actor: identity(ws), payload: { owners: proj, changes: [ownerChange], handover_at: handoverAt } }),
+          inbox: emit({ event_kind: 'inbox', cr_id: cr, from_status: state.status, to_status: state.status, trigger: 'owner-handover', commit_sha: sha, actor: identity(ws), payload: inboxPayload }),
+        };
+        ok({ op: 'owner-set', cr, changed: true, role: flags.role, from, to: newId, handoverAt, files: [os.crMd.path, os.backlog.path], commit: { sha, message: msg }, outbox, warnings });
+        return;
+      }
+    }
+  }
+  // add/commit/隔离复核失败 → 回滚恢复 clean baseline
+  rollbackOwnerWrite(ws, os, candidateHashes, rels);
 }
 
 function cmdBacklogSet(ws, cr, gates, flags) {
@@ -2291,7 +2621,7 @@ function editInboxEmit(text, cr, meta) {
   const subIndent = ' '.repeat(block.indent + 6);
   const payloadJson = meta.payload ? ` ${JSON.stringify(meta.payload)}` : '';
   const logItem = [
-    `${itemIndent}- at: "${nowIso()}"`,
+    `${itemIndent}- at: "${meta.at || nowIso()}"`,
     `${subIndent}event: ${meta.event}`,
     `${subIndent}to: ${JSON.stringify(meta.to)}`,
     `${subIndent}payload:${payloadJson || ' {}'}`,
@@ -2380,35 +2710,38 @@ function scanMaxCrNumber(ws, year) {
 function formatCrId(year, n) { return `CR-${year}-${String(n).padStart(3, '0')}`; }
 
 function cmdCrInit(ws, gates, flags) {
-  if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]');
-  if (!flags['owner-requirement']) fail('BAD_ARGS', 'cr-init 需要 --owner-requirement <id>（被指派人业务身份）');
+  if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]');
+  // FR-1（CR-2026-030）：三角色显式必填，缺任一参数在读取/创建任何文件之前零写入；不保留复制兼容路径
+  const req = String(flags['owner-requirement'] || '');
+  const dev = String(flags['owner-development'] || '');
+  const tst = String(flags['owner-test'] || '');
+  if (!req || !dev || !tst) {
+    fail('BAD_ARGS', 'cr-init 需要显式 --owner-requirement <id> --owner-development <id> --owner-test <id>（三角色独立指定，无隐式继承）');
+  }
   const year = flags.year || String(new Date().getFullYear());
   const cr = formatCrId(year, scanMaxCrNumber(ws, year) + 1);
   const now = nowIso();
   const by = identity(ws);
-  const ownerId = String(flags['owner-requirement']);
   // FR-9（CR-2026-022）：注册元信息可选旗标，缺省值与旧硬编码同义（summary="" / source=manual / target-version=tbd），向后兼容
-  const yamlScalar = (v) => (/^[\w./-]+$/.test(String(v)) ? String(v) : `"${String(v).replaceAll('"', '\\"')}"`);
   const summary = flags.summary ?? '';
   const source = flags.source ?? 'manual';
   const tv = flags['target-version'] ?? 'tbd';
+  // FR-1：同一个注册时间戳 now 复用于三角色当前 Owner 与三条 initial-assignment history
+  const ownerSlot = (id, indent) => [`${' '.repeat(indent)}id: ${id}`, `${' '.repeat(indent)}assigned-at: "${now}"`];
   // cr.md 全量 frontmatter（owners/owner-history/时间戳全 crctl 生成）
   const fm = [
     '---',
     `id: ${cr}`,
     `title: ${flags.title.replaceAll('"', '\\"')}`,
     `summary: ${yamlScalar(summary)}`,
-    `owner: ${ownerId}`,
+    `owner: ${req}`,
     'owners:',
-    `  requirement:`,
-    `    id: ${ownerId}`,
-    `    assigned-at: "${now}"`,
-    `  development:`,
-    `    id: ${ownerId}`,
-    `    assigned-at: "${now}"`,
-    `  test:`,
-    `    id: ${ownerId}`,
-    `    assigned-at: "${now}"`,
+    '  requirement:',
+    ...ownerSlot(req, 4),
+    '  development:',
+    ...ownerSlot(dev, 4),
+    '  test:',
+    ...ownerSlot(tst, 4),
     `target-version: ${yamlScalar(tv)}`,
     `source: ${yamlScalar(source)}`,
     'status: drafting',
@@ -2418,9 +2751,9 @@ function cmdCrInit(ws, gates, flags) {
     'last-push-at: ""',
     'last-push-by: ""',
     'owner-history:',
-    `  - { role: requirement, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
-    `  - { role: development, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
-    `  - { role: test, from: "", to: ${ownerId}, at: "${now}", reason: initial-assignment }`,
+    `  - { role: requirement, from: "", to: ${req}, at: "${now}", reason: initial-assignment }`,
+    `  - { role: development, from: "", to: ${dev}, at: "${now}", reason: initial-assignment }`,
+    `  - { role: test, from: "", to: ${tst}, at: "${now}", reason: initial-assignment }`,
     'handover-history: []',
     '---',
     '',
@@ -2433,17 +2766,14 @@ function cmdCrInit(ws, gates, flags) {
     `  - id: ${cr}`,
     `    title: ${flags.title.replaceAll('"', '\\"')}`,
     `    summary: ${yamlScalar(summary)}`,
-    `    owner: ${ownerId}`,
+    `    owner: ${req}`,
     '    owners:',
-    `      requirement:`,
-    `        id: ${ownerId}`,
-    `        assigned-at: "${now}"`,
-    `      development:`,
-    `        id: ${ownerId}`,
-    `        assigned-at: "${now}"`,
-    `      test:`,
-    `        id: ${ownerId}`,
-    `        assigned-at: "${now}"`,
+    '      requirement:',
+    ...ownerSlot(req, 8),
+    '      development:',
+    ...ownerSlot(dev, 8),
+    '      test:',
+    ...ownerSlot(tst, 8),
     `    target-version: ${yamlScalar(tv)}`,
     `    source: ${yamlScalar(source)}`,
     '    prd-path: ""',
@@ -2470,12 +2800,22 @@ function cmdCrInit(ws, gates, flags) {
     { path: bp, expectedHash: sha256(backlogText), newText: newBacklog },
     { path: ip, expectedHash: sha256(indexText), newText: newIndex },
   ]);
-  auditLog(ws, { kind: 'ledger', op: 'cr-init', cr, actor: by, title: flags.title });
-  emitOutboxEvent(ws, {
-    event_kind: 'cr-init', cr_id: cr, actor: by,
-    payload: { title: flags.title, ownerRequirement: ownerId },
+  // FR-1/FR-2：成功 audit 记录完整 Owner 投影与三项初始变化；不记录 branch/worktree/commit SHA/outbox 成功事实（尚未发生）
+  auditLog(ws, {
+    kind: 'ledger', op: 'cr-init', cr, actor: by, title: flags.title,
+    owners: { requirement: req, development: dev, test: tst },
+    changes: ['requirement', 'development', 'test'].map((role) => ({ role, from: '', to: role === 'requirement' ? req : role === 'development' ? dev : tst, at: now, reason: 'initial-assignment' })),
   });
-  ok({ op: 'cr-init', cr, title: flags.title, status: 'drafting', files: { crMd: path.join('change-requests', cr, 'cr.md'), backlog: bp, index: ip } });
+  // FR-2：cr-init 自身不发 outbox——注册事实由 register commit 成功后以真实 SHA 产生
+  ok({
+    op: 'cr-init', cr, title: flags.title, status: 'drafting',
+    owners: {
+      requirement: { id: req, 'assigned-at': now },
+      development: { id: dev, 'assigned-at': now },
+      test: { id: tst, 'assigned-at': now },
+    },
+    files: { crMd: path.join('change-requests', cr, 'cr.md'), backlog: bp, index: ip },
+  });
 }
 
 /* ────────────────────────── task allocate（S7，CR-2026-021 TASK-07） ──────────────────────────
@@ -2557,7 +2897,8 @@ function cmdWorktreePath(ws, cr, gates, flags) {
   if (!flags.repo) fail('BAD_ARGS', 'worktree-path 需要 --repo <repo-id>');
   const bucket = flags.repo === 'knowledge-base' || flags.repo === 'ai-first-platform-docs' ? 'knowledge-base' : flags.repo;
   const p = path.join(deriveInstallRoot(ws), '.rayai-worktrees', bucket, 'requirement', cr);
-  ok({ op: 'worktree-path', cr, repo: flags.repo, bucket, path: p });
+  // CR-2026-030 TASK-02（FR-2/AC-5）：canonical branch 只在此处生成，Skill/Pipeline 不再拼接
+  ok({ op: 'worktree-path', cr, repo: flags.repo, bucket, branch: `requirement/${cr}`, path: p });
 }
 
 /** 解析 --period（仅支持 <N>d，如 7d/30d），返回该窗口起始的日期字符串（YYYY-MM-DD）；无 period 输入返回 null。 */
@@ -2655,6 +2996,24 @@ function resolveTemplateCr(ws, cwd, subject) {
   fail('BAD_ARGS', 'git commit --template 无法确定 cr：--cwd 分支非 requirement/CR-* 且 subject 不含 CR 编号');
 }
 
+// CR-2026-030 TASK-02：cr.md 权威 Owner 投影读取（register commit 后置事件的数据源）。
+// 软失败变体：commit 已是权威事实，Owner 校验失败只返回结构化原因，由调用方记 warning + SKIPPED audit（SDD §4.2）。
+function tryReadCrOwnerProjection(ws, cr) {
+  try {
+    const md = readCrMdFrontmatter(ws, cr);
+    if (!md || !md.owners) return { ok: false, why: `cr.md 缺少 owners 投影: ${cr}` };
+    const slots = {};
+    for (const role of ['requirement', 'development', 'test']) {
+      const s = md.owners[role];
+      if (!s || !s.id) return { ok: false, why: `cr.md owners.${role} 缺失，无法产生注册事件` };
+      slots[role] = { id: String(s.id), 'assigned-at': s['assigned-at'] ? String(s['assigned-at']) : '' };
+    }
+    return { ok: true, owners: slots };
+  } catch (e) {
+    return { ok: false, why: String(e && e.message || e) };
+  }
+}
+
 function applyCommitTemplate(ws, argv, flags) {
   const kind = flags.template;
   const tpl = COMMIT_TEMPLATES[kind];
@@ -2675,7 +3034,8 @@ function applyCommitTemplate(ws, argv, flags) {
     cr = resolveTemplateCr(ws, flags.cwd ? path.resolve(flags.cwd) : ws, subject);
   }
   argv[mi + 1] = tpl(cr, subject);
-  return argv;
+  // CR-2026-030 TASK-02：返回模板上下文（register 模板在 commit 成功后触发真实 SHA 注册事件）
+  return { args: argv, templateContext: { kind, cr } };
 }
 
 /** 行级追加 supplemental-reviews 段条目（硬失败：无该段则创建，段结构异常则报错）。 */
@@ -2717,7 +3077,8 @@ function cmdTest(ws, cr, gates, flags) {
   }
   const allPass = runs.every((r) => r.exit === 0);
   const reportPath = path.join(crDir(ws, cr), 'test-report.md');
-  const tester = identity(ws);
+  const md = readCrMdFrontmatter(ws, cr);
+  const tester = md?.owners?.test?.id ? String(md.owners.test.id) : identity(ws);
   const lines = [
     '---',
     `cr: ${cr}`,
@@ -3076,11 +3437,55 @@ function cmdGit(ws, argv, flags) {
   if (!sub) fail('BAD_ARGS', 'git 需要子命令，如 crctl git status --short --cwd <path>');
   let args = argv.slice(1);
   // S10（CR-2026-021 TASK-09）：git commit --template <kind> 生成规范 message（可选分支，不影响 -m 直传白名单校验）
-  if (sub === 'commit' && flags.template) args = applyCommitTemplate(ws, args, flags);
+  let templateContext = null;
+  if (sub === 'commit' && flags.template) {
+    const t = applyCommitTemplate(ws, args, flags);
+    args = t.args;
+    templateContext = t.templateContext;
+  }
   const r = controlledGit(ws, sub, args, flags.cwd ? path.resolve(flags.cwd) : ws, flags.caller);
   if (r.code === 'FORBIDDEN_SUBCOMMAND') fail('FORBIDDEN_SUBCOMMAND', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   if (r.code === 'SHELL_UNAVAILABLE') fail('SHELL_UNAVAILABLE', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   let outbox = null;
+  let registerMeta = null;
+  // CR-2026-030 TASK-02（FR-2）：register commit 成功后，以真实 HEAD SHA 产生 status + owners 两类注册事件。
+  // commit 失败不读 HEAD、不发事件；单个 outbox 写出失败对应 null + warnings EMIT_FAILED，commit 不回滚（Git 是权威）。
+  if (r.ok && sub === 'commit' && templateContext && templateContext.kind === 'register') {
+    const cwd = flags.cwd ? path.resolve(flags.cwd) : ws;
+    const cr = templateContext.cr;
+    const sha = gitHeadSha(ws, cwd);
+    const warnings = [];
+    const emit = (ev) => {
+      const name = emitOutboxEvent(ws, ev);
+      if (!name) warnings.push({ code: 'EMIT_FAILED', event_kind: ev.event_kind });
+      return name;
+    };
+    try {
+      const proj = tryReadCrOwnerProjection(ws, cr);
+      if (!proj.ok) {
+        auditLog(ws, { kind: 'register-events', cr, result: 'SKIPPED', why: proj.why });
+        registerMeta = { commit: { sha }, outbox: { status: null, owners: null }, warnings: [{ code: 'REGISTER_EVENTS_SKIPPED', why: proj.why }] };
+      } else {
+        const owners = proj.owners;
+        const changes = ['requirement', 'development', 'test'].map((role) => ({
+          role, from: '', to: owners[role].id, at: owners[role]['assigned-at'], reason: 'initial-assignment',
+        }));
+        registerMeta = {
+          commit: { sha },
+          outbox: {
+            status: emit({ event_kind: 'status', cr_id: cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: sha, actor: identity(ws) }),
+            owners: emit({ event_kind: 'owners', cr_id: cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: sha, actor: identity(ws), payload: { owners, changes } }),
+          },
+          warnings,
+        };
+      }
+    } catch (e) {
+      // commit 已是权威事实，不回滚；事件构造异常仅结构化 warning + audit（SDD §4.2）
+      const why = String(e && e.message || e);
+      auditLog(ws, { kind: 'register-events', cr, result: 'SKIPPED', why });
+      registerMeta = { commit: { sha }, outbox: { status: null, owners: null }, warnings: [{ code: 'REGISTER_EVENTS_SKIPPED', why }] };
+    }
+  }
   if (r.ok && sub === 'push' && !args.includes('--delete')) {
     // checkpoint 事件：携带被推送仓的 HEAD sha，供 worker 补全 --embedded 状态事件的空 commit_sha（§A.5）。
     // CR 上下文从 HEAD 提交信息或分支参数提取；提不到（非 CR 相关推送）则不发。
@@ -3098,7 +3503,8 @@ function cmdGit(ws, argv, flags) {
   }
   process.stdout.write(r.stdout || '');
   process.stderr.write(r.stderr || '');
-  ok(outbox ? { ok: r.ok, exit: r.exit, outbox } : { ok: r.ok, exit: r.exit });
+  const extra = registerMeta ? { commit: registerMeta.commit, outbox: registerMeta.outbox, warnings: registerMeta.warnings } : (outbox ? { outbox } : {});
+  ok({ ok: r.ok, exit: r.exit, ...extra });
   if (!r.ok) process.exit(r.exit || 1);
 }
 
@@ -3120,10 +3526,11 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
                                                 schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）
   crctl review-note  <cr_id> [--stage <s>] --note <text>  approval.yml supplemental-reviews[] 追加（不接受 --by，身份 crctl 生成）
   crctl checkpoint-add <cr_id> --repo <r> --sha <sha> [--remote-ref <ref>]   _backlog checkpoints[] 追加 + 推送元数据（developing~writing-back）
-  crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   _backlog owners.{role} 指派（非终态）
+  crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   双投影 owners 更新 + 正式移交 commit（非终态）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
-  crctl cr-init     --title <t> --owner-requirement <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
+  crctl cr-init     --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
+                        [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
   crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
   crctl report | crctl cr-metrics [--period <N>d]   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架

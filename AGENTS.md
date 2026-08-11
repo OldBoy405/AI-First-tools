@@ -110,7 +110,7 @@ drafting
 
 状态推进必须通过对应 Skill 或 Pipeline 节点完成，不得手工编辑目标 workspace 的 `_backlog.yml`。涉及人工确认的节点，后续必须有明确的 `approve-*` 或写入型 Skill 记录结论。
 
-CR 角色 owner 变更必须通过 `handover-cr` 或 `resume-from-remote` 的角色移交逻辑完成，更新 `owners.{role}.id`、`owners.{role}.assigned-at` 并追加 `owner-history`。不得只修改顶层 `owner`。
+CR 角色 owner 变更必须通过 `handover-cr` 唯一业务入口（CR-2026-030 FR-4）：固定顺序 `owner-set -> push-progress`，经 crctl 原子更新 `cr.md` 与 `_backlog.yml` 的 `owners.{role}.id`/`assigned-at`、追加唯一责任历史 `owner-history` 并形成只含两账本的隔离 commit；`resume-from-remote` 只读恢复 worktree，不承担 Owner 变更。不得手工编辑 owners 字段或只修改顶层 `owner`。
 
 ---
 
