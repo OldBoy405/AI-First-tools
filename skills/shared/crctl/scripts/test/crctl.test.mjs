@@ -3695,7 +3695,9 @@ test('CR-2026-030 TASK-01：register outbox 写出失败 → commit 保留、war
     assert.equal(out.commit.sha, head, 'outbox 失败不回滚 commit，真实 SHA 保留');
     assert.ok(out.outbox && out.outbox.status === null && out.outbox.owners === null, '失败事件以 null 呈现');
     assert.ok(Array.isArray(out.warnings) && out.warnings.some((w2) => w2.code === 'EMIT_FAILED'), `warnings 含 EMIT_FAILED: ${JSON.stringify(out.warnings)}`);
-    assert.ok(auditLines(ws).some((a) => a.result === 'EMIT_FAILED'), 'EMIT_FAILED audit 存在');
+    const failures = auditLines(ws).filter((a) => a.result === 'EMIT_FAILED');
+    assert.deepEqual(new Set(failures.map((a) => a.cr)), new Set(['CR-2026-001']), 'EMIT_FAILED audit 标识 CR');
+    assert.deepEqual(new Set(failures.map((a) => a.event_kind)), new Set(['status', 'owners']), 'EMIT_FAILED audit 区分事件类型');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -3759,6 +3761,26 @@ test('CR-2026-030 TASK-01：owner-set 真实移交——双投影同步、owner-
     assert.notEqual(git(ws, ['rev-parse', 'HEAD']), head0, '形成新 commit');
     const files = git(ws, ['show', '--name-only', '--format=', 'HEAD']).trim().split('\n').filter(Boolean);
     assert.deepEqual(files.sort(), ['change-requests/CR-T1/cr.md', 'change-requests/_backlog.yml'], '成功 commit 只含两账本');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-030 review repair：owner-set 将 owner-history: [] 展开后追加，不得把条目插到 frontmatter 首行（AC-8）', () => {
+  const ws = makeGitWorkspace();
+  try {
+    writeOwnerEntry(ws, 'CR-T1', 'drafting');
+    const mdPath = path.join(ws, 'change-requests', 'CR-T1', 'cr.md');
+    const md = readFileSync(mdPath, 'utf8').replace(/owner-history:\n(?:  - .*\n){3}/, 'owner-history: []\n');
+    writeFileSync(mdPath, md);
+    git(ws, ['add', '-A']);
+    git(ws, ['commit', '-m', '[cr] seed empty owner history']);
+
+    const r = runCrctl(['owner-set', 'CR-T1', '--role', 'development', '--id', 'Alice', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    const updated = readFileSync(mdPath, 'utf8');
+    assert.match(updated, /^---\nid: CR-T1\n/, 'frontmatter 首个字段仍为 id');
+    assert.match(updated, /owner-history:\n  - \{ role: development, from: Ray, to: Alice, /, '空 flow 展开后追加 formal-handover');
+    const status = runCrctl(['status', 'CR-T1', '--workspace', ws]);
+    assert.equal(status.status, 0, status.rawStderr);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 

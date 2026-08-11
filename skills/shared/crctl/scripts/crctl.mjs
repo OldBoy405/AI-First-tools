@@ -464,7 +464,7 @@ function emitOutboxEvent(ws, ev) {
     fs.renameSync(tmp, path.join(dir, name)); // 原子可见：先写临时名再 rename，防半写
     return name;
   } catch (e) {
-    try { auditLog(ws, { kind: 'outbox', result: 'EMIT_FAILED', why: String(e && e.message || e) }); } catch { /* 双重失败只能放弃 */ }
+    try { auditLog(ws, { kind: 'outbox', cr: ev.cr_id, event_kind: ev.event_kind, result: 'EMIT_FAILED', why: String(e && e.message || e) }); } catch { /* 双重失败只能放弃 */ }
     return null;
   }
 }
@@ -2386,10 +2386,11 @@ function appendOwnerHistory(lines, entryLine) {
   const idx = lines.findIndex((l) => /^owner-history:/.test(l));
   if (idx === -1) return [...lines, 'owner-history:', entryLine];
   const out = [...lines];
+  if (/^owner-history:\s*\[\]\s*$/.test(out[idx])) out[idx] = 'owner-history:';
   const segEnd = findBlockEnd(out, idx);
   let lastItem = -1;
   for (let i = segEnd - 1; i > idx; i--) { if (/^[ \t]*- /.test(out[i])) { lastItem = i; break; } }
-  out.splice(lastItem + 1, 0, entryLine);
+  out.splice(lastItem === -1 ? idx + 1 : lastItem + 1, 0, entryLine);
   return out;
 }
 

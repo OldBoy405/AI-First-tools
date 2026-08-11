@@ -41,20 +41,28 @@ function loadAuthorityTransitions(root) {
   const norm = text.replaceAll('\r\n', '\n');
   const lines = norm.split('\n');
   const failParse = (why) => { throw new Error(why); };
-  const findKey = (fromIdx, key) => {
-    const re = new RegExp('^([ \t]*)' + key + ':');
-    for (let i = fromIdx; i < lines.length; i++) {
-      const m = lines[i].match(re);
-      if (m) return { idx: i, indent: m[1].length };
+  const rootHits = lines
+    .map((line, idx) => ({ line, idx }))
+    .filter(({ line }) => /^change-request-track:\s*$/.test(line));
+  if (rootHits.length !== 1) failParse(`dir-graph.yaml change-request-track 块必须唯一，实际找到 ${rootHits.length} 个`);
+  const childHits = (parent, key) => {
+    const hits = [];
+    const re = new RegExp('^' + ' '.repeat(parent.indent + 2) + key + ':\\s*$');
+    for (let i = parent.idx + 1; i < lines.length; i++) {
+      if (!lines[i].trim()) continue;
+      const ind = lines[i].match(/^[ \t]*/)[0].length;
+      if (ind <= parent.indent) break;
+      if (re.test(lines[i])) hits.push({ idx: i, indent: ind });
     }
-    return null;
+    return hits;
   };
-  const crt = findKey(0, 'change-request-track');
-  const sm = crt ? findKey(crt.idx + 1, 'state_machine') : null;
-  const tr = sm ? findKey(sm.idx + 1, 'transitions') : null;
-  const transitionHeaders = lines.filter((line) => /^\s*transitions:\s*$/.test(line));
-  if (!crt || !sm || !tr) failParse('dir-graph.yaml 缺少 change-request-track.state_machine.transitions 块');
-  if (transitionHeaders.length !== 1) failParse(`dir-graph.yaml transitions 块必须唯一，实际找到 ${transitionHeaders.length} 个`);
+  const crt = { idx: rootHits[0].idx, indent: 0 };
+  const smHits = childHits(crt, 'state_machine');
+  if (smHits.length !== 1) failParse(`dir-graph.yaml change-request-track.state_machine 块必须唯一，实际找到 ${smHits.length} 个`);
+  const sm = smHits[0];
+  const trHits = childHits(sm, 'transitions');
+  if (trHits.length !== 1) failParse(`dir-graph.yaml change-request-track.state_machine.transitions 块必须唯一，实际找到 ${trHits.length} 个`);
+  const tr = trHits[0];
   const pairs = new Set();
   let seen = 0;
   for (let i = tr.idx + 1; i < lines.length; i++) {
