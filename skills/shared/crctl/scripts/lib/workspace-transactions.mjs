@@ -187,6 +187,23 @@ export function gitMust(cwd, args, opts = {}) {
   return r.stdout;
 }
 
+/** frontmatter 匹配（自 crctl.mjs 原样提取，merge finalize 与 crctl 共用，禁止复刻）。 */
+export function matchFrontmatter(text) {
+  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  return m ? { match: m[0], body: m[1] } : null;
+}
+
+/** cr.md 状态文本生成纯函数（status + updated-at 更新；自 crctl.mjs 原样提取）。 */
+export function crMdStatusText(text, newStatus) {
+  const m = matchFrontmatter(text);
+  if (!m) return null;
+  let fm = m.body;
+  if (/^status:\s*.*$/m.test(fm)) fm = fm.replace(/^status:\s*.*$/m, `status: ${newStatus}`);
+  else fm = fm + `\nstatus: ${newStatus}`;
+  if (/^updated-at:\s*.*$/m.test(fm)) fm = fm.replace(/^updated-at:\s*.*$/m, `updated-at: "${nowIso()}"`);
+  return text.replace(m.match, `---\n${fm}\n---`);
+}
+
 /* ────────────────────────── CR-ID 分配（原 crctl.mjs 同名函数迁入，TASK-05） ────────────────────────── */
 
 export function formatCrId(year, n) { return `CR-${year}-${String(n).padStart(3, '0')}`; }
@@ -688,4 +705,280 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
   const digest = sha256(snapshot.artifacts.files.map((f) => `${f.path}:${f.sha256}`).join('\n'));
   if (digest !== snapshot.artifacts.digest) return bad('task', { reason: 'digest-drift', expected: snapshot.artifacts.digest, actual: digest });
   return { ok: true };
+}
+/* ────────────────────────── mergeCr（SDD §5.2，TASK-07） ──────────────────────────
+ * 可恢复跨仓 merge saga：
+ * - 只消费 approval.yml#code.release-subjects（TASK-06 签入的 approved source），不猜 branch；
+ * - 零 publish 的 code/source/TASK drift → 返回 phase='release-drift'（由 crctl 层经
+ *   code-approved -> developing 回退转换执行）；PRD/SDD drift → APPROVED_ARTIFACT_DRIFT；
+ * - prepare 用 git merge-tree --write-tree + commit-tree，不 checkout/move 本地 trunk；
+ * - publish 逐仓 lease push，journal 先记 intent 再记 observation；重入按 classifyRemoteCommit 分流；
+ * - 全部 confirmed 后在 detached Transaction Workspace 单 finalize commit 写
+ *   status=merging + merge-commits.yml + merge-verification.md，lease push 后 origin confirmed。
+ */
+
+function renderMergeCommits(repos, snapshot, txId, mergedAt) {
+  const lines = ['schema: merge-commits/v1', `tx-id: ${txId}`, `merged-at: "${mergedAt}"`, 'repositories:'];
+  for (const r of repos) {
+    lines.push(`  - repo: ${r.repo}`, `    base-sha: ${r.baseSha}`, `    source-sha: ${r.sourceSha}`, `    merge-sha: ${r.mergeSha}`);
+  }
+  lines.push(`release-subjects-digest: ${snapshot.artifacts.digest}`);
+  return lines.join('\n') + '\n';
+}
+
+function renderMergeVerification(repos, snapshot) {
+  const lines = ['# Merge Verification', '', `- release-subjects version: ${snapshot.version}`, '- repositories:'];
+  for (const r of repos) lines.push(`  - ${r.repo}: base=${r.baseSha.slice(0, 12)} source=${r.sourceSha.slice(0, 12)} merge=${r.mergeSha.slice(0, 12)}`);
+  lines.push(`- artifacts-digest: ${snapshot.artifacts.digest}`);
+  return lines.join('\n') + '\n';
+}
+
+function buildMergeSideEffects(payload) {
+  const se = [];
+  for (const r of payload.repos || []) {
+    if (r.pushed) se.push({ kind: 'publish', repo: r.repo, mergeSha: r.mergeSha });
+  }
+  if (payload.finalizePushed) se.push({ kind: 'finalize-push', repo: 'knowledge-base', commit: payload.finalizeCommit });
+  if (payload.operationalWorkspace) se.push({ kind: 'operational-workspace', path: payload.operationalWorkspace });
+  return se;
+}
+
+export async function mergeCr(ctx, input) {
+  const cr = input && input.cr;
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) throw new TxError('MERGE_CR_INVALID', `merge 需要合法 CR-ID，收到 ${cr}`, { cr });
+  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
+  const opWs = resolveOperationalWorkspace(ctx, cr);
+  if (opWs.source !== 'cr-worktree') {
+    throw new TxError('MERGE_STATE_MISMATCH', `merge 只接受 code-approved（authority=CR worktree），当前 ${opWs.phase}`, { cr, phase: opWs.phase });
+  }
+  const recoverCommand = `crctl merge ${cr} --workspace ${JSON.stringify((input && input.workspace) || ctx.installRoot)}`;
+  const lock = await acquireLock({ root: ctx.installRoot, scope: `merge-${cr}`, op: 'merge' });
+  try {
+    let journal, journalPath;
+    ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'merge', key: cr, graphDigest: ctx.graphDigest, inputDigest: sha256(cr) }));
+    const payload = journal.merge || { cr, phase: 'start', repos: [], finalizeCommitted: false, finalizeCommit: null, finalizeBaseSha: null, finalizePushed: false, mergedStatus: null, operationalWorkspace: null };
+    journal.merge = payload;
+    const wasComplete = payload.phase === 'complete';
+    let did = false;
+    const save = async (phase) => { payload.phase = phase; journal.phase = phase; await saveJournal({ path: journalPath, journal }); };
+    const assertGraph = () => {
+      if ((payload.repos.length || payload.finalizeCommitted || payload.finalizePushed) && journal.graphDigest !== ctx.graphDigest) {
+        throw new TxError('GRAPH_CHANGED_DURING_TRANSACTION', 'merge 事务出现副作用后 dir-graph 声明发生变化，拒绝继续（请先完成或清理既有事务）', { journalDigest: journal.graphDigest, currentDigest: ctx.graphDigest });
+      }
+    };
+    // roll-forward：恢复任何中断的 write-set（installRoot 全局 + txws 局部）
+    await recoverWriteSet({ root: ctx.installRoot });
+    const txws = txWorkspacePath(ctx, cr);
+    if (fs.existsSync(txws)) await recoverWriteSet({ root: txws, txRoot: ctx.installRoot });
+
+    // status + approved snapshot（只从 approval.yml#code 读，TASK-06 签入）
+    // authority：status 从 CR worktree 读（SDD §1.3）；approval.yml 是主 checkout 评审产物（TASK-06 模型，
+    // review/approve 在 --workspace 主 checkout 跑），故从 kb.rootPath 读。
+    const crStatus = readCrMdStatus(kb.rootPath, cr);
+    if (crStatus !== 'code-approved') throw new TxError('MERGE_STATE_MISMATCH', `merge 需要 status=code-approved，实际 ${crStatus}`, { cr, status: crStatus });
+    const approvalText = fs.readFileSync(path.join(kb.rootPath, 'change-requests', cr, 'approval.yml'), 'utf8');
+    const doc = parseYaml(approvalText.replaceAll('\r\n', '\n')) || {};
+    const snapshot = doc && doc.code && doc.code['release-subjects'];
+    if (!snapshot) throw new TxError('RELEASE_SUBJECT_DRIFT', 'approval.yml#code.release-subjects 缺失，无法 merge（code 审批时未签入 snapshot）', { cr, kind: 'missing' });
+
+    const v = await verifyReleaseSubjects(ctx, cr, snapshot);
+    if (!v.ok) {
+      const published = (payload.repos || []).some((r) => r.pushed);
+      if (v.kind === 'prd' || v.kind === 'sdd') {
+        throw new TxError('APPROVED_ARTIFACT_DRIFT', `受控 artifact 漂移（kind=${v.kind}），拒绝 merge：${v.details && v.details.reason}`, { cr, kind: v.kind, ...v.details });
+      }
+      if (published) {
+        throw new TxError('RELEASE_SUBJECT_DRIFT', `已有 trunk publish 后 release-subjects 漂移（kind=${v.kind}），保持 blocked，恢复原 ref 后才能续跑`, { cr, kind: v.kind, ...v.details });
+      }
+      // 零 publish 的 code/source/TASK drift：原子标记审批 stale，回退转换由 crctl 层执行
+      return { cr, txId: journal.txId, phase: 'release-drift', changed: false, drift: { kind: v.kind, ...v.details }, recoverCommand };
+    }
+
+    // per-repo prepare（无 ref/worktree/账本副作用）
+    for (const repo of ctx.repositories) {
+      assertGraph();
+      const snapRepo = snapshot.repositories.find((r) => r.repo === repo.id);
+      if (!snapRepo) throw new TxError('RELEASE_SUBJECT_DRIFT', `release-subjects 缺 ${repo.id} 仓声明`, { cr, repo: repo.id });
+      gitMust(repo.rootPath, ['fetch', 'origin']);
+      const baseSha = gitMust(repo.rootPath, ['rev-parse', `refs/remotes/origin/${repo.trunk}`]);
+      const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
+      const src = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', sourceRef]);
+      if (src.status !== 0) throw new TxError('MERGE_SOURCE_MISSING', `${repo.id} 缺少远端 source ref ${sourceRef}（被评审分支未 push）`, { repo: repo.id, ref: sourceRef });
+      if (src.stdout !== repoReviewedSha(snapRepo)) {
+        throw new TxError('RELEASE_SUBJECT_DRIFT', `${repo.id} 远端 ${sourceRef} 与 approved source 不一致`, { repo: repo.id, expected: repoReviewedSha(snapRepo), actual: src.stdout });
+      }
+      const prev = (payload.repos || []).find((r) => r.repo === repo.id);
+      // 已发布/已确认的仓不再重做 prepare：candidate 与 baseSha 保持（发布后 base 不得漂移）
+      if (prev && (prev.pushed || prev.confirmed)) continue;
+      if (prev && prev.baseSha === baseSha && prev.sourceSha === src.stdout && prev.mergeSha) continue;
+      const mt = gitRun(repo.rootPath, ['merge-tree', '--write-tree', baseSha, src.stdout]);
+      if (mt.status !== 0) {
+        throw new TxError('MERGE_PREPARE_CONFLICT', `${repo.id} merge prepare 冲突（base ${baseSha.slice(0, 12)} × source ${src.stdout.slice(0, 12)}），零远端副作用`, { repo: repo.id, base: baseSha, source: src.stdout, detail: (mt.stdout || mt.stderr).slice(0, 300) });
+      }
+      const tree = mt.stdout.trim();
+      const msg = `merge ${cr}: ${repo.id}\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${baseSha}\nAI-First-Merge-Source: ${src.stdout}\n`;
+      const mergeSha = gitMust(repo.rootPath, ['commit-tree', tree, '-p', baseSha, '-p', src.stdout, '-F', '-'], { input: msg });
+      const rec = prev || { repo: repo.id, baseSha, sourceSha: src.stdout, mergeSha, pushed: false, confirmed: false };
+      Object.assign(rec, { baseSha, sourceSha: src.stdout, mergeSha });
+      if (!prev) payload.repos.push(rec);
+      did = true;
+      await save(`prepared-${repo.id}`);
+      faultPoint('merge-after-prepare', { repo: repo.id });
+    }
+
+    // publish：逐仓 lease push + observation（最多 3 轮 rebuild）
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const pending = (payload.repos || []).filter((r) => !r.confirmed);
+      if (!pending.length) break;
+      for (const rec of pending) {
+        assertGraph();
+        const repo = getRepository(ctx, rec.repo);
+        gitMust(repo.rootPath, ['fetch', 'origin']);
+        const remoteSha = gitMust(repo.rootPath, ['rev-parse', `refs/remotes/origin/${repo.trunk}`]);
+        const isAncestor = gitRun(repo.rootPath, ['merge-base', '--is-ancestor', rec.mergeSha, remoteSha]).status === 0;
+        const cls = classifyRemoteCommit({ remoteSha, expectedBase: rec.baseSha, commitSha: rec.mergeSha, commitIsRemoteAncestor: isAncestor, journalSaysPublished: rec.pushed });
+        if (cls === 'confirmed') {
+          rec.confirmed = true;
+          did = true;
+          await save(`confirmed-${repo.id}`);
+          faultPoint('merge-after-observation', { repo: repo.id });
+          continue;
+        }
+        if (cls === 'history-rewritten') {
+          throw new TxError('MERGE_REMOTE_HISTORY_REWRITTEN', `${repo.id} 远端 trunk 历史在事务中被重写，硬阻断（不猜测、不自动 force）`, { repo: repo.id, remoteSha, expectedBase: rec.baseSha });
+        }
+        if (cls === 'rebuild') {
+          const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
+          const src = gitMust(repo.rootPath, ['rev-parse', '--verify', sourceRef]);
+          const mt = gitRun(repo.rootPath, ['merge-tree', '--write-tree', remoteSha, src]);
+          if (mt.status !== 0) throw new TxError('MERGE_PREPARE_CONFLICT', `${repo.id} rebuild prepare 冲突（base ${remoteSha.slice(0, 12)} × source ${src.slice(0, 12)}）`, { repo: repo.id, base: remoteSha, source: src });
+          const msg = `merge ${cr}: ${repo.id} (rebuild)\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${remoteSha}\nAI-First-Merge-Source: ${src}\n`;
+          rec.baseSha = remoteSha;
+          rec.mergeSha = gitMust(repo.rootPath, ['commit-tree', mt.stdout.trim(), '-p', remoteSha, '-p', src, '-F', '-'], { input: msg });
+          rec.pushed = false;
+          did = true;
+          await save(`rebuild-${repo.id}`);
+          continue;
+        }
+        // pushable：lease push（expectedBase = rec.baseSha）
+        gitMust(repo.rootPath, ['push', `--force-with-lease=${repo.trunk}:${rec.baseSha}`, 'origin', `${rec.mergeSha}:refs/heads/${repo.trunk}`]);
+        rec.pushed = true;
+        did = true;
+        await save(`pushed-${repo.id}`);
+        faultPoint('merge-after-push', { repo: repo.id });
+      }
+    }
+    if ((payload.repos || []).some((r) => !r.confirmed)) {
+      throw new TxError('MERGE_REMOTE_STALE', 'merge publish 阶段连续 rebuild 超过上限，无法收敛', { cr });
+    }
+
+    // finalize：所有仓 confirmed → detached Transaction Workspace 单 commit
+    const mergedAt = nowIso();
+    if (!payload.finalizeCommitted) {
+      assertGraph();
+      gitMust(kb.rootPath, ['fetch', 'origin']);
+      const trunkSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
+      if (!fs.existsSync(txws)) {
+        gitMust(kb.rootPath, ['worktree', 'add', '--detach', txws, trunkSha]);
+      } else {
+        gitMust(txws, ['fetch', 'origin']);
+        gitMust(txws, ['reset', '--hard', trunkSha]);
+        gitMust(txws, ['checkout', '--detach', trunkSha]);
+      }
+      faultPoint('merge-before-finalize', { cr });
+      const txCrMdP = path.join(txws, 'change-requests', cr, 'cr.md');
+      const txCrMdText = fs.readFileSync(txCrMdP, 'utf8');
+      const nextCrMd = crMdStatusText(txCrMdText, 'merging');
+      if (!nextCrMd) throw new TxError('MERGE_FINALIZE_FAILED', `finalize: ${txCrMdP} 无 frontmatter，无法写 merging`, { cr, txws });
+      const mergeCommitsYml = renderMergeCommits(payload.repos, snapshot, journal.txId, mergedAt);
+      const verificationMd = renderMergeVerification(payload.repos, snapshot);
+      await applyWriteSet({ root: txws, txRoot: ctx.installRoot, txId: journal.txId, entries: [
+        { path: `change-requests/${cr}/cr.md`, beforeSha256: sha256(txCrMdText), afterSha256: sha256(nextCrMd), content: nextCrMd },
+        { path: `change-requests/${cr}/merge-commits.yml`, beforeSha256: null, afterSha256: sha256(mergeCommitsYml), content: mergeCommitsYml },
+        { path: `change-requests/${cr}/merge-verification.md`, beforeSha256: null, afterSha256: sha256(verificationMd), content: verificationMd },
+      ] });
+      const msg = `merge finalize ${cr}\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\n`;
+      gitMust(txws, ['add', `change-requests/${cr}/cr.md`, `change-requests/${cr}/merge-commits.yml`, `change-requests/${cr}/merge-verification.md`]);
+      gitMust(txws, ['commit', '--no-gpg-sign', '--file=-'], { input: msg });
+      payload.finalizeCommit = gitMust(txws, ['rev-parse', 'HEAD']);
+      payload.finalizeBaseSha = trunkSha;
+      payload.mergedStatus = 'merging';
+      payload.finalizeCommitted = true;
+      did = true;
+      await save('finalize-committed');
+      faultPoint('merge-after-finalize-commit', { cr });
+    }
+    for (let attempt = 0; attempt < 3 && !payload.finalizePushed; attempt++) {
+      assertGraph();
+      gitMust(kb.rootPath, ['fetch', 'origin']);
+      const remoteSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
+      const isAncestor = gitRun(kb.rootPath, ['merge-base', '--is-ancestor', payload.finalizeCommit, remoteSha]).status === 0;
+      const cls = classifyRemoteCommit({ remoteSha, expectedBase: payload.finalizeBaseSha, commitSha: payload.finalizeCommit, commitIsRemoteAncestor: isAncestor, journalSaysPublished: payload.finalizePushed });
+      if (cls === 'confirmed') { payload.finalizePushed = true; did = true; await save('finalize-confirmed'); faultPoint('merge-after-finalize-push', { cr }); break; }
+      if (cls === 'history-rewritten') {
+        throw new TxError('MERGE_REMOTE_HISTORY_REWRITTEN', 'finalize 提交遇远端 trunk history rewrite，硬阻断（不猜测、不自动 force）', { cr, remoteSha, expectedBase: payload.finalizeBaseSha });
+      }
+      if (cls === 'rebuild') {
+        // 他人推进 trunk：detached txws 从新 base 重建 finalize commit
+        gitMust(txws, ['fetch', 'origin']);
+        gitMust(txws, ['reset', '--hard', remoteSha]);
+        gitMust(txws, ['checkout', '--detach', remoteSha]);
+        const txCrMdText = fs.readFileSync(path.join(txws, 'change-requests', cr, 'cr.md'), 'utf8');
+        const nextCrMd = crMdStatusText(txCrMdText, 'merging');
+        if (!nextCrMd) throw new TxError('MERGE_FINALIZE_FAILED', `finalize rebuild: ${txws} cr.md 无 frontmatter`, { cr, txws });
+        const mergeCommitsYml = renderMergeCommits(payload.repos, snapshot, journal.txId, mergedAt);
+        const verificationMd = renderMergeVerification(payload.repos, snapshot);
+        await applyWriteSet({ root: txws, txRoot: ctx.installRoot, txId: journal.txId, entries: [
+          { path: `change-requests/${cr}/cr.md`, beforeSha256: sha256(txCrMdText), afterSha256: sha256(nextCrMd), content: nextCrMd },
+          { path: `change-requests/${cr}/merge-commits.yml`, beforeSha256: null, afterSha256: sha256(mergeCommitsYml), content: mergeCommitsYml },
+          { path: `change-requests/${cr}/merge-verification.md`, beforeSha256: null, afterSha256: sha256(verificationMd), content: verificationMd },
+        ] });
+        const msg = `merge finalize ${cr} (rebuild)\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\n`;
+        gitMust(txws, ['add', `change-requests/${cr}/cr.md`, `change-requests/${cr}/merge-commits.yml`, `change-requests/${cr}/merge-verification.md`]);
+        gitMust(txws, ['commit', '--no-gpg-sign', '--file=-'], { input: msg });
+        payload.finalizeCommit = gitMust(txws, ['rev-parse', 'HEAD']);
+        payload.finalizeBaseSha = remoteSha;
+        did = true;
+        await save('finalize-rebuild');
+        continue;
+      }
+      gitMust(txws, ['push', `--force-with-lease=${kb.trunk}:${payload.finalizeBaseSha}`, 'origin', `HEAD:refs/heads/${kb.trunk}`]);
+      payload.finalizePushed = true;
+      did = true;
+      await save('finalize-pushed');
+      faultPoint('merge-after-finalize-push', { cr });
+    }
+    if (!payload.finalizePushed) throw new TxError('MERGE_REMOTE_STALE', 'finalize push 连续 rebuild 超过上限，无法收敛', { cr });
+    payload.operationalWorkspace = txws;
+    await save('complete');
+    return {
+      cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete,
+      sideEffects: buildMergeSideEffects(payload), recoverCommand,
+      operationalWorkspace: txws, mergedStatus: payload.mergedStatus,
+    };
+  } finally {
+    await lock.release();
+  }
+}
+
+/** merge status 只读快照：journal phase + 每仓 intent/observation；零写入、零 fetch。 */
+export function mergeStatus(ctx, cr) {
+  const base = path.join(ctx.installRoot, '.crctl', 'transactions', 'merge', cr);
+  if (!fs.existsSync(base)) return { cr, phase: 'none', repos: [] };
+  let latest = null;
+  for (const txId of fs.readdirSync(base).sort()) {
+    const p = path.join(base, txId, 'journal.json');
+    if (!fs.existsSync(p)) continue;
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!latest || Date.parse(j.updatedAt) > Date.parse(latest.updatedAt)) latest = j;
+  }
+  if (!latest || !latest.merge) return { cr, phase: 'none', repos: [] };
+  return {
+    cr,
+    phase: latest.merge.phase,
+    txId: latest.txId,
+    repos: (latest.merge.repos || []).map((r) => ({ repo: r.repo, baseSha: r.baseSha, mergeSha: r.mergeSha, pushed: r.pushed, confirmed: r.confirmed })),
+    finalizePushed: !!latest.merge.finalizePushed,
+    operationalWorkspace: latest.merge.operationalWorkspace || null,
+  };
 }

@@ -33,6 +33,8 @@ scope: drift-governance
 | `test` | 代执行 lint/test/build 命令，按真实退出码生成 `test-report.md` 骨架（status/tester/commands 段模型不得改写），原始输出落盘 `test-evidence/` | `write-test-report` 证据部分 |
 | `next` | 按 status + 评审/测试证据输出下一个该跑的节点；blocker 未清空**绝不**返回 `human_approval`；writing-back 态改查 specs/{spec}/traceability.yml（FR-21） | 最小 pipeline-runner |
 | `cr-init` | 唯一权威原子分配与建档：`--title <t> --owner-requirement <id> --owner-development <id> --owner-test <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]`——**三角色 Owner 显式必填**（CR-2026-030 FR-1：缺任一角色 BAD_ARGS 零写入，无隐式继承；成功返回含完整 `owners` 投影与三文件路径；自身不发 outbox，注册事实由 register commit 以真实 SHA 产生）；注册元信息旗标一次写齐（CR-2026-022 FR-9） | requirement-register |
+| `register` | 幂等注册事务（CR-2026-031 TASK-05，TASK-10 起取代 cr-init）：`--registration-key <k> --title <t> --owner-* <id>`——CR-ID + 三账本 recoverable write-set + trailer commit/lease push + 逐仓 worktree ensure，同 key 同输入续跑、输入漂移/trunk dirty/history rewrite 零写或硬阻断 | requirement-register |
+| `merge` | 可恢复跨仓 merge saga（CR-2026-031 TASK-07）：只消费 approval.yml#code.release-subjects；commit-tree 无副作用 prepare（冲突 MERGE_PREPARE_CONFLICT 零远端副作用）→ 逐仓 lease publish（confirmed 跳过/pushable 续推/rebuild 重做/history-rewritten 硬阻断）→ 全部 confirmed 后 detached Transaction Workspace 单 finalize commit（status=merging + merge-commits.yml + merge-verification.md）；零 publish 的 code/TASK drift 经回退转换 `code-approved -> developing`，PRD/SDD drift → APPROVED_ARTIFACT_DRIFT；`merge status` 只读快照 | writeback/merge 阶段 |
 | `checkpoint-add` | 逐仓记录推送 checkpoint（remote-ref/last-push/checkpoints）；前置态 = 状态机派生全非终态（FR-11） | push-progress |
 | `git` | controlled-shell 白名单的 IDE 运行时适配器：按「子命令 + 形态 + 调用者」三元放行，越界返回 `FORBIDDEN_SUBCOMMAND`，全量审计日志；`commit --template` 支持 `--cr` 显式直传（FR-10） | `controlled-shell` |
 

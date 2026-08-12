@@ -22,6 +22,12 @@ export const FAULT_POINTS = [
   'register-after-commit',           // registration commit 后、lease push 前（TASK-05）
   'register-after-push',             // lease push 后、worktree ensure 前（TASK-05）
   'register-between-worktrees',      // 每个 worktree ensure 落盘后、下一仓前（TASK-05）
+  'merge-after-prepare',             // 每仓 prepare（merge-tree+commit-tree）落盘后、下一仓/推前（TASK-07）
+  'merge-after-observation',         // 每仓 confirmed 落盘后、下一仓/推前（TASK-07）
+  'merge-after-push',                // 每仓 lease push 落盘后、下一仓/observation 前（TASK-07）
+  'merge-before-finalize',           // 全部 confirmed 后、finalize 写集前（TASK-07）
+  'merge-after-finalize-commit',     // finalize commit 落盘后、lease push 前（TASK-07）
+  'merge-after-finalize-push',       // finalize lease push 落盘后（TASK-07）
 ];
 export function faultPoint(point, context) {
   if (process.env.CRCTL_FAULT_POINT === point) {
@@ -267,9 +273,9 @@ const readHash = (p) => {
  * 分类：当前 hash = after → skip；= before（null=不存在）→ 从 blob redo；其余 → TX_RECOVERY_CONFLICT，绝不覆盖第三值。
  * 全部 entry 确认后才标 complete 并清理 blob；清理失败不逆转已完成写入。
  */
-export async function applyWriteSet({ root, txId, entries }) {
+export async function applyWriteSet({ root, txId, entries, txRoot = root }) {
   if (!Array.isArray(entries) || entries.length === 0) throw new TxError('TX_WRITESET_INVALID', 'write-set 为空');
-  const txDir = findTxDir(root, txId);
+  const txDir = findTxDir(txRoot, txId);
   if (!txDir) throw new TxError('TX_NOT_FOUND', `txId ${txId} 无事务目录（须先 loadOrCreateJournal）`, { txId });
   const manifestPath = path.join(txDir, 'write-set.json');
   const blobDir = path.join(txDir, 'blobs');
@@ -322,12 +328,12 @@ export async function applyWriteSet({ root, txId, entries }) {
 }
 
 /** 扫描全部事务目录，对 state != complete 的 write-set 用已落盘 blob 恢复（redo/skip/conflict 同 applyWriteSet）。 */
-export async function recoverWriteSet({ root }) {
+export async function recoverWriteSet({ root, txRoot = root }) {
   let changed = false;
-  const txRoot = path.join(root, '.crctl', 'transactions');
-  if (!fs.existsSync(txRoot)) return { changed };
-  for (const op of fs.readdirSync(txRoot)) {
-    const opDir = path.join(txRoot, op);
+  const txRootDir = path.join(txRoot, '.crctl', 'transactions');
+  if (!fs.existsSync(txRootDir)) return { changed };
+  for (const op of fs.readdirSync(txRootDir)) {
+    const opDir = path.join(txRootDir, op);
     let keys;
     try { keys = fs.readdirSync(opDir); } catch { continue; }
     for (const k of keys) {
@@ -338,7 +344,7 @@ export async function recoverWriteSet({ root }) {
         if (!fs.existsSync(manifestPath)) continue;
         const m = readJsonChecked(manifestPath, 'TX_WRITESET_INVALID', 'write-set manifest');
         if (!m || m.v !== 1 || m.state === 'complete' || !Array.isArray(m.entries)) continue;
-        const r = await applyWriteSet({ root, txId: m.txId || txId, entries: m.entries });
+        const r = await applyWriteSet({ root, txRoot, txId: m.txId || txId, entries: m.entries });
         changed = changed || r.changed;
       }
     }

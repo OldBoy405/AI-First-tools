@@ -25,6 +25,7 @@ import {
   deriveInstallRoot, TxError, resolveRepositories, getRepository, registerCr, ensureWorkspace,
   scanMaxCrNumber, formatCrId, buildRegistrationTexts, assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
+  matchFrontmatter, crMdStatusText, mergeCr, mergeStatus, resolveOperationalWorkspace,
 } from './lib/workspace-transactions.mjs';
 import { FAULT_POINTS, faultPoint, nowIso } from './lib/durable-tx.mjs';
 
@@ -412,11 +413,6 @@ function controlledGit(ws, sub, args, cwd, caller, options = {}) {
  * 唯一收敛点：此正则此前在 5 处逐字复制（readEvidenceDoc / updateCrMdStatus /
  * readCrMdFrontmatter / detectStatusDivergence / validate）。刻意只收敛正则、不代解析——
  * updateCrMdStatus 只做字符串改写不 parse，代解析会引入无谓 parseYaml 调用。 */
-function matchFrontmatter(text) {
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  return m ? { match: m[0], body: m[1] } : null;
-}
-
 function parseEvidenceText(p, text) {
   if (p.endsWith('.md')) {
     const m = matchFrontmatter(text);
@@ -829,16 +825,6 @@ function updateCrMdStatus(ws, cr, newStatus) {
 }
 
 // CR-2026-027 FR-8/TASK-03：cr.md 状态文本生成纯函数（status + updated-at 更新），供 approve 原子提交在内存生成候选文本。
-function crMdStatusText(text, newStatus) {
-  const m = matchFrontmatter(text);
-  if (!m) return null;
-  let fm = m.body;
-  if (/^status:\s*.*$/m.test(fm)) fm = fm.replace(/^status:\s*.*$/m, `status: ${newStatus}`);
-  else fm = fm + `\nstatus: ${newStatus}`;
-  if (/^updated-at:\s*.*$/m.test(fm)) fm = fm.replace(/^updated-at:\s*.*$/m, `updated-at: "${nowIso()}"`);
-  return text.replace(m.match, `---\n${fm}\n---`);
-}
-
 /* ────────────────────────── 状态读取收敛（CR-2026-018 FR-2） ──────────────────────────
  * 状态权威源 = cr.md frontmatter；_backlog.yml 退化为注册索引（owners/merge-commits 等低频字段）。
  * 迁移期兼容读：cr.md 无 status 时回退 backlog 条目 status（deprecated since v0.2.0，计划 v0.3.0 移除）。
@@ -3061,6 +3047,44 @@ async function cmdWorkspace(ws, positional, flags) {
   ok({ op: `workspace-${sub}`, cr, mode, ...result });
 }
 
+async function cmdMerge(ws, positional, flags) {
+  const sub = positional[0];
+  if (sub === 'status') {
+    const cr = positional[1];
+    if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'merge status 需要 CR-ID');
+    const ctx = resolveRepositories(ws);
+    ok({ op: 'merge-status', ...mergeStatus(ctx, cr) });
+    return;
+  }
+  const cr = sub;
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'merge 需要 CR-ID');
+  const gates = loadGates(ws);
+  const ctx = resolveRepositories(ws);
+  // 状态/门禁检查在主 checkout（评审产物与 cr.md 提交于 master，TASK-06 模型）；
+  // 事务 authority（worktree HEAD / txws）由 mergeCr 内部按 SDD §1.3 解析。
+  const state = resolveCrState(ws, cr);
+  if (state.status !== 'code-approved') {
+    fail('MERGE_STATE_MISMATCH', `merge 需要 status=code-approved，实际 ${state.status}`, { cr, status: state.status });
+  }
+  const gate = runGateChecks(ws, cr, 'code-approved', gates, {});
+  if (!gate.pass) {
+    const why = gate.checks.filter((c) => !c.ok).map((c) => c.why).filter(Boolean).join('；');
+    fail('GATE_BLOCKED', `merge 前置门禁未通过，拒绝写入${why ? '：' + why : ''}`, { gate });
+  }
+  const result = await runTxAsync(mergeCr(ctx, { cr, workspace: ws }));
+  if (result.phase === 'release-drift') {
+    // 零 publish 的 code/source/TASK 漂移：原子回退 code-approved -> developing（唯一回退转换）
+    auditLog(ws, { kind: 'merge', cr, result: 'release-drift', drift: result.drift, actor: identity(ws) });
+    const adv = performAdvance(ws, cr, gates, {
+      to: 'developing', trigger: 'merge-feature-branch:release-drift -> implement-code', expect: 'code-approved',
+    });
+    ok({ op: 'merge', ...result, advanced: { to: 'developing', trigger: adv.trigger, committed: adv.committed } });
+    return;
+  }
+  auditLog(ws, { kind: 'merge', cr, txId: result.txId, phase: result.phase, changed: result.changed, actor: identity(ws) });
+  ok({ op: 'merge', ...result });
+}
+
 const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
 
 用法:
@@ -3085,6 +3109,8 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl workspace inspect <cr_id>                  各 active repo workspace 事实分类（只读）
   crctl workspace ensure  <cr_id> --mode resume    只补齐可证明缺失的 workspace 资源（零删除）
   crctl workspace cleanup <cr_id> --mode partial|archived   只删干净 worktree；dirty/unknown/未合并 ref 保留
+  crctl merge <cr_id>                                可恢复跨仓 merge saga：prepare(commit-tree) → 逐仓 lease publish → 全部 confirmed 后 detached Transaction Workspace 单 finalize commit（status=merging + merge-commits.yml + merge-verification.md）→ lease push
+  crctl merge status <cr_id>                        只读快照：journal phase + 每仓 intent/observation（零写入、零 fetch）
   crctl cr-init     --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
                         [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
   crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
@@ -3160,6 +3186,7 @@ async function main() {
     case 'cr-init': return cmdCrInit(ws, gates, flags);
     case 'register': return cmdRegister(ws, flags);
     case 'workspace': return cmdWorkspace(ws, positional, flags);
+    case 'merge': return cmdMerge(ws, positional, flags);
     case 'worktree-path': return cmdWorktreePath(ws, requireCr(positional), gates, flags);
     case 'report': return cmdReport(ws, gates, flags);
     case 'task': {
