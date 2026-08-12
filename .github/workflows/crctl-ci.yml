@@ -1,0 +1,70 @@
+name: crctl-ci
+
+# CR-2026-031 TASK-12：双平台（Ubuntu + Windows）全量契约校验。
+# 覆盖：crctl 全量测试（含三 bare remote 事务矩阵）、writeback 单测、
+# lint-prompts / skill matrix / agent contract、pipeline JSON 可解析。
+on:
+  push:
+    paths:
+      - 'skills/shared/crctl/**'
+      - 'skills/writeback/**'
+      - 'pipeline-templates/**'
+      - 'dir-graph.yaml'
+      - 'agents/**'
+      - '.github/workflows/crctl-ci.yml'
+  pull_request:
+    paths:
+      - 'skills/shared/crctl/**'
+      - 'skills/writeback/**'
+      - 'pipeline-templates/**'
+      - 'dir-graph.yaml'
+      - 'agents/**'
+
+jobs:
+  contracts:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Configure git identity (Windows autocrlf 不变量演练)
+        shell: bash
+        run: |
+          git config --global user.email "ci@aifirst.dev"
+          git config --global user.name "CI"
+
+      - name: Lint prompts (contract: prompt 与 crctl 无漂移)
+        shell: bash
+        run: node skills/shared/crctl/scripts/lint-prompts.mjs --mode enforce
+
+      - name: Skill matrix consistency
+        shell: bash
+        run: node skills/shared/crctl/scripts/check-skill-matrix.mjs
+
+      - name: Agents contract invariants
+        shell: bash
+        run: node skills/shared/crctl/scripts/check-agents-contract.mjs
+
+      - name: Pipeline JSON parse (all templates)
+        shell: bash
+        run: |
+          for f in pipeline-templates/*.pipeline.json; do
+            node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))"
+          done
+
+      - name: crctl full test suite
+        shell: bash
+        run: node --test skills/shared/crctl/scripts/test/*.test.mjs
+
+      - name: writeback unit tests
+        shell: bash
+        run: node --test skills/writeback/scripts/test/*.test.mjs

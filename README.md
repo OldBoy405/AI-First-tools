@@ -169,7 +169,7 @@ owners:
 
 | 角色 | 作用 | 首次写入 | 后续使用 |
 
-- **注册**：`cr-init` 显式接收三个角色 Owner（`--owner-requirement --owner-development --owner-test`，缺任一参数零写入），注册提交成功后以真实 commit SHA 产生 status + owners 注册事件（CR-2026-030 FR-1/FR-2）。
+- **注册**：`crctl register`（CR-2026-031 TASK-05，取代 cr-init）显式接收三个角色 Owner（`--owner-requirement --owner-development --owner-test`，缺任一参数零写入），CR-ID 分配 + 三账本 recoverable write-set + 注册 commit/trailer + lease push + 逐仓 worktree ensure 一次完成（registration-key 幂等，同键同输入续跑）。
 - **移交**：Owner 变更唯一业务入口是 `handover-cr`（`owner-set -> push-progress` 固定顺序）：crctl 原子更新双投影、追加唯一责任历史 `owner-history`、形成只含两份账本的隔离 commit，并以同一 SHA 发出 owners/inbox 事件；`resume-from-remote` 只恢复 worktree，不改变 Owner（CR-2026-030 FR-3~FR-5）。
 - **审批**：四阶段人工审批支持平台签名 grant 与本地 TTY 双模式；签名驳回（decision=reject）在完整验签后执行状态机既有回退并返回 `APPROVAL_DECLINED_ROLLED_BACK` 业务结果，紧邻结果态重放幂等（CR-2026-030 FR-6~FR-7）。
 |------|------|----------|----------|
