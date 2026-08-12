@@ -1597,3 +1597,62 @@ export async function archiveCr(ctx, input) {
     await lock.release();
   }
 }
+/* ────────────────────────── TASK-11：upgrade-check（临时只读预检）──────────────────────────
+ * 从 origin 权威事实分类新协议激活风险（SDD §4.6）：fetch 后只读 origin trunk 的 CR 状态与
+ * 本机 merge journal（已发布事实），不创建 workspace、不修改审批、不合成 snapshot、零写入。
+ * 分类：developing 及之前阶段 = safe；旧 code-approved 零 publish = requiresReapproval；
+ *       merging/writing-back/部分 publish/authority unknown = blocksUpgrade（保守）。
+ * 本命令为临时工具：全部安装完成协议切换且无旧事务后，随 dispatch/help/tests 整体删除
+ * （CUSTOM-TODO-009 删除条件）。
+ */
+
+const UPGRADE_SAFE_STATUSES = new Set(['drafting', 'requirement-reviewing', 'requirement-approved', 'tech-designing', 'tech-design-review-pending', 'tech-design-reviewed', 'task-breakdown', 'developing', 'code-reviewing']);
+const UPGRADE_TERMINAL = new Set(['archived', 'rejected', 'withdrawn']);
+const UPGRADE_BLOCKER_STATUSES = new Set(['merging', 'writing-back']);
+
+/** 从 origin trunk 权威事实分类新协议激活风险（只读，零写入）。 */
+export function checkUpgrade(ctx) {
+  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
+  gitMust(kb.rootPath, ['fetch', 'origin']); // fetch 更新 remote-tracking refs（只读本地 ref 更新，无业务写入）
+  const trunkRef = `refs/remotes/origin/${kb.trunk}`;
+  const backlogText = gitMust(kb.rootPath, ['show', `${trunkRef}:change-requests/_backlog.yml`]);
+  const crIds = [...backlogText.matchAll(/^[ \t]*- id:\s*(\S+)/gm)].map((m) => m[1]);
+  const safe = [];
+  const requiresReapproval = [];
+  const blocksUpgrade = [];
+  for (const cr of crIds) {
+    const readStatus = () => {
+      const r = gitRun(kb.rootPath, ['show', `${trunkRef}:change-requests/${cr}/cr.md`]);
+      if (r.status !== 0) return null;
+      const fm = r.stdout.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      if (!fm) return null;
+      const s = fm[1].match(/^status:\s*["']?([^"'\n]+?)["']?\s*$/m);
+      return s ? s[1] : null;
+    };
+    const status = readStatus();
+    if (status == null) {
+      blocksUpgrade.push({ cr, why: 'authority-unknown', detail: 'origin trunk 无法读取 cr.md status（缺失或非法）' });
+      continue;
+    }
+    if (UPGRADE_SAFE_STATUSES.has(status)) { safe.push({ cr, status }); continue; }
+    if (UPGRADE_TERMINAL.has(status)) { safe.push({ cr, status }); continue; }
+    if (UPGRADE_BLOCKER_STATUSES.has(status)) {
+      blocksUpgrade.push({ cr, status, why: 'in-flight-writeback', detail: 'status=' + status + '（回写期在途，authority=Transaction Workspace，切协议前须归档）' });
+      continue;
+    }
+    if (status === 'code-approved') {
+      // 旧 code-approved：查 merge journal 是否已有发布事实
+      const ms = mergeStatus(ctx, cr);
+      const published = (ms.repos || []).some((r) => r.pushed) || ms.finalizePushed;
+      if (published) {
+        blocksUpgrade.push({ cr, status, why: 'partial-publish', detail: `merge journal phase=${ms.phase} 已有 publish，切协议前须完成或回退`, txId: ms.txId });
+      } else {
+        requiresReapproval.push({ cr, status, why: 'legacy-code-approved', detail: '旧协议 code-approved 零 publish：切协议后须重核 release-subjects 并重新审批' });
+      }
+      continue;
+    }
+    // 未知状态：保守阻断
+    blocksUpgrade.push({ cr, status, why: 'unknown-status', detail: '非预期 status，保守阻断' });
+  }
+  return { safe, requiresReapproval, blocksUpgrade, canActivate: blocksUpgrade.length === 0 };
+}

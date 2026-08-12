@@ -26,7 +26,7 @@ import {
   assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
   matchFrontmatter, crMdStatusText, mergeCr, mergeStatus, resolveOperationalWorkspace,
-  applyWriteback, archiveCr,
+  applyWriteback, archiveCr, checkUpgrade,
 } from './lib/workspace-transactions.mjs';
 import { FAULT_POINTS, faultPoint, nowIso } from './lib/durable-tx.mjs';
 
@@ -2737,6 +2737,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl writeback-apply <cr_id> --stage <s> --candidate <manifest.json> --spec-id <id>
                                                     candidate-only writeback 应用：manifest 校验（schema/allowlist/path/blob/before/inputDigest/snapshot）→ txws 应用 → 精确 stage → commit+trailer → lease push（TASK-08）
   crctl archive <cr_id> [--spec-id <id>]                          单一幂等归档：四账本同批 write-set + archive commit + lease push → cleanup（txws/CR worktree/本地 ref）；cleanup 失败返回 CR_ARCHIVE_CLEANUP_PENDING，重跑只续清理；rejected/withdrawn 未合并远端 ref 保留为 preservedRefs（TASK-09）
+  crctl upgrade-check                                         临时只读预检（TASK-11）：origin 权威事实分类新协议激活风险（safe/requiresReapproval/blocksUpgrade/canActivate）；有 blocker 或事实不确定 exit 1，全程零写入；协议切换后随 CUSTOM-TODO-009 整体删除
   crctl report [--period <N>d]                   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
@@ -2806,6 +2807,7 @@ async function main() {
     case 'merge': return cmdMerge(ws, positional, flags);
     case 'writeback-apply': return cmdWritebackApply(ws, positional, flags);
     case 'archive': return cmdArchive(ws, positional, flags);
+    case 'upgrade-check': return cmdUpgradeCheck(ws, flags);
     case 'report': return cmdReport(ws, gates, flags);
     case 'task': {
       if (positional[0] === 'done') return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
@@ -2825,6 +2827,16 @@ function requireCr(positional) {
 }
 
 main().catch((e) => { fail('INTERNAL_ERROR', e && e.stack ? e.stack : String(e)); });
+
+
+function cmdUpgradeCheck(ws, flags) {
+  // 临时只读预检（TASK-11）：从 origin 权威事实分类新协议激活风险；有 blocker 或事实不确定 exit 1，全程零写入。
+  // 全部安装完成协议切换且无旧事务后，按 CUSTOM-TODO-009 连同 dispatch/help/tests 整体删除。
+  const ctx = resolveRepositories(ws);
+  const result = checkUpgrade(ctx);
+  ok({ op: 'upgrade-check', temporary: true, ...result });
+  if (!result.canActivate) process.exit(1);
+}
 
 async function cmdArchive(ws, positional, flags) {
   const cr = positional[0];
