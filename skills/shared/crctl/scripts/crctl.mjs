@@ -609,21 +609,22 @@ function ledgerTxKey(op, cr, stage = '') {
   return `${op}-${cr}${stage ? `-${stage}` : ''}`.replace(/[^A-Za-z0-9._-]/g, '-');
 }
 
+function syncLedgerIndex(ws, paths, caller) {
+  const tracked = queryTrackedChanges(ws, { audit: false });
+  const staged = new Set(tracked.ok ? tracked.staged : []);
+  const syncPaths = paths.filter((p) => fs.existsSync(path.join(ws, ...p.split('/'))) || staged.has(p));
+  if (!syncPaths.length) return;
+  const add = controlledGit(ws, 'add', ['-A', '--', ...syncPaths], ws, caller);
+  if (!add.ok) throw new TxError('TX_GIT_FAILED', `ledger rollback 后 index 恢复失败: ${add.stderr || add.message}`, { paths: syncPaths });
+}
+
 async function recoverLedgerCommand(ws, key) {
   const root = deriveInstallRoot(ws);
   if (!hasLedgerTransaction({ root, key })) return { recovered: false, paths: [] };
   const head = gitHeadSha(ws);
   const log = controlledGit(ws, 'log', ['--format=%B', '-1'], ws, 'crctl-ledger-recovery');
   const recovered = await runTxAsync(recoverLedgerTransaction({ root, key, currentHead: head, headMessage: log.ok ? log.stdout : '' }));
-  if (recovered.rolledBack && recovered.paths.length && head) {
-    const tracked = queryTrackedChanges(ws, { audit: false });
-    const staged = new Set(tracked.ok ? tracked.staged : []);
-    const syncPaths = recovered.paths.filter((p) => fs.existsSync(path.join(ws, ...p.split('/'))) || staged.has(p));
-    if (syncPaths.length) {
-      const add = controlledGit(ws, 'add', ['-A', '--', ...syncPaths], ws, 'crctl-ledger-recovery');
-      if (!add.ok) throw new TxError('TX_GIT_FAILED', `ledger rollback 后 index 恢复失败: ${add.stderr || add.message}`, { paths: syncPaths });
-    }
-  }
+  if (recovered.rolledBack && recovered.paths.length && head) await runTxAsync((async () => syncLedgerIndex(ws, recovered.paths, 'crctl-ledger-recovery'))());
   return recovered;
 }
 
@@ -1077,7 +1078,7 @@ async function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
   const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', commitMsg], ws, 'crctl-approve') : addR;
   if (!commitR.ok) {
     const rolled = await runTxAsync(abortLedgerTransaction(ledgerTx));
-    if (rolled.paths.length) controlledGit(ws, 'add', rolled.paths, ws, 'crctl-approve');
+    if (rolled.paths.length) await runTxAsync((async () => syncLedgerIndex(ws, rolled.paths, 'crctl-approve'))());
   } else {
     await injectLedgerFault('ledger-after-commit');
     await runTxAsync(finishLedgerTransaction(ledgerTx));

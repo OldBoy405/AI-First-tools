@@ -3398,6 +3398,7 @@ test('review repair：approve commit 失败由 ledger transaction 回滚，修�
     git(ws, ['config', '--unset', 'core.hooksPath']);
     const head1 = git(ws, ['rev-parse', 'HEAD']);
     assert.match(readFileSync(path.join(ws, 'change-requests', 'CR-G1', 'cr.md'), 'utf8'), /status:\s*requirement-reviewing/, '失败后状态回滚');
+    assert.equal(git(ws, ['status', '--porcelain', '--untracked-files=no']), '', '失败后 index/worktree 恢复 clean baseline');
     const r2 = runCrctl(['approve', 'CR-G1', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
     assert.equal(r2.status, 0, r2.rawStderr);
     assert.notEqual(git(ws, ['rev-parse', 'HEAD']), head1, '重试形成唯一成功 commit');
