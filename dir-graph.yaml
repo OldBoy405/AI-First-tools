@@ -232,6 +232,7 @@ change-request-track:
       - { from: code-reviewing, to: developing, trigger: "approve-code:reject -> implement-code" }
       - { from: code-reviewing, to: code-approved, trigger: "approve-code" }
       - { from: code-approved, to: merging, trigger: "merge-feature-branch" }
+      - { from: code-approved, to: developing, trigger: "merge-feature-branch:release-drift -> implement-code" }
       - { from: merging, to: writing-back, trigger: "writeback-prd-sdd" }
       - { from: writing-back, to: archived, trigger: "cr-archive" }
       - { from: any-active, to: rejected, trigger: "cr-review-record:reject" }

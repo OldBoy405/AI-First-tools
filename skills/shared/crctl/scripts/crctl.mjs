@@ -24,6 +24,7 @@ import { parseYaml } from './lib/yaml-subset.mjs';
 import {
   deriveInstallRoot, TxError, resolveRepositories, getRepository, registerCr, ensureWorkspace,
   scanMaxCrNumber, formatCrId, buildRegistrationTexts, assertSupportedBacklogSchemaText,
+  buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
 } from './lib/workspace-transactions.mjs';
 import { FAULT_POINTS, faultPoint, nowIso } from './lib/durable-tx.mjs';
 
@@ -1150,14 +1151,25 @@ function assertCandidateStatus(crMdText, expectStatus) {
 // 流程：预检（调用方完成）→ 内存生成候选两文件 → runGateChecks（approval.yml evidence override）→
 // assertCandidateStatus → casWriteMulti 两文件 → controlledGit add/commit 单次提交 → commit 成功后发 status outbox。
 // 失败边界：gate/候选校验失败零写入；CAS 冲突两文件均不写；commit 失败两文件共同留在工作区、不发 outbox、返回结构化恢复信息。
-function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
+async function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
   const { approver, via, evidenceHash, grant, outboxEvidence, specId, fromStatus } = ctx;
+  // TASK-06（SDD §3.4）：code 审批重核机器注入的 release-subjects，任一漂移零写入拒绝；
+  // TTY 与 grant 两条路径在此单缝汇合，通过后原样复制到 approval.yml#code.release-subjects。
+  if (stageCfg.approvalSection === 'code') {
+    ctx.releaseSubjects = await runTxAsync((async () => {
+      const snap = readCodeReleaseSubjects(ws, cr);
+      if (!snap) fail('RELEASE_SUBJECT_DRIFT', 'code 审批需要 review-annotations/code.yml#release-subjects（机器注入），当前缺失或形状非法，拒绝签入', { kind: 'missing' });
+      const v = await verifyReleaseSubjects(resolveRepositories(ws), cr, snap);
+      if (!v.ok) fail('RELEASE_SUBJECT_DRIFT', `release-subjects 漂移（kind=${v.kind}），零写入拒绝审批`, { kind: v.kind, ...v.details });
+      return snap;
+    })());
+  }
   const crMdP = path.join(crDir(ws, cr), 'cr.md');
   const approvalP = path.join(crDir(ws, cr), 'approval.yml');
   const crMdText = readFileChecked(crMdP);
   if (crMdText == null) fail('CR_MD_WRITE_FAILED', `cr.md 不存在: ${crMdP}`);
   // 1) 内存生成候选文本（零落盘）
-  const approvalText = buildApprovalSectionText(approvalP, stageCfg, approver, evidenceHash, { via, grant });
+  const approvalText = buildApprovalSectionText(approvalP, stageCfg, approver, evidenceHash, { via, grant, releaseSubjects: ctx.releaseSubjects });
   const nextCrMd = crMdStatusText(crMdText, stageCfg.to);
   if (nextCrMd == null) fail('CANDIDATE_STATUS_MISMATCH', '候选 cr.md 无 frontmatter，无法生成目标态文本');
   // 2) 按候选 approval 复核目标 gate（evidence override，approval.yml 不落盘）
@@ -1240,7 +1252,7 @@ function cmdApprove(ws, cr, gates, flags) {
   process.stdout.write(summaryLines.join('\n') + '\n');
   const approver = flags.approver || identity(ws);
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  rl.question(`以 approver=${approver} 批准该阶段？只有输入 yes 才会写入 approval.yml [yes/N] `, (answer) => {
+  rl.question(`以 approver=${approver} 批准该阶段？只有输入 yes 才会写入 approval.yml [yes/N] `, async (answer) => {
     rl.close();
     if (answer.trim().toLowerCase() !== 'yes') {
       auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined' });
@@ -1256,7 +1268,7 @@ function cmdApprove(ws, cr, gates, flags) {
       fail('APPROVAL_DECLINED_ROLLED_BACK', `审批未通过，CR 已回退到 ${rollback.to}，请重跑 ${rollback.write}`, { rolledBackTo: rollback.to, rerunHint: rollback.write });
     }
     // CR-2026-027 FR-8/TASK-03：TTY 确认后走 approveAndAdvance（approval.yml + cr.md 单次原子提交），替代原分提交路径
-    approveAndAdvance(ws, cr, gates, stage, stageCfg, {
+    await approveAndAdvance(ws, cr, gates, stage, stageCfg, {
       approver, via: 'crctl-approve', evidenceHash,
       outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
       specId: flags['spec-id'], fromStatus: current,
@@ -1359,13 +1371,12 @@ function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
   // 7) 副作用 / 幂等分支
   if (grant.decision === 'approve') {
     if (cls === 'fresh') {
-      // approveAndAdvance 内部已 ok() 输出成功结果并处理 commit 失败退出，这里直接返回
-      approveAndAdvance(ws, cr, gates, stage, stageCfg, {
+      // approveAndAdvance 内部已 ok() 输出成功结果并处理 commit 失败退出；TASK-06 起为 async（code 重核），返回 promise 给调用链
+      return approveAndAdvance(ws, cr, gates, stage, stageCfg, {
         approver: grant.approver, via: 'server-approve', evidenceHash: digest || null, grant,
         outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
         specId: flags['spec-id'], fromStatus: current,
       });
-      return;
     }
     assertAdjacentApprove(ws, cr, stageCfg, grant, current);
     assertResultLedgersCommitted(ws, [`change-requests/${cr}/approval.yml`, `change-requests/${cr}/cr.md`]);
@@ -1488,7 +1499,7 @@ function buildApprovalSectionText(p, stageCfg, approver, evidenceHash, opts = {}
 function buildApprovalBlock(stageCfg, approver, evidenceHash, opts = {}) {
   const section = stageCfg.approvalSection;
   const g = opts.grant || null;
-  return [
+  const lines = [
     `${section}:`,
     `  approver: "${approver}"`,
     `  approved-at: "${nowIso()}"`,
@@ -1498,7 +1509,20 @@ function buildApprovalBlock(stageCfg, approver, evidenceHash, opts = {}) {
     g ? `  signature: "${g.signature}"` : null,
     g ? `  grant-approved-at: "${g.approved_at}"` : null,
     `  target-status: ${stageCfg.to}`,
-  ].filter(Boolean).join('\n');
+  ].filter(Boolean);
+  // TASK-06：release-subjects 原样复制到 approval.yml#code 段内（与 annotation 块字节语义一致，缩进 2 格嵌套）
+  if (opts.releaseSubjects) lines.push(...renderReleaseSubjects(opts.releaseSubjects).map((l) => `  ${l}`));
+  return lines.join('\n');
+}
+
+/** TASK-06：读取 review-annotations/code.yml#release-subjects（机器注入块）；缺失/非法返回 null。 */
+function readCodeReleaseSubjects(ws, cr) {
+  const p = path.join(crDir(ws, cr), 'review-annotations', REVIEW_STAGE_FILES.code);
+  const text = readFileChecked(p);
+  if (text == null) return null;
+  const doc = parseYaml(text.replaceAll('\r\n', '\n'));
+  const rs = doc && typeof doc === 'object' && !Array.isArray(doc) ? doc['release-subjects'] : null;
+  return rs && typeof rs === 'object' && !Array.isArray(rs) ? rs : null;
 }
 
 function cmdValidate(ws, target, gates) {
@@ -1824,7 +1848,7 @@ function upsertReviewsStage(traceNorm, cr, stage, blockText) {
   return [...lines.slice(0, re), ...blockLines, ...lines.slice(re)].join('\n');
 }
 
-function cmdReviewRecord(ws, cr, gates, flags) {
+async function cmdReviewRecord(ws, cr, gates, flags) {
   const stage = flags.stage;
   const fileName = REVIEW_STAGE_FILES[stage];
   if (!fileName) fail('STAGE_UNKNOWN', `--stage 必须是 ${Object.keys(REVIEW_STAGE_FILES).join(' | ')}`);
@@ -1845,6 +1869,10 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   if (!Array.isArray(payload.blockers)) fail('SCHEMA_INVALID', 'blockers 必须是列表（可空）');
   if (!payload.dimensions || typeof payload.dimensions !== 'object' || Array.isArray(payload.dimensions)) {
     fail('SCHEMA_INVALID', 'dimensions 缺失或不是映射（该 stage 门禁要求的维度必须齐全）');
+  }
+  // TASK-06（SDD §3.4）：release-subjects 只由 crctl 机器注入；payload 提供/覆盖一律零写入拒绝
+  if (stage === 'code' && payload['release-subjects'] !== undefined) {
+    fail('RELEASE_SUBJECTS_FORGED', 'release-subjects 只能由 crctl review-record 机器注入，模型 payload 不得提供或覆盖', { stage });
   }
   const bumpFlag = !!flags['bump-attempt'];
   // dev-plan 双轨路由（CR-2026-026，TD-BL-2）：bump 之前判定；repair-target 枚举校验（非法值 SCHEMA_INVALID 不写）；
@@ -1970,6 +1998,11 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     if (sddRaw == null) fail('SUBJECT_NOT_FOUND', `tech-design review-record 需要 ${sddPath} 存在（写入 subject-sha256）`);
     lines.push(`subject-file: change-requests/${cr}/sdd.md`);
     lines.push(`subject-sha256: ${sha256(sddRaw.replaceAll('\r\n', '\n'))}`);
+  }
+  if (stage === 'code') {
+    // TASK-06（SDD §3.4）：机器注入逐仓 source SHA 与受控 artifact digest；approve-code 重核后原样签入
+    const rs = await runTxAsync((async () => buildReleaseSubjects(resolveRepositories(ws), cr))());
+    lines.push(...renderReleaseSubjects(rs));
   }
   lines.push('');
   const annotationText = lines.join('\n');
@@ -3036,12 +3069,12 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl advance <cr_id> --to <s> --trigger <t>   校验转换+门禁后写入 cr.md 并 commit
                         [--expect <cur>] [--embedded] [--spec-id <id>]
   crctl approve <cr_id> --stage <requirement|tech-design|dev-start|code>
-                        [--approver <id>] [--spec-id <id>]   仅限交互式终端（人类在环）
+                        [--approver <id>] [--spec-id <id>]   仅限交互式终端（人类在环）；code 审批重核 release-subjects，漂移零写入拒绝（TASK-06）
   crctl approve <cr_id> --stage <stage> --resign <reason>   受控历史审批迁移：仅限交互式终端迁移 via=crctl-approve；server-approve 必须由服务端重签 grant
   crctl validate <file>                          受控产物 schema 校验（validate-doc 代码化）
   crctl attempt <cr_id> --loop <ref>             review-loop 轮次唯一记账点；超限返回 LOOP_EXHAUSTED
   crctl review-record <cr_id> --stage <requirement|tech-design|code> --from <payload.yml> [--bump-attempt]
-                                                schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）
+                                                schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）；code 阶段机器注入 release-subjects（payload 提供/覆盖 → RELEASE_SUBJECTS_FORGED）
   crctl review-note  <cr_id> [--stage <s>] --note <text>  approval.yml supplemental-reviews[] 追加（不接受 --by，身份 crctl 生成）
   crctl checkpoint-add <cr_id> --repo <r> --sha <sha> [--remote-ref <ref>]   _backlog checkpoints[] 追加 + 推送元数据（developing~writing-back）
   crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   双投影 owners 更新 + 正式移交 commit（非终态）

@@ -549,3 +549,143 @@ export async function ensureWorkspace(ctx, input) {
   }
   return { txId: null, resources, changed };
 }
+
+/* ────────────────────────── Signed release snapshot（TASK-06，SDD §3.4） ──────────────────────────
+ * 受控 artifact 集合 = PRD、SDD、dev plan、TASK 文件与 task index（knowledge-base 仓内）。
+ * buildReleaseSubjects 由 review-record --stage code 机器注入 review-annotations/code.yml，
+ * 模型 payload 不得提供或覆盖；approve-code 重核后原样复制到 approval.yml#code.release-subjects，
+ * 并由既有 evidence/approval digest 签入（annotation 文件文本本身进入 canonical digest）。
+ * verifyReleaseSubjects 返回 {ok:true} 或 {ok:false, kind:'code'|'task'|'prd'|'sdd', details}，
+ * merge/writeback（TASK-07/08）精确消费 kind 做 release-drift/APPROVED_ARTIFACT_DRIFT 分流。 */
+
+/** 受控 artifact 收集：路径 POSIX 字典序，内容 CRLF→LF 后 SHA-256；缺失文件不入选。 */
+function collectControlledArtifacts(ctx, cr) {
+  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
+  const crBase = `change-requests/${cr}`;
+  const files = [];
+  const consider = (rel) => {
+    const abs = path.join(kb.rootPath, ...rel.split('/'));
+    if (!fs.existsSync(abs)) return;
+    files.push({ path: rel, sha256: sha256(fs.readFileSync(abs, 'utf8').replaceAll('\r\n', '\n')) });
+  };
+  for (const f of ['prd.md', 'sdd.md', 'plan.md']) consider(`${crBase}/${f}`);
+  const tasksDir = path.join(kb.rootPath, crBase, 'tasks');
+  if (fs.existsSync(tasksDir)) {
+    consider(`${crBase}/tasks/_index.yml`);
+    for (const name of fs.readdirSync(tasksDir).filter((n) => /^TASK-\d+\.md$/.test(n)).sort()) {
+      consider(`${crBase}/tasks/${name}`);
+    }
+  }
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return files;
+}
+
+/**
+ * 构造 release subjects（当前事实快照）：
+ * - repositories：每个 active 仓的 requirement 分支远端 ref 名 + 该仓 CR worktree HEAD（被评审源 SHA）；
+ * - artifacts：受控文件集合 + 逐文件 SHA-256 + 集合 digest。
+ * worktree 缺失或无任何受控 artifact 均硬失败（不得产出空快照）。
+ */
+export async function buildReleaseSubjects(ctx, cr) {
+  const files = collectControlledArtifacts(ctx, cr);
+  if (!files.length) {
+    throw new TxError('RELEASE_SUBJECT_EMPTY', `${cr} 无受控 artifact（PRD/SDD/plan/tasks），不能构造 release-subjects`, { cr });
+  }
+  const repositories = [];
+  for (const repo of ctx.repositories) {
+    const wt = path.join(repo.worktreePath, cr);
+    if (!fs.existsSync(wt)) {
+      throw new TxError('RELEASE_WORKSPACE_MISSING', `${repo.id} 的 CR worktree 不存在: ${wt}（code 评审前必须先 ensure workspace）`, { repo: repo.id, worktree: wt });
+    }
+    const sha = gitMust(wt, ['rev-parse', 'HEAD']);
+    repositories.push({ repo: repo.id, remoteRef: `refs/heads/${branchForCr(cr)}`, reviewedSourceSha: sha });
+  }
+  return {
+    version: 1,
+    repositories,
+    artifacts: {
+      algorithm: 'sha256',
+      canonicalization: 'crlf-to-lf+path-sort',
+      files,
+      digest: sha256(files.map((f) => `${f.path}:${f.sha256}`).join('\n')),
+    },
+  };
+}
+
+/** release-subjects 的 YAML 渲染（顶格 key），供 annotation/approval 两处复用，保证字节语义一致。
+ * 同时容忍 build 产出的 camelCase 与 YAML 回读的 kebab-case（approve 复制路径消费解析后对象）。 */
+const repoRemoteRef = (r) => r.remoteRef ?? r['remote-ref'];
+const repoReviewedSha = (r) => r.reviewedSourceSha ?? r['reviewed-source-sha'];
+export function renderReleaseSubjects(rs) {
+  const lines = ['release-subjects:', `  version: ${rs.version}`, '  repositories:'];
+  for (const r of rs.repositories) {
+    lines.push(`    - repo: ${r.repo}`, `      remote-ref: ${repoRemoteRef(r)}`, `      reviewed-source-sha: ${repoReviewedSha(r)}`);
+  }
+  lines.push('  artifacts:', `    algorithm: ${rs.artifacts.algorithm}`, `    canonicalization: ${rs.artifacts.canonicalization}`, '    files:');
+  for (const f of rs.artifacts.files) lines.push(`      - { path: ${f.path}, sha256: ${f.sha256} }`);
+  lines.push(`    digest: ${rs.artifacts.digest}`);
+  return lines;
+}
+
+/** artifact path → drift kind：prd.md→prd，sdd.md→sdd，其余（plan/tasks/index）→task。 */
+const artifactKindOf = (p) => (p.endsWith('/prd.md') ? 'prd' : p.endsWith('/sdd.md') ? 'sdd' : 'task');
+
+/**
+ * 重核 release subjects 与当前事实：任一漂移返回 {ok:false, kind, details}，零写入。
+ * code：任一仓 worktree HEAD 或被推送的远端 requirement 分支 ≠ reviewed-source-sha，或仓集合不一致；
+ * prd/sdd/task：对应受控文件哈希漂移、缺失或文件集合/digest 不一致。
+ */
+export async function verifyReleaseSubjects(ctx, cr, snapshot) {
+  const bad = (kind, details) => ({ ok: false, kind, details });
+  if (!snapshot || typeof snapshot !== 'object' || snapshot.version !== 1
+    || !Array.isArray(snapshot.repositories) || !snapshot.artifacts || typeof snapshot.artifacts !== 'object'
+    || !Array.isArray(snapshot.artifacts.files)) {
+    return bad('code', { reason: 'shape', snapshot: JSON.stringify(snapshot).slice(0, 200) });
+  }
+  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
+  const byId = new Map(ctx.repositories.map((r) => [r.id, r]));
+  const snapRepos = new Set();
+  for (const r of snapshot.repositories) {
+    const repo = byId.get(r.repo);
+    if (!repo) return bad('code', { reason: 'repo-not-active', repo: r.repo });
+    if (snapRepos.has(r.repo)) return bad('code', { reason: 'repo-duplicate', repo: r.repo });
+    snapRepos.add(r.repo);
+    const wt = path.join(repo.worktreePath, cr);
+    let head = null;
+    if (fs.existsSync(wt)) {
+      const rr = gitRun(wt, ['rev-parse', 'HEAD']);
+      head = rr.status === 0 ? rr.stdout : null;
+    }
+    if (head !== repoReviewedSha(r)) {
+      return bad('code', { reason: 'head-drift', repo: r.repo, expected: repoReviewedSha(r), actual: head });
+    }
+    // 已推送的远端 requirement 分支必须与被评审源一致（未推送则跳过）
+    const rem = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branchForCr(cr)}`]);
+    if (rem.status === 0 && rem.stdout !== repoReviewedSha(r)) {
+      return bad('code', { reason: 'remote-ref-drift', repo: r.repo, expected: repoReviewedSha(r), actual: rem.stdout });
+    }
+  }
+  for (const repo of ctx.repositories) {
+    if (!snapRepos.has(repo.id)) return bad('code', { reason: 'repo-missing', repo: repo.id });
+  }
+  // artifact 逐文件重核（按 snapshot 声明序）
+  for (const f of snapshot.artifacts.files) {
+    const abs = path.join(kb.rootPath, ...String(f.path || '').split('/'));
+    const raw = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null;
+    const actual = raw == null ? null : sha256(raw.replaceAll('\r\n', '\n'));
+    if (actual !== f.sha256) {
+      return bad(artifactKindOf(String(f.path)), { reason: raw == null ? 'missing' : 'hash-drift', path: f.path, expected: f.sha256, actual });
+    }
+  }
+  // 文件集合与 digest 一致性（新增/删除受控文件也是漂移）
+  const current = collectControlledArtifacts(ctx, cr);
+  if (current.length !== snapshot.artifacts.files.length
+    || current.some((f, i) => f.path !== snapshot.artifacts.files[i].path)) {
+    const firstDiff = current.find((f, i) => !snapshot.artifacts.files[i] || snapshot.artifacts.files[i].path !== f.path)
+      || snapshot.artifacts.files[current.length];
+    return bad(artifactKindOf(String(firstDiff && firstDiff.path || 'tasks')), { reason: 'file-set-drift', current: current.map((f) => f.path), snapshot: snapshot.artifacts.files.map((f) => f.path) });
+  }
+  const digest = sha256(snapshot.artifacts.files.map((f) => `${f.path}:${f.sha256}`).join('\n'));
+  if (digest !== snapshot.artifacts.digest) return bad('task', { reason: 'digest-drift', expected: snapshot.artifacts.digest, actual: digest });
+  return { ok: true };
+}
