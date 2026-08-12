@@ -152,6 +152,8 @@ export function makeCodeApprovedFixture() {
   for (const x of artifacts.files) rsLines.push(`      - { path: ${x.path}, sha256: ${x.sha256} }`);
   rsLines.push(`    digest: ${artifacts.digest}`);
   fs.mkdirSync(path.join(kbCr, 'review-annotations'), { recursive: true });
+  fs.writeFileSync(path.join(kbCr, 'traceability.yml'), `cr-id: ${cr}\nreviews:\n  code:\n    review-loop:\n      current-attempt: 1\n`);
+  fs.writeFileSync(path.join(kbCr, 'review-loop.yml'), 'schema: review-loop/v1\ncode:\n  current-attempt: 1\n');
   fs.writeFileSync(path.join(kbCr, 'review-annotations', 'dev-plan.yml'),
     'cr-id: ' + cr + '\nreview-type: dev-plan\nverdict: pass\nblockers: []\ndimensions:\n  sdd-to-plan: ok\n');
   fs.writeFileSync(path.join(kbCr, 'review-annotations', 'code.yml'),

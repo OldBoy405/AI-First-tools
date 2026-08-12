@@ -706,6 +706,8 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
       const allowed = new Set([
         `change-requests/${cr}/approval.yml`,
         `change-requests/${cr}/cr.md`,
+        `change-requests/${cr}/traceability.yml`,
+        `change-requests/${cr}/review-loop.yml`,
         'change-requests/_backlog.yml',
       ]);
       const reviewPrefix = `change-requests/${cr}/review-annotations/`;
