@@ -249,6 +249,26 @@ test('TASK-05 AC-1/5.1：push 竞争（remote 被他人推进）时 rebuild 到�
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
+test('review repair：register remote stale 后用户改动出现时拒绝 reset --hard', () => {
+  const { base, kb } = makeFixture();
+  try {
+    const r1 = runCrctl(regArgs(kb), { cwd: kb, env: { CRCTL_FAULT_POINT: 'register-after-commit' } });
+    assert.notEqual(r1.status, 0);
+    const clone = path.join(base, 'rival-dirty');
+    git(base, ['clone', '-q', path.join(base, 'origin-kb.git'), clone]);
+    git(clone, ['config', 'user.email', 'rival@aifirst.dev']);
+    git(clone, ['config', 'user.name', 'Rival']);
+    fs.writeFileSync(path.join(clone, 'rival.txt'), 'rival');
+    git(clone, ['add', '-A']); git(clone, ['commit', '-q', '-m', 'rival']);
+    git(clone, ['push', '-q', 'origin', 'HEAD:refs/heads/master']);
+    fs.writeFileSync(path.join(kb, 'user-uncommitted.txt'), 'must survive');
+    const r2 = runCrctl(regArgs(kb), { cwd: kb });
+    assert.notEqual(r2.status, 0);
+    assert.equal(r2.errJson.error.code, 'REGISTRATION_TRUNK_DIRTY');
+    assert.equal(fs.readFileSync(path.join(kb, 'user-uncommitted.txt'), 'utf8'), 'must survive');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
 test('TASK-05 AC-1：副作用出现后 graph 变化返回 GRAPH_CHANGED_DURING_TRANSACTION', () => {
   const { base, kb } = makeFixture();
   try {

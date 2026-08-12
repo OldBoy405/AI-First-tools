@@ -3610,20 +3610,18 @@ test('TASK-06 ④: approve 前各类漂移全部 RELEASE_SUBJECT_DRIFT 零写入
     expectDrift('missing');
     writeFileSync(codeYmlP, annotation, 'utf8');
     gp = makeCodeGrant(ws, privateKey); // 恢复完整 annotation 后按原版证据重签
-    // PRD 漂移 -> kind=prd
-    writeFileSync(path.join(ws, 'change-requests', 'CR-D1', 'prd.md'), '# PRD tampered\n', 'utf8');
-    expectDrift('prd');
-    writeFileSync(path.join(ws, 'change-requests', 'CR-D1', 'prd.md'), '# PRD\n', 'utf8');
-    // SDD 漂移 -> kind=sdd
-    writeFileSync(path.join(ws, 'change-requests', 'CR-D1', 'sdd.md'), '# SDD tampered\n', 'utf8');
-    expectDrift('sdd');
-    writeFileSync(path.join(ws, 'change-requests', 'CR-D1', 'sdd.md'), '# SDD\n', 'utf8');
-    // TASK 漂移 -> kind=task
-    writeFileSync(path.join(ws, 'change-requests', 'CR-D1', 'tasks', 'TASK-01.md'), '# TASK-01 tampered\n', 'utf8');
-    expectDrift('task');
-    writeFileSync(path.join(ws, 'change-requests', 'CR-D1', 'tasks', 'TASK-01.md'), '# TASK-01\n', 'utf8');
-    // 被评审源 HEAD 漂移（worktree 新增 commit）-> kind=code
     const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+    // PRD/SDD/TASK authority 均在 CR worktree。
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', 'prd.md'), '# PRD tampered\n', 'utf8');
+    expectDrift('prd');
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', 'prd.md'), '# PRD\n', 'utf8');
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', 'sdd.md'), '# SDD tampered\n', 'utf8');
+    expectDrift('sdd');
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', 'sdd.md'), '# SDD\n', 'utf8');
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', 'tasks', 'TASK-01.md'), '# TASK-01 tampered\n', 'utf8');
+    expectDrift('task');
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', 'tasks', 'TASK-01.md'), '# TASK-01\n', 'utf8');
+    // 被评审源 HEAD 漂移（worktree 新增 commit）-> kind=code
     writeFileSync(path.join(wt, 'late.txt'), 'late change\n', 'utf8');
     spawnSync('git', ['add', '-A'], { cwd: wt });
     spawnSync('git', ['commit', '-q', '-m', 'late'], { cwd: wt });

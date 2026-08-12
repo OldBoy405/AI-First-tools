@@ -211,7 +211,7 @@ test('TASK-07 AC-2：零 publish 的 code drift → release-drift 回退 code-ap
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.json.phase, 'release-drift');
     assert.equal(r.json.advanced.to, 'developing');
-    const crMd = fs.readFileSync(path.join(kb, 'change-requests', cr, 'cr.md'), 'utf8');
+    const crMd = fs.readFileSync(path.join(wt, 'change-requests', cr, 'cr.md'), 'utf8');
     assert.ok(crMd.includes('status: developing'), '回退转换写 developing');
     const log = git(path.join(base, 'origin-kb.git'), ['log', '--format=%s', 'master']);
     assert.ok(!log.includes('merge ' + cr + ':'), 'release-drift 零 merge publish');
@@ -220,10 +220,10 @@ test('TASK-07 AC-2：零 publish 的 code drift → release-drift 回退 code-ap
 
 test('TASK-07 AC-1：PRD 漂移零 publish → APPROVED_ARTIFACT_DRIFT 硬阻断', () => {
   const f = makeCodeApprovedFixture();
-  const { base, kb, cr } = f;
+  const { base, kb, kbWt, cr } = f;
   try {
-    // PRD 漂移改主 checkout 的受控 artifact（verify 从 kb.rootPath 读）
-    fs.writeFileSync(path.join(kb, 'change-requests', cr, 'prd.md'), '# PRD tampered\n');
+    // PRD 漂移改 authoritative CR worktree 的受控 artifact。
+    fs.writeFileSync(path.join(kbWt, 'change-requests', cr, 'prd.md'), '# PRD tampered\n');
     const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
     assert.notEqual(r.status, 0);
     assert.equal(r.errJson.error.code, 'APPROVED_ARTIFACT_DRIFT');

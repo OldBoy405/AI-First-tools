@@ -1,5 +1,5 @@
 // CR-2026-031 TASK-07/08 共享 fixture：三 bare remote + 手工 code-approved 状态（TASK-06 模型）。
-// 评审产物在主 checkout（master）提交，worktree 分支是只读被评审源（HEAD 恒定 = reviewed-source-sha）。
+// 评审产物与审批事实写入 knowledge-base CR worktree；reviewed-source-sha 固定评审前 feature HEAD。
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -85,8 +85,8 @@ export function makeFixture() {
   return { base, kb, others };
 }
 
-/** 手工构造 code-approved 状态（TASK-06 模型）：评审产物在主 checkout（master）提交，
- * worktree 分支是只读被评审源（HEAD 恒定 = reviewed-source-sha）。 */
+/** 手工构造 code-approved 状态（TASK-06 模型）：评审/审批证据写入 CR worktree，
+ * reviewed-source-sha 固定其写入前的 feature HEAD。 */
 export function makeCodeApprovedFixture() {
   const f = makeFixture();
   const { base, kb, others } = f;
@@ -95,7 +95,7 @@ export function makeCodeApprovedFixture() {
   fs.writeFileSync(path.join(kb, 'change-requests', '_backlog.yml'),
     `schema: cr-backlog/v2\nchange-requests:\n  - id: ${cr}\n    title: Merge Test\n    status: code-approved\n    owner: alice\n`);
   fs.writeFileSync(path.join(kb, 'change-requests', '_index.yml'), `change-requests:\n  - id: ${cr}\n    title: Merge Test\n`);
-  const kbCr = path.join(kb, 'change-requests', cr);
+  let kbCr = path.join(kb, 'change-requests', cr);
   fs.mkdirSync(path.join(kbCr, 'tasks'), { recursive: true });
   fs.writeFileSync(path.join(kbCr, 'cr.md'),
     `---\nid: ${cr}\nstatus: code-approved\nupdated-at: "2026-08-11T21:00:00+08:00"\n---\n`);
@@ -120,7 +120,9 @@ export function makeCodeApprovedFixture() {
     headByRepo[repo] = git(wt, ['rev-parse', 'HEAD']);
     git(wt, ['push', '-q', 'origin', 'HEAD:refs/heads/requirement/' + cr]);
   }
-  // 3) kb master 补评审证据（release-subjects 引用各仓 feature HEAD）
+  // 3) knowledge-base CR worktree 补评审/审批证据；release-subjects 引用写入前的各仓 feature HEAD。
+  const kbWt = path.join(kb, '.rayai-worktrees', 'knowledge-base', 'requirement', cr);
+  kbCr = path.join(kbWt, 'change-requests', cr);
   // collectControlledArtifacts 按 POSIX 字典序（plan.md < prd.md < sdd.md < tasks/TASK-01.md < tasks/_index.yml 注意 'T' < '_'）
   const files = [
     `change-requests/${cr}/plan.md`,
@@ -129,7 +131,7 @@ export function makeCodeApprovedFixture() {
     `change-requests/${cr}/tasks/TASK-01.md`,
     `change-requests/${cr}/tasks/_index.yml`,
   ];
-  const shaOf = (rel) => sha256(fs.readFileSync(path.join(kb, ...rel.split('/')), 'utf8').replaceAll('\r\n', '\n'));
+  const shaOf = (rel) => sha256(fs.readFileSync(path.join(kbWt, ...rel.split('/')), 'utf8').replaceAll('\r\n', '\n'));
   const artifacts = {
     algorithm: 'sha256', canonicalization: 'crlf-to-lf+path-sort',
     files: files.map((x) => ({ path: x, sha256: shaOf(x) })),
@@ -166,12 +168,11 @@ export function makeCodeApprovedFixture() {
   fs.writeFileSync(path.join(kbCr, 'approval.yml'),
     'development-start:\n  approver: "alice"\n  approved-at: "2026-08-11T21:00:00+08:00"\n  via: crctl-approve\n  evidence-digest: "' + devDigest + '"\n  target-status: "developing"\n' +
     'code:\n  approver: "alice"\n  approved-at: "2026-08-11T21:30:00+08:00"\n  via: crctl-approve\n  evidence-digest: "' + codeDigest + '"\n  target-status: "code-approved"\n' + rsLines.map((l) => `  ${l}`).join('\n') + '\n');
-  git(kb, ['add', '-A']);
-  git(kb, ['commit', '-q', '-m', 'review evidence']);
-  git(kb, ['push', '-q', 'origin', 'HEAD:refs/heads/master']);
-  // 主 checkout 的 remote-tracking ref 对齐（worktree push 不更新主 checkout 的 refs/remotes）
+  git(kbWt, ['add', '-A']);
+  git(kbWt, ['commit', '-q', '-m', 'review evidence']);
+  git(kbWt, ['push', '-q', 'origin', `HEAD:refs/heads/requirement/${cr}`]);
   git(kb, ['fetch', '-q', 'origin']);
-  return { ...f, cr, kbWt: path.join(kb, '.rayai-worktrees', 'knowledge-base', 'requirement', cr), headByRepo };
+  return { ...f, cr, kbWt, headByRepo };
 }
 
 export const originMasterCount = (base, name) => Number(git(path.join(base, `origin-${name}.git`), ['rev-list', '--count', 'master']));

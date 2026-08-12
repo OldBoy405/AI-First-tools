@@ -8,19 +8,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { parseYaml } from './yaml-subset.mjs';
 import {
-  acquireLock, loadOrCreateJournal, saveJournal, applyWriteSet, recoverWriteSet, faultPoint, nowIso,
+  TxError, acquireLock, loadOrCreateJournal, saveJournal, applyWriteSet, recoverWriteSet, faultPoint, nowIso,
 } from './durable-tx.mjs';
-
-/** 事务层结构化错误：crctl.mjs 接线时捕获并转 fail(code, message, extra)，保持单进程 JSON 输出契约。 */
-export class TxError extends Error {
-  constructor(code, message, extra = {}) {
-    super(message);
-    this.code = code;
-    this.extra = extra;
-  }
-}
+export { TxError } from './durable-tx.mjs';
 
 const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 
@@ -47,6 +40,11 @@ const POST_FINALIZE_STATUSES = new Set(['merging', 'writing-back', 'archived']);
 /** detached knowledge-base Transaction Workspace 的唯一路径约定（.crctl 为运行时目录，不入 Git）。 */
 export function txWorkspacePath(ctx, cr) {
   return path.join(ctx.installRoot, '.crctl', 'transaction-workspaces', cr);
+}
+
+export function crWorktreePath(ctx, cr) {
+  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
+  return path.join(kb.worktreePath, cr);
 }
 
 /**
@@ -155,8 +153,7 @@ function readCrMdStatus(ws, cr) {
  * 用户主 checkout 永远不是返回值。
  */
 export function resolveOperationalWorkspace(ctx, cr) {
-  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
-  const crWorktree = path.join(kb.worktreePath, cr);
+  const crWorktree = crWorktreePath(ctx, cr);
   const status = readCrMdStatus(crWorktree, cr);
   if (status == null) {
     throw new TxError('CR_WORKTREE_STATUS_MISSING', `${cr}: CR worktree 的 cr.md 缺少 status（${path.join(crWorktree, 'change-requests', cr, 'cr.md')}）`, { cr, crWorktree });
@@ -440,8 +437,8 @@ export async function registerCr(ctx, input) {
         throw new TxError('GRAPH_CHANGED_DURING_TRANSACTION', '事务出现副作用后 dir-graph 声明发生变化，拒绝继续（请先完成或清理既有事务）', { journalDigest: journal.graphDigest, currentDigest: ctx.graphDigest });
       }
     };
-    // roll-forward：先恢复任何中断的 write-set（本机全局扫描）
-    await recoverWriteSet({ root: ctx.installRoot });
+    // roll-forward：只恢复当前 register 事务，target root 由 manifest 绑定。
+    await recoverWriteSet({ txRoot: ctx.installRoot, txId: journal.txId });
 
     if (!payload.cr) {
       const st = gitRun(kb.rootPath, ['status', '--porcelain']);
@@ -501,7 +498,11 @@ export async function registerCr(ctx, input) {
       } else if (cls === 'pushable') {
         gitMust(kb.rootPath, ['push', `--force-with-lease=${kb.trunk}:${payload.baseSha}`, 'origin', `HEAD:refs/heads/${kb.trunk}`]);
       } else if (cls === 'rebuild') {
-        // remote 被他人推进：从新 origin base 重建账本写与 commit（本地未发布 commit 作废，trunk 已验证 clean）
+        // remote 被他人推进：仅在 checkout 仍完全 clean 时重建；事务开始后的用户改动绝不 reset。
+        const beforeReset = gitRun(kb.rootPath, ['status', '--porcelain']);
+        if (beforeReset.status !== 0 || beforeReset.stdout !== '') {
+          throw new TxError('REGISTRATION_TRUNK_DIRTY', 'remote stale 后主 checkout 出现用户改动，拒绝 reset/rebuild', { dirty: beforeReset.stdout.split('\n').slice(0, 5) });
+        }
         gitMust(kb.rootPath, ['reset', '--hard', `refs/remotes/origin/${kb.trunk}`]);
         payload.baseSha = remoteSha;
         payload.ledgersCommitted = false;
@@ -553,8 +554,7 @@ export async function ensureWorkspace(ctx, input) {
     return { txId: null, resources, changed: false };
   }
   if (mode === 'resume') {
-    const rec = await recoverWriteSet({ root: ctx.installRoot });
-    let changed = rec.changed;
+    let changed = false;
     for (const repo of ctx.repositories) {
       const r = ensureRepoWorkspace(ctx, repo, cr);
       if (String(r.action).startsWith('created:')) changed = true;
@@ -590,16 +590,16 @@ export async function ensureWorkspace(ctx, input) {
 
 /** 受控 artifact 收集：路径 POSIX 字典序，内容 CRLF→LF 后 SHA-256；缺失文件不入选。 */
 function collectControlledArtifacts(ctx, cr) {
-  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
+  const crRoot = crWorktreePath(ctx, cr);
   const crBase = `change-requests/${cr}`;
   const files = [];
   const consider = (rel) => {
-    const abs = path.join(kb.rootPath, ...rel.split('/'));
+    const abs = path.join(crRoot, ...rel.split('/'));
     if (!fs.existsSync(abs)) return;
     files.push({ path: rel, sha256: sha256(fs.readFileSync(abs, 'utf8').replaceAll('\r\n', '\n')) });
   };
   for (const f of ['prd.md', 'sdd.md', 'plan.md']) consider(`${crBase}/${f}`);
-  const tasksDir = path.join(kb.rootPath, crBase, 'tasks');
+  const tasksDir = path.join(crRoot, crBase, 'tasks');
   if (fs.existsSync(tasksDir)) {
     consider(`${crBase}/tasks/_index.yml`);
     for (const name of fs.readdirSync(tasksDir).filter((n) => /^TASK-\d+\.md$/.test(n)).sort()) {
@@ -628,6 +628,14 @@ export async function buildReleaseSubjects(ctx, cr) {
       throw new TxError('RELEASE_WORKSPACE_MISSING', `${repo.id} 的 CR worktree 不存在: ${wt}（code 评审前必须先 ensure workspace）`, { repo: repo.id, worktree: wt });
     }
     const sha = gitMust(wt, ['rev-parse', 'HEAD']);
+    // 真实仓存在 origin 时要求 reviewed HEAD 已推送；无 remote 的内存/单仓测试 fixture 保持可用。
+    if (gitRun(repo.rootPath, ['remote', 'get-url', 'origin']).status === 0) {
+      gitMust(repo.rootPath, ['fetch', 'origin']);
+      const remote = gitRun(repo.rootPath, ['rev-parse', '--verify', `refs/remotes/origin/${branchForCr(cr)}`]);
+      if (remote.status !== 0 || remote.stdout !== sha) {
+        throw new TxError('RELEASE_REMOTE_NOT_PUSHED', `${repo.id} 的 requirement ref 未推送或不等于 worktree HEAD`, { repo: repo.id, head: sha, remote: remote.status === 0 ? remote.stdout : null });
+      }
+    }
     repositories.push({ repo: repo.id, remoteRef: `refs/heads/${branchForCr(cr)}`, reviewedSourceSha: sha });
   }
   return {
@@ -672,7 +680,7 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
     || !Array.isArray(snapshot.artifacts.files)) {
     return bad('code', { reason: 'shape', snapshot: JSON.stringify(snapshot).slice(0, 200) });
   }
-  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
+  const crRoot = crWorktreePath(ctx, cr);
   const byId = new Map(ctx.repositories.map((r) => [r.id, r]));
   const snapRepos = new Set();
   for (const r of snapshot.repositories) {
@@ -686,13 +694,26 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
       const rr = gitRun(wt, ['rev-parse', 'HEAD']);
       head = rr.status === 0 ? rr.stdout : null;
     }
-    if (head !== repoReviewedSha(r)) {
-      return bad('code', { reason: 'head-drift', repo: r.repo, expected: repoReviewedSha(r), actual: head });
-    }
-    // 已推送的远端 requirement 分支必须与被评审源一致（未推送则跳过）
+    const hasOrigin = gitRun(repo.rootPath, ['remote', 'get-url', 'origin']).status === 0;
     const rem = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branchForCr(cr)}`]);
-    if (rem.status === 0 && rem.stdout !== repoReviewedSha(r)) {
-      return bad('code', { reason: 'remote-ref-drift', repo: r.repo, expected: repoReviewedSha(r), actual: rem.stdout });
+    if ((hasOrigin || rem.status === 0) && (rem.status !== 0 || rem.stdout !== head)) {
+      return bad('code', { reason: 'remote-ref-drift', repo: r.repo, expected: head, actual: rem.status === 0 ? rem.stdout : null });
+    }
+    if (r.repo === ctx.knowledgeBaseRepoId) {
+      if (gitRun(wt, ['merge-base', '--is-ancestor', repoReviewedSha(r), head]).status !== 0) {
+        return bad('code', { reason: 'head-drift', repo: r.repo, expectedAncestor: repoReviewedSha(r), actual: head });
+      }
+      const allowed = new Set([
+        `change-requests/${cr}/approval.yml`,
+        `change-requests/${cr}/cr.md`,
+        'change-requests/_backlog.yml',
+      ]);
+      const reviewPrefix = `change-requests/${cr}/review-annotations/`;
+      const changed = gitMust(wt, ['diff', '--name-only', `${repoReviewedSha(r)}..${head}`]).split('\n').filter(Boolean);
+      const unexpected = changed.filter((p) => !allowed.has(p) && !p.startsWith(reviewPrefix));
+      if (unexpected.length) return bad('code', { reason: 'post-review-path-drift', repo: r.repo, unexpected });
+    } else if (head !== repoReviewedSha(r)) {
+      return bad('code', { reason: 'head-drift', repo: r.repo, expected: repoReviewedSha(r), actual: head });
     }
   }
   for (const repo of ctx.repositories) {
@@ -700,7 +721,7 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
   }
   // artifact 逐文件重核（按 snapshot 声明序）
   for (const f of snapshot.artifacts.files) {
-    const abs = path.join(kb.rootPath, ...String(f.path || '').split('/'));
+    const abs = path.join(crRoot, ...String(f.path || '').split('/'));
     const raw = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null;
     const actual = raw == null ? null : sha256(raw.replaceAll('\r\n', '\n'));
     if (actual !== f.sha256) {
@@ -779,17 +800,16 @@ export async function mergeCr(ctx, input) {
         throw new TxError('GRAPH_CHANGED_DURING_TRANSACTION', 'merge 事务出现副作用后 dir-graph 声明发生变化，拒绝继续（请先完成或清理既有事务）', { journalDigest: journal.graphDigest, currentDigest: ctx.graphDigest });
       }
     };
-    // roll-forward：恢复任何中断的 write-set（installRoot 全局 + txws 局部）
-    await recoverWriteSet({ root: ctx.installRoot });
+    // roll-forward：只恢复当前 merge 事务，target root 由 manifest 绑定。
+    await recoverWriteSet({ txRoot: ctx.installRoot, txId: journal.txId });
     const txws = txWorkspacePath(ctx, cr);
-    if (fs.existsSync(txws)) await recoverWriteSet({ root: txws, txRoot: ctx.installRoot });
 
     // status + approved snapshot（只从 approval.yml#code 读，TASK-06 签入）
     // authority：status 从 CR worktree 读（SDD §1.3）；approval.yml 是主 checkout 评审产物（TASK-06 模型，
     // review/approve 在 --workspace 主 checkout 跑），故从 kb.rootPath 读。
-    const crStatus = readCrMdStatus(kb.rootPath, cr);
+    const crStatus = readCrMdStatus(opWs.path, cr);
     if (crStatus !== 'code-approved') throw new TxError('MERGE_STATE_MISMATCH', `merge 需要 status=code-approved，实际 ${crStatus}`, { cr, status: crStatus });
-    const approvalText = fs.readFileSync(path.join(kb.rootPath, 'change-requests', cr, 'approval.yml'), 'utf8');
+    const approvalText = fs.readFileSync(path.join(opWs.path, 'change-requests', cr, 'approval.yml'), 'utf8');
     const doc = parseYaml(approvalText.replaceAll('\r\n', '\n')) || {};
     const snapshot = doc && doc.code && doc.code['release-subjects'];
     if (!snapshot) throw new TxError('RELEASE_SUBJECT_DRIFT', 'approval.yml#code.release-subjects 缺失，无法 merge（code 审批时未签入 snapshot）', { cr, kind: 'missing' });
@@ -817,7 +837,10 @@ export async function mergeCr(ctx, input) {
       const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
       const src = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', sourceRef]);
       if (src.status !== 0) throw new TxError('MERGE_SOURCE_MISSING', `${repo.id} 缺少远端 source ref ${sourceRef}（被评审分支未 push）`, { repo: repo.id, ref: sourceRef });
-      if (src.stdout !== repoReviewedSha(snapRepo)) {
+      const sourceMatches = repo.id === ctx.knowledgeBaseRepoId
+        ? gitRun(repo.rootPath, ['merge-base', '--is-ancestor', repoReviewedSha(snapRepo), src.stdout]).status === 0
+        : src.stdout === repoReviewedSha(snapRepo);
+      if (!sourceMatches) {
         throw new TxError('RELEASE_SUBJECT_DRIFT', `${repo.id} 远端 ${sourceRef} 与 approved source 不一致`, { repo: repo.id, expected: repoReviewedSha(snapRepo), actual: src.stdout });
       }
       const prev = (payload.repos || []).find((r) => r.repo === repo.id);
@@ -1062,7 +1085,7 @@ export function writebackAllowlist(stage, specId) {
   throw new TxError('WRITEBACK_STAGE_INVALID', `stage 非法: ${stage}`, { stage });
 }
 
-function validateWritebackManifest(m, { cr, stage, specId, candidate }) {
+function validateWritebackManifest(m, { cr, stage, specId, candidate, txws }) {
   if (!m || typeof m !== 'object') throw new TxError('WRITEBACK_MANIFEST_INVALID', 'manifest 非对象');
   if (m.v !== 1) throw new TxError('WRITEBACK_MANIFEST_INVALID', `manifest v=${m.v}（仅支持 v1）`);
   if (!WRITEBACK_STAGES.includes(m.stage)) throw new TxError('WRITEBACK_STAGE_INVALID', `manifest stage=${m.stage} 非法`, { stage: m.stage });
@@ -1075,6 +1098,17 @@ function validateWritebackManifest(m, { cr, stage, specId, candidate }) {
   }
   if (m.generator.id !== stageToGenerator(stage)) {
     throw new TxError('WRITEBACK_MANIFEST_MISMATCH', `manifest generator=${m.generator.id} 与 stage ${stage} 不符`);
+  }
+  const candidateReal = fs.realpathSync(candidate);
+  const txwsReal = fs.realpathSync(txws);
+  const candidateRel = path.relative(txwsReal, candidateReal);
+  if (path.basename(candidateReal) !== 'manifest.json' || candidateRel.startsWith(`..${path.sep}`) || path.isAbsolute(candidateRel)) {
+    throw new TxError('WRITEBACK_CANDIDATE_OUTSIDE_TX', `candidate 必须是 Transaction Workspace 内的 manifest.json: ${candidate}`, { candidate });
+  }
+  const generatorPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'writeback', 'scripts', `${m.generator.id}.mjs`);
+  const actualGeneratorSha = sha256(fs.readFileSync(generatorPath, 'utf8'));
+  if (m.generator.sha256 !== actualGeneratorSha) {
+    throw new TxError('WRITEBACK_GENERATOR_MISMATCH', `generator SHA 与当前版本化脚本不一致: ${m.generator.id}`, { expected: actualGeneratorSha, actual: m.generator.sha256 });
   }
   if (!Array.isArray(m.files) || m.files.length === 0) throw new TxError('WRITEBACK_MANIFEST_EMPTY', 'manifest files 为空');
   const allow = writebackAllowlist(stage, specId);
@@ -1128,11 +1162,13 @@ export async function applyWriteback(ctx, input) {
   const txws = opWs.path;
   const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
   const recoverCommand = `crctl writeback-apply ${cr} --stage ${stage} --candidate ${JSON.stringify(candidate)} --spec-id ${JSON.stringify(specId)} --workspace ${JSON.stringify((input && input.workspace) || ctx.installRoot)}`;
+  const manifestText = fs.readFileSync(candidate, 'utf8').replaceAll('\r\n', '\n');
+  const manifestDigest = sha256(manifestText);
   const lock = await acquireLock({ root: ctx.installRoot, scope: `writeback-${cr}-${stage}`, op: 'writeback', cr });
   try {
     const key = `${cr}-${stage}`;
     let journal, journalPath;
-    ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'writeback', key, graphDigest: ctx.graphDigest, inputDigest: sha256(candidate) }));
+    ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'writeback', key, graphDigest: ctx.graphDigest, inputDigest: manifestDigest }));
     const payload = journal.writeback || { cr, stage, phase: 'start', specId, committed: false, commit: null, baseSha: null, pushed: false, files: null };
     journal.writeback = payload;
     const wasComplete = payload.phase === 'complete';
@@ -1143,13 +1179,11 @@ export async function applyWriteback(ctx, input) {
         throw new TxError('GRAPH_CHANGED_DURING_TRANSACTION', 'writeback 事务出现副作用后 dir-graph 声明发生变化，拒绝继续（请先完成或清理既有事务）', { journalDigest: journal.graphDigest, currentDigest: ctx.graphDigest });
       }
     };
-    await recoverWriteSet({ root: ctx.installRoot });
-    await recoverWriteSet({ root: txws, txRoot: ctx.installRoot });
+    await recoverWriteSet({ txRoot: ctx.installRoot, txId: journal.txId });
 
-    // manifest 静态校验（schema/allowlist/path/blob/hash/inputDigest），零 txws 写入
-    const manifestText = fs.readFileSync(candidate, 'utf8');
-    const m = JSON.parse(manifestText.replaceAll('\r\n', '\n'));
-    validateWritebackManifest(m, { cr, stage, specId, candidate });
+    // manifest 静态校验（schema/allowlist/path/blob/hash/inputDigest/generator/containment），零 txws 写入
+    const m = JSON.parse(manifestText);
+    validateWritebackManifest(m, { cr, stage, specId, candidate, txws });
 
     // origin 前置：已发布 → confirmed 幂等 / history-rewritten 硬阻断；
     // 未 commit 且 trunk 前进 → txws reset + STALE；已 commit 未 push → 走 push 循环续推
@@ -1202,6 +1236,10 @@ export async function applyWriteback(ctx, input) {
     const doc = parseYaml(approvalText.replaceAll('\r\n', '\n')) || {};
     const snapshot = doc && doc.code && doc.code['release-subjects'];
     if (!snapshot) throw new TxError('WRITEBACK_SNAPSHOT_MISSING', 'txws approval.yml#code.release-subjects 缺失，拒绝 writeback（TASK-06 snapshot 未签入）', { cr });
+    const snapshotCheck = await verifyReleaseSubjects(ctx, cr, snapshot);
+    if (!snapshotCheck.ok) {
+      throw new TxError('WRITEBACK_RELEASE_SUBJECT_DRIFT', `writeback 前 signed release-subjects 漂移（kind=${snapshotCheck.kind}）`, { cr, kind: snapshotCheck.kind, ...snapshotCheck.details });
+    }
 
     // 应用：recoverable write-set（blob 内容复用静态校验阶段的 _blobText）
     if (!payload.committed) {
@@ -1399,16 +1437,27 @@ function archiveCleanup(ctx, cr, status, journalTxId) {
       if (hasRemote) preservedRefs.push(`${repo.id}:refs/heads/${branchForCr(cr)}`);
       // 本地分支保留（未合并事实源）
     } else {
+      const trunkRef = `refs/remotes/origin/${repo.trunk}`;
       if (hasRemote) {
+        const merged = gitRun(repo.rootPath, ['merge-base', '--is-ancestor', remoteRef, trunkRef]).status === 0;
+        if (!merged) {
+          remaining.push({ kind: 'remote-ref', repo: repo.id, ref: `refs/heads/${branchForCr(cr)}`, why: 'not-merged' });
+          continue;
+        }
         const del = gitRun(repo.rootPath, ['push', 'origin', `:refs/heads/${branchForCr(cr)}`]);
-        if (del.status !== 0) remaining.push({ kind: 'remote-ref', repo: repo.id, ref: `refs/heads/${branchForCr(cr)}`, why: 'delete-failed' });
+        if (del.status !== 0) {
+          remaining.push({ kind: 'remote-ref', repo: repo.id, ref: `refs/heads/${branchForCr(cr)}`, why: 'delete-failed' });
+          continue;
+        }
+      }
+      const localRef = `refs/heads/${branchForCr(cr)}`;
+      const localExists = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', localRef]).status === 0;
+      if (localExists && gitRun(repo.rootPath, ['merge-base', '--is-ancestor', localRef, trunkRef]).status !== 0) {
+        remaining.push({ kind: 'local-ref', repo: repo.id, ref: localRef, why: 'not-merged' });
+        continue;
       }
       const delLocal = gitRun(repo.rootPath, ['branch', '-D', branchForCr(cr)]);
-      if (delLocal.status !== 0) {
-        // 分支不存在是幂等成功；存在但删除失败（如仍被 worktree 引用）→ 保留
-        const exists = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${branchForCr(cr)}`]).status === 0;
-        if (exists) remaining.push({ kind: 'local-ref', repo: repo.id, ref: `refs/heads/${branchForCr(cr)}`, why: 'delete-failed' });
-      }
+      if (delLocal.status !== 0 && localExists) remaining.push({ kind: 'local-ref', repo: repo.id, ref: localRef, why: 'delete-failed' });
     }
   }
   return { remaining, preservedRefs };
@@ -1434,7 +1483,7 @@ export async function archiveCr(ctx, input) {
         throw new TxError('GRAPH_CHANGED_DURING_TRANSACTION', 'archive 事务出现副作用后 dir-graph 声明发生变化，拒绝继续', { journalDigest: journal.graphDigest, currentDigest: ctx.graphDigest });
       }
     };
-    await recoverWriteSet({ root: ctx.installRoot });
+    await recoverWriteSet({ txRoot: ctx.installRoot, txId: journal.txId });
 
     // 幂等重放：complete 事务直接返回（cleanup 后 CR worktree 已删，authority 解析会失败）
     if (payload.phase === 'complete') {
@@ -1453,13 +1502,18 @@ export async function archiveCr(ctx, input) {
         if (!specId) throw new TxError('ARCHIVE_SPEC_REQUIRED', 'archive writing-back 路径需要 --spec-id（writeback-spec-id 入账）', { cr });
         editRoot = opWs.path;
       } else {
-        // rejected/withdrawn：状态权威在主 checkout（评审产物与状态推进所在，TASK-06 模型）
-        const masterStatus = readCrMdStatus(kb.rootPath, cr);
-        if (!['rejected', 'withdrawn'].includes(masterStatus)) {
-          throw new TxError('ARCHIVE_STATE_MISMATCH', `archive 仅接受 writing-back（txws）或 rejected/withdrawn（主 checkout），当前 ${masterStatus}`, { cr, status: masterStatus });
+        // rejected/withdrawn 的事实来自 CR worktree；归档提交在 detached origin trunk 上生成，绝不改用户主 checkout。
+        if (!['rejected', 'withdrawn'].includes(status)) {
+          throw new TxError('ARCHIVE_STATE_MISMATCH', `archive 仅接受 writing-back 或 rejected/withdrawn，当前 ${status}`, { cr, status });
         }
-        status = masterStatus;
-        editRoot = kb.rootPath; // 评审产物与账本所在，push trunk
+        gitMust(kb.rootPath, ['fetch', 'origin']);
+        const trunkSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
+        editRoot = txWorkspacePath(ctx, cr);
+        if (!fs.existsSync(editRoot)) gitMust(kb.rootPath, ['worktree', 'add', '--detach', editRoot, trunkSha]);
+        else {
+          gitMust(editRoot, ['reset', '--hard', trunkSha]);
+          gitMust(editRoot, ['checkout', '--detach', trunkSha]);
+        }
       }
       if (payload.status != null && payload.status !== status) {
         throw new TxError('ARCHIVE_STATUS_MISMATCH', `archive 事务 status=${payload.status} 与当前 ${status} 不一致`, { cr });
@@ -1565,26 +1619,19 @@ export async function archiveCr(ctx, input) {
     // origin confirmed → cleanup（逐单元落盘 + fault；失败不抛错，返回 cleanup-pending）
     await save('cleanup-pending');
     if (!payload.cleanupDone) {
-      payload.lastCleanupError = null; // 每轮全新尝试：上轮 fault 不阻塞本轮续清理
-      const steps = ['txws', 'worktrees', 'refs'];
-      for (const step of steps) {
-        try {
-          assertGraph();
-          const r = archiveCleanup(ctx, cr, status, journal.txId);
-          payload.remaining = r.remaining;
-          payload.preservedRefs = r.preservedRefs;
-          payload.cleanupStep = step;
-          did = true;
-          await save(`cleanup-${step}`);
-          faultPoint('archive-during-cleanup', { cr, step });
-          if (r.remaining.length > 0) break; // 保留现场，重跑续清理
-        } catch (ce) {
-          // cleanup 失败（含 fault）不阻断：业务状态已 archived，返回 cleanup-pending
-          payload.lastCleanupError = ce && ce.code ? ce.code : 'CLEANUP_FAILED';
-          did = true;
-          await save(`cleanup-${step}-failed`);
-          break;
-        }
+      payload.lastCleanupError = null;
+      try {
+        assertGraph();
+        const r = archiveCleanup(ctx, cr, status, journal.txId);
+        payload.remaining = r.remaining;
+        payload.preservedRefs = r.preservedRefs;
+        did = true;
+        await save('cleanup-attempted');
+        faultPoint('archive-during-cleanup', { cr });
+      } catch (ce) {
+        payload.lastCleanupError = ce && ce.code ? ce.code : 'CLEANUP_FAILED';
+        did = true;
+        await save('cleanup-failed');
       }
       if (payload.remaining.length === 0 && !payload.lastCleanupError) payload.cleanupDone = true;
     }

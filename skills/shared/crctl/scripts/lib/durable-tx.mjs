@@ -7,7 +7,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
-import { TxError } from './workspace-transactions.mjs';
+
+export class TxError extends Error {
+  constructor(code, message, extra = {}) {
+    super(message);
+    this.code = code;
+    this.extra = extra;
+  }
+}
 
 const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 
@@ -297,8 +304,8 @@ export async function applyWriteSet({ root, txId, entries, txRoot = root }) {
   }
   const todo = plan.filter((p) => p.action === 'redo');
   if (todo.length === 0) {
-    durableWriteFile(manifestPath, JSON.stringify({ v: 1, txId, state: 'complete', entries }, null, 2));
-    await cleanupTxBlobs({ root, txId });
+    durableWriteFile(manifestPath, JSON.stringify({ v: 1, txId, state: 'complete', targetRoot: path.resolve(root), entries }, null, 2));
+    await cleanupTxBlobs({ txRoot, txId });
     return { changed: false };
   }
   // stage blob（恢复锚点），随后 prepared manifest，再连续 rename
@@ -313,7 +320,7 @@ export async function applyWriteSet({ root, txId, entries, txRoot = root }) {
     durableWriteFile(blobPath, e.content);
   }
   durableWriteFile(manifestPath, JSON.stringify({
-    v: 1, txId, state: 'prepared',
+    v: 1, txId, state: 'prepared', targetRoot: path.resolve(root),
     entries: entries.map((e) => ({ path: e.path, beforeSha256: e.beforeSha256 == null ? null : e.beforeSha256, afterSha256: e.afterSha256, blob: `blobs/${e.afterSha256}` })),
   }, null, 2));
   for (let i = 0; i < todo.length; i++) {
@@ -328,39 +335,33 @@ export async function applyWriteSet({ root, txId, entries, txRoot = root }) {
     if (i < todo.length - 1) faultPoint('tx-apply-between-rename', { path: e.path });
   }
   faultPoint('tx-apply-before-complete', { txId });
-  durableWriteFile(manifestPath, JSON.stringify({ v: 1, txId, state: 'complete', entries: entries.map((e) => ({ path: e.path, beforeSha256: e.beforeSha256 == null ? null : e.beforeSha256, afterSha256: e.afterSha256, blob: `blobs/${e.afterSha256}` })) }, null, 2));
-  await cleanupTxBlobs({ root, txId });
+  durableWriteFile(manifestPath, JSON.stringify({ v: 1, txId, state: 'complete', targetRoot: path.resolve(root), entries: entries.map((e) => ({ path: e.path, beforeSha256: e.beforeSha256 == null ? null : e.beforeSha256, afterSha256: e.afterSha256, blob: `blobs/${e.afterSha256}` })) }, null, 2));
+  await cleanupTxBlobs({ txRoot, txId });
   return { changed: true };
 }
 
-/** 扫描全部事务目录，对 state != complete 的 write-set 用已落盘 blob 恢复（redo/skip/conflict 同 applyWriteSet）。 */
-export async function recoverWriteSet({ root, txRoot = root }) {
-  let changed = false;
-  const txRootDir = path.join(txRoot, '.crctl', 'transactions');
-  if (!fs.existsSync(txRootDir)) return { changed };
-  for (const op of fs.readdirSync(txRootDir)) {
-    const opDir = path.join(txRootDir, op);
-    let keys;
-    try { keys = fs.readdirSync(opDir); } catch { continue; }
-    for (const k of keys) {
-      let txIds;
-      try { txIds = fs.readdirSync(path.join(opDir, k)); } catch { continue; }
-      for (const txId of txIds) {
-        const manifestPath = path.join(opDir, k, txId, 'write-set.json');
-        if (!fs.existsSync(manifestPath)) continue;
-        const m = readJsonChecked(manifestPath, 'TX_WRITESET_INVALID', 'write-set manifest');
-        if (!m || m.v !== 1 || m.state === 'complete' || !Array.isArray(m.entries)) continue;
-        const r = await applyWriteSet({ root, txRoot, txId: m.txId || txId, entries: m.entries });
-        changed = changed || r.changed;
-      }
-    }
+/** 只恢复指定事务；目标 root 来自首次 apply 持久化的 manifest，禁止调用方把相对路径重放到其他 checkout。 */
+export async function recoverWriteSet({ txRoot, txId }) {
+  const txDir = findTxDir(txRoot, txId);
+  if (!txDir) return { changed: false };
+  const manifestPath = path.join(txDir, 'write-set.json');
+  if (!fs.existsSync(manifestPath)) return { changed: false };
+  const m = readJsonChecked(manifestPath, 'TX_WRITESET_INVALID', 'write-set manifest');
+  if (!m || m.v !== 1 || !Array.isArray(m.entries)
+    || typeof m.targetRoot !== 'string' || !path.isAbsolute(m.targetRoot)) {
+    throw new TxError('TX_WRITESET_INVALID', `write-set manifest 缺少合法 targetRoot: ${manifestPath}`, { path: manifestPath });
   }
-  return { changed };
+  if (m.state === 'complete') {
+    await cleanupTxBlobs({ txRoot, txId });
+    return { changed: false };
+  }
+  if (m.state !== 'prepared') throw new TxError('TX_WRITESET_INVALID', `write-set manifest state 非法: ${m.state}`, { path: manifestPath });
+  return applyWriteSet({ root: m.targetRoot, txRoot, txId: m.txId || txId, entries: m.entries });
 }
 
 /** 幂等清理：blobs/ 与残留 temp；清理失败不抛业务错误（完成态写入不可逆转）。 */
-export async function cleanupTxBlobs({ root, txId }) {
-  const txDir = findTxDir(root, txId);
+export async function cleanupTxBlobs({ txRoot, txId }) {
+  const txDir = findTxDir(txRoot, txId);
   if (!txDir) return;
   try { fs.rmSync(path.join(txDir, 'blobs'), { recursive: true, force: true }); } catch { /* 幂等清理 */ }
   const manifestPath = path.join(txDir, 'write-set.json');
@@ -369,7 +370,7 @@ export async function cleanupTxBlobs({ root, txId }) {
     if (m && m.state === 'complete') {
       for (const e of m.entries || []) {
         try {
-          const dst = path.join(root, ...String(e.path).split('/'));
+          const dst = path.join(m.targetRoot, ...String(e.path).split('/'));
           const dir = path.dirname(dst);
           for (const f of fs.readdirSync(dir)) {
             if (f.startsWith(`${path.basename(dst)}.tmp-`)) fs.rmSync(path.join(dir, f), { force: true });

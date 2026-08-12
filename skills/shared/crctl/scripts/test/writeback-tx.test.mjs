@@ -90,10 +90,12 @@ test('TASK-08 AC-1：恶意 manifest 全矩阵 hard fail 且零写入（origin/s
       m2.inputDigest = m2.inputDigest; // 保持自洽由 case 决定
       return m2;
     };
-    const writeManifest = (m2) => {
-      // 固定路径：journal inputDigest = sha256(candidate 路径)，重跑同一 candidate 才允许续跑；
-      // manifest 必须在 candidate 目录内（blob 相对路径解析）
-      const p = path.join(path.dirname(manifest), '.evil-manifest.json');
+    const writeManifest = (m2, label) => {
+      const dir = path.join(txws, `.cand-evil-${label.replace(/[^a-z0-9]/gi, '-')}`);
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(dir, { recursive: true });
+      fs.cpSync(path.join(path.dirname(manifest), 'blobs'), path.join(dir, 'blobs'), { recursive: true });
+      const p = path.join(dir, 'manifest.json');
       fs.writeFileSync(p, JSON.stringify(m2, null, 2) + '\n', 'utf8');
       return p;
     };
@@ -131,13 +133,17 @@ test('TASK-08 AC-1：恶意 manifest 全矩阵 hard fail 且零写入（origin/s
     cases.push(['stage.md', 'WRITEBACK_MANIFEST_MISMATCH', (m2) => { m2.stage = 'tasks'; }]);
     // 15) v 不支持
     cases.push(['v2.md', 'WRITEBACK_MANIFEST_INVALID', (m2) => { m2.v = 2; }]);
+    // 16) generator SHA 必须来自当前版本化脚本，不能信 manifest 自报
+    cases.push(['generator-sha.md', 'WRITEBACK_GENERATOR_MISMATCH', (m2) => { m2.generator.sha256 = '0'.repeat(64); }]);
 
     const originBefore = originMasterCount(base, 'kb');
     for (const [label, code, mutate] of cases) {
       const m2 = mk(mutate);
       // tamper case 故意保留伪造 digest；其余 case 重算保持自洽（隔离目标错误码）
       m2.inputDigest = label === 'tamper.md' ? '0'.repeat(64) : writebackInputDigest(m2);
-      const p = writeManifest(m2);
+      const p = writeManifest(m2, label);
+      // 每个恶意输入是独立事务；同一事务替换 manifest 内容必须由 inputDigest 硬阻断。
+      fs.rmSync(path.join(kb, '.crctl', 'transactions', 'writeback', `${cr}-baseline`), { recursive: true, force: true });
       const r = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--candidate', p, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
       assert.notEqual(r.status, 0, `${label} 应 hard fail`);
       assert.equal(r.errJson.error.code, code, `${label}: 期望 ${code} 实得 ${r.errJson.error.code} ${r.errJson.error.message}`);
@@ -146,6 +152,32 @@ test('TASK-08 AC-1：恶意 manifest 全矩阵 hard fail 且零写入（origin/s
       const staged = git(txws, ['diff', '--cached', '--name-only']).trim();
       assert.equal(staged, '', `${label}: txws staged set 必须为空`);
     }
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('review repair：candidate 必须在 txws 内，且 journal 绑定 manifest 实际内容', () => {
+  const { base, kb, cr, txws } = makeMergedFixture();
+  try {
+    const manifest = makeBaselineCandidate(txws, cr, 'binding');
+    const outside = path.join(base, 'outside-candidate');
+    fs.cpSync(path.dirname(manifest), outside, { recursive: true });
+    const rOutside = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--candidate', path.join(outside, 'manifest.json'), '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.notEqual(rOutside.status, 0);
+    assert.equal(rOutside.errJson.error.code, 'WRITEBACK_CANDIDATE_OUTSIDE_TX');
+
+    fs.rmSync(path.join(kb, '.crctl', 'transactions', 'writeback', `${cr}-baseline`), { recursive: true, force: true });
+    const original = fs.readFileSync(manifest, 'utf8');
+    const tampered = JSON.parse(original);
+    tampered.generator.sha256 = '0'.repeat(64);
+    tampered.inputDigest = writebackInputDigest(tampered);
+    fs.writeFileSync(manifest, JSON.stringify(tampered, null, 2) + '\n');
+    const r1 = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--candidate', manifest, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.notEqual(r1.status, 0);
+    assert.equal(r1.errJson.error.code, 'WRITEBACK_GENERATOR_MISMATCH');
+    fs.writeFileSync(manifest, original);
+    const r2 = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--candidate', manifest, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.notEqual(r2.status, 0);
+    assert.equal(r2.errJson.error.code, 'TX_INPUT_CONFLICT');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 

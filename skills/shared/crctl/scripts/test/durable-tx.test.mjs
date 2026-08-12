@@ -10,7 +10,7 @@ import {
   acquireLock, loadOrCreateJournal, saveJournal, applyWriteSet, recoverWriteSet, cleanupTxBlobs,
   pidProbe, _setPidProbe, durableWriteFile, nowIso,
 } from '../lib/durable-tx.mjs';
-import { TxError } from '../lib/workspace-transactions.mjs';
+import { TxError } from '../lib/durable-tx.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import crypto from 'node:crypto';
@@ -186,11 +186,11 @@ try {
     assert.equal(fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), 'A1');
     assert.equal(fs.readFileSync(path.join(root, 'b.txt'), 'utf8'), 'B0');
     // 恢复：b.txt 从 blob redo
-    const rec = await recoverWriteSet({ root });
+    const rec = await recoverWriteSet({ txRoot: root, txId: journal.txId });
     assert.equal(rec.changed, true);
     assert.equal(fs.readFileSync(path.join(root, 'b.txt'), 'utf8'), 'B1');
     // 再恢复：全 skip，幂等
-    const rec2 = await recoverWriteSet({ root });
+    const rec2 = await recoverWriteSet({ txRoot: root, txId: journal.txId });
     assert.equal(rec2.changed, false);
   } finally { rm(root); }
 });
@@ -220,19 +220,43 @@ try {
     assert.equal(fs.readFileSync(path.join(root, 'c.txt'), 'utf8'), 'C1', '写入已落盘');
     const txDir = path.join(root, '.crctl', 'transactions', 'writeback', 'CR-11', journal.txId);
     assert.equal(JSON.parse(fs.readFileSync(path.join(txDir, 'write-set.json'), 'utf8')).state, 'prepared', 'complete 标记未写');
-    const rec = await recoverWriteSet({ root });
+    const rec = await recoverWriteSet({ txRoot: root, txId: journal.txId });
     assert.equal(rec.changed, false, '全 skip（内容已到位）');
     assert.ok(!fs.existsSync(path.join(txDir, 'write-set.json')), '恢复后 complete 并清理 manifest');
     assert.equal(fs.readFileSync(path.join(root, 'c.txt'), 'utf8'), 'C1');
   } finally { rm(root); }
 });
 
+test('review repair：recoverWriteSet 只恢复指定 txId，并使用 manifest 绑定的 targetRoot', async () => {
+  const txRoot = mkRoot();
+  const rootA = path.join(txRoot, 'a');
+  const rootB = path.join(txRoot, 'b');
+  fs.mkdirSync(rootA); fs.mkdirSync(rootB);
+  try {
+    const a = await loadOrCreateJournal({ root: txRoot, op: 'merge', cr: 'CR-A', inputDigest: 'a' });
+    const b = await loadOrCreateJournal({ root: txRoot, op: 'writeback', cr: 'CR-B', inputDigest: 'b' });
+    const crash = async (root, txId, text) => {
+      process.env.CRCTL_FAULT_POINT = 'tx-apply-before-complete';
+      await expectTx(applyWriteSet({ root, txRoot, txId, entries: [
+        { path: 'result.txt', beforeSha256: null, afterSha256: sha256Hex(text), content: text },
+      ] }), 'FAULT_INJECTED');
+      delete process.env.CRCTL_FAULT_POINT;
+    };
+    await crash(rootA, a.journal.txId, 'A');
+    await crash(rootB, b.journal.txId, 'B');
+    await recoverWriteSet({ txRoot, txId: a.journal.txId });
+    assert.equal(fs.readFileSync(path.join(rootA, 'result.txt'), 'utf8'), 'A');
+    assert.ok(fs.existsSync(path.join(path.dirname(b.journalPath), 'write-set.json')), '其他事务仍待恢复');
+    assert.equal(fs.readFileSync(path.join(rootB, 'result.txt'), 'utf8'), 'B');
+  } finally { delete process.env.CRCTL_FAULT_POINT; rm(txRoot); }
+});
+
 test('TASK-04：cleanupTxBlobs 幂等；blob 与 afterSha256 不符 → TX_BLOB_MISMATCH（AC-3）', async () => {
   const root = mkRoot();
   try {
     const { journal } = await loadOrCreateJournal({ root, op: 'archive', cr: 'CR-12', inputDigest: 'w' });
-    await cleanupTxBlobs({ root, txId: journal.txId }); // 无 blob 也不报错
-    await cleanupTxBlobs({ root, txId: journal.txId });
+    await cleanupTxBlobs({ txRoot: root, txId: journal.txId }); // 无 blob 也不报错
+    await cleanupTxBlobs({ txRoot: root, txId: journal.txId });
     // 预置坏 blob：同 txId 第二次 apply 发现 blob 哈希不符
     const txDir = path.join(root, '.crctl', 'transactions', 'archive', 'CR-12', journal.txId);
     fs.mkdirSync(path.join(txDir, 'blobs'), { recursive: true });
@@ -240,7 +264,7 @@ test('TASK-04：cleanupTxBlobs 幂等；blob 与 afterSha256 不符 → TX_BLOB_
     fs.writeFileSync(path.join(txDir, 'blobs', after), 'corrupted');
     await expectTx(applyWriteSet({ root, txId: journal.txId, entries: [{ path: 'd.txt', beforeSha256: null, afterSha256: after, content: 'good' }] }), 'TX_BLOB_MISMATCH');
     // content 与 afterSha256 不符
-    await cleanupTxBlobs({ root, txId: journal.txId }).then(() => fs.rmSync(path.join(txDir, 'blobs'), { recursive: true, force: true }));
+    await cleanupTxBlobs({ txRoot: root, txId: journal.txId }).then(() => fs.rmSync(path.join(txDir, 'blobs'), { recursive: true, force: true }));
     await expectTx(applyWriteSet({ root, txId: journal.txId, entries: [{ path: 'd.txt', beforeSha256: null, afterSha256: after, content: 'different' }] }), 'TX_BLOB_MISMATCH');
   } finally { rm(root); }
 });

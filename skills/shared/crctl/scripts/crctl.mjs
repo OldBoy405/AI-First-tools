@@ -2681,30 +2681,30 @@ async function cmdMerge(ws, positional, flags) {
   }
   const cr = sub;
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'merge 需要 CR-ID');
-  const gates = loadGates(ws);
   const ctx = resolveRepositories(ws);
-  // 状态/门禁检查在主 checkout（评审产物与 cr.md 提交于 master，TASK-06 模型）；
-  // 事务 authority（worktree HEAD / txws）由 mergeCr 内部按 SDD §1.3 解析。
-  const state = resolveCrState(ws, cr);
+  const authority = resolveOperationalWorkspace(ctx, cr);
+  const authWs = authority.path;
+  const gates = loadGates(ctx.installRoot);
+  const state = resolveCrState(authWs, cr);
   if (state.status !== 'code-approved') {
     fail('MERGE_STATE_MISMATCH', `merge 需要 status=code-approved，实际 ${state.status}`, { cr, status: state.status });
   }
-  const gate = runGateChecks(ws, cr, 'code-approved', gates, {});
+  const gate = runGateChecks(authWs, cr, 'code-approved', gates, {});
   if (!gate.pass) {
     const why = gate.checks.filter((c) => !c.ok).map((c) => c.why).filter(Boolean).join('；');
     fail('GATE_BLOCKED', `merge 前置门禁未通过，拒绝写入${why ? '：' + why : ''}`, { gate });
   }
-  const result = await runTxAsync(mergeCr(ctx, { cr, workspace: ws }));
+  const result = await runTxAsync(mergeCr(ctx, { cr, workspace: authWs }));
   if (result.phase === 'release-drift') {
     // 零 publish 的 code/source/TASK 漂移：原子回退 code-approved -> developing（唯一回退转换）
-    auditLog(ws, { kind: 'merge', cr, result: 'release-drift', drift: result.drift, actor: identity(ws) });
-    const adv = performAdvance(ws, cr, gates, {
+    auditLog(authWs, { kind: 'merge', cr, result: 'release-drift', drift: result.drift, actor: identity(authWs) });
+    const adv = performAdvance(authWs, cr, gates, {
       to: 'developing', trigger: 'merge-feature-branch:release-drift -> implement-code', expect: 'code-approved',
     });
     ok({ op: 'merge', ...result, advanced: { to: 'developing', trigger: adv.trigger, committed: adv.committed } });
     return;
   }
-  auditLog(ws, { kind: 'merge', cr, txId: result.txId, phase: result.phase, changed: result.changed, actor: identity(ws) });
+  auditLog(authWs, { kind: 'merge', cr, txId: result.txId, phase: result.phase, changed: result.changed, actor: identity(authWs) });
   ok({ op: 'merge', ...result });
 }
 

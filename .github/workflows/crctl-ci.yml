@@ -6,19 +6,24 @@ name: crctl-ci
 on:
   push:
     paths:
-      - 'skills/shared/crctl/**'
-      - 'skills/writeback/**'
+      - 'skills/**'
       - 'pipeline-templates/**'
       - 'dir-graph.yaml'
+      - 'agent-skill-matrix.yml'
       - 'agents/**'
+      - 'AGENTS.md'
+      - 'ARCHITECTURE.md'
       - '.github/workflows/crctl-ci.yml'
   pull_request:
     paths:
-      - 'skills/shared/crctl/**'
-      - 'skills/writeback/**'
+      - 'skills/**'
       - 'pipeline-templates/**'
       - 'dir-graph.yaml'
+      - 'agent-skill-matrix.yml'
       - 'agents/**'
+      - 'AGENTS.md'
+      - 'ARCHITECTURE.md'
+      - '.github/workflows/crctl-ci.yml'
 
 jobs:
   contracts:

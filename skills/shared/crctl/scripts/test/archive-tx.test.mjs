@@ -130,16 +130,30 @@ test('TASK-09 AC-2：dirty CR worktree 零删除 → cleanup-pending 保留现�
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
-test('TASK-09 AC-2：rejected CR — 账本落主 checkout + push trunk，未合并远端 ref 保留为 preservedRefs', () => {
-  const f = makeCodeApprovedFixture();
-  const { base, kb, cr } = f;
+test('review repair：archive 删除 requirement ref 前必须证明 source 已合入 origin trunk', () => {
+  const { base, kb, cr } = makeWritebackFixture();
   try {
-    // 构造 rejected：主 checkout cr.md status=rejected（reject 评审产物在主 checkout）
-    const crDir = path.join(kb, 'change-requests', cr);
+    const baseSha = git(kb, ['rev-parse', 'master']);
+    const tree = git(kb, ['rev-parse', `${baseSha}^{tree}`]);
+    const unmerged = git(kb, ['commit-tree', tree, '-p', baseSha, '-m', 'unmerged release source']);
+    git(kb, ['push', '-q', '--force', 'origin', `${unmerged}:refs/heads/requirement/${cr}`]);
+    const r = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.json.phase, 'cleanup-pending');
+    assert.ok(r.json.remaining.some((x) => x.kind === 'remote-ref' && x.why === 'not-merged'));
+    assert.equal(git(path.join(base, 'origin-kb.git'), ['rev-parse', `refs/heads/requirement/${cr}`]), unmerged, '未证明 merged 的 source ref 必须保留');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('TASK-09 AC-2：rejected CR — authority 来自 CR worktree，归档在 detached trunk 提交并保留未合并 ref', () => {
+  const f = makeCodeApprovedFixture();
+  const { base, kb, kbWt, cr } = f;
+  try {
+    const crDir = path.join(kbWt, 'change-requests', cr);
     fs.writeFileSync(path.join(crDir, 'cr.md'), `---\nid: ${cr}\nstatus: rejected\nupdated-at: "2026-08-11T21:00:00+08:00"\n---\n`);
-    git(kb, ['add', '-A']);
-    git(kb, ['commit', '-q', '-m', 'reject']);
-    git(kb, ['push', '-q', 'origin', 'HEAD:refs/heads/master']);
+    git(kbWt, ['add', '-A']);
+    git(kbWt, ['commit', '-q', '-m', 'reject']);
+    git(kbWt, ['push', '-q', 'origin', `HEAD:refs/heads/requirement/${cr}`]);
     const r = runCrctl(['archive', cr, '--workspace', kb], { cwd: kb });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.json.phase, 'complete', JSON.stringify(r.json || r.errJson));
