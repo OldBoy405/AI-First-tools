@@ -28,7 +28,10 @@ import {
   matchFrontmatter, crMdStatusText, mergeCr, mergeStatus, resolveOperationalWorkspace,
   applyWriteback, archiveCr, checkUpgrade,
 } from './lib/workspace-transactions.mjs';
-import { FAULT_POINTS, faultPoint, nowIso } from './lib/durable-tx.mjs';
+import {
+  FAULT_POINTS, faultPoint, nowIso,
+  hasLedgerTransaction, recoverLedgerTransaction, beginLedgerTransaction, abortLedgerTransaction, finishLedgerTransaction,
+} from './lib/durable-tx.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,18 +47,7 @@ function ok(obj) {
   process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
 }
 
-/* ──────────── CR-2026-031 TASK-01/04：确定性故障注入（仅测试启用）────────────
- * CRCTL_FAULT_POINT 未设置 → 生产零行为；命中 → FAULT_INJECTED 退出。
- * FAULT_POINTS 唯一登记表已随 TASK-04 下沉到 lib/durable-tx.mjs（re-import）；
- * lib 抛 TxError，本入口统一转 JSON fail，保持单进程输出契约。 */
-function fault(point) {
-  try { faultPoint(point); } catch (e) {
-    if (e instanceof TxError) fail(e.code, e.message, e.extra);
-    throw e;
-  }
-}
-
-// nowIso 自 TASK-04 起 re-import 自 lib/durable-tx.mjs（唯一实现）。
+// nowIso 与 FAULT_POINTS 自 TASK-04 起 re-import 自 lib/durable-tx.mjs（唯一实现）。
 
 // CR-2026-027 代码评审回修（b4）：reviewed-at 时间戳统一解析为 epoch 毫秒后再比较。
 // ISO 字符串字典序比较在跨时区偏移时会产生错误先后判定（如 +08:00 vs Z）；
@@ -613,31 +605,38 @@ function casWrite(p, expectedHash, newText) {
   if (sha256(cur) !== expectedHash) fail('CAS_CONFLICT', `${p} 在读取后被其他进程修改，本次写入中止。请重新执行。`);
   fs.writeFileSync(p, newText, 'utf8');
 }
-/* casWriteMulti — 多文件全有或全无 CAS 写（CR-2026-019 TASK-01，archive-move 双文件原子）
- * 三阶段：全校验 → 全写 temp → 连续 rename。任一侧读后被改则整体 CAS_CONFLICT 中止，
- * 不落任何一侧（NFR-2：绝不产生 backlog 已删而 history 未写的半状态）。
- * expectedHash 为 null 表示"期望目标文件不存在"（首次归档时 _history.yml 可缺省）：
- * 文件实际不存在则放行（新建），文件实际存在则 CAS_CONFLICT（创建冲突）。
- * 残余窗口（ponytail 天花板）：两次 rename 间进程崩溃留半状态，SDD §4.3 判定为可接受：
- * rename 微秒级窗口 + 账本随 --embedded 进同一 git 提交可整体回滚 + 单写者不变量下无并发。
- */
-function casWriteMulti(writes) {
-  for (const w of writes) {
-    const cur = readFileChecked(w.path);
-    if (cur == null && w.expectedHash == null) continue;
-    if (cur == null) fail('CAS_FILE_MISSING', `写入前文件消失: ${w.path}`);
-    if (w.expectedHash == null || sha256(cur) !== w.expectedHash)
-      fail('CAS_CONFLICT', `${w.path} 在读取后被其他进程修改（或与预期存在状态不符），本次写入中止，两侧均未落盘。请重新执行。`);
+function ledgerTxKey(op, cr, stage = '') {
+  return `${op}-${cr}${stage ? `-${stage}` : ''}`.replace(/[^A-Za-z0-9._-]/g, '-');
+}
+
+async function recoverLedgerCommand(ws, key) {
+  const root = deriveInstallRoot(ws);
+  if (!hasLedgerTransaction({ root, key })) return { recovered: false, paths: [] };
+  const head = gitHeadSha(ws);
+  const log = controlledGit(ws, 'log', ['--format=%B', '-1'], ws, 'crctl-ledger-recovery');
+  const recovered = await runTxAsync(recoverLedgerTransaction({ root, key, currentHead: head, headMessage: log.ok ? log.stdout : '' }));
+  if (recovered.rolledBack && recovered.paths.length && head) {
+    const tracked = queryTrackedChanges(ws, { audit: false });
+    const staged = new Set(tracked.ok ? tracked.staged : []);
+    const syncPaths = recovered.paths.filter((p) => fs.existsSync(path.join(ws, ...p.split('/'))) || staged.has(p));
+    if (syncPaths.length) {
+      const add = controlledGit(ws, 'add', ['-A', '--', ...syncPaths], ws, 'crctl-ledger-recovery');
+      if (!add.ok) throw new TxError('TX_GIT_FAILED', `ledger rollback 后 index 恢复失败: ${add.stderr || add.message}`, { paths: syncPaths });
+    }
   }
-  const staged = writes.map((w) => {
-    const tmp = w.path + `.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, w.newText, 'utf8');
-    return { tmp, dst: w.path };
-  });
-  for (let i = 0; i < staged.length; i++) {
-    fs.renameSync(staged[i].tmp, staged[i].dst);
-    if (i === 0 && staged.length > 1) fault('ledger-cas-multi-between-rename');
-  }
+  return recovered;
+}
+
+async function injectLedgerFault(point) {
+  return runTxAsync((async () => faultPoint(point))());
+}
+
+async function beginLedgerCommand(ws, key, writes, commitRequired) {
+  const inputDigest = sha256(JSON.stringify(writes.map((w) => ({ path: path.relative(ws, w.path).split(path.sep).join('/'), expectedHash: w.expectedHash, afterSha256: sha256(w.newText) }))));
+  return runTxAsync(beginLedgerTransaction({
+    root: deriveInstallRoot(ws), targetRoot: ws, key, inputDigest, writes,
+    headBefore: gitHeadSha(ws), commitRequired,
+  }));
 }
 /* ────────────────────────── 账本编辑纯函数（CR-2026-019） ──────────────────────────
  * 行级正则改写，纯 string→string（SDD §1.1）；匹配不到一律 fail 硬失败（纪律 #1），
@@ -814,7 +813,7 @@ function readAttempts(ws, cr, loopRef, gates) {
 }
 
 /** review-loop.yml 全量渲染纯函数（CR-2026-025 I-1 拆分：bumpAttempt 与 review-record 共用同一渲染，
- * 使 review-record 能"先算后写"并入 casWriteMulti 同批，消除半状态，B-16）。 */
+ * 使 review-record 能“先算后写”并入 durable ledger transaction，消除半状态，B-16）。 */
 function renderLoopText(loopsMap) {
   const lines = ['# 由 crctl attempt 维护，请勿手工编辑', 'loops:'];
   for (const [k, v] of Object.entries(loopsMap)) {
@@ -1031,7 +1030,7 @@ function assertCandidateStatus(crMdText, expectStatus) {
 
 // CR-2026-027 FR-8/TASK-03：approval 与 status 的原子提交核心（TTY 与 --grant 共用）。
 // 流程：预检（调用方完成）→ 内存生成候选两文件 → runGateChecks（approval.yml evidence override）→
-// assertCandidateStatus → casWriteMulti 两文件 → controlledGit add/commit 单次提交 → commit 成功后发 status outbox。
+// assertCandidateStatus → durable ledger transaction → controlledGit add/commit 单次提交 → commit 成功后发 status outbox。
 // 失败边界：gate/候选校验失败零写入；CAS 冲突两文件均不写；commit 失败两文件共同留在工作区、不发 outbox、返回结构化恢复信息。
 async function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
   const { approver, via, evidenceHash, grant, outboxEvidence, specId, fromStatus } = ctx;
@@ -1065,18 +1064,26 @@ async function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
   }
   // 3) 候选 cr.md 独立 invariant 校验（零写入前提）
   assertCandidateStatus(nextCrMd, stageCfg.to);
-  // 4) 两文件同一 CAS：全校验→全 temp→连续 rename，任一冲突整体中止
+  // 4) 两文件进入 command-level durable transaction；commit 前崩溃会在同命令下次启动时整体回滚。
   const approvalHash = readFileChecked(approvalP) == null ? null : sha256(readFileChecked(approvalP));
-  casWriteMulti([
+  const ledgerTx = await beginLedgerCommand(ws, ledgerTxKey('approve', cr, stage), [
     { path: approvalP, expectedHash: approvalHash, newText: approvalText },
     { path: crMdP, expectedHash: sha256(crMdText), newText: nextCrMd },
-  ]);
-  // 5) 单次 commit（approval.yml + cr.md 同批可见）
+  ], true);
+  // 5) 单次 commit（approval.yml + cr.md 同批可见），tx trailer 供 crash-after-commit 恢复判定。
   const addR = controlledGit(ws, 'add', [`change-requests/${cr}/approval.yml`, `change-requests/${cr}/cr.md`], ws, 'crctl-approve');
   const msg = `[cr] approve ${cr} ${stage} approval+status -> ${stageCfg.to}`;
-  const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-approve') : addR;
-  auditLog(ws, { kind: 'approve', cr, stage, approver, via, result: 'approved', commit: commitR.ok ? msg : 'commit-failed' });
-  const result = { advanced: true, op: 'approve', cr, stage, from: fromStatus, to: stageCfg.to, trigger: stageCfg.trigger, crMd: { updated: true, path: crMdP }, files: [approvalP, crMdP], commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR, note: 'approval.yml 与 cr.md 已同批写入工作区；commit 失败时两文件共同保留、未发 status outbox，请修复后手工经 crctl git 提交' } };
+  const commitMsg = `${msg}\n\nAI-First-Tx: ${ledgerTx.txId}`;
+  const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', commitMsg], ws, 'crctl-approve') : addR;
+  if (!commitR.ok) {
+    const rolled = await runTxAsync(abortLedgerTransaction(ledgerTx));
+    if (rolled.paths.length) controlledGit(ws, 'add', rolled.paths, ws, 'crctl-approve');
+  } else {
+    await injectLedgerFault('ledger-after-commit');
+    await runTxAsync(finishLedgerTransaction(ledgerTx));
+  }
+  auditLog(ws, { kind: 'approve', cr, stage, approver, via, result: commitR.ok ? 'approved' : 'commit-failed', commit: commitR.ok ? msg : 'rolled-back' });
+  const result = { advanced: commitR.ok, op: 'approve', cr, stage, from: fromStatus, to: stageCfg.to, trigger: stageCfg.trigger, crMd: { updated: commitR.ok, path: crMdP }, files: [approvalP, crMdP], commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR, rolledBack: true } };
   // 6) commit 成功后发 status outbox（git 是权威、outbox 只是投影）；commit 失败不发
   if (commitR.ok) {
     result.outbox = emitOutboxEvent(ws, {
@@ -1089,10 +1096,11 @@ async function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
   if (!commitR.ok) process.exit(1);
 }
 
-function cmdApprove(ws, cr, gates, flags) {
+async function cmdApprove(ws, cr, gates, flags) {
   const stage = flags.stage;
   const stageCfg = gates.approvalStages[stage];
   if (!stageCfg) fail('BAD_ARGS', `--stage 必须是 ${Object.keys(gates.approvalStages).join(' | ')}`);
+  await recoverLedgerCommand(ws, ledgerTxKey('approve', cr, stage));
   // CR-2026-027 代码评审回修（b10）：受控历史审批迁移路径（TTY 人类在环，无旁路）——
   // 证据定义变更（如 dev-start 剔除 task-index）后既有 approval 段 digest 按旧定义签发，
   // 门禁复算不一致报 EVIDENCE_DRIFT；--resign 只重算当前定义下 digest 并改写该段，保留审批本体。
@@ -1647,6 +1655,7 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
   const stage = flags.stage;
   const fileName = REVIEW_STAGE_FILES[stage];
   if (!fileName) fail('STAGE_UNKNOWN', `--stage 必须是 ${Object.keys(REVIEW_STAGE_FILES).join(' | ')}`);
+  await recoverLedgerCommand(ws, ledgerTxKey('review', cr, stage));
   const expect = REVIEW_STAGE_EXPECT[stage];
   const state = resolveCrState(ws, cr);
   if (!expect.includes(state.status)) {
@@ -1758,7 +1767,7 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
     }
   }
 
-  // ── 构造三份新文本（同一 recordedAt），再交 casWriteMulti 统一写入（FR-17/D-11，复用 B-18 语义）──
+  // ── 构造三份新文本（同一 recordedAt），再交 durable ledger transaction 统一写入（FR-17/D-11）──
   const target = path.join(crDir(ws, cr), 'review-annotations', fileName);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const existing = readFileChecked(target);
@@ -1825,7 +1834,8 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
     };
     writes.push({ path: loopPath, expectedHash: loopRaw == null ? null : sha256(loopRaw), newText: renderLoopText(all.loops) });
   }
-  casWriteMulti(writes); // 任一前置校验/CAS 失败时本次涉及的受控文件均不落盘；保留 B-18 已声明的连续 rename 极小崩溃窗口，不另造事务
+  const ledgerTx = await beginLedgerCommand(ws, ledgerTxKey('review', cr, stage), writes, false);
+  await runTxAsync(finishLedgerTransaction(ledgerTx));
   auditLog(ws, { kind: 'ledger', op: 'review-record', cr, stage, verdict: payload.verdict, actor: reviewer, file: target });
   emitOutboxEvent(ws, {
     event_kind: 'review', cr_id: cr, actor: reviewer,
@@ -1963,7 +1973,7 @@ function editCheckpointAdd(text, cr, meta) {
 /** owner-set：块内 owners.{role} 的 id + assigned-at 更新（crctl 生成时间戳）。 */
 /* ────────────────────────── Owner 正式移交原语（CR-2026-030 TASK-03，SDD §2.2~§2.5/§3.5/§4.4~§4.7） ──────────────────────────
  * owner-set 收敛为受控账本原语：tracked clean 前置 → 双投影一致性校验 → 唯一时间戳两账本候选 →
- * 一次 casWriteMulti → 只 add 两受控路径并复核 staged set → 一次隔离正式 commit → 成功后同 SHA 发 owners/inbox 事件。
+ * 一次 durable ledger transaction → 只 add 两受控路径并复核 staged set → 一次隔离正式 commit → 成功后同 SHA 发 owners/inbox 事件。
  * 失败回滚以候选 hash 为 CAS 前提恢复原始快照并复核 clean baseline；禁止 reset/checkout/补偿 commit。
  */
 
@@ -2089,33 +2099,11 @@ function editBacklogOwnerProjection(text, cr, role, newId, inboxPayload, handove
   return editInboxEmit(nb, cr, { at: handoverAt, event: 'owner-handover', to: inboxPayload.to, payload: inboxPayload });
 }
 
-/** casWriteMulti 的软失败变体（回滚专用，SDD §4.7）：语义一致（全校验→全 temp→连续 rename），失败抛 Error 而非 process.exit。 */
-function tryCasWriteMulti(writes) {
-  for (const w of writes) {
-    const cur = readFileChecked(w.path);
-    if (cur == null && w.expectedHash == null) continue;
-    if (cur == null) throw new Error(`写入前文件消失: ${w.path}`);
-    if (w.expectedHash == null || sha256(cur) !== w.expectedHash) {
-      throw new Error(`${w.path} CAS 失配（候选 hash ${String(w.expectedHash).slice(0, 8)}…），疑似并发修改`);
-    }
-  }
-  const staged = writes.map((w) => {
-    const tmp = w.path + `.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, w.newText, 'utf8');
-    return { tmp, dst: w.path };
-  });
-  for (const s of staged) fs.renameSync(s.tmp, s.dst);
-}
-
-/** FR-5 失败回滚：以候选 hash 为 CAS 前提恢复两原始快照，撤销本次暂存，复核 clean baseline。
- * 任一步失败 → OWNER_COMMIT_ROLLBACK_FAILED（不吞外部并发变化，不 reset/checkout）。 */
-function rollbackOwnerWrite(ws, os, candidateHashes, rels) {
+/** FR-5 失败回滚：复用 durable ledger transaction 的 before snapshots，撤销暂存并复核 clean baseline。 */
+async function rollbackOwnerWrite(ws, ledgerTx, rels) {
   try {
-    tryCasWriteMulti([
-      { path: os.crMd.path, expectedHash: candidateHashes.crMd, newText: os.crMd.text },
-      { path: os.backlog.path, expectedHash: candidateHashes.backlog, newText: os.backlog.text },
-    ]);
-    const unR = controlledGit(ws, 'add', rels, ws, 'crctl-owner-set'); // 原文等于 HEAD → 清除本次 staged diff
+    await runTxAsync(abortLedgerTransaction(ledgerTx));
+    const unR = controlledGit(ws, 'add', rels, ws, 'crctl-owner-set');
     if (!unR.ok) throw new Error(`撤销本次暂存失败: git add ${rels.join(' ')}`);
     const clean = queryTrackedChanges(ws, { audit: true });
     if (!clean.ok || clean.staged.length || clean.unstaged.length) {
@@ -2124,7 +2112,7 @@ function rollbackOwnerWrite(ws, os, candidateHashes, rels) {
   } catch (e) {
     fail('OWNER_COMMIT_ROLLBACK_FAILED', `正式移交提交失败后的恢复未完成：${String(e && e.message || e)}`, { affected: rels });
   }
-  fail('OWNER_COMMIT_FAILED', '正式移交提交失败，已恢复两个原始快照并撤销本次暂存（tracked clean baseline 已复原），请修复后重试', { changed: false, rolled_back: true });
+  fail('OWNER_COMMIT_FAILED', '正式移交提交失败，已由 durable transaction 恢复两个原始快照并撤销暂存', { changed: false, rolled_back: true });
 }
 
 /** backlog-set：白名单标量字段 prd-path/sdd-path 替换或插入。 */
@@ -2158,9 +2146,10 @@ function cmdCheckpointAdd(ws, cr, gates, flags) {
   ok({ op: 'checkpoint-add', cr, repo: flags.repo, sha: flags.sha, file: snap.path });
 }
 
-function cmdOwnerSet(ws, cr, gates, flags) {
+async function cmdOwnerSet(ws, cr, gates, flags) {
   if (!flags.role || !flags.id) fail('BAD_ARGS', 'owner-set 需要 --role <requirement|development|test> --id <id> [--note <text>]');
   if (!['requirement', 'development', 'test'].includes(flags.role)) fail('BAD_ARGS', `--role 必须是 requirement|development|test（当前 ${flags.role}）`);
+  await recoverLedgerCommand(ws, ledgerTxKey('owner', cr));
   const state = resolveCrState(ws, cr);
   const { sm } = loadStateMachine(ws);
   if ((sm.terminal || []).includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `owner-set 不允许在终态 ${state.status} 修改负责人`, { current: state.status, expect: '非终态' });
@@ -2194,20 +2183,20 @@ function cmdOwnerSet(ws, cr, gates, flags) {
   const relBacklog = path.relative(ws, os.backlog.path).split(path.sep).join('/');
   const rels = [relCrMd, relBacklog];
   const expected = [...rels].sort();
-  const candidateHashes = { crMd: sha256(newCrMd), backlog: sha256(newBacklog) };
-  // FR-5：两账本候选一次 CAS 写入
-  casWriteMulti([
+  const ledgerTx = await beginLedgerCommand(ws, ledgerTxKey('owner', cr), [
     { path: os.crMd.path, expectedHash: os.crMd.hash, newText: newCrMd },
     { path: os.backlog.path, expectedHash: os.backlog.hash, newText: newBacklog },
-  ]);
+  ], true);
   // FR-5：只 add 两受控路径，commit 前复核 staged set 恰好等于两文件且无其他 tracked working-tree 变化
   const addR = controlledGit(ws, 'add', rels, ws, 'crctl-owner-set');
   if (addR.ok) {
     const iso = queryTrackedChanges(ws, { audit: false });
     if (iso.ok && iso.unstaged.length === 0 && JSON.stringify(iso.staged) === JSON.stringify(expected)) {
       const msg = `[cr] owner handover ${cr} ${flags.role} ${from} -> ${newId}`;
-      const commitR = controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-owner-set');
+      const commitR = controlledGit(ws, 'commit', ['-m', `${msg}\n\nAI-First-Tx: ${ledgerTx.txId}`], ws, 'crctl-owner-set');
       if (commitR.ok) {
+        await injectLedgerFault('ledger-after-commit');
+        await runTxAsync(finishLedgerTransaction(ledgerTx));
         const sha = gitHeadSha(ws);
         auditLog(ws, { kind: 'ledger', op: 'owner-set', cr, actor: identity(ws), role: flags.role, from, to: newId, handover_at: handoverAt, result: 'ok' });
         // FR-5：同一真实 SHA 分别尝试 owners + inbox 事件；outbox 失败只 warning，不回滚 commit
@@ -2234,7 +2223,7 @@ function cmdOwnerSet(ws, cr, gates, flags) {
     }
   }
   // add/commit/隔离复核失败 → 回滚恢复 clean baseline
-  rollbackOwnerWrite(ws, os, candidateHashes, rels);
+  await rollbackOwnerWrite(ws, ledgerTx, rels);
 }
 
 function cmdBacklogSet(ws, cr, gates, flags) {

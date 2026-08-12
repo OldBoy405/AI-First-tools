@@ -40,9 +40,9 @@ updated: "2026-08-05T15:10:00+08:00"
 
 ### `skills/shared/crctl/scripts/crctl.mjs`
 
-状态机与账本的唯一可执行治理工具。**刻意单文件**（当前 1400+ 行），不因体量拆分——拆分会打散“状态机 + CAS + 审计”这条强内聚的写入路径，抵消单文件带来的“改动即全貌可见”优势（对标 esbuild/Litestream 的单文件哲学）。**本轮不创建 `commands/` 模块目录**；若未来需要模块化，必须独立立项并先修订本文档（CR-2026-027 FR-2 拍板）。CR-2026-031 起例外：Git/workspace 事务层按 SDD §2.3 下沉到同级 `lib/`（现有 `yaml-subset.mjs`、`workspace-transactions.mjs`、`durable-tx.mjs`），crctl.mjs 保持 CLI/状态机/门禁的唯一入口并薄接线 lib；lib 不得反向依赖 crctl.mjs、不得成为第二 CLI（TASK-12 回写时统一修订本段基线）。TASK-05 起首个业务事务接线：`register`（幂等注册：CR-ID + 三账本 recoverable write-set + trailer commit/lease push + worktree ensure）与 `workspace inspect|ensure|cleanup`；注册三账本模板与 scanMaxCrNumber/formatCrId/assertSupportedBacklogSchema 下沉 lib 共用（cr-init re-import，TASK-10 删除时一并收敛）。TASK-07 起 `merge`（可恢复跨仓 saga：只消费 approval release-subjects，commit-tree 无副作用 prepare、逐仓 lease publish + classifyRemoteCommit 分流、全部 confirmed 后 detached Transaction Workspace 单 finalize commit 写 status=merging + merge-commits.yml + merge-verification.md，origin confirmed 后返回 operational_workspace；零 publish 的 code/TASK drift 经唯一回退转换 code-approved -> developing）与只读 `merge status`；matchFrontmatter/crMdStatusText 同步下沉 lib 共用。
+状态机与账本的唯一可执行治理入口。CLI/门禁留在 `crctl.mjs`；YAML 子集、repository/workspace 事务与持久化原语分别下沉到同级 `lib/yaml-subset.mjs`、`lib/workspace-transactions.mjs`、`lib/durable-tx.mjs`。lib 不反向依赖 CLI，也不形成第二命令入口。
 
-CR-2026-021 起写入子命令族扩至覆盖：`review-annotations/{stage}.yml`（review-record）、`approval.yml#supplemental-reviews[]`（review-note）、`_backlog` 非 status 字段（checkpoint-add/backlog-set/inbox-emit）、**Owner 双投影 + 唯一责任历史 + 隔离 commit（owner-set，CR-2026-030 起不再是单一 _backlog 写入）**、CR-ID/TASK-ID 分配与首次建档（cr-init；TASK-ID 分配自 CR-2026-031 TASK-02 起由 write-dev-tasks 直接登记，`task allocate` 已删除）、只读聚合（worktree-path/report）、`git commit --template` 消息模板。全部沿用「状态机 + CAS + `.crctl/audit.log` 审计」同一条写入路径，无旁路。
+`register`、`merge`、`writeback-apply`、`archive` 使用 journal envelope、目录锁与 recoverable write-set。`approve`、`review-record`、`owner-set` 的多文件写使用同一 `durable-tx.mjs` 中的 command-level ledger transaction：commit 前中断按持久化 before snapshots 整组回滚；commit 后中断按 `AI-First-Tx` trailer 确认 authority 后只清理 journal。旧 `casWriteMulti` 与专属半状态故障点已删除。其余单文件账本命令继续使用 hash-CAS；所有路径共享 `.crctl/audit.log` 与 controlled Git，无旁路。
 
 ### `skills/shared/crctl/gates.json` + `dir-graph.yaml`
 

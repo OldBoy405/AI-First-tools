@@ -902,7 +902,7 @@ test('CR-2026-018 AC-11：混版布局告警（cr.md 与 backlog 不一致）', 
 
 // ── CR-2026-019：账本子命令（task done；merge-metadata/archive-move 已于 CR-2026-031 TASK-10 随旧命令删除）+ AC-9 入库（FR-7） ──
 // SDD §7.2 测试矩阵：AC-1/2/3/5/7 全覆盖；CAS_CONFLICT 分支黑盒无法注入读后改时序，
-// 改为组件级验证 casWriteMulti 三阶段语义（AC-3 原子性），行为契约不变。
+// command-level durable transaction 的 kill/restart 原子性由 fault-harness 黑盒覆盖。
 
 function writeTaskIndex(ws, cr, tasks) {
   const dir = path.join(ws, 'change-requests', cr, 'tasks');
@@ -997,44 +997,13 @@ test('task done：非 developing 态非零退出（ILLEGAL_LEDGER_STATE）且无
 // ── CR-2026-027 TASK-06：三终态 / 中文 reason / 收件人矩阵 ────────────
 
 
-test('casWriteMulti：任一侧 CAS 失配则全部不落盘，无 write/rename（组件级三阶段语义，SDD §4.3）', async () => {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'crctl-casw-'));
-  try {
-    const src = readFileSync(CRCTL, 'utf8').replaceAll('\r\n', '\n');
-    const m = src.match(/function casWriteMulti\(writes\) \{[\s\S]*?\n\}/);
-    assert.ok(m, 'crctl.mjs 中应能提取 casWriteMulti 源码');
-    // 源码函数提取后注入依赖，写入临时模块再 import（不 import crctl.mjs 本身，保持黑盒）
-    const moduleText = [
-      "const calls = [];",
-      "const fail = (code, msg) => { throw new Error(code + ': ' + msg); };",
-      "const fault = () => {};", // CR-2026-031 TASK-01：故障注入在本组件级测试中关闭
-      "const readFileChecked = (p) => { calls.push(['read', p]); return p.endsWith('ok.txt') ? 'orig-a' : 'tampered-b'; };",
-      "const sha256 = (t) => t;",
-      "const fs = {",
-      "  writeFileSync: (p) => calls.push(['write', p]),",
-      "  renameSync: (t, d) => calls.push(['rename', t, d]),",
-      "};",
-      m[0],
-      'export { casWriteMulti, calls };',
-    ].join('\n');
-    const modPath = path.join(dir, 'casw.mjs');
-    writeFileSync(modPath, moduleText);
-    const { casWriteMulti, calls } = await import(pathToFileURL(modPath).href);
-    const p1 = path.join(dir, 'ok.txt');
-    const p2 = path.join(dir, 'bad.txt');
-    assert.throws(() => casWriteMulti([
-      { path: p1, expectedHash: 'orig-a', newText: 'x' },
-      { path: p2, expectedHash: 'orig-b', newText: 'y' },
-    ]), /CAS_CONFLICT/);
-    assert.ok(!calls.some((c) => c[0] === 'write' || c[0] === 'rename'), '阶段一失败后不得有任何 write/rename');
-    calls.length = 0;
-    casWriteMulti([
-      { path: p1, expectedHash: 'orig-a', newText: 'x' },
-      { path: p2, expectedHash: 'tampered-b', newText: 'y' },
-    ]);
-    assert.equal(calls.filter((c) => c[0] === 'write').length, 2, '全部校验通过后应写 2 个 temp');
-    assert.equal(calls.filter((c) => c[0] === 'rename').length, 2, '应连续 rename 2 个文件');
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+test('TASK-10：旧 casWriteMulti/tryCasWriteMulti 与专属 fault point 已删除', () => {
+  const crctlSrc = readFileSync(CRCTL, 'utf8');
+  const durableSrc = readFileSync(path.join(path.dirname(CRCTL), 'lib', 'durable-tx.mjs'), 'utf8');
+  assert.doesNotMatch(crctlSrc, /\b(?:try)?casWriteMulti\b/);
+  assert.doesNotMatch(durableSrc, /ledger-cas-multi-between-rename/);
+  assert.match(crctlSrc, /beginLedgerCommand/);
+  assert.match(durableSrc, /recoverLedgerTransaction/);
 });
 
 test('AC-9：merge-tree 对 _backlog.yml 零冲突（分支推进只写 cr.md，master 注册新 CR）（FR-7/AC-7）', () => {
@@ -1771,7 +1740,7 @@ test('CR-2026-025 回显⑦：blockers 空数组 → isEmpty 通过（收敛不�
 
 // ── CR-2026-025 TASK-03：review-record 三账本一致写 + cmdNext drafting 路由（FR-16~FR-21，SDD §4.4） ──
 // 说明：④的 CAS 注入失败黑盒无法构造读后改时序，沿用 CR-2026-019 先例——
-// casWriteMulti 三阶段原子语义已有组件级向量兜底，此处以 TRACE_SHAPE 结构错误覆盖"三文件均不落盘 + payload 保留"。
+// durable ledger transaction 原子语义已有 fault-harness 向量兜底，此处覆盖前置结构错误的零写入。
 
 function writePrd(ws, cr, content) { return writeEvidence(ws, cr, 'prd.md', content); }
 function readTrace(ws, cr) { return readFileSync(path.join(ws, 'change-requests', cr, 'traceability.yml'), 'utf8'); }
@@ -1914,7 +1883,7 @@ test('CR-2026-025 投影③：trace 缺失创建骨架；已有其他顶层段�
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-test('CR-2026-025 投影④：cr-id 不匹配 → TRACE_SHAPE，受控文件 sha256 均不变且 payload 保留（AC-20/AC-21 失败分支；CAS 原子性由 CR-2026-019 casWriteMulti 组件向量兜底）', () => {
+test('CR-2026-025 投影④：cr-id 不匹配 → TRACE_SHAPE，受控文件 sha256 均不变且 payload 保留（AC-20/AC-21）', () => {
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-R1', 'drafting');
@@ -3143,6 +3112,21 @@ test('CR-2026-030 TASK-01：owner-set untracked-only 不阻塞——真实移交
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('review repair：owner-set rename 间隙崩溃后整组回滚并安全重试', () => {
+  const ws = makeGitWorkspace();
+  try {
+    writeOwnerEntry(ws, 'CR-T1', 'drafting');
+    git(ws, ['add', '-A']); git(ws, ['commit', '-m', '[cr] seed']);
+    const r1 = runCrctl(['owner-set', 'CR-T1', '--role', 'development', '--id', 'Alice', '--workspace', ws], { CRCTL_FAULT_POINT: 'tx-apply-between-rename' });
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'FAULT_INJECTED');
+    const r2 = runCrctl(['owner-set', 'CR-T1', '--role', 'development', '--id', 'Alice', '--workspace', ws]);
+    assert.equal(r2.status, 0, r2.rawStderr);
+    assert.equal(r2.stdout.changed, true);
+    assert.equal(git(ws, ['log', '--format=%s', '--grep=owner handover']).split('\n').filter(Boolean).length, 1);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
 test('CR-2026-030 TASK-01：owner-set commit 失败 → OWNER_COMMIT_FAILED/changed=false/rolled_back=true，恢复 clean baseline（AC-14）', () => {
   const ws = makeGitWorkspace();
   try {
@@ -3178,16 +3162,16 @@ test('CR-2026-030 TASK-01：owner-set 恢复失败 → OWNER_COMMIT_ROLLBACK_FAI
     mkdirSync(path.join(ws, '.githooks'), { recursive: true });
     writeFileSync(path.join(ws, '.githooks', 'pre-commit'), '#!/bin/sh\nexit 1\n');
     git(ws, ['config', 'core.hooksPath', '.githooks']);
-    // 前 2 次 rename 属于 owner-set 写（casWriteMulti 两账本），第 3 次起属于回滚恢复 → 注入失败
+    // lock-owner/journal/blob/manifest/apply 共 10 次 rename；第 11 次是 rollback 首次恢复
     const prelude = [
       "import fs from 'node:fs';",
       'const rn = fs.renameSync.bind(fs);',
       'let n = 0;',
-      "fs.renameSync = (a, b) => { n += 1; if (n >= 3) throw new Error('injected rename failure'); return rn(a, b); };",
+      "fs.renameSync = (a, b) => { n += 1; if (n >= 11) throw new Error('injected rename failure'); return rn(a, b); };",
     ].join('\n');
     const r = runCrctlWrapped(['owner-set', 'CR-T1', '--role', 'development', '--id', 'Alice', '--workspace', ws], prelude);
     assert.equal(r.status, 1);
-    assert.equal(r.stderr.error.code, 'OWNER_COMMIT_ROLLBACK_FAILED');
+    assert.equal(r.stderr.error.code, 'OWNER_COMMIT_ROLLBACK_FAILED', r.rawStderr);
     assert.ok(Array.isArray(r.stderr.error.affected), '列出受影响文件');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
@@ -3373,7 +3357,36 @@ test('CR-2026-030 TASK-01：reject 紧邻回退态 replay → APPROVAL_DECLINED_
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-test('CR-2026-030 TASK-01：approve commit 失败后重放同 grant → GRANT_STATE_UNCOMMITTED，不误判幂等成功（AC-22）', () => {
+test('review repair：approve rename 间隙崩溃后整组回滚并安全重试', () => {
+  const { ws, privateKey } = makeStageWorkspace('requirement');
+  try {
+    const gp = makeStageGrant(ws, privateKey, 'requirement');
+    const r1 = runCrctl(['approve', 'CR-G1', '--stage', 'requirement', '--grant', gp, '--workspace', ws], { CRCTL_FAULT_POINT: 'tx-apply-between-rename' });
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'FAULT_INJECTED');
+    const r2 = runCrctl(['approve', 'CR-G1', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
+    assert.equal(r2.status, 0, r2.rawStderr);
+    assert.equal(r2.stdout.to, 'requirement-approved');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review repair：approve commit 后崩溃由 tx trailer 判定已提交，不回滚 authority', () => {
+  const { ws, privateKey } = makeStageWorkspace('requirement');
+  try {
+    const gp = makeStageGrant(ws, privateKey, 'requirement');
+    const r1 = runCrctl(['approve', 'CR-G1', '--stage', 'requirement', '--grant', gp, '--workspace', ws], { CRCTL_FAULT_POINT: 'ledger-after-commit' });
+    assert.equal(r1.status, 1);
+    assert.equal(r1.stderr.error.code, 'FAULT_INJECTED');
+    const head = git(ws, ['rev-parse', 'HEAD']);
+    assert.match(git(ws, ['log', '-1', '--format=%B']), /AI-First-Tx:/);
+    const r2 = runCrctl(['approve', 'CR-G1', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
+    assert.equal(r2.status, 0, r2.rawStderr);
+    assert.equal(r2.stdout.changed, false);
+    assert.equal(git(ws, ['rev-parse', 'HEAD']), head, '恢复不得重复 commit 或回滚已提交 authority');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('review repair：approve commit 失败由 ledger transaction 回滚，修复 hook 后同 grant 可安全重试', () => {
   const { ws, privateKey } = makeStageWorkspace('requirement');
   try {
     mkdirSync(path.join(ws, '.githooks'), { recursive: true });
@@ -3384,12 +3397,11 @@ test('CR-2026-030 TASK-01：approve commit 失败后重放同 grant → GRANT_ST
     assert.equal(r1.status, 1, 'commit 失败为技术失败');
     git(ws, ['config', '--unset', 'core.hooksPath']);
     const head1 = git(ws, ['rev-parse', 'HEAD']);
-    const audits1 = auditLines(ws).length;
+    assert.match(readFileSync(path.join(ws, 'change-requests', 'CR-G1', 'cr.md'), 'utf8'), /status:\s*requirement-reviewing/, '失败后状态回滚');
     const r2 = runCrctl(['approve', 'CR-G1', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
-    assert.equal(r2.status, 1);
-    assert.equal(r2.stderr.error.code, 'GRANT_STATE_UNCOMMITTED', '未提交结果态不得误判幂等成功');
-    assert.equal(git(ws, ['rev-parse', 'HEAD']), head1, 'HEAD 不增加');
-    assert.equal(auditLines(ws).length, audits1, 'audit 不增加');
+    assert.equal(r2.status, 0, r2.rawStderr);
+    assert.notEqual(git(ws, ['rev-parse', 'HEAD']), head1, '重试形成唯一成功 commit');
+    assert.equal(r2.stdout.to, 'requirement-approved');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 

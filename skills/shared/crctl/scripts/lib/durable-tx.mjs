@@ -21,9 +21,9 @@ const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest
 /* 故障注入（TASK-01 契约）：CRCTL_FAULT_POINT 未设置 → 零行为；命中 → 抛 TxError FAULT_INJECTED。
  * FAULT_POINTS 为全仓唯一登记表（SDD §9.1）；crctl.mjs re-import 本表做入口校验。 */
 export const FAULT_POINTS = [
-  'ledger-cas-multi-between-rename', // crctl.mjs 旧 casWriteMulti 连续 rename 间隙（TASK-10 随该函数删除）
   'tx-apply-between-rename',         // write-set 连续 rename 间隙的崩溃窗口（TASK-04）
   'tx-apply-before-complete',        // 全部 rename 完成、complete 标记前的崩溃窗口（TASK-04）
+  'ledger-after-commit',             // command ledger commit 后、journal complete 前
   'register-after-allocate',         // CR-ID 分配落盘后、账本写前（TASK-05）
   'register-after-ledgers',          // 三账本 write-set 完成后、commit 前（TASK-05）
   'register-after-commit',           // registration commit 后、lease push 前（TASK-05）
@@ -93,7 +93,7 @@ function readJsonChecked(p, code, label) {
 /* ────────────────────────── 目录锁（SDD §3.2） ────────────────────────── */
 
 const LOCK_SCOPE_RE = /^[A-Za-z0-9:_-]+$/;
-const OPS = ['register', 'workspace', 'merge', 'writeback', 'archive'];
+const OPS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger'];
 
 /** PID 存活探针：同 hostname 下 process.kill(pid, 0)——无错/EPERM 视为存活，ESRCH 视为不存在。
  * 导出 _setPidProbe 仅为测试 seam（EPERM/ESRCH/PID reuse 矩阵），生产路径不得替换。 */
@@ -168,7 +168,7 @@ export async function acquireLock({ root, scope, op, cr }) {
 
 /* ────────────────────────── journal envelope（SDD §3.1） ────────────────────────── */
 
-const PAYLOAD_KEYS = ['register', 'workspace', 'merge', 'writeback', 'archive'];
+const PAYLOAD_KEYS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger'];
 
 const CR_OR_KEY_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -195,7 +195,7 @@ function assertEnvelope(j, p) {
 
 /**
  * 加载 {root}/.crctl/transactions/{op}/{cr-or-key}/ 下最新 journal（按 updatedAt，平手取 txId 字典序大者），
- * 无则新建空 envelope（五个 payload 均 null，业务首个 save 前必须置位 op 对应 payload）。
+ * 无则新建空 envelope（六个 payload 均 null，业务首个 save 前必须置位 op 对应 payload）。
  * 任一已存在 journal 非法 → 硬失败（不静默跳过）。
  */
 export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inputDigest }) {
@@ -231,7 +231,7 @@ export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inpu
     inputDigest: inputDigest == null ? null : inputDigest,
     sideEffects: [], commit: null, lastError: null,
     createdAt: now, updatedAt: now,
-    register: null, workspace: null, merge: null, writeback: null, archive: null,
+    register: null, workspace: null, merge: null, writeback: null, archive: null, ledger: null,
   };
   const journalPath = path.join(base, txId, 'journal.json');
   durableWriteFile(journalPath, JSON.stringify(journal, null, 2));
@@ -380,4 +380,126 @@ export async function cleanupTxBlobs({ txRoot, txId }) {
       fs.rmSync(manifestPath, { force: true });
     }
   } catch { /* 幂等清理 */ }
+}
+
+/* ────────────────────────── command-level ledger transaction ──────────────────────────
+ * approve/review-record/owner-set 的多文件写在 authority commit 前保持可回滚。
+ * 正常完成由 finishLedgerTransaction 清理；进程中断后，下一次同命令先按 key 恢复：
+ * 若 HEAD trailer 已包含 txId，说明 commit 已成为 authority，只清理；否则将整组文件回滚到 before。
+ */
+function latestLedger(root, key) {
+  const base = journalDir(root, 'ledger', key);
+  if (!fs.existsSync(base)) return null;
+  let latest = null;
+  for (const txId of fs.readdirSync(base).sort()) {
+    const journalPath = path.join(base, txId, 'journal.json');
+    if (!fs.existsSync(journalPath)) continue;
+    const journal = readJsonChecked(journalPath, 'TX_JOURNAL_INVALID', 'journal');
+    assertEnvelope(journal, journalPath);
+    if (journal.op !== 'ledger') throw new TxError('TX_JOURNAL_INVALID', `ledger 目录包含 op=${journal.op}`, { path: journalPath });
+    if (!latest || Date.parse(journal.updatedAt) > Date.parse(latest.journal.updatedAt)
+      || (journal.updatedAt === latest.journal.updatedAt && journal.txId > latest.journal.txId)) {
+      latest = { journal, journalPath, txDir: path.dirname(journalPath) };
+    }
+  }
+  return latest;
+}
+
+function rollbackLedgerPayload(payload, txDir) {
+  if (!payload || !Array.isArray(payload.entries) || typeof payload.targetRoot !== 'string') {
+    throw new TxError('TX_JOURNAL_INVALID', 'ledger payload 缺 entries/targetRoot', { txDir });
+  }
+  const classified = payload.entries.map((e) => {
+    const dst = validateEntry(payload.targetRoot, e);
+    const cur = readHash(dst).hash;
+    if (cur !== e.beforeSha256 && cur !== e.afterSha256) {
+      throw new TxError('TX_RECOVERY_CONFLICT', `ledger rollback 遇到第三值: ${e.path}`, { path: e.path, current: cur, before: e.beforeSha256, after: e.afterSha256 });
+    }
+    return { e, dst, cur };
+  });
+  let changed = false;
+  for (const { e, dst, cur } of classified) {
+    if (cur === e.beforeSha256) continue;
+    if (e.beforeSha256 == null) {
+      fs.rmSync(dst, { force: true });
+    } else {
+      if (typeof e.beforeText !== 'string' || sha256(e.beforeText) !== e.beforeSha256) {
+        throw new TxError('TX_JOURNAL_INVALID', `ledger beforeText/hash 不一致: ${e.path}`, { path: e.path });
+      }
+      durableWriteFile(dst, e.beforeText);
+    }
+    changed = true;
+  }
+  fs.rmSync(txDir, { recursive: true, force: true });
+  return { changed, paths: payload.entries.map((e) => e.path) };
+}
+
+export function hasLedgerTransaction({ root, key }) {
+  return latestLedger(root, key) != null;
+}
+
+export async function recoverLedgerTransaction({ root, key, currentHead, headMessage }) {
+  const lock = await acquireLock({ root, scope: `ledger-${key}`, op: 'ledger' });
+  try {
+    const found = latestLedger(root, key);
+    if (!found) return { recovered: false, paths: [] };
+    const payload = found.journal.ledger;
+    if (!payload) {
+      fs.rmSync(found.txDir, { recursive: true, force: true });
+      return { recovered: true, rolledBack: true, paths: [] };
+    }
+    if (payload.phase === 'complete') {
+      fs.rmSync(found.txDir, { recursive: true, force: true });
+      return { recovered: true, committed: true, paths: payload.entries.map((e) => e.path) };
+    }
+    const committed = payload.commitRequired && currentHead !== payload.headBefore
+      && typeof headMessage === 'string' && headMessage.includes(`AI-First-Tx: ${found.journal.txId}`);
+    if (committed) {
+      fs.rmSync(found.txDir, { recursive: true, force: true });
+      return { recovered: true, committed: true, paths: payload.entries.map((e) => e.path) };
+    }
+    return { recovered: true, rolledBack: true, ...rollbackLedgerPayload(payload, found.txDir) };
+  } finally { await lock.release(); }
+}
+
+export async function beginLedgerTransaction({ root, targetRoot, key, inputDigest, writes, headBefore, commitRequired }) {
+  if (!Array.isArray(writes) || writes.length < 2) throw new TxError('TX_WRITESET_INVALID', 'ledger transaction 至少需要两个文件');
+  const lock = await acquireLock({ root, scope: `ledger-${key}`, op: 'ledger' });
+  try {
+    const existing = latestLedger(root, key);
+    if (existing) throw new TxError('TX_LEDGER_RECOVERY_REQUIRED', `ledger/${key} 有未收敛事务`, { txId: existing.journal.txId });
+    const entries = writes.map((w) => {
+      const rel = path.relative(targetRoot, w.path).split(path.sep).join('/');
+      const before = readHash(w.path);
+      if (before.hash !== w.expectedHash) throw new TxError('CAS_CONFLICT', `${w.path} 在读取后被其他进程修改`, { path: w.path });
+      return { path: rel, beforeSha256: before.hash, beforeText: before.content, afterSha256: sha256(w.newText), content: w.newText };
+    });
+    let journal, journalPath;
+    ({ journal, journalPath } = await loadOrCreateJournal({ root, op: 'ledger', key, inputDigest }));
+    journal.ledger = { phase: 'prepared', targetRoot: path.resolve(targetRoot), headBefore, commitRequired: Boolean(commitRequired), entries };
+    journal.phase = 'prepared';
+    journal = await saveJournal({ path: journalPath, journal });
+    await applyWriteSet({ root: targetRoot, txRoot: root, txId: journal.txId, entries });
+    journal.ledger.phase = 'written';
+    journal.phase = 'written';
+    journal = await saveJournal({ path: journalPath, journal });
+    return { root, key, txId: journal.txId, journalPath, journal, lock, paths: entries.map((e) => e.path) };
+  } catch (e) {
+    await lock.release();
+    throw e;
+  }
+}
+
+export async function abortLedgerTransaction(tx) {
+  try { return rollbackLedgerPayload(tx.journal.ledger, path.dirname(tx.journalPath)); }
+  finally { await tx.lock.release(); }
+}
+
+export async function finishLedgerTransaction(tx) {
+  try {
+    tx.journal.ledger.phase = 'complete';
+    tx.journal.phase = 'complete';
+    await saveJournal({ path: tx.journalPath, journal: tx.journal });
+    fs.rmSync(path.dirname(tx.journalPath), { recursive: true, force: true });
+  } finally { await tx.lock.release(); }
 }

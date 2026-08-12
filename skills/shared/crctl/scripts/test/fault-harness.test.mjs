@@ -1,6 +1,6 @@
 // CR-2026-031 TASK-01：确定性故障注入 harness 契约测试。
-// 覆盖：CRCTL_FAULT_POINT 未设置零行为、未知 point 硬失败、命中 point 触发 FAULT_INJECTED、
-// 以及旧实现 casWriteMulti 连续 rename 间隙的半状态基线暴露（该基线测试随 TASK-02 删除 casWriteMulti 一并退役）。
+// 覆盖：CRCTL_FAULT_POINT 未设置零行为、未知 point 硬失败、命中 point 触发 FAULT_INJECTED，
+// 以及 command-level ledger transaction 在 rename 间隙崩溃后的整组回滚与重试。
 // 零依赖：仅用 node:test / node:assert，黑盒 spawnSync 调用 crctl.mjs。
 // 运行：node --test skills/shared/crctl/scripts/test/fault-harness.test.mjs
 
@@ -100,9 +100,9 @@ test('fault harness：命中挂接点 → FAULT_INJECTED 结构化退出并回�
   try {
     setupTechDesignReview(ws, 'CR-T1');
     const r = await runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--bump-attempt', '--workspace', ws],
-      { env: { [FAULT_ENV]: 'ledger-cas-multi-between-rename' }, expectExit: 1 });
+      { env: { [FAULT_ENV]: 'tx-apply-between-rename' }, expectExit: 1 });
     assert.equal(r.stderr.error.code, 'FAULT_INJECTED');
-    assert.equal(r.stderr.error.point, 'ledger-cas-multi-between-rename');
+    assert.equal(r.stderr.error.point, 'tx-apply-between-rename');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -111,20 +111,23 @@ test('fault harness：point 已设置但执行路径未挂接 → 命令正常�
   try {
     writeCrEntry(ws, 'CR-T1', 'drafting');
     const r = await runCrctl(['status', 'CR-T1', '--workspace', ws],
-      { env: { [FAULT_ENV]: 'ledger-cas-multi-between-rename' }, expectExit: 0 });
+      { env: { [FAULT_ENV]: 'tx-apply-between-rename' }, expectExit: 0 });
     assert.equal(r.stdout.status, 'drafting');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-test('旧实现半状态基线：casWriteMulti rename 间隙中断 → annotation 已落、traceability/review-loop 未落（红基线，TASK-02 随函数退役）', async () => {
+test('review repair：ledger rename 间隙中断后，下次同命令先整组回滚再成功重试', async () => {
   const ws = makeWorkspace();
   try {
     setupTechDesignReview(ws, 'CR-T1');
     await runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--bump-attempt', '--workspace', ws],
-      { env: { [FAULT_ENV]: 'ledger-cas-multi-between-rename' }, expectExit: 1 });
+      { env: { [FAULT_ENV]: 'tx-apply-between-rename' }, expectExit: 1 });
     const crDir = path.join(ws, 'change-requests', 'CR-T1');
-    assert.ok(existsSync(path.join(crDir, 'review-annotations', 'sdd.yml')), '第一个 rename 已落盘（半状态第一侧）');
-    assert.ok(!existsSync(path.join(crDir, 'traceability.yml')), '第二个 rename 未执行（半状态暴露）');
-    assert.ok(!existsSync(path.join(crDir, 'review-loop.yml')), '第三个 rename 未执行（半状态暴露）');
+    assert.ok(existsSync(path.join(crDir, 'review-annotations', 'sdd.yml')), '故障确实命中首个 rename 后窗口');
+    const r = await runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--bump-attempt', '--workspace', ws], { expectExit: 0 });
+    assert.equal(r.stdout.attempt.current, 1, '回滚后重试只登记一次 attempt');
+    assert.ok(existsSync(path.join(crDir, 'review-annotations', 'sdd.yml')));
+    assert.ok(existsSync(path.join(crDir, 'traceability.yml')));
+    assert.ok(existsSync(path.join(crDir, 'review-loop.yml')));
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
