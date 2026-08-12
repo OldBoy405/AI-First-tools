@@ -33,11 +33,11 @@ description: 在新电脑或新成员环境下，按 CR-ID 与 dir-graph.yaml re
 
 1. 读取 `AGENTS.md`、`dir-graph.yaml#repositories`。
 2. 选择 `active != false` 的 repo。
-3. 对每个 repo 先调用 `crctl worktree-path {cr_id} --repo {repo.id} --workspace <ws>`，保存返回的 `wt.branch`、`wt.path`；后续所有远端分支和 worktree 操作只使用该返回值。
+3. 对每个 repo 先调用 `crctl workspace inspect {cr_id} --workspace <ws>（resources[].worktreePath 为权威路径）`，保存返回的 `wt.branch`、`wt.path`；后续所有远端分支和 worktree 操作只使用该返回值。
 4. 对每个 repo 执行远端分支预检；任一 repo 缺少远端分支则整体 abort，不创建任何 worktree。**去重（FR-32，CR-2026-022）**：resume-cr 流水线场景下节点 1（list-remote-checkpoints）已产出各 repo 存在性结论（含 checkpoints[] SHA 漂移告警），此处直接复用其 node-1.md 结论、不再重复 ls-remote 预检；独立调用场景才自行预检。
 
 ```ts
-const wt = await runCrctl(["worktree-path", crId, "--repo", repo.id, "--workspace", workspaceRoot]);
+const wt = await runCrctl(["workspace", "inspect", crId, "--workspace", workspaceRoot]);
 const ls = await runGit({ subcommand: "ls-remote",
   args: ["--heads", "origin", wt.branch],
   cwd: repo.path });

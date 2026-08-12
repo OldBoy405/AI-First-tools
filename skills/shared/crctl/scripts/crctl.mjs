@@ -22,8 +22,8 @@ import { fileURLToPath } from 'node:url';
 // CR-2026-031 TASK-03：YAML 子集解析器与 workspace 基础设施同源共享（lib/ 下，禁止在 crctl.mjs 复刻）。
 import { parseYaml } from './lib/yaml-subset.mjs';
 import {
-  deriveInstallRoot, TxError, resolveRepositories, getRepository, registerCr, ensureWorkspace,
-  scanMaxCrNumber, formatCrId, buildRegistrationTexts, assertSupportedBacklogSchemaText,
+  deriveInstallRoot, TxError, resolveRepositories, registerCr, ensureWorkspace,
+  assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
   matchFrontmatter, crMdStatusText, mergeCr, mergeStatus, resolveOperationalWorkspace,
   applyWriteback, archiveCr,
@@ -708,111 +708,6 @@ function guardDependsOn(normText, taskId) {
     `${taskId} 的直接前置未全部 done：${notDone.map((d) => `${d}(${byId.get(d).status})`).join(', ')}。若前置互相等待，检查 depends-on 是否成环`,
     { notDone: notDone.map((d) => ({ id: d, status: byId.get(d).status })) });
 }
-
-/** merge-metadata：条目 merge-commits[] 追加 {repo,trunk,sha,branch}，无则创建键（SDD §4.2）。
- * branch 由 CR id 按硬约定（分支恒为 requirement/{cr}）自动补全——必填集仍为 {repo,trunk,sha}
- * （唯一生产者保证输出的集合），branch 是可推导的富化字段（CR-2026-020 复盘 FR-8：字段契约收敛）。 */
-function editMergeMetadata(text, cr, commit) {
-  const norm = text.replaceAll('\r\n', '\n');
-  const block = matchEntryBlock(norm, cr);
-  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
-  const lines = block.text.split('\n');
-  const mcIdx = lines.findIndex((l) => /^[ \t]*merge-commits:/.test(l));
-  const itemIndent = ' '.repeat(block.indent + 4);
-  const fieldIndent = ' '.repeat(block.indent + 6);
-  const item = `${itemIndent}- repo: ${commit.repo}\n${fieldIndent}trunk: ${commit.trunk}\n${fieldIndent}sha: ${commit.sha}\n${fieldIndent}branch: requirement/${cr}`;
-  if (mcIdx === -1) {
-    const fieldIndent2 = ' '.repeat(block.indent + 2);
-    lines.push(`${fieldIndent2}merge-commits:`, item);
-  } else {
-    if (/^[ \t]*merge-commits:\s*\[\]\s*$/.test(lines[mcIdx])) lines[mcIdx] = lines[mcIdx].replace(/:\s*\[\]\s*$/, ':');
-    // 段边界：merge-commits 键行之后第一个缩进不深于键的行（含块尾）
-    const mcIndent = lines[mcIdx].match(/^[ \t]*/)[0].length;
-    let segEnd = lines.length;
-    for (let i = mcIdx + 1; i < lines.length; i++) {
-      if (lines[i].match(/^[ \t]*/)[0].length <= mcIndent) { segEnd = i; break; }
-    }
-    // 段内最后一个列表项行
-    let lastItem = -1;
-    for (let i = segEnd - 1; i > mcIdx; i--) {
-      if (/^[ \t]*- /.test(lines[i])) { lastItem = i; break; }
-    }
-    // 插入点 = 最后一项行 + 其嵌套字段行之后（段尾前）；无项则紧跟键行
-    let insAt = lastItem === -1 ? mcIdx + 1 : lastItem + 1;
-    if (lastItem !== -1) {
-      const itemInd = lines[lastItem].match(/^[ \t]*/)[0].length;
-      while (insAt < segEnd && lines[insAt].match(/^[ \t]*/)[0].length > itemInd) insAt++;
-    }
-    lines.splice(insAt, 0, item);
-  }
-  return norm.slice(0, block.start) + lines.join('\n') + norm.slice(block.end);
-}
-
-/** archive-move：生成 newBacklog（删块）+ newHistory（history 追加富化块）（SDD §4.3）。 */
-function editArchiveMove(textB, textH, cr, meta) {
-  const normB = textB.replaceAll('\r\n', '\n');
-  const block = matchEntryBlock(normB, cr);
-  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
-  const newBacklog = normB.slice(0, block.start) + normB.slice(block.end);
-  const normH = textH == null ? '' : textH.replaceAll('\r\n', '\n');
-  if (normH && matchEntryBlock(normH, cr)) fail('ENTRY_ALREADY_IN_HISTORY', `${cr} 已在 _history.yml，禁止重复归档`);
-  // minIndent 必须排除空行（block.text 结尾换行会产生空串，其缩进为 0，会把整块错压成 +2 缩进——CR-2026-027 TASK-07 实测）
-  const minIndent = Math.min(...block.text.split('\n').filter((l) => l.trim() !== '').map((l) => (l.match(/^[ \t]*/) || [''])[0].length));
-  const entry = block.text.split('\n').map((l) => '  ' + l.slice(minIndent)).join('\n');
-  const reason = String(meta.archiveReason || '').replaceAll('"', '\\"');
-  const enrich = [
-    `    final-status: ${meta.finalStatus}`,
-    `    archive-reason: "${reason}"`,
-    meta.specId ? `    writeback-spec-id: ${meta.specId}` : null,
-    `    archived-at: "${nowIso()}"`,
-  ].filter(Boolean).join('\n');
-  // CR-2026-027 FR-11/TASK-06：归档事件随 history 条目同批写入（meta.notifyLog 行数组，4 空格基准缩进）
-  const notifyLog = meta.notifyLog && meta.notifyLog.length ? '\n' + meta.notifyLog.join('\n') : '';
-  const record = entry + '\n' + enrich + notifyLog + '\n';
-  const newHistory = (normH.trim() === '' ? 'history:' : normH.trimEnd()) + '\n' + record;
-  return { newBacklog, newHistory };
-}
-
-// CR-2026-027 FR-11/TASK-06：归档事件行构造（与 editInboxEmit 同构：at/event/to/payload）。
-// 收件人由 resolveArchiveRecipients 解析（owners 三角色去重 → legacy 顶层 owner → 空则硬失败）。
-function buildArchiveNotifyLog(finalStatus, to, payload) {
-  return [
-    '    notify-log:',
-    `      - at: "${nowIso()}"`,
-    `        event: ${finalStatus}`,
-    `        to: ${JSON.stringify(to)}`,
-    `        payload: ${JSON.stringify(payload)}`,
-  ];
-}
-
-// CR-2026-027 FR-11/TASK-06：收件人解析（D-10）。
-function resolveArchiveRecipients(ws, cr) {
-  const snap = loadBacklogEntry(ws, cr);
-  const o = snap.entry.owners || {};
-  const to = [...new Set([o.requirement && o.requirement.id, o.development && o.development.id, o.test && o.test.id].filter(Boolean))];
-  if (to.length === 0 && snap.entry.owner) to.push(String(snap.entry.owner));
-  if (to.length === 0) fail('ARCHIVE_RECIPIENTS_MISSING', `归档事件收件人为空：${cr} 缺少 owners 三角色且无顶层 owner，CAS 前拒绝归档`);
-  return to;
-}
-
-// CR-2026-027 FR-11/TASK-06：_index.yml 终态字段更新（只写 status/archived-at/可选 writeback-spec-id，D-2）。
-function editIndexFinalStatus(text, cr, finalStatus, specId) {
-  const norm = text.replaceAll('\r\n', '\n');
-  const block = matchEntryBlock(norm, cr);
-  if (!block) fail('INDEX_ENTRY_NOT_FOUND', `${cr} 不在 _index.yml`);
-  const fieldIndent = ' '.repeat(block.indent + 2);
-  let body = block.text;
-  const set = (key, val) => {
-    const re = new RegExp(`^([ \\t]*)${key}:.*$`, 'm');
-    return re.test(body) ? body.replace(re, `$1${key}: ${val}`) : body + `\n${fieldIndent}${key}: ${val}`;
-  };
-  body = set('status', finalStatus);
-  body = set('archived-at', `"${nowIso()}"`);
-  if (specId) body = set('writeback-spec-id', String(specId));
-  return norm.slice(0, block.start) + body + norm.slice(block.end);
-}
-
-
 
 function updateCrMdStatus(ws, cr, newStatus) {
   const p = path.join(crDir(ws, cr), 'cr.md');
@@ -1626,93 +1521,6 @@ function cmdTaskDone(ws, cr, gates, flags) {
   ok({ op: 'task-done', cr, task: flags.task, status: 'done', file: p });
 }
 
-function cmdMergeMetadata(ws, cr, gates, flags) {
-  if (!flags.repo || !flags.trunk || !flags.sha) fail('BAD_ARGS', 'merge-metadata 需要 --repo <r> --trunk <t> --sha <sha>');
-  const state = resolveCrState(ws, cr);
-  const LEGAL = ['merging', 'writing-back'];
-  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `merge-metadata 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}。请先 crctl advance 到 ${LEGAL[0]} 再写 merge 元数据（状态前置强制：先推进状态，后写账本）`, { current: state.status, expect: LEGAL });
-  const snap = loadBacklogEntry(ws, cr);
-  const before = (snap.entry['merge-commits'] || []).length;
-  const dup = (snap.entry['merge-commits'] || []).some((c) => c && String(c.sha) === String(flags.sha));
-  if (dup) {
-    auditLog(ws, { kind: 'ledger', op: 'merge-metadata', cr, actor: identity(ws), result: 'dup-idempotent', sha: flags.sha });
-    return ok({ op: 'merge-metadata', cr, sha: flags.sha, result: 'dup-idempotent', note: '同 sha 已存在，未重复写入' });
-  }
-  const newText = editMergeMetadata(snap.text, cr, { repo: flags.repo, trunk: flags.trunk, sha: flags.sha });
-  casWrite(snap.path, snap.hash, newText);
-  auditLog(ws, { kind: 'ledger', op: 'merge-metadata', cr, actor: identity(ws), before: { count: before }, after: { sha: flags.sha, count: before + 1 } });
-  ok({ op: 'merge-metadata', cr, repo: flags.repo, trunk: flags.trunk, sha: flags.sha, branch: `requirement/${cr}`, result: 'appended' });
-}
-
-function cmdArchiveMove(ws, cr, gates, flags) {
-  if (!flags['final-status']) fail('BAD_ARGS', 'archive-move 需要 --final-status <status>');
-  // CR-2026-027 FR-11/TASK-06：重复调用检测（TD-BL-3 拍板）——先查 history：
-  // 同 CR 且 final-status 一致 → already-archived 幂等（零写入、不发 outbox）；不一致 → FINAL_STATUS_MISMATCH。
-  const hp = path.join(ws, 'change-requests', '_history.yml');
-  const hText = readFileChecked(hp);
-  if (hText != null) {
-    const hDoc = parseYaml(hText);
-    const hList = Array.isArray(hDoc) ? hDoc : hDoc['change-requests'] || hDoc['history'] || [];
-    const histEntry = hList.find((e) => e && e.id === cr);
-    if (histEntry) {
-      // CR-2026-027 代码评审回修（b2）：幂等前提是 CR 已移出 backlog；backlog/history 双存是数据冲突，不得静默判为幂等成功
-      const bpText = readFileChecked(backlogPath(ws));
-      if (bpText != null && matchEntryBlock(bpText.replaceAll('\r\n', '\n'), cr)) {
-        fail('CR_LOCATION_CONFLICT', `${cr} 同时存在于 _backlog.yml 与 _history.yml，重复归档判定拒绝（数据冲突，非幂等）`, { location: 'both' });
-      }
-      if (String(histEntry['final-status']) === String(flags['final-status'])) {
-        auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), result: 'already-archived', finalStatus: flags['final-status'] });
-        ok({ op: 'archive-move', cr, result: 'already-archived', finalStatus: flags['final-status'] });
-        return;
-      }
-      fail('FINAL_STATUS_MISMATCH', `history 中 ${cr} 的 final-status=${histEntry['final-status']}，与 --final-status ${flags['final-status']} 不一致`, { current: histEntry['final-status'], expect: flags['final-status'] });
-    }
-  }
-  const state = resolveCrState(ws, cr);
-  // CR-2026-027 FR-11/TASK-06：前置态放宽为三种终态，且 --final-status 必须与 cr.md 当前 status 完全一致（D-8）
-  if (!['archived', 'rejected', 'withdrawn'].includes(state.status)) {
-    fail('ILLEGAL_LEDGER_STATE', `archive-move 仅允许在终态 archived/rejected/withdrawn 执行，当前 ${state.status}。请先 crctl advance 到终态再 archive-move（状态前置强制）`, { current: state.status, expect: ['archived', 'rejected', 'withdrawn'] });
-  }
-  if (String(flags['final-status']) !== String(state.status)) {
-    fail('FINAL_STATUS_MISMATCH', `--final-status ${flags['final-status']} 与 cr.md 当前状态 ${state.status} 不一致`, { current: state.status, expect: flags['final-status'] });
-  }
-  const bp = backlogPath(ws);
-  const ip = path.join(ws, 'change-requests', '_index.yml');
-  const textB = readFileChecked(bp);
-  if (textB == null) fail('BACKLOG_NOT_FOUND', `缺少 ${bp}`);
-  // 收件人解析（CAS 前，空则硬失败）
-  const to = resolveArchiveRecipients(ws, cr);
-  const payload = {
-    'final-status': flags['final-status'],
-    'archive-reason': flags['archive-reason'] || '',
-    ...(flags['spec-id'] ? { 'writeback-spec-id': flags['spec-id'] } : {}),
-    'archived-at': nowIso(),
-  };
-  const parts = editArchiveMove(textB, hText, cr, {
-    finalStatus: flags['final-status'],
-    archiveReason: flags['archive-reason'] || '',
-    specId: flags['spec-id'] || null,
-    notifyLog: buildArchiveNotifyLog(flags['final-status'], to, payload),
-  });
-  // _index.yml 终态更新（D-2：只写 status/archived-at/可选 writeback-spec-id，不复制 history、不删除条目）
-  const textI = readFileChecked(ip);
-  if (textI == null) fail('INDEX_NOT_FOUND', `缺少 ${ip}`);
-  const newIndex = editIndexFinalStatus(textI, cr, flags['final-status'], flags['spec-id'] || null);
-  // 三账本同一 CAS：事件与 backlog/history/index 要么同生要么同灭
-  casWriteMulti([
-    { path: bp, expectedHash: sha256(textB), newText: parts.newBacklog },
-    { path: hp, expectedHash: hText == null ? null : sha256(hText), newText: parts.newHistory },
-    { path: ip, expectedHash: sha256(textI), newText: newIndex },
-  ]);
-  auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), before: { inBacklog: true }, after: { inBacklog: false, inHistory: true, inIndex: true, finalStatus: flags['final-status'] } });
-  // CAS 成功后发 archive outbox（git 是权威、outbox 只是投影）
-  const outbox = emitOutboxEvent(ws, {
-    event_kind: 'archive', cr_id: cr, from_status: state.status, to_status: flags['final-status'],
-    actor: identity(ws), payload,
-  });
-  ok({ op: 'archive-move', cr, finalStatus: flags['final-status'], recipients: to, backlog: bp, history: hp, index: ip, outbox });
-}
-
 function cmdAttempt(ws, cr, gates, flags) {
   if (!flags.loop) fail('BAD_ARGS', 'attempt 需要 --loop <review ref>（如 review-code / write-test-report）');
   const r = bumpAttempt(ws, cr, flags.loop, gates);
@@ -2432,7 +2240,7 @@ function cmdOwnerSet(ws, cr, gates, flags) {
 function cmdBacklogSet(ws, cr, gates, flags) {
   if (!flags.field || flags.value === undefined) fail('BAD_ARGS', 'backlog-set 需要 --field <prd-path|sdd-path> --value <v>');
   if (!BACKLOG_SET_FIELDS.includes(flags.field)) {
-    fail('FIELD_NOT_ALLOWED', `backlog-set 白名单仅允许 ${BACKLOG_SET_FIELDS.join(' | ')}；${flags.field} 属受控字段，各有专命令（status→advance、updated-at/owners→crctl 自动维护、merge-commits→merge-metadata）`, { field: flags.field, allowed: BACKLOG_SET_FIELDS });
+    fail('FIELD_NOT_ALLOWED', `backlog-set 白名单仅允许 ${BACKLOG_SET_FIELDS.join(' | ')}；${flags.field} 属受控字段，各有专命令（status→advance、updated-at/owners→crctl 自动维护、merge-commits→crctl merge）`, { field: flags.field, allowed: BACKLOG_SET_FIELDS });
   }
   const state = resolveCrState(ws, cr);
   const { sm } = loadStateMachine(ws);
@@ -2523,92 +2331,6 @@ function cmdInboxEmit(ws, cr, gates, flags) {
   ok({ op: 'inbox-emit', cr, event: flags.event, to, file: snap.path });
 }
 
-/* ────────────────────────── cr-init（S8，CR-2026-021 TASK-06） ──────────────────────────
- * SDD §2.3/§4.2（SDD-BLOCK-001 修复语义）：
- * cr-init = 唯一权威原子分配：不取显式 cr-id 入参，内部读 max → 计算 → casWriteMulti 一次写
- *   cr.md(新建,expectedHash=null) + _backlog(追加) + _index(登记) → 输出返回分配到的 cr-id。
- * 并发下后到者见 _index/_backlog hash 已变 → CAS_CONFLICT，三文件全不落盘，调用方重跑拿新号。
- * 唯一并发冲突码是 CAS_CONFLICT；正常路径无 CR_ALREADY_EXISTS（无外部传入 id，无 TOCTOU）。
- */
-
-// CR-ID 分配与注册模板已下沉 lib/workspace-transactions.mjs（TASK-05）；cr-init（TASK-10 删除）与 register 共用。
-
-function cmdCrInit(ws, gates, flags) {
-  if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]');
-  // FR-1（CR-2026-030）：三角色显式必填，缺任一参数在读取/创建任何文件之前零写入；不保留复制兼容路径
-  const req = String(flags['owner-requirement'] || '');
-  const dev = String(flags['owner-development'] || '');
-  const tst = String(flags['owner-test'] || '');
-  if (!req || !dev || !tst) {
-    fail('BAD_ARGS', 'cr-init 需要显式 --owner-requirement <id> --owner-development <id> --owner-test <id>（三角色独立指定，无隐式继承）');
-  }
-  const year = flags.year || String(new Date().getFullYear());
-  const cr = formatCrId(year, scanMaxCrNumber(ws, year) + 1);
-  const now = nowIso();
-  const by = identity(ws);
-  // FR-9（CR-2026-022）：注册元信息可选旗标，缺省值与旧硬编码同义（summary="" / source=manual / target-version=tbd），向后兼容
-  const summary = flags.summary ?? '';
-  const source = flags.source ?? 'manual';
-  const tv = flags['target-version'] ?? 'tbd';
-  // 注册三账本模板唯一实现在 lib buildRegistrationTexts（TASK-05 下沉；cr-init 与 register 共用）
-  const texts = buildRegistrationTexts({ cr, title: flags.title, summary, source, targetVersion: tv, owners: { requirement: req, development: dev, test: tst }, now });
-  const fm = texts.crMdText;
-  // _backlog 条目追加
-  const bp = backlogPath(ws);
-  const backlogText = readFileChecked(bp);
-  if (backlogText == null) fail('BACKLOG_NOT_FOUND', `缺少 ${bp}`);
-  const newBacklog = backlogText.trimEnd() + '\n' + texts.backlogEntry + '\n';
-  // _index 条目追加
-  const ip = path.join(ws, 'change-requests', '_index.yml');
-  const indexText = readFileChecked(ip);
-  if (indexText == null) fail('INDEX_NOT_FOUND', `缺少 ${ip}`);
-  const newIndex = indexText.trimEnd() + '\n' + texts.indexEntry + '\n';
-  // 原子三文件写：cr.md 期望不存在（创建冲突即 CAS_CONFLICT）；_backlog/_index 用读时 sha256
-  const crDirPath = crDir(ws, cr);
-  fs.mkdirSync(crDirPath, { recursive: true });
-  casWriteMulti([
-    { path: path.join(crDirPath, 'cr.md'), expectedHash: null, newText: fm },
-    { path: bp, expectedHash: sha256(backlogText), newText: newBacklog },
-    { path: ip, expectedHash: sha256(indexText), newText: newIndex },
-  ]);
-  // FR-1/FR-2：成功 audit 记录完整 Owner 投影与三项初始变化；不记录 branch/worktree/commit SHA/outbox 成功事实（尚未发生）
-  auditLog(ws, {
-    kind: 'ledger', op: 'cr-init', cr, actor: by, title: flags.title,
-    owners: { requirement: req, development: dev, test: tst },
-    changes: ['requirement', 'development', 'test'].map((role) => ({ role, from: '', to: role === 'requirement' ? req : role === 'development' ? dev : tst, at: now, reason: 'initial-assignment' })),
-  });
-  // FR-2：cr-init 自身不发 outbox——注册事实由 register commit 成功后以真实 SHA 产生
-  ok({
-    op: 'cr-init', cr, title: flags.title, status: 'drafting',
-    owners: {
-      requirement: { id: req, 'assigned-at': now },
-      development: { id: dev, 'assigned-at': now },
-      test: { id: tst, 'assigned-at': now },
-    },
-    files: { crMd: path.join('change-requests', cr, 'cr.md'), backlog: bp, index: ip },
-  });
-}
-
-/* ────────────────────────── worktree-path / report（S9/S11，CR-2026-021 TASK-08 + CR-2026-028 FR-2） ──────────────────────────
- * 只读子命令（SDD §3.2/§3.3）：不写任何文件、无 CAS。
- * - worktree-path <cr> --repo <r>：唯一权威拼接规则（从 requirement-register 等 4+ 处 SKILL prose 提炼）：
- *   bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id；path = {installRoot}/.rayai-worktrees/{bucket}/requirement/{cr}
- *   installRoot = Installation Workspace（deriveInstallRoot）：linked worktree 场景由 git common-dir 派生主 checkout，
- *   避免从 CR worktree 内部再拼出第二个 .rayai-worktrees（CR-2026-028 FR-2 实测 bug）。
- * - report [--period <N>d]：跨 CR 聚合（对齐 cr-dashboard Step 2 口径）——
- *   状态直方图（在途 cr.md frontmatter + _history.yml 归档 final-status，累计口径，不受 --period 影响）、
- *   周期活动计数 periodActivity（按 archived-at，仅当传 --period 时按窗口过滤，格式仅支持 <N>d 如 7d/30d，
- *   非法格式 BAD_ARGS 硬拒而非静默忽略）、SLA 阈值比较（change-requests/_config.yml#sla，缺省跳过，累计口径）。
- */
-
-function cmdWorktreePath(ws, cr, gates, flags) {
-  if (!flags.repo) fail('BAD_ARGS', 'worktree-path 需要 --repo <repo-id>');
-  const bucket = flags.repo === 'knowledge-base' || flags.repo === 'ai-first-platform-docs' ? 'knowledge-base' : flags.repo;
-  const p = path.join(deriveInstallRoot(ws), '.rayai-worktrees', bucket, 'requirement', cr);
-  // CR-2026-030 TASK-02（FR-2/AC-5）：canonical branch 只在此处生成，Skill/Pipeline 不再拼接
-  ok({ op: 'worktree-path', cr, repo: flags.repo, bucket, branch: `requirement/${cr}`, path: p });
-}
-
 /** 解析 --period（仅支持 <N>d，如 7d/30d），返回该窗口起始的日期字符串（YYYY-MM-DD）；无 period 输入返回 null。 */
 function periodCutoffDay(period) {
   const m = /^(\d+)d$/.exec(String(period).trim());
@@ -2672,77 +2394,6 @@ function cmdReport(ws, gates, flags) {
   });
 }
 
-
-/* ────────────────────────── git commit --template（S10，CR-2026-021 TASK-09） ──────────────────────────
- * 给既有 git commit 分支加格式化模板（不是新顶层子命令）：
- *   register:        [cr] register {cr}: {subject}
- *   task-breakdown:  feat({cr}): task breakdown ({subject})
- *   writeback:       writeback({cr}): {subject}
- * cr 从 --cwd 当前分支名 requirement/{cr} 提取（提取不到则要求 subject 自带 CR 前缀）。
- * 不改变现有 -m 直传路径的白名单校验（--template 是新增可选分支）。
- */
-const COMMIT_TEMPLATES = {
-  // CR-2026-022 TASK-04：生成形态必须命中 controlled-shell commit 白名单（-m 前缀 wip: | [cr] | merge(）——
-  // task-breakdown/writeback 原 feat()/writeback() 前缀被 FORBIDDEN_SUBCOMMAND 拒绝，统一改 [cr] 前缀（现场坐实：CR-2026-022 任务拆分 commit）
-  register: (cr, subject) => `[cr] register ${cr}: ${subject}`,
-  'task-breakdown': (cr, subject) => `[cr] task-breakdown ${cr}: ${subject}`,
-  writeback: (cr, subject) => `[cr] writeback ${cr}: ${subject}`,
-};
-
-function resolveTemplateCr(ws, cwd, subject) {
-  const r = controlledGit(ws, 'branch', ['--show-current'], cwd, 'crctl-commit-template');
-  if (r.ok && r.stdout) {
-    const m = r.stdout.trim().match(/requirement\/(CR-[\w-]+)/); // 兼容 CR-YYYY-NNN 与测试短 ID
-    if (m) return m[1];
-  }
-  const sm = subject.match(/CR-\d{4}-\d{3}/);
-  if (sm) return sm[0];
-  fail('BAD_ARGS', 'git commit --template 无法确定 cr：--cwd 分支非 requirement/CR-* 且 subject 不含 CR 编号');
-}
-
-// CR-2026-030 TASK-02：cr.md 权威 Owner 投影读取（register commit 后置事件的数据源）。
-// 软失败变体：commit 已是权威事实，Owner 校验失败只返回结构化原因，由调用方记 warning + SKIPPED audit（SDD §4.2）。
-function tryReadCrOwnerProjection(ws, cr) {
-  try {
-    const md = readCrMdFrontmatter(ws, cr);
-    if (!md || !md.owners) return { ok: false, why: `cr.md 缺少 owners 投影: ${cr}` };
-    const slots = {};
-    for (const role of ['requirement', 'development', 'test']) {
-      const s = md.owners[role];
-      if (!s || !s.id) return { ok: false, why: `cr.md owners.${role} 缺失，无法产生注册事件` };
-      slots[role] = { id: String(s.id), 'assigned-at': s['assigned-at'] ? String(s['assigned-at']) : '' };
-    }
-    return { ok: true, owners: slots };
-  } catch (e) {
-    return { ok: false, why: String(e && e.message || e) };
-  }
-}
-
-function applyCommitTemplate(ws, argv, flags) {
-  const kind = flags.template;
-  const tpl = COMMIT_TEMPLATES[kind];
-  if (!tpl) fail('BAD_ARGS', `--template 必须是 ${Object.keys(COMMIT_TEMPLATES).join(' | ')}（当前 ${kind}）`);
-  const mi = argv.indexOf('-m');
-  if (mi === -1) fail('BAD_ARGS', 'git commit --template 需要同时提供 -m <subject>（作为模板的 subject 部分）');
-  const subject = String(argv[mi + 1] || '').trim();
-  if (!subject) fail('BAD_ARGS', '-m subject 为空');
-  // FR-10（CR-2026-022）：--cr 显式旗标直传已知值，跳过「分支探测→subject 正则」反向解析；缺省走原兜底
-  let cr;
-  if (flags.cr) {
-    const m = String(flags.cr).match(/^CR-\d{4}-\d{3}$/);
-    if (!m) fail('BAD_ARGS', `--cr 必须是 CR-YYYY-NNN 格式（当前 ${flags.cr}）`);
-    const crp = path.join(ws, 'change-requests', String(flags.cr));
-    if (!fs.existsSync(crp)) fail('BAD_ARGS', `--cr ${flags.cr} 在 change-requests/ 下不存在`);
-    cr = String(flags.cr);
-  } else {
-    cr = resolveTemplateCr(ws, flags.cwd ? path.resolve(flags.cwd) : ws, subject);
-  }
-  argv[mi + 1] = tpl(cr, subject);
-  // CR-2026-030 TASK-02：返回模板上下文（register 模板在 commit 成功后触发真实 SHA 注册事件）
-  return { args: argv, templateContext: { kind, cr } };
-}
-
-/** 行级追加 supplemental-reviews 段条目（硬失败：无该段则创建，段结构异常则报错）。 */
 function appendSupplementalReview(text, entry) {
   const norm = text.replaceAll('\r\n', '\n');
   const lines = norm.split('\n');
@@ -2930,57 +2581,11 @@ function cmdNext(ws, cr, gates, flags) {
 function cmdGit(ws, argv, flags) {
   const sub = argv[0];
   if (!sub) fail('BAD_ARGS', 'git 需要子命令，如 crctl git status --short --cwd <path>');
-  let args = argv.slice(1);
-  // S10（CR-2026-021 TASK-09）：git commit --template <kind> 生成规范 message（可选分支，不影响 -m 直传白名单校验）
-  let templateContext = null;
-  if (sub === 'commit' && flags.template) {
-    const t = applyCommitTemplate(ws, args, flags);
-    args = t.args;
-    templateContext = t.templateContext;
-  }
-  const r = controlledGit(ws, sub, args, flags.cwd ? path.resolve(flags.cwd) : ws, flags.caller);
+  const args = argv.slice(1);
+  const r = controlledGit(ws, sub, args, flags.cwd ? path.resolve(flags.cwd) : ws, 'crctl-git');
   if (r.code === 'FORBIDDEN_SUBCOMMAND') fail('FORBIDDEN_SUBCOMMAND', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   if (r.code === 'SHELL_UNAVAILABLE') fail('SHELL_UNAVAILABLE', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   let outbox = null;
-  let registerMeta = null;
-  // CR-2026-030 TASK-02（FR-2）：register commit 成功后，以真实 HEAD SHA 产生 status + owners 两类注册事件。
-  // commit 失败不读 HEAD、不发事件；单个 outbox 写出失败对应 null + warnings EMIT_FAILED，commit 不回滚（Git 是权威）。
-  if (r.ok && sub === 'commit' && templateContext && templateContext.kind === 'register') {
-    const cwd = flags.cwd ? path.resolve(flags.cwd) : ws;
-    const cr = templateContext.cr;
-    const sha = gitHeadSha(ws, cwd);
-    const warnings = [];
-    const emit = (ev) => {
-      const name = emitOutboxEvent(ws, ev);
-      if (!name) warnings.push({ code: 'EMIT_FAILED', event_kind: ev.event_kind });
-      return name;
-    };
-    try {
-      const proj = tryReadCrOwnerProjection(ws, cr);
-      if (!proj.ok) {
-        auditLog(ws, { kind: 'register-events', cr, result: 'SKIPPED', why: proj.why });
-        registerMeta = { commit: { sha }, outbox: { status: null, owners: null }, warnings: [{ code: 'REGISTER_EVENTS_SKIPPED', why: proj.why }] };
-      } else {
-        const owners = proj.owners;
-        const changes = ['requirement', 'development', 'test'].map((role) => ({
-          role, from: '', to: owners[role].id, at: owners[role]['assigned-at'], reason: 'initial-assignment',
-        }));
-        registerMeta = {
-          commit: { sha },
-          outbox: {
-            status: emit({ event_kind: 'status', cr_id: cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: sha, actor: identity(ws) }),
-            owners: emit({ event_kind: 'owners', cr_id: cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: sha, actor: identity(ws), payload: { owners, changes } }),
-          },
-          warnings,
-        };
-      }
-    } catch (e) {
-      // commit 已是权威事实，不回滚；事件构造异常仅结构化 warning + audit（SDD §4.2）
-      const why = String(e && e.message || e);
-      auditLog(ws, { kind: 'register-events', cr, result: 'SKIPPED', why });
-      registerMeta = { commit: { sha }, outbox: { status: null, owners: null }, warnings: [{ code: 'REGISTER_EVENTS_SKIPPED', why }] };
-    }
-  }
   if (r.ok && sub === 'push' && !args.includes('--delete')) {
     // checkpoint 事件：携带被推送仓的 HEAD sha，供 worker 补全 --embedded 状态事件的空 commit_sha（§A.5）。
     // CR 上下文从 HEAD 提交信息或分支参数提取；提不到（非 CR 相关推送）则不发。
@@ -2998,8 +2603,7 @@ function cmdGit(ws, argv, flags) {
   }
   process.stdout.write(r.stdout || '');
   process.stderr.write(r.stderr || '');
-  const extra = registerMeta ? { commit: registerMeta.commit, outbox: registerMeta.outbox, warnings: registerMeta.warnings } : (outbox ? { outbox } : {});
-  ok({ ok: r.ok, exit: r.exit, ...extra });
+  ok({ ok: r.ok, exit: r.exit, ...(outbox ? { outbox } : {}) });
   if (!r.ok) process.exit(r.exit || 1);
 }
 
@@ -3032,7 +2636,25 @@ async function cmdRegister(ws, flags) {
   const ctx = resolveRepositories(ws);
   const result = await runTxAsync(registerCr(ctx, input));
   auditLog(ws, { kind: 'ledger', op: 'register', cr: result.cr, txId: result.txId, actor: identity(ws), title: input.title, phase: result.phase, changed: result.changed });
-  ok({ op: 'register', ...result });
+  if (!result.changed) return ok({ op: 'register', ...result });
+  // 注册事件（TASK-10：语义自原 cmdGit --template register 分支迁移至此）：register commit 落盘后以真实 SHA 发 status + owners 事件；
+  // 单个 outbox 写出失败对应 null + warnings EMIT_FAILED，事务不回滚（Git 是权威）。
+  const commitSe = (result.sideEffects || []).find((s) => s.kind === 'commit');
+  const commitSha = commitSe ? commitSe.sha : null;
+  const now = nowIso();
+  const owners = {
+    requirement: { id: input.owners.requirement, 'assigned-at': now },
+    development: { id: input.owners.development, 'assigned-at': now },
+    test: { id: input.owners.test, 'assigned-at': now },
+  };
+  const changes = ['requirement', 'development', 'test'].map((role) => ({ role, from: '', to: owners[role].id, at: now, reason: 'initial-assignment' }));
+  const warnings = [];
+  const emit = (ev) => { const name = emitOutboxEvent(ws, ev); if (!name) warnings.push({ code: 'EMIT_FAILED', event_kind: ev.event_kind }); return name; };
+  const outbox = {
+    status: emit({ event_kind: 'status', cr_id: result.cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: commitSha, actor: identity(ws) }),
+    owners: emit({ event_kind: 'owners', cr_id: result.cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: commitSha, actor: identity(ws), payload: { owners, changes } }),
+  };
+  ok({ op: 'register', ...result, outbox, warnings });
 }
 
 async function cmdWorkspace(ws, positional, flags) {
@@ -3115,20 +2737,12 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl writeback-apply <cr_id> --stage <s> --candidate <manifest.json> --spec-id <id>
                                                     candidate-only writeback 应用：manifest 校验（schema/allowlist/path/blob/before/inputDigest/snapshot）→ txws 应用 → 精确 stage → commit+trailer → lease push（TASK-08）
   crctl archive <cr_id> [--spec-id <id>]                          单一幂等归档：四账本同批 write-set + archive commit + lease push → cleanup（txws/CR worktree/本地 ref）；cleanup 失败返回 CR_ARCHIVE_CLEANUP_PENDING，重跑只续清理；rejected/withdrawn 未合并远端 ref 保留为 preservedRefs（TASK-09）
-  crctl cr-init     --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
-                        [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
-  crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
   crctl report [--period <N>d]                   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
-  crctl git     <sub> [args...] [--cwd <p>] [--caller <skill>]   controlled-shell 白名单执行
-                （git commit 可加 --template <register|task-breakdown|writeback> [--cr <CR-ID>] 生成规范 message；--cr 显式直传，缺省走分支/subject 反向解析）
+  crctl git     <sub> [args...] [--cwd <p>]      controlled-shell 白名单执行（只读/安全面；写路径一律走深原语）
   crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
-  crctl merge-metadata <cr_id> --repo <r> --trunk <t> --sha <sha>
-                                                _backlog.yml merge-commits[] 追加（merging/writing-back 态）
-  crctl archive-move <cr_id> --final-status <s> [--archive-reason <r>] [--spec-id <id>]
-                                                backlog→history 原子移动（archived 态，双文件 CAS）
 
 
 全局: --workspace <path> 指定目标 workspace（默认从 cwd 向上探测 change-requests/_backlog.yml）
@@ -3152,7 +2766,7 @@ function parseArgs(argv) {
 
 /** git 子命令专用解析：只抽取 crctl 自己的旗标，git 的旗标（--short 等）原样透传 */
 function parseGitArgs(argv) {
-  const CRCTL_FLAGS = ['--cwd', '--caller', '--workspace', '--template', '--cr']; // --template/--cr 是 crctl 的 commit 模板旗标（FR-10），不透传给 git
+  const CRCTL_FLAGS = ['--cwd', '--workspace']; // crctl 自己的旗标，不透传给 git
   const flags = {};
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
@@ -3187,20 +2801,16 @@ async function main() {
     case 'owner-set': return cmdOwnerSet(ws, requireCr(positional), gates, flags);
     case 'backlog-set': return cmdBacklogSet(ws, requireCr(positional), gates, flags);
     case 'inbox-emit': return cmdInboxEmit(ws, requireCr(positional), gates, flags);
-    case 'cr-init': return cmdCrInit(ws, gates, flags);
     case 'register': return cmdRegister(ws, flags);
     case 'workspace': return cmdWorkspace(ws, positional, flags);
     case 'merge': return cmdMerge(ws, positional, flags);
     case 'writeback-apply': return cmdWritebackApply(ws, positional, flags);
     case 'archive': return cmdArchive(ws, positional, flags);
-    case 'worktree-path': return cmdWorktreePath(ws, requireCr(positional), gates, flags);
     case 'report': return cmdReport(ws, gates, flags);
     case 'task': {
       if (positional[0] === 'done') return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
       fail('BAD_ARGS', 'task 仅支持子命令 done：crctl task done <CR-ID> --task <TASK-ID>');
     }
-    case 'merge-metadata': return cmdMergeMetadata(ws, requireCr(positional), gates, flags);
-    case 'archive-move': return cmdArchiveMove(ws, requireCr(positional), gates, flags);
 
     case 'test': return cmdTest(ws, requireCr(positional), gates, flags);
     case 'next': return cmdNext(ws, requireCr(positional), gates, flags);

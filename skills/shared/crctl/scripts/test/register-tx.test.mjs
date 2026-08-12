@@ -324,3 +324,37 @@ test('TASK-05 AC-2：inspect 七分类 + ensure resume 只补缺 + cleanup 零�
     assert.equal(git(path.join(base, 'origin-tools.git'), ['rev-parse', '--verify', `refs/heads/requirement/${cr}`]).length, 40, '远端分支保留');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
+
+test('TASK-10：register 成功 → outbox 发 status+owners 事件（同真实 commit SHA、owners changes 恰 3 项）；幂等重跑零事件', () => {
+  const { base, kb } = makeFixture();
+  try {
+    const r1 = runCrctl(regArgs(kb), { cwd: kb });
+    assert.equal(r1.status, 0, r1.stderr);
+    const commitSe = (r1.json.sideEffects || []).find((s) => s.kind === 'commit');
+    assert.ok(commitSe, 'register 必须有 commit 副作用');
+    assert.ok(r1.json.outbox && r1.json.outbox.status && r1.json.outbox.owners, 'status+owners 事件必须发出');
+    assert.deepEqual(r1.json.warnings, []);
+    const outDir = path.join(kb, '.crctl', 'outbox');
+    const events = fs.readdirSync(outDir).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(outDir, f), 'utf8')));
+    const status = events.find((e) => e.event_kind === 'status' && e.trigger === 'requirement-register');
+    const owners = events.find((e) => e.event_kind === 'owners' && e.trigger === 'requirement-register');
+    assert.ok(status && owners, 'outbox 必须落盘 status+owners 注册事件');
+    for (const ev of [status, owners]) {
+      assert.equal(ev.cr_id, r1.json.cr);
+      assert.equal(ev.from_status, '(new)');
+      assert.equal(ev.to_status, 'drafting');
+      assert.equal(ev.commit_sha, commitSe.sha, '事件 commit_sha 必须是真实 register commit SHA');
+    }
+    assert.equal(owners.payload.changes.length, 3);
+    for (const role of ['requirement', 'development', 'test']) {
+      assert.ok(owners.payload.owners[role] && owners.payload.owners[role].id, `owners.${role} 缺失`);
+    }
+    // 幂等重跑：changed=false 且零新事件
+    const before = fs.readdirSync(outDir).length;
+    const r2 = runCrctl(regArgs(kb), { cwd: kb });
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.equal(r2.json.changed, false);
+    assert.equal(r2.json.outbox, undefined, '重跑不得重发事件');
+    assert.equal(fs.readdirSync(outDir).length, before);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});

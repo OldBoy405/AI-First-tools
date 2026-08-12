@@ -1,7 +1,7 @@
 {
   "id": "feature-writeback",
   "name": "需求回写",
-  "description": "回写期主流水线：代码审批通过后以 CR workspace 为原子交付集合，将全部参与仓同名分支一起检查并合并回各仓 trunk，再把 change-requests/{CR-ID}/ 下的 PRD / SDD / TASK 回写到 specs/{id}/ 与 delivery/task/，最后归档 CR。任一仓未通过评审、未提交、未 push 或合并失败，整个 CR 不进入 writeback。",
+  "description": "回写期主流水线：代码审批通过后以深原语 crctl merge 完成跨仓合并，随后在 merge 返回的 operational workspace 上以 candidate-only generator + crctl writeback-apply 回写 specs/ 与 delivery/，最后 crctl archive 归档。全部写操作（Git、账本、commit/push）由深原语独占；Skill 只做调用与结果分类。",
   "triggerCommand": "writeback",
   "scope": "product-dev",
   "isDefault": false,
@@ -20,7 +20,7 @@
       "type": "text",
       "required": true,
       "placeholder": "collaboration-dashboard",
-      "description": "回写目标 specs/{id}；必须显式提供，避免后续 writeback 节点收到空路径"
+      "description": "回写目标 specs/{id}；必须显式提供"
     },
     {
       "key": "target_version",
@@ -28,7 +28,7 @@
       "type": "text",
       "required": true,
       "placeholder": "v0.16.0",
-      "description": "用于 delivery/task 文件命名 TASK-{target_version}-{cr_id}-{NN}-{slug}；必须显式提供并传递给所有 writeback 节点（CR-2026-020 统一格式）"
+      "description": "用于 delivery/task 文件命名 TASK-{target_version}-{cr_id}-{NN}-{slug}；必须显式提供并传递给所有 writeback 节点"
     }
   ],
   "nodes": [
@@ -37,7 +37,7 @@
       "kind": "skill",
       "label": "合并 CR workspace 全仓同名分支",
       "ref": "merge-feature-branch",
-      "prompt": "以 CR workspace 为单位执行各仓同名分支合并：\n1. 校验 change-requests/{{inputs.cr_id}} 当前 status=code-approved，否则 abort\n2. 读取 dir-graph.yaml repositories[*]（active≠false），解析全部参与仓与对应 CR worktree；role=knowledge-base 使用 bucket=knowledge-base，独立代码仓使用 bucket=repo.id，非独立代码目录随 knowledge-base worktree\n3. 对所有参与仓一起检查：代码评审已通过、工作区无未提交改动、requirement/{{inputs.cr_id}} 已 push 到远端、远端分支存在且 SHA 可记录；任一仓失败则整个 CR abort，不得单仓提前结束\n4. 对每个独立仓解析 repo.trunk；若返回 REPO_TRUNK_UNRESOLVED 则 abort\n5. 通过 controlled-shell 执行两阶段合并：先对所有 repo fetch + rev-parse origin/trunk + merge-tree --write-tree dry-run；全部通过后才 checkout trunk + pull --ff-only + merge --no-commit --no-ff；全部本地合并成功后才 commit\n6. push 前再次 fetch 并确认 origin/trunk 未变化；不得在全部参与仓本地合并成功前 push 任何 trunk\n7. 若部分 repo push 失败，必须自动 revert 已 push 的 merge commit，输出 MERGE_REMOTE_COMPENSATED 或 MERGE_REMOTE_COMPENSATION_FAILED，CR status 保持 code-approved，pipeline abort，不得进入 writeback\n8. 全部 repo push origin trunk 成功后，必须在同一 knowledge-base commit 中写入 merge-commits[] 并将 CR status 由 code-approved → merging；若 metadata commit/push 失败，必须先确认 metadata SHA 是否已到达 origin/trunk，未到达时自动 revert 全部已 push 的 merge commit，并回滚 knowledge-base 本地 metadata 到 code-approved，输出 MERGE_METADATA_PUBLISH_COMPENSATED、MERGE_METADATA_PUBLISH_COMPENSATION_FAILED 或 MERGE_METADATA_ROLLBACK_FAILED，pipeline abort，不得进入 writeback\n9. 发布联调走查（merge pipeline 完成证据，CR-2026-029）：metadata 发布成功后，从主 checkout 与 CR worktree 分别执行 crctl status / worktree-path / next 验证（linked worktree 不得有 STATUS_DIVERGED、worktree-path 无嵌套 .rayai-worktrees），核对代码仓 CUSTOM.md 台账；将走查结论写入 change-requests/{{inputs.cr_id}}/merge-verification.md（frontmatter 含各仓 merge-sha）并提交 knowledge-base trunk。发布联调类工作归本节点，不创建开发 TASK\n10. 本节点不移除本地 worktree、不删除远端分支；这些清理统一由 cr-archive 完成\n\n在 node-1.md 输出各仓 merge commit SHA、source branch SHA、trunk 分支名、远端 checkpoint SHA、metadata 发布结果、补偿/回滚记录与是否发生冲突。",
+      "prompt": "执行 merge-feature-branch：\n- cr_id: {{inputs.cr_id}}\n- workspace: knowledge-base 主 checkout\n\n动作：\n1. 校验 change-requests/{{inputs.cr_id}}/cr.md 当前 status=code-approved，否则 abort\n2. 一次调用深原语：`crctl merge {{inputs.cr_id}} --workspace {knowledge-base 主 checkout}`——prepare（commit-tree 无副作用）→ 逐仓 lease publish → 全部 confirmed 后 detached Transaction Workspace 单 finalize commit（status=merging + merge-commits.yml + merge-verification.md）→ lease push\n3. 只透传深原语返回的 operational_workspace 到后续节点；不写任何 Git 命令序列、不手写 merge-commits 账本\n4. 结果分类：exit 0 phase=complete → 记录 operational_workspace；MERGE_PREPARE_CONFLICT → 解决后重跑；phase=release-drift（kind=code/task）→ 深原语已回退 code-approved→developing，回到开发期；APPROVED_ARTIFACT_DRIFT（prd/sdd）→ 走需求/设计修订链路；MERGE_REMOTE_HISTORY_REWRITTEN → 人工介入；中间态非零 → 重跑同命令续跑\n\n在 node-1.md 输出：operational_workspace、merge 事务 txId、phase。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },
@@ -46,7 +46,7 @@
       "kind": "skill",
       "label": "回写 PRD / SDD 到 specs/",
       "ref": "writeback-prd-sdd",
-      "prompt": "将 change-requests/{{inputs.cr_id}}/{prd.md,sdd.md} 增量回写到 specs/{{inputs.spec_id}}/{PRD.md,SDD.md} 并维护 specs/_index.yml：\n- 调用 {TOOLS_ROOT}/skills/writeback/scripts/writeback-prd-sdd.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}}）：先 --dry-run 核对里程碑节追加 diff（标题 ## {名}（v{version} · CR-{id}）、原文 H 级 +1、既有章节原样保留），无误后实跑（脚本末尾自检，失败 SELF_CHECK_FAILED 非零退出）\n- specs/ 是跨 CR 累积基线（纪律 #6）：只做末尾追加里程碑节 + frontmatter 行级更新，禁止全量覆盖；不做旧版本备份（回写即提交，历史由 git 承载）\n- 使用必填输入 target_version={{inputs.target_version}}，不得在本节点重新推导版本\n\n在 node-2.md 输出目标 spec_id 与新建/更新标记、变更文件清单。",
+      "prompt": "执行 writeback-prd-sdd（在 merge 返回的 operational_workspace 上）：\n- cr_id: {{inputs.cr_id}}, spec_id: {{inputs.spec_id}}, target_version: {{inputs.target_version}}\n- operational_workspace: {上一节点返回}\n\n动作：\n1. 调用 candidate-only generator：node {TOOLS_ROOT}/skills/writeback/scripts/writeback-prd-sdd.mjs --workspace {operational_workspace} --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --candidate-out {candidate_dir}（输出 manifestPath；specs/ 是跨 CR 累积基线，只做末尾追加里程碑节 + frontmatter 行级更新，禁止全量覆盖）\n2. 一次调用深原语：`crctl writeback-apply {{inputs.cr_id}} --stage baseline --candidate {manifestPath} --spec-id {{inputs.spec_id}} --workspace {knowledge-base 主 checkout}`（manifest 全矩阵校验 → txws 精确 stage → commit+trailer → lease push）\n3. 推进状态：`crctl advance {{inputs.cr_id}} --to writing-back --trigger writeback-prd-sdd --expect merging --embedded --spec-id {{inputs.spec_id}} --workspace {operational_workspace}`\n4. 结果分类：WRITEBACK_REMOTE_STALE → 重跑 generator 后重试；WRITEBACK_MANIFEST_* → 核对 candidate 后重生成；其余按错误信息处理\n\n在 node-2.md 输出变更文件清单与 writeback-apply 返回 txId。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },
@@ -55,7 +55,7 @@
       "kind": "skill",
       "label": "回写 TASK 到 delivery/",
       "ref": "writeback-tasks",
-      "prompt": "将 change-requests/{{inputs.cr_id}}/tasks/ 下 status=done 任务回写到 delivery/task/ 并全量重建 delivery/task/_index.yaml：\n- 调用 {TOOLS_ROOT}/skills/writeback/scripts/writeback-tasks.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}}）：先 --dry-run 核对将新建的文件清单，无误后实跑（脚本末尾自检）\n- 目标命名 TASK-{{inputs.target_version}}-{{inputs.cr_id}}-{NN}-{slug}（slug 取源任务 frontmatter，缺失回退 task-{NN}）；幂等判据为 delivery/task/*.md frontmatter 的 id 集合\n- 使用必填输入 target_version={{inputs.target_version}}，不得在本节点重新推导版本\n\n在 node-3.md 输出生成的 TASK 文件清单。",
+      "prompt": "执行 writeback-tasks（在 operational_workspace 上）：\n- cr_id: {{inputs.cr_id}}, spec_id: {{inputs.spec_id}}, target_version: {{inputs.target_version}}\n- operational_workspace: {上一节点返回}\n\n动作：\n1. 调用 candidate-only generator：node {TOOLS_ROOT}/skills/writeback/scripts/writeback-tasks.mjs --workspace {operational_workspace} --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --candidate-out {candidate_dir}（输出 manifestPath；目标命名 TASK-{{inputs.target_version}}-{{inputs.cr_id}}-{NN}-{slug}；幂等判据为 delivery/task/*.md frontmatter 的 id 集合）\n2. 一次调用深原语：`crctl writeback-apply {{inputs.cr_id}} --stage tasks --candidate {manifestPath} --spec-id {{inputs.spec_id}} --workspace {knowledge-base 主 checkout}`\n3. 结果分类同 writeback-prd-sdd\n\n在 node-3.md 输出生成的 TASK 文件清单与 txId。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -64,7 +64,7 @@
       "kind": "skill",
       "label": "回写追溯链",
       "ref": "writeback-traceability",
-      "prompt": "<!-- lint-prompts:ignore --> 脚本内部处理说明：merge-commits 由脚本从 _backlog.yml 提取，milestone 段由脚本追加\n在 specs/{{inputs.spec_id}}/traceability.yml（跨 CR 累积的唯一权威文件）追加本 CR 的 milestone 段：\n- 按证据源起草 milestone-file（fr-chain 的 title/sdd/code/evidence 为编辑性内容），merge-commits 由脚本从 `_backlog.yml` 账本定向提取注入（脚本内部读取，非模型写入）（三字段必填校验（repo/trunk/sha，FR-8），缺失 MERGE_COMMITS_MISSING 硬失败，不猜测）\n- 调用 {TOOLS_ROOT}/skills/writeback/scripts/writeback-traceability.mjs（--workspace . --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --milestone-file <path>）：先 --dry-run 核对（既有 milestones 段不得出现在 diff 中），无误后实跑（脚本末尾自检）\n- 不做\"与 change-requests/{{inputs.cr_id}}/traceability.yml 保持一致\"校验——specs 侧为唯一权威文件，change-requests 侧为开发期工作稿，归档后不再同步\n\n在 node-4.md 输出链路条目数与未对齐项。",
+      "prompt": "执行 writeback-traceability（在 operational_workspace 上）：\n- cr_id: {{inputs.cr_id}}, spec_id: {{inputs.spec_id}}, target_version: {{inputs.target_version}}\n- operational_workspace: {上一节点返回}\n\n动作：\n1. 按证据源起草 milestone-file（fr-chain 的 title/sdd/code/evidence 为编辑性内容）；merge-commits 由 generator 从 change-requests/{{inputs.cr_id}}/merge-commits.yml 提取注入（模型不得手工誊抄，缺失 MERGE_COMMITS_MISSING 硬失败）\n2. 调用 candidate-only generator：node {TOOLS_ROOT}/skills/writeback/scripts/writeback-traceability.mjs --workspace {operational_workspace} --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --milestone-file <path> --candidate-out {candidate_dir}（既有 milestones 段不得出现在 candidate 差异中）\n3. 一次调用深原语：`crctl writeback-apply {{inputs.cr_id}} --stage traceability --candidate {manifestPath} --spec-id {{inputs.spec_id}} --workspace {knowledge-base 主 checkout}`\n\n在 node-4.md 输出链路条目数与未对齐项。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -73,7 +73,7 @@
       "kind": "skill",
       "label": "归档 CR",
       "ref": "cr-archive",
-      "prompt": "经 `crctl archive-move` 将 CR {{inputs.cr_id}} 从 change-requests/_backlog.yml 移入 _history.yml（双文件原子 CAS，模型不得手写账本）：\n- 对 writing-back → archived 使用 crctl advance 的 embedded 校验，不单独提交中间 archived 状态\n- 在同一归档账本 commit 中同步 cr.md、_backlog.yml、_history.yml 与 _index.yml，记录 archived-at、merge-commits、writeback_spec_id={{inputs.spec_id}}\n- 若上次归档发布失败导致 backlog 中 status 已为 archived，按 archive-repair 继续完成 backlog→history 移动\n- 若 history 已存在但 origin/trunk 尚未包含归档账本，按 publish-retry 只重试归档账本 commit/push，不重复移动 backlog/history\n- 若 history 已存在且 cleanup-report.yml 为 pending，跳过账本移动，只重试 cleanup\n- 先确认归档账本已推送到 knowledge-base trunk，成功后才进入清理阶段\n- 清理阶段通过 controlled-shell 删除远端 requirement/{{inputs.cr_id}} 分支，并移除本地 CR worktree；缺失 worktree 视为 skipped-missing\n- 清理失败不得回滚已发布归档记录，必须写 cleanup-report.yml 并输出 cleanup-pending，后续可重试 cleanup\n- 保留 change-requests/{{inputs.cr_id}}/ 目录作为历史痕迹，下次 CR 可参考\n- 【回写清单】本 CR 若 diff 触及 `crctl.mjs` 的 dispatch 或 `rules.json` 的 `protectedPaths.deny`：① 跑 `crctl lint-prompts` 清零 CONTRADICTS/STALE；② 对新增子命令，在 SDD『prompt 采纳影响』小节列出应改为调用它的 skill 清单并逐一改，由评审兜底（归档前必须完成，否则不得进入归档）\n\n在 node-5.md 输出归档汇总：spec_id、task 数、追溯链条数、归档 commit SHA 与 cleanup 状态。",
+      "prompt": "执行 cr-archive：\n- cr_id: {{inputs.cr_id}}, spec_id: {{inputs.spec_id}}\n\n动作：\n1. 一次调用深原语：`crctl archive {{inputs.cr_id}} --spec-id {{inputs.spec_id}} --workspace {knowledge-base 主 checkout}`——四账本（cr.md/_backlog/_history/_index）同批 recoverable write-set → archive commit + trailer → lease push → origin confirmed 后 cleanup（txws/CR worktree/本地分支，clean 才删）\n2. 结果分类：exit 0 phase=complete → 归档完成；phase=cleanup-pending（status=archived）→ 清理未完成，重跑同命令只续清理；ARCHIVE_* 错误 → 按信息处理\n3. 模型不写 cleanup-report、不手写账本、不输出手工 git 指令\n\n在 node-5.md 输出归档汇总：spec_id、txId、phase、preservedRefs（若有）。",
       "onFail": "abort",
       "timeoutMinutes": 10
     }

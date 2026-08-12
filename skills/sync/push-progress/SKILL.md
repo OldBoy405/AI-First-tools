@@ -33,7 +33,7 @@ description: "按 dir-graph.yaml repositories 遍历所有 active repo，将 CR 
 
 1. 读取 `AGENTS.md`、`dir-graph.yaml#repositories`。
 2. 选择 `active != false` 的 repo。
-3. 对每个 repo：`branch = requirement/{cr_id}`，worktreePath 经 `crctl worktree-path {cr_id} --repo {repo.id} --workspace <ws>` 取权威值（FR-29②，CR-2026-022——不再手拼 bucket/worktreePath；bucket 规则由 crctl 唯一派生）
+3. 对每个 repo：`branch = requirement/{cr_id}`，worktreePath 经 `crctl workspace inspect {cr_id} --workspace <ws>（resources[].worktreePath 为权威路径）` 取权威值（FR-29②，CR-2026-022——不再手拼 bucket/worktreePath；bucket 规则由 crctl 唯一派生）
 <!-- lint-prompts:ignore --> 描述性：推送说明（实际写入走 crctl checkpoint-add）
 4. 读取 `change-requests/_backlog.yml`，确认存在 `cr_id` 条目。
 5. 任一 active repo 的 worktree 不存在则返回 `WORKTREE_MISSING`，不得只推部分 repo。
