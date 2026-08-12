@@ -1265,3 +1265,335 @@ export async function applyWriteback(ctx, input) {
     await lock.release();
   }
 }
+/* ────────────────────────── TASK-09：archive 与 cleanup-pending ──────────────────────────
+ * 单一幂等归档入口（SDD §4.5/§5.4）：writing-back → detached txws 四账本（cr.md + _backlog.yml +
+ * _history.yml + _index.yml）同批 recoverable write-set → archive commit + trailer → lease push；
+ * origin confirmed 后 journal 转 cleanup-pending，仅清理由 graph+journal+ancestry 证明且 clean 的
+ * 资源（txws、CR worktree、本地 requirement 分支）；rejected/withdrawn 的未合并远端 ref 保留并输出
+ * preservedRefs；任一 cleanup 失败返回 phase=cleanup-pending（status 恒 archived，重跑只续清理）。
+ */
+
+/** 轻量条目块提取（与 crctl.mjs matchEntryBlock 同语义，TxError 风格；TASK-10 旧命令删除后收敛）。 */
+function matchEntryBlockTx(text, id) {
+  const lines = text.split('\n');
+  let startLine = -1, indent = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
+    if (m && m[2] === id) { startLine = i; indent = m[1].length; break; }
+  }
+  if (startLine === -1) return null;
+  let endLine = lines.length;
+  for (let i = startLine + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
+    if (m && m[1].length <= indent) { endLine = i; break; }
+  }
+  return { text: lines.slice(startLine, endLine).join('\n'), indent };
+}
+
+/** 归档收件人：owners 三角色去重 → legacy 顶层 owner → 空则 ARCHIVE_RECIPIENTS_MISSING。 */
+function archiveRecipients(backlogText, cr) {
+  const blk = matchEntryBlockTx(backlogText.replaceAll('\r\n', '\n'), cr);
+  if (!blk) throw new TxError('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
+  const o = {};
+  let owner = null;
+  for (const line of blk.text.split('\n')) {
+    const t = line.trim();
+    let m = /^owner:\s*(.+)$/.exec(t);
+    if (m) owner = m[1].replace(/^"|"$/g, '');
+    m = /^(\w+):\s*id:\s*(.+)$/.exec(t);
+    if (m) o[m[1]] = m[2].replace(/^"|"$/g, '');
+  }
+  const to = [...new Set([o.requirement, o.development, o.test].filter(Boolean))];
+  if (to.length === 0 && owner) to.push(owner);
+  if (to.length === 0) throw new TxError('ARCHIVE_RECIPIENTS_MISSING', `归档事件收件人为空：${cr} 缺少 owners 三角色且无顶层 owner，拒绝归档`);
+  return to;
+}
+
+/** 四账本归档编辑（纯函数，TxError 风格）：backlog 移出 + history 追加（含 notify-log）+ index 终态。 */
+export function archiveLedgerEdits({ backlogText, historyText, indexText, cr, finalStatus, specId, reason, now }) {
+  const normB = backlogText.replaceAll('\r\n', '\n');
+  const blk = matchEntryBlockTx(normB, cr);
+  if (!blk) throw new TxError('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
+  const lines = normB.split('\n');
+  const start = lines.indexOf(blk.text.split('\n')[0]);
+  const blockLines = blk.text.split('\n');
+  // 定位块在 normB 中的偏移（缩进块 + 后续直到下一同缩进条目/结尾）
+  let endLine = start + blockLines.length;
+  while (endLine < lines.length) {
+    const m = lines[endLine].match(/^([ \t]*)- id:/);
+    if (m && m[1].length <= blk.indent) break;
+    if (lines[endLine].trim() === '' && endLine + 1 < lines.length && /^[ \t]*- id:/.test(lines[endLine + 1])) break;
+    endLine++;
+  }
+  const newBacklog = lines.slice(0, start).concat(lines.slice(endLine)).join('\n').replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '');
+  const normH = historyText == null || historyText.trim() === '' ? null : historyText.replaceAll('\r\n', '\n').trimEnd();
+  if (normH && matchEntryBlockTx(normH, cr)) throw new TxError('ENTRY_ALREADY_IN_HISTORY', `${cr} 已在 _history.yml，禁止重复归档`);
+  const minIndent = Math.min(...blk.text.split('\n').filter((l) => l.trim() !== '').map((l) => (l.match(/^[ \t]*/) || [''])[0].length));
+  const entry = blk.text.split('\n').map((l) => '  ' + l.slice(minIndent)).join('\n');
+  const reasonEsc = String(reason || '').replaceAll('"', '\\"');
+  const to = archiveRecipients(normB, cr);
+  const payload = { 'final-status': finalStatus, 'archive-reason': String(reason || ''), 'archived-at': now, ...(specId ? { 'writeback-spec-id': specId } : {}) };
+  const notifyLog = [
+    '    notify-log:',
+    `      - at: "${now}"`,
+    `        event: ${finalStatus}`,
+    `        to: ${JSON.stringify(to)}`,
+    `        payload: ${JSON.stringify(payload)}`,
+  ];
+  const enrich = [
+    `    final-status: ${finalStatus}`,
+    `    archive-reason: "${reasonEsc}"`,
+    specId ? `    writeback-spec-id: ${specId}` : null,
+    `    archived-at: "${now}"`,
+  ].filter(Boolean).join('\n');
+  const record = entry + '\n' + enrich + '\n' + notifyLog.join('\n') + '\n';
+  const newHistory = (normH == null ? 'history:' : normH) + '\n' + record;
+  const normI = indexText.replaceAll('\r\n', '\n');
+  const iBlk = matchEntryBlockTx(normI, cr);
+  if (!iBlk) throw new TxError('INDEX_ENTRY_NOT_FOUND', `${cr} 不在 _index.yml`);
+  const fieldIndent = ' '.repeat(iBlk.indent + 2);
+  let body = iBlk.text;
+  const set = (key, val) => {
+    const re = new RegExp(`^([ \\t]*)${key}:.*$`, 'm');
+    return re.test(body) ? body.replace(re, `$1${key}: ${val}`) : body + `\n${fieldIndent}${key}: ${val}`;
+  };
+  body = set('status', finalStatus);
+  body = set('archived-at', `"${now}"`);
+  if (specId) body = set('writeback-spec-id', String(specId));
+  const iLines = normI.split('\n');
+  const iStart = iLines.indexOf(iBlk.text.split('\n')[0]);
+  const newIndex = iLines.slice(0, iStart).concat(body.split('\n'), iLines.slice(iStart + iBlk.text.split('\n').length)).join('\n');
+  return { newBacklog, newHistory, newIndex, recipients: to };
+}
+
+/** 归档清理：删除 txws 与各仓 CR worktree/本地分支；rejected/withdrawn 远端 ref 保留。
+ * 只删 clean 资源；dirty/未知 workspace 零删除（保留在 remaining）。返回 {remaining, preservedRefs}。 */
+function archiveCleanup(ctx, cr, status, journalTxId) {
+  const remaining = [];
+  const preservedRefs = [];
+  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
+  // 1) txws（detached，archive commit 后应 clean；删除失败/非 clean → 保留）
+  const txws = txWorkspacePath(ctx, cr);
+  if (fs.existsSync(txws)) {
+    const dirty = gitRun(txws, ['status', '--porcelain']).stdout.trim() !== '';
+    if (dirty) {
+      remaining.push({ kind: 'txws', path: txws, why: 'dirty' });
+    } else {
+      const rm = gitRun(kb.rootPath, ['worktree', 'remove', '--force', txws]);
+      if (rm.status !== 0) remaining.push({ kind: 'txws', path: txws, why: 'remove-failed' });
+    }
+  }
+  // 2) 各仓 CR worktree + 本地 requirement 分支；远端 ref：archived 删除，rejected/withdrawn 保留
+  for (const repo of ctx.repositories) {
+    const wt = path.join(repo.worktreePath, cr);
+    if (fs.existsSync(wt)) {
+      const dirty = gitRun(wt, ['status', '--porcelain']).stdout.trim() !== '';
+      if (dirty) { remaining.push({ kind: 'cr-worktree', repo: repo.id, path: wt, why: 'dirty' }); continue; }
+      const rm = gitRun(repo.rootPath, ['worktree', 'remove', '--force', wt]);
+      if (rm.status !== 0) { remaining.push({ kind: 'cr-worktree', repo: repo.id, path: wt, why: 'remove-failed' }); continue; }
+    }
+    gitRun(repo.rootPath, ['fetch', 'origin']); // cleanup 容错：fetch 失败仅导致 ref 判定保守
+    const remoteRef = `refs/remotes/origin/${branchForCr(cr)}`;
+    const hasRemote = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', remoteRef]).status === 0;
+    if (status === 'rejected' || status === 'withdrawn') {
+      if (hasRemote) preservedRefs.push(`${repo.id}:refs/heads/${branchForCr(cr)}`);
+      // 本地分支保留（未合并事实源）
+    } else {
+      if (hasRemote) {
+        const del = gitRun(repo.rootPath, ['push', 'origin', `:refs/heads/${branchForCr(cr)}`]);
+        if (del.status !== 0) remaining.push({ kind: 'remote-ref', repo: repo.id, ref: `refs/heads/${branchForCr(cr)}`, why: 'delete-failed' });
+      }
+      const delLocal = gitRun(repo.rootPath, ['branch', '-D', branchForCr(cr)]);
+      if (delLocal.status !== 0) {
+        // 分支不存在是幂等成功；存在但删除失败（如仍被 worktree 引用）→ 保留
+        const exists = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${branchForCr(cr)}`]).status === 0;
+        if (exists) remaining.push({ kind: 'local-ref', repo: repo.id, ref: `refs/heads/${branchForCr(cr)}`, why: 'delete-failed' });
+      }
+    }
+  }
+  return { remaining, preservedRefs };
+}
+
+/** archive 事务（TASK-09）。input: {cr, specId?, workspace}。 */
+export async function archiveCr(ctx, input) {
+  const { cr, specId } = input;
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) throw new TxError('ARCHIVE_CR_INVALID', `archive 需要合法 CR-ID，收到 ${cr}`, { cr });
+  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
+  const recoverCommand = `crctl archive ${cr}${specId ? ` --spec-id ${JSON.stringify(specId)}` : ''} --workspace ${JSON.stringify((input && input.workspace) || ctx.installRoot)}`;
+  const lock = await acquireLock({ root: ctx.installRoot, scope: `archive-${cr}`, op: 'archive', cr });
+  try {
+    let journal, journalPath;
+    ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'archive', key: cr, graphDigest: ctx.graphDigest, inputDigest: sha256(cr + '|' + (specId || '')) }));
+    const payload = journal.archive || { cr, phase: 'start', status: null, committed: false, commit: null, baseSha: null, pushed: false, cleanupDone: null, preservedRefs: [], remaining: [] };
+    journal.archive = payload;
+    const wasComplete = payload.phase === 'complete';
+    let did = false;
+    const save = async (phase) => { payload.phase = phase; journal.phase = phase; await saveJournal({ path: journalPath, journal }); };
+    const assertGraph = () => {
+      if ((payload.committed || payload.pushed) && journal.graphDigest !== ctx.graphDigest) {
+        throw new TxError('GRAPH_CHANGED_DURING_TRANSACTION', 'archive 事务出现副作用后 dir-graph 声明发生变化，拒绝继续', { journalDigest: journal.graphDigest, currentDigest: ctx.graphDigest });
+      }
+    };
+    await recoverWriteSet({ root: ctx.installRoot });
+
+    // 幂等重放：complete 事务直接返回（cleanup 后 CR worktree 已删，authority 解析会失败）
+    if (payload.phase === 'complete') {
+      return { cr, txId: journal.txId, phase: 'complete', status: payload.status, changed: false, preservedRefs: payload.preservedRefs || [], remaining: payload.remaining || [], recoverCommand };
+    }
+
+    // authority 与终态判定（仅 publish 阶段需要；cleanup 续跑时 CR worktree 可能已被删，跳过解析）：
+    // writing-back → txws；rejected/withdrawn → 主 checkout 账本（无 txws）
+    let status = payload.status;
+    let editRoot = null;
+    if (!payload.committed) {
+      const opWs = resolveOperationalWorkspace(ctx, cr);
+      status = opWs.phase;
+      if (opWs.source === 'transaction-workspace') {
+        if (status !== 'writing-back') throw new TxError('ARCHIVE_STATE_MISMATCH', `archive 需要 writing-back（authority=txws），当前 ${status}`, { cr, status });
+        if (!specId) throw new TxError('ARCHIVE_SPEC_REQUIRED', 'archive writing-back 路径需要 --spec-id（writeback-spec-id 入账）', { cr });
+        editRoot = opWs.path;
+      } else {
+        // rejected/withdrawn：状态权威在主 checkout（评审产物与状态推进所在，TASK-06 模型）
+        const masterStatus = readCrMdStatus(kb.rootPath, cr);
+        if (!['rejected', 'withdrawn'].includes(masterStatus)) {
+          throw new TxError('ARCHIVE_STATE_MISMATCH', `archive 仅接受 writing-back（txws）或 rejected/withdrawn（主 checkout），当前 ${masterStatus}`, { cr, status: masterStatus });
+        }
+        status = masterStatus;
+        editRoot = kb.rootPath; // 评审产物与账本所在，push trunk
+      }
+      if (payload.status != null && payload.status !== status) {
+        throw new TxError('ARCHIVE_STATUS_MISMATCH', `archive 事务 status=${payload.status} 与当前 ${status} 不一致`, { cr });
+      }
+      payload.status = status;
+
+      // 前置（非幂等重入）：writing-back 路径校验 TASK done + traceability 落点 + approval 存在
+      if (status === 'writing-back') {
+        const tasksIdx = path.join(editRoot, 'change-requests', cr, 'tasks', '_index.yml');
+        const idxText = fs.readFileSync(tasksIdx, 'utf8').replaceAll('\r\n', '\n');
+        const pending = [...idxText.matchAll(/^([ \t]*)status:\s*(\S+)/gm)].filter((m) => m[2] !== 'done').map((m) => m[0].trim());
+        if (pending.length) throw new TxError('ARCHIVE_TASKS_PENDING', `archive 前置：tasks/_index.yml 仍有非 done 任务`, { cr, pending });
+        const traceP = path.join(editRoot, 'specs', specId, 'traceability.yml');
+        if (!fs.existsSync(traceP)) throw new TxError('ARCHIVE_TRACEABILITY_MISSING', `archive 前置：specs/${specId}/traceability.yml 不存在（traceability 回写未完成）`, { cr, specId });
+        const approvalP = path.join(editRoot, 'change-requests', cr, 'approval.yml');
+        if (!fs.existsSync(approvalP)) throw new TxError('ARCHIVE_APPROVAL_MISSING', `archive 前置：approval.yml 缺失`, { cr });
+      }
+    }
+
+    // 四账本编辑 + write-set + commit + lease push（与 merge finalize 相同 classify 模式）
+    const finalStatus = payload.status === 'writing-back' ? 'archived' : payload.status; // writing-back → archived；rejected/withdrawn → 保持
+    const buildEntries = (root) => {
+      const readT = (p) => fs.readFileSync(p, 'utf8').replaceAll('\r\n', '\n');
+      const now = nowIso();
+      const bp = path.join(root, 'change-requests', '_backlog.yml');
+      const hp = path.join(root, 'change-requests', '_history.yml');
+      const ip = path.join(root, 'change-requests', '_index.yml');
+      const crp = path.join(root, 'change-requests', cr, 'cr.md');
+      const edits = archiveLedgerEdits({
+        backlogText: readT(bp), historyText: fs.existsSync(hp) ? readT(hp) : null,
+        indexText: readT(ip), cr, finalStatus, specId, reason: 'cr-archive', now,
+      });
+      const crMdText = readT(crp);
+      const nextCrMd = crMdStatusText(crMdText, finalStatus);
+      if (!nextCrMd) throw new TxError('ARCHIVE_CRMD_INVALID', `${crp} 无 frontmatter，无法写终态`, { cr });
+      // before = 磁盘字节哈希（CAS 锚点，Windows autocrlf 不影响一致性）；after = 编辑产物（LF）
+      const file = (p, after) => ({ path: p, beforeSha256: readHashRaw(path.join(root, p)), afterSha256: sha256(after), content: after });
+      const entries = [
+        file(`change-requests/_backlog.yml`, edits.newBacklog),
+        file(`change-requests/_history.yml`, edits.newHistory),
+        file(`change-requests/_index.yml`, edits.newIndex),
+        file(`change-requests/${cr}/cr.md`, nextCrMd),
+      ];
+      return { entries, recipients: edits.recipients, now };
+    };
+    if (!payload.committed) {
+      assertGraph();
+      const txHeadBefore = gitMust(editRoot, ['rev-parse', 'HEAD']);
+      const built = buildEntries(editRoot);
+      const pre = built.entries.map((e) => ({ path: e.path, beforeSha256: e.beforeSha256, afterSha256: e.afterSha256, content: e.content }));
+      await applyWriteSet({ root: editRoot, txRoot: ctx.installRoot, txId: journal.txId, entries: pre });
+      gitMust(editRoot, ['add', '--', ...built.entries.map((e) => e.path)]);
+      const staged = gitMust(editRoot, ['diff', '--cached', '--name-only', '--diff-filter=ACMR']).split('\n').filter(Boolean).sort();
+      const expect = built.entries.map((e) => e.path).sort();
+      if (staged.length !== expect.length || staged.some((p, i) => p !== expect[i])) {
+        throw new TxError('ARCHIVE_STAGED_MISMATCH', `archive staged set 与四账本不精确相等（expect=${expect.length} got=${staged.length}）`, { expect, got: staged });
+      }
+      const msg = `archive ${cr}\n\nAI-First-Op: archive\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\n`;
+      gitMust(editRoot, ['commit', '--no-gpg-sign', '--file=-'], { input: msg });
+      payload.commit = gitMust(editRoot, ['rev-parse', 'HEAD']);
+      payload.baseSha = txHeadBefore;
+      payload.recipients = built.recipients;
+      payload.committed = true;
+      did = true;
+      await save('committed');
+      faultPoint('archive-after-commit', { cr });
+    }
+    for (let attempt = 0; attempt < 3 && !payload.pushed; attempt++) {
+      assertGraph();
+      gitMust(kb.rootPath, ['fetch', 'origin']);
+      const remoteSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
+      const isAncestor = gitRun(kb.rootPath, ['merge-base', '--is-ancestor', payload.commit, remoteSha]).status === 0;
+      const cls = classifyRemoteCommit({ remoteSha, expectedBase: payload.baseSha, commitSha: payload.commit, commitIsRemoteAncestor: isAncestor, journalSaysPublished: payload.pushed });
+      if (cls === 'confirmed') { payload.pushed = true; did = true; await save('pushed'); break; }
+      if (cls === 'history-rewritten') {
+        throw new TxError('ARCHIVE_REMOTE_HISTORY_REWRITTEN', 'archive commit 遇远端 trunk history rewrite，硬阻断（不猜测、不自动 force）', { cr, remoteSha, expectedBase: payload.baseSha });
+      }
+      if (cls === 'rebuild') {
+        // 他人推进 trunk：编辑位置 reset 到新 base 后重建四账本 write-set（编辑是纯函数可重算）
+        gitMust(editRoot, ['fetch', 'origin']);
+        gitMust(editRoot, ['reset', '--hard', remoteSha]);
+        if (payload.status === 'writing-back') gitMust(editRoot, ['checkout', '--detach', remoteSha]);
+        const built = buildEntries(editRoot);
+        const pre = built.entries.map((e) => ({ path: e.path, beforeSha256: e.beforeSha256, afterSha256: e.afterSha256, content: e.content }));
+        await applyWriteSet({ root: editRoot, txRoot: ctx.installRoot, txId: journal.txId, entries: pre });
+        gitMust(editRoot, ['add', '--', ...built.entries.map((e) => e.path)]);
+        const msg = `archive ${cr} (rebuild)\n\nAI-First-Op: archive\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\n`;
+        gitMust(editRoot, ['commit', '--no-gpg-sign', '--file=-'], { input: msg });
+        payload.commit = gitMust(editRoot, ['rev-parse', 'HEAD']);
+        payload.baseSha = remoteSha;
+        did = true;
+        await save('rebuild');
+        continue;
+      }
+      gitMust(editRoot, ['push', `--force-with-lease=${kb.trunk}:${payload.baseSha}`, 'origin', `HEAD:refs/heads/${kb.trunk}`]);
+      payload.pushed = true;
+      did = true;
+      await save('pushed');
+      faultPoint('archive-after-push', { cr });
+    }
+    if (!payload.pushed) throw new TxError('ARCHIVE_REMOTE_STALE', 'archive push 连续 rebuild 超过上限，无法收敛', { cr });
+
+    // origin confirmed → cleanup（逐单元落盘 + fault；失败不抛错，返回 cleanup-pending）
+    await save('cleanup-pending');
+    if (!payload.cleanupDone) {
+      payload.lastCleanupError = null; // 每轮全新尝试：上轮 fault 不阻塞本轮续清理
+      const steps = ['txws', 'worktrees', 'refs'];
+      for (const step of steps) {
+        try {
+          assertGraph();
+          const r = archiveCleanup(ctx, cr, status, journal.txId);
+          payload.remaining = r.remaining;
+          payload.preservedRefs = r.preservedRefs;
+          payload.cleanupStep = step;
+          did = true;
+          await save(`cleanup-${step}`);
+          faultPoint('archive-during-cleanup', { cr, step });
+          if (r.remaining.length > 0) break; // 保留现场，重跑续清理
+        } catch (ce) {
+          // cleanup 失败（含 fault）不阻断：业务状态已 archived，返回 cleanup-pending
+          payload.lastCleanupError = ce && ce.code ? ce.code : 'CLEANUP_FAILED';
+          did = true;
+          await save(`cleanup-${step}-failed`);
+          break;
+        }
+      }
+      if (payload.remaining.length === 0 && !payload.lastCleanupError) payload.cleanupDone = true;
+    }
+    if (payload.remaining.length === 0 && !payload.lastCleanupError) {
+      await save('complete');
+      return { cr, txId: journal.txId, phase: 'complete', status: finalStatus, changed: did && !wasComplete, preservedRefs: payload.preservedRefs, remaining: [], recoverCommand };
+    }
+    return { cr, txId: journal.txId, phase: 'cleanup-pending', status: finalStatus, changed: did && !wasComplete, preservedRefs: payload.preservedRefs, remaining: payload.remaining, recoverCommand };
+  } finally {
+    await lock.release();
+  }
+}

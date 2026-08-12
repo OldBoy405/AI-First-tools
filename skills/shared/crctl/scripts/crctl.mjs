@@ -26,7 +26,7 @@ import {
   scanMaxCrNumber, formatCrId, buildRegistrationTexts, assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
   matchFrontmatter, crMdStatusText, mergeCr, mergeStatus, resolveOperationalWorkspace,
-  applyWriteback,
+  applyWriteback, archiveCr,
 } from './lib/workspace-transactions.mjs';
 import { FAULT_POINTS, faultPoint, nowIso } from './lib/durable-tx.mjs';
 
@@ -3114,6 +3114,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl merge status <cr_id>                        只读快照：journal phase + 每仓 intent/observation（零写入、零 fetch）
   crctl writeback-apply <cr_id> --stage <s> --candidate <manifest.json> --spec-id <id>
                                                     candidate-only writeback 应用：manifest 校验（schema/allowlist/path/blob/before/inputDigest/snapshot）→ txws 应用 → 精确 stage → commit+trailer → lease push（TASK-08）
+  crctl archive <cr_id> [--spec-id <id>]                          单一幂等归档：四账本同批 write-set + archive commit + lease push → cleanup（txws/CR worktree/本地 ref）；cleanup 失败返回 CR_ARCHIVE_CLEANUP_PENDING，重跑只续清理；rejected/withdrawn 未合并远端 ref 保留为 preservedRefs（TASK-09）
   crctl cr-init     --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
                         [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
   crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
@@ -3191,6 +3192,7 @@ async function main() {
     case 'workspace': return cmdWorkspace(ws, positional, flags);
     case 'merge': return cmdMerge(ws, positional, flags);
     case 'writeback-apply': return cmdWritebackApply(ws, positional, flags);
+    case 'archive': return cmdArchive(ws, positional, flags);
     case 'worktree-path': return cmdWorktreePath(ws, requireCr(positional), gates, flags);
     case 'report': return cmdReport(ws, gates, flags);
     case 'task': {
@@ -3213,6 +3215,16 @@ function requireCr(positional) {
 }
 
 main().catch((e) => { fail('INTERNAL_ERROR', e && e.stack ? e.stack : String(e)); });
+
+async function cmdArchive(ws, positional, flags) {
+  const cr = positional[0];
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'archive 需要 CR-ID');
+  const specId = flags['spec-id'] == null ? undefined : String(flags['spec-id']);
+  const ctx = resolveRepositories(ws);
+  const result = await runTxAsync(archiveCr(ctx, { cr, specId, workspace: ws }));
+  auditLog(ws, { kind: 'archive', cr, txId: result.txId, phase: result.phase, status: result.status, changed: result.changed, actor: identity(ws) });
+  ok({ op: 'archive', ...result });
+}
 async function cmdWritebackApply(ws, positional, flags) {
   const cr = positional[0];
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'writeback-apply 需要 CR-ID');

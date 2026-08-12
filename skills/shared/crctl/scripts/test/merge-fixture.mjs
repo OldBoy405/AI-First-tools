@@ -93,7 +93,7 @@ export function makeCodeApprovedFixture() {
   const cr = `CR-${YEAR}-042`;
   // 1) kb master：注册账本 + cr.md(code-approved) + plan/tasks/test-report
   fs.writeFileSync(path.join(kb, 'change-requests', '_backlog.yml'),
-    `schema: cr-backlog/v2\nchange-requests:\n  - id: ${cr}\n    title: Merge Test\n    status: code-approved\n`);
+    `schema: cr-backlog/v2\nchange-requests:\n  - id: ${cr}\n    title: Merge Test\n    status: code-approved\n    owner: alice\n`);
   fs.writeFileSync(path.join(kb, 'change-requests', '_index.yml'), `change-requests:\n  - id: ${cr}\n    title: Merge Test\n`);
   const kbCr = path.join(kb, 'change-requests', cr);
   fs.mkdirSync(path.join(kbCr, 'tasks'), { recursive: true });
