@@ -1,23 +1,22 @@
 ---
 name: writeback-tasks
-description: 将 change-requests/{CR-ID}/tasks/ 下 status=done 的任务原子回写到 delivery/task/（拷贝+frontmatter+全局索引更新一步完成），供 archived 门禁的 deliveryIndexComplete 检查通过。
+description: writing-back 阶段任务回写：在 operational workspace 调 candidate-only generator 产出 delivery/task 回写 manifest，一次 crctl writeback-apply 深原语完成校验、应用、精确 stage、commit+trailer、lease push。
 ---
 
 # Skill: writeback-tasks
 
 **类型**: 回写期 Skill（writeback/ 组）
-**调用时机**: CR 生命周期 `writing-back` 阶段，`write-test-report` 完成之后、`cr-archive`（推进到 `archived`）之前。**必须在 archived 转移之前调用**——`archived` 门禁的 `deliveryIndexComplete` 检查（CR-2026-005 起）会校验本 skill 的产物是否齐备，晚于 archived 调用没有意义。
+**调用时机**: CR 生命周期 `writing-back` 阶段（write-test-report 之后、cr-archive 之前）
 **前置要求**: CR status = `writing-back`
 
 ---
 
 ## 用途
 
-把 `change-requests/{CR-ID}/tasks/` 下 `status=done` 的任务，一次调用原子完成：拷贝为 `delivery/task/` 下规范命名的文件 + 追加 frontmatter + 全量重建全局 `delivery/task/_index.yaml`——消除"拷文件"与"更新索引"两个动作靠记忆分别执行、容易漏掉后者的问题（CR-2026-003 归档时曾发生：3 个任务文件被正确拷贝，但 3 条索引行漏加，直到下一个 CR 归档时才被偶然发现，见 CR-2026-005 立项背景）。
+把 `change-requests/{cr_id}/tasks/` 下 `status=done` 的任务原子回写到 `delivery/task/`（拷贝 + frontmatter 注入 + 全局索引 `_index.yaml` 维护），供 archived 门禁的 deliveryIndexComplete 检查通过。
+内容生成与落盘分离（CR-2026-031 TASK-08）：**candidate-only generator** 产出 manifest，**`crctl writeback-apply` 深原语**独占校验、应用、精确 stage、commit + trailer、lease push。
 
-**机械步骤由入库脚本执行（CR-2026-020 起）**：脚本位于 `{TOOLS_ROOT}/skills/writeback/scripts/writeback-tasks.mjs`。执行者只做「调脚本 → 核对 dry-run 输出 → 实跑 → 提交」。
-
-> **格式约定**：目标文件名 `TASK-{version}-{cr_id}-{NN}-{slug}.md`（`{cr_id}` 用完整形式如 `CR-2026-005`）。`{slug}` 取源任务 frontmatter 的 `slug:` 字段，缺失回退 `task-{NN}`——由脚本内置逻辑保证，不做中文分词/语义猜测。此格式与 `writeback-traceability` SKILL / pipeline 模板三处一致（CR-2026-020 FR-8 统一）。
+本 Skill 只拥有：**前置确认、一次 generator 调用、一次深原语调用、结果分类**。
 
 ---
 
@@ -25,9 +24,10 @@ description: 将 change-requests/{CR-ID}/tasks/ 下 status=done 的任务原子�
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `cr_id` | string | ✅ | 目标 CR-ID（如 CR-2026-005） |
-| `spec_id` | string | ✅ | 关联的 spec ID，写入任务 frontmatter（如 `ai-first-platform`） |
-| `version` | string | ✅ | 目标版本（如 `0.12.1`），写入 frontmatter 与索引 `target-version`，用于文件名前缀 |
+| `cr_id` | string | ✅ | 目标 CR-ID |
+| `spec_id` | string | ✅ | 关联 spec ID |
+| `target_version` | string | ✅ | 目标版本 |
+| `operational_workspace` | string | ✅ | detached Transaction Workspace |
 
 ---
 
@@ -35,49 +35,49 @@ description: 将 change-requests/{CR-ID}/tasks/ 下 status=done 的任务原子�
 
 ### Step 1 — 前置校验
 
-<!-- lint-prompts:ignore --> 描述性：任务回写说明
-1. 读取 `change-requests/{cr_id}/cr.md`，确认 `status: writing-back`（脚本同样校验，不满足即 `CR_STATUS_MISMATCH` 硬失败）。
-2. 读取 `change-requests/{cr_id}/tasks/_index.yml`，筛出 `status: done` 的任务列表；为空则脚本输出 noop 并结束（无需回写）。
+1. 读取 `change-requests/{cr_id}/cr.md`（operational_workspace 内），确认 status=`writing-back`。
+2. 确认 `tasks/_index.yml` 有 `status: done` 任务；为空则 generator 输出 noop 结束。
 
-### Step 2 — 调用脚本，dry-run 核对
+### Step 2 — 生成 candidate（candidate-only，零写 workspace）
 
 ```bash
 node {TOOLS_ROOT}/skills/writeback/scripts/writeback-tasks.mjs \
-  --workspace . --cr {cr_id} --spec {spec_id} --version {version} --dry-run
+  --workspace {operational_workspace} --cr {cr_id} --spec {spec_id} --version {target_version} \
+  --candidate-out {candidate_dir}
 ```
 
-核对输出：将新建的文件名列表（`+ TASK-{version}-{cr_id}-{NN}-{slug}.md`）与 `delivery/task/_index.yaml` 全量重建摘要。**幂等判据（SDD-BLOCK-001 修复版）**：脚本扫描 `delivery/task/*.md` frontmatter 的 `id` 集合，已交付的 done 任务直接跳过——不看目标文件名、不比内容；因此源任务后补/修改 `slug` 再重跑不会产生第二份交付文件。
+输出 JSON 含 `manifestPath`。**幂等判据（SDD-BLOCK-001）**：已交付 id 集合跳过（不看文件名、不比内容）。
 
-### Step 3 — 实跑 + 自检 + 提交
+### Step 3 — 一次深原语应用
 
-去掉 `--dry-run` 重跑。脚本末尾自检（新增 id 在索引中恰 1 条、frontmatter 注入齐全、全文件无 CRLF），失败输出 `SELF_CHECK_FAILED` 非零退出。成功后提交：
-
-```bash
-crctl git add delivery/task/ --cwd <knowledge-base worktree>
-crctl git commit --template writeback --cr {cr_id} -m "任务回写 delivery/task {N} 项（{version}）" --cwd <knowledge-base worktree>
+```text
+crctl writeback-apply {cr_id} --stage tasks
+  --candidate {manifestPath} --spec-id {spec_id}
+  --workspace {knowledge-base 主 checkout}
 ```
+
+深原语内部完成：manifest 全矩阵校验（allowlist = `delivery/task/` 前缀 + `_index.yaml`）→ 精确 stage + staged set 断言 → commit + trailer → lease push + 远端事实分类；STALE/history-rewritten 语义同 writeback-prd-sdd。
 
 ### Step 4 — 输出摘要
 
 ```
 ✅ 任务回写完成
    CR          : {cr_id}
-   回写数量    : {N} 个（跳过已交付 {M} 个）
-   目标目录    : delivery/task/
+   回写数量    : {N} 个
+   tx          : {writeback-apply 返回 txId}
    下一步      : 以 `crctl next {cr_id}` 为准
 ```
 
 ---
 
-## 已核实事实基线（纪律 #4，2026-08-04 核实）
+## 已核实事实基线（纪律 #4）
 
 | 事实 | 值 |
 |---|---|
-| 目标文件命名 | `TASK-{version}-{cr_id}-{NN}-{slug}.md`（version 不带 v 前缀；slug 缺失回退 `task-{NN}`） |
-| 幂等唯一判据 | `delivery/task/*.md` frontmatter 的 `id` 集合（不比较内容、不看文件名） |
-| frontmatter 注入 | 拷贝时在 frontmatter 顶部注入 `spec-id: {spec_id}` 与 `version: "{version}"`（置于 id 之前，与既有回写产物一致） |
-| `delivery/task/_index.yaml` 结构 | 顶层 `tasks:` 列表；条目七字段 `id/file/title/status/cr-ref/target-version/estimate` 全部可从各任务文件 frontmatter 与文件名投影；重建顺序 = 既有 id 原序 + 新增按 id 排序追加 |
-| 源任务读取 | `change-requests/{cr_id}/tasks/_index.yml` 为账本文件，只读（账本写入仍唯一经 crctl） |
+| 目标文件命名 | `TASK-{version}-{cr_id}-{NN}-{slug}.md`（slug 缺失回退 `task-{NN}`） |
+| 幂等唯一判据 | `delivery/task/*.md` frontmatter 的 `id` 集合 |
+| frontmatter 注入 | `spec-id` + `version`（置于 id 前） |
+| 源任务读取 | `tasks/_index.yml` 账本只读（账本写入唯一经 crctl） |
 
 ---
 
@@ -85,8 +85,7 @@ crctl git commit --template writeback --cr {cr_id} -m "任务回写 delivery/tas
 
 | 错误码 | 处理 |
 |------|------|
-| `BAD_ARGS` | 缺 `--workspace/--cr/--spec/--version`，补参重跑 |
-<!-- lint-prompts:ignore --> 描述性：任务回写说明
-| `CR_STATUS_MISMATCH` | cr.md status 非 `writing-back`，先完成 writeback-prd-sdd 的 status 推进 |
-| `STRUCTURE_MISMATCH` | tasks/_index.yml 标记 done 的任务无对应 TASK-*.md 源文件，报告后停止 |
-| `SELF_CHECK_FAILED` | 回写后自检断言失败，检查输出文件后重跑 |
+| `BAD_ARGS` | 缺参，补参重跑 |
+| `CR_STATUS_MISMATCH` | status 非 `writing-back`，先完成 writeback-prd-sdd 的推进 |
+| `STRUCTURE_MISMATCH` | done 任务无对应 TASK-*.md 源文件，报告后停止 |
+| `WRITEBACK_REMOTE_STALE` | 重跑 Step 2 后重试 |

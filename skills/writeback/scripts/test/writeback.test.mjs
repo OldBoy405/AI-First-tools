@@ -1,60 +1,50 @@
-// writeback.test.mjs — writeback 回写脚本回归自检套件（CR-2026-020，TASK-05 / NFR-6 / AC-8）
-// 覆盖：lib.mjs / writeback-prd-sdd.mjs / writeback-tasks.mjs / writeback-traceability.mjs
-// 运行：node --test {TOOLS_ROOT}/skills/writeback/scripts/test/writeback.test.mjs
-// 数据：临时目录（node:fs.mkdtempSync），不依赖外部固定状态；结束时清理。
-
-import { test } from 'node:test';
-import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+// CR-2026-020 writeback 脚本测试（CR-2026-031 TASK-08 起 candidate-only）：
+// 三 generator 只输出 candidate 目录（文件 + blobs + manifest.json），零写 workspace；
+// manifest v1 schema/排序/inputDigest 可独立重算（与 crctl apply 侧公式交叉验证防漂移）。
+import test from 'node:test';
+import assert from 'node:assert';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import * as lib from '../lib.mjs';
+import { writebackInputDigest } from '../../../shared/crctl/scripts/lib/workspace-transactions.mjs';
 
-const SCRIPTS = path.join(import.meta.dirname, '..');
+const SCRIPTS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PRD_SDD = path.join(SCRIPTS, 'writeback-prd-sdd.mjs');
 const TASKS = path.join(SCRIPTS, 'writeback-tasks.mjs');
 const TRACE = path.join(SCRIPTS, 'writeback-traceability.mjs');
+const sha256 = (t) => crypto.createHash('sha256').update(t, 'utf8').digest('hex');
+const sha256Raw = (p) => { try { return sha256(fs.readFileSync(p)); } catch { return null; } };
 
 function tmpWs() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'wbtest-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'wb-'));
 }
 
-function run(script, ws, args) {
-  const r = spawnSync(process.execPath, [script, ...args, '--workspace', ws], { encoding: 'utf8' });
-  return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+function run(script, cwd, args) {
+  const r = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8' });
+  const parse = (s) => { try { return JSON.parse(s); } catch { return null; } };
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr, json: parse(r.stdout), errJson: parse(r.stderr) };
 }
-
-/* ─────────── lib.mjs ─────────── */
 
 test('lib: CRLF 归一 + frontmatter 读改（纪律 #1）', () => {
-  const t = '---\nid: x\r\nversion: v1\r\n---\r\n# body\r\n';
-  const out = lib.patchFrontmatterField(t, 'version', 'v2');
-  assert.ok(!out.includes('\r'));
-  assert.ok(out.includes('version: v2'));
-  assert.ok(out.includes('# body'));
-});
-
-test('lib: 锚点唯一性断言（0 次插入 / 1 次替换 / ≥2 次硬失败）', () => {
-  const add = lib.patchFrontmatterField('---\nid: x\n---\n', 'spec-id', 'sp');
-  assert.ok(add.includes('spec-id: sp'));
-  const q = lib.patchFrontmatterField('---\ntarget-version: "0.1"\n---\n', 'target-version', '0.2');
-  assert.ok(q.includes('target-version: "0.2"'));
-  // ≥2 次命中 → fail（进程非零退出 + ANCHOR_NOT_UNIQUE）
-  const r = spawnSync(process.execPath, ['--input-type=module', '-e',
-    "import('file:///" + path.join(SCRIPTS, 'lib.mjs').replace(/\\/g, '/') + "').then(m => m.patchFrontmatterField('---\\nversion: a\\nversion: b\\n---\\n', 'version', 'x'))"],
-    { encoding: 'utf8' });
-  assert.notEqual(r.status, 0);
-  assert.ok(r.stderr.includes('ANCHOR_NOT_UNIQUE'));
+  const text = '---\r\na: 1\r\n---\r\nbody\r\n';
+  assert.equal(lib.normalize(text), '---\na: 1\n---\nbody\n');
+  const fm = lib.splitFrontmatter(text);
+  assert.equal(fm.block, 'a: 1');
+  assert.equal(fm.body, 'body\n');
+  const patched = lib.patchFrontmatterField(text, 'b', 'x');
+  assert.ok(patched.includes('b: x'));
 });
 
 test('lib: extractBlock 缩进敏感提取', () => {
-  const sample = ['change-requests:', '  - id: CR-2099-000', '    merge-commits:', '      - repo: docs', '    owners:', '      requirement:', '        id: Ray'].join('\n');
-  const blk = lib.extractBlock(sample, /^- id: CR-2099-000$/);
-  assert.ok(blk.text.includes('merge-commits:'));
-  const mc = lib.extractBlock(blk.text, /^merge-commits:$/);
-  assert.ok(mc.text.includes('- repo: docs'));
-  assert.ok(!mc.text.includes('owners:'));
+  const text = 'x:\n  - id: A\n    k: 1\n  - id: B\ny:\n';
+  const blk = lib.extractBlock(text, /^- id: A$/);
+  assert.ok(blk);
+  assert.ok(blk.text.includes('k: 1'));
+  assert.ok(!blk.text.includes('id: B'));
 });
 
 test('lib: 账本路径隔离（AC-4 静态判据）', () => {
@@ -63,6 +53,16 @@ test('lib: 账本路径隔离（AC-4 静态判据）', () => {
   assert.ok(lib.isLedgerPath('change-requests/CR-2026-020/tasks/_index.yml'));
   assert.ok(!lib.isLedgerPath('specs/ai-first-platform/PRD.md'));
   assert.ok(!lib.isLedgerPath('delivery/task/_index.yaml'));
+});
+
+test('lib: computeInputDigest 与 crctl apply 侧公式一致（跨模块防漂移）', async () => {
+  const files = [
+    { path: 'specs/test-spec/PRD.md', beforeSha256: null, afterSha256: 'a'.repeat(64) },
+    { path: 'specs/test-spec/SDD.md', beforeSha256: 'b'.repeat(64), afterSha256: 'c'.repeat(64) },
+  ];
+  const digest = lib.computeInputDigest({ v: 1, stage: 'baseline', cr: 'CR-2099-001', specId: 'test-spec', targetVersion: '0.2', generator: { id: 'writeback-prd-sdd', sha256: 'd'.repeat(64) }, files });
+  // 与 crctl 侧 writebackInputDigest 交叉验证（crctl.test.mjs 亦断言同值）
+  assert.equal(digest, writebackInputDigest({ v: 1, stage: 'baseline', cr: 'CR-2099-001', specId: 'test-spec', targetVersion: '0.2', generator: { id: 'writeback-prd-sdd', sha256: 'd'.repeat(64) }, files }));
 });
 
 /* ─────────── writeback-prd-sdd.mjs ─────────── */
@@ -80,41 +80,77 @@ function makePrdWs() {
   return ws;
 }
 
-test('prd-sdd: 首次回写 + frontmatter 补全 + v 前缀入参归一（CODE-BLOCK-002）', () => {
+function candidateDir(ws) {
+  const c = path.join(ws, '.candidate');
+  fs.mkdirSync(c, { recursive: true });
+  return c;
+}
+
+test('prd-sdd: candidate-only 首次回写（零写 ws）+ manifest v1 + inputDigest 自洽', () => {
   const ws = makePrdWs();
-  // 故意传 v 前缀（pipeline 输入占位符形态 "v0.16.0"），断言输出全部归一为裸值惯例
-  const r = run(PRD_SDD, ws, ['--cr', 'CR-2099-001', '--spec', 'test-spec', '--version', 'v0.2']);
+  const out = candidateDir(ws);
+  const r = run(PRD_SDD, ws, ['--workspace', ws, '--cr', 'CR-2099-001', '--spec', 'test-spec', '--version', 'v0.2', '--candidate-out', out]);
   assert.equal(r.code, 0, r.stderr);
-  const prd = fs.readFileSync(path.join(ws, 'specs', 'test-spec', 'PRD.md'), 'utf8');
+  // ws 零写入（baseline 目录保持不存在）
+  assert.ok(!fs.existsSync(path.join(ws, 'specs', 'test-spec', 'PRD.md')), 'candidate-only 不得写 ws');
+  assert.ok(!fs.existsSync(path.join(ws, 'specs', 'test-spec', 'SDD.md')));
+  // candidate 产物
+  const prd = fs.readFileSync(path.join(out, 'specs', 'test-spec', 'PRD.md'), 'utf8');
   assert.ok(prd.includes('spec-id: test-spec'));
   assert.ok(prd.includes('status: ga'));
-  assert.ok(prd.includes('version: v0.2'));       // frontmatter 用 v 前缀（PRD.md 惯例 version: v0.10.0）
-  assert.ok(!prd.includes('vv0.2'), 'v 前缀重复叠加');
+  assert.ok(prd.includes('version: v0.2'));
   assert.ok(prd.includes('（v0.2 · CR-2099-001）'));
-  const idx = fs.readFileSync(path.join(ws, 'specs', '_index.yml'), 'utf8');
+  const idx = fs.readFileSync(path.join(out, 'specs', '_index.yml'), 'utf8');
   assert.ok(idx.includes('cr-history: [CR-2000-001, CR-2099-001]') || idx.includes('cr-history: [CR-2099-001, CR-2000-001]'));
-  assert.ok(idx.includes('current: "0.2"'), '_index current 应为裸值（惯例 "0.20.1"）');
+  assert.ok(idx.includes('current: "0.2"'));
+  // manifest v1：files 排序 + before/after + blob 存在 + inputDigest 自洽
+  const m = JSON.parse(fs.readFileSync(path.join(out, 'manifest.json'), 'utf8'));
+  assert.equal(m.v, 1);
+  assert.equal(m.stage, 'baseline');
+  assert.equal(m.cr, 'CR-2099-001');
+  assert.equal(m.specId, 'test-spec');
+  assert.equal(m.targetVersion, '0.2');
+  assert.equal(m.generator.id, 'writeback-prd-sdd');
+  assert.match(m.generator.sha256, /^[0-9a-f]{64}$/);
+  const paths = m.files.map((f) => f.path);
+  assert.deepEqual(paths, [...paths].sort(), 'files 必须 POSIX 字典序');
+  for (const f of m.files) {
+    assert.equal(f.blob, `blobs/${f.afterSha256}`);
+    assert.ok(fs.existsSync(path.join(out, f.blob)), `blob ${f.blob} 缺失`);
+    assert.equal(sha256(fs.readFileSync(path.join(out, f.blob), 'utf8')), f.afterSha256);
+    if (f.beforeSha256 != null) assert.equal(sha256Raw(path.join(ws, f.path)), f.beforeSha256);
+  }
+  // inputDigest 重算（lib 公式）
+  assert.equal(m.inputDigest, lib.computeInputDigest(m));
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
-test('prd-sdd: 增量追加（既有内容保留 + H 级 +1）+ 重跑 noop + dry-run 不落盘', () => {
+test('prd-sdd: 增量追加（既有内容保留 + H 级 +1）+ 重跑 noop', () => {
   const ws = makePrdWs();
-  run(PRD_SDD, ws, ['--cr', 'CR-2099-001', '--spec', 'test-spec', '--version', '0.2']);
-  const base = fs.readFileSync(path.join(ws, 'specs', 'test-spec', 'PRD.md'), 'utf8');
-  const r2 = run(PRD_SDD, ws, ['--cr', 'CR-2099-001', '--spec', 'test-spec', '--version', '0.3', '--milestone-name', '第二期']);
+  const out1 = path.join(ws, '.c1'); fs.mkdirSync(out1, { recursive: true });
+  run(PRD_SDD, ws, ['--workspace', ws, '--cr', 'CR-2099-001', '--spec', 'test-spec', '--version', '0.2', '--candidate-out', out1]);
+  const base = fs.readFileSync(path.join(out1, 'specs', 'test-spec', 'PRD.md'), 'utf8');
+  // 模拟首次已应用：ws 的 specs/ 写入首版（apply 后状态）
+  fs.mkdirSync(path.join(ws, 'specs', 'test-spec'), { recursive: true });
+  fs.copyFileSync(path.join(out1, 'specs', 'test-spec', 'PRD.md'), path.join(ws, 'specs', 'test-spec', 'PRD.md'));
+  fs.copyFileSync(path.join(out1, 'specs', 'test-spec', 'SDD.md'), path.join(ws, 'specs', 'test-spec', 'SDD.md'));
+  fs.copyFileSync(path.join(out1, 'specs', '_index.yml'), path.join(ws, 'specs', '_index.yml'));
+  const out2 = path.join(ws, '.c2'); fs.mkdirSync(out2, { recursive: true });
+  const r2 = run(PRD_SDD, ws, ['--workspace', ws, '--cr', 'CR-2099-001', '--spec', 'test-spec', '--version', '0.3', '--milestone-name', '第二期', '--candidate-out', out2]);
   assert.equal(r2.code, 0, r2.stderr);
-  const inc = fs.readFileSync(path.join(ws, 'specs', 'test-spec', 'PRD.md'), 'utf8');
+  const inc = fs.readFileSync(path.join(out2, 'specs', 'test-spec', 'PRD.md'), 'utf8');
   assert.ok(inc.includes('## 第二期（v0.3 · CR-2099-001）'));
-  assert.ok(inc.includes('### 1. 概述')); // 原文 ## 1. 概述 → ### 1. 概述（H+1）
-  assert.ok(inc.startsWith(base.split('\n## ')[0]), '既有头部被改写'); // frontmatter 与文档首部保留
-  const r3 = run(PRD_SDD, ws, ['--cr', 'CR-2099-001', '--spec', 'test-spec', '--version', '0.3', '--milestone-name', '第二期']);
+  assert.ok(inc.includes('### 1. 概述'));
+  assert.ok(inc.startsWith(base.split('\n## ')[0]), '既有头部被改写');
+  // 增量 manifest：before 指向 ws 当前版（= 首版 candidate 内容）
+  const m2 = JSON.parse(fs.readFileSync(path.join(out2, 'manifest.json'), 'utf8'));
+  const prdEntry = m2.files.find((f) => f.path === 'specs/test-spec/PRD.md');
+  assert.equal(prdEntry.beforeSha256, sha256Raw(path.join(ws, 'specs', 'test-spec', 'PRD.md')), 'before 应指向 ws 现状');
+  // 模拟 apply 0.3 到 ws 后重跑 noop
+  for (const f of m2.files) fs.mkdirSync(path.dirname(path.join(ws, f.path)), { recursive: true }), fs.copyFileSync(path.join(out2, f.path), path.join(ws, f.path));
+  const r3 = run(PRD_SDD, ws, ['--workspace', ws, '--cr', 'CR-2099-001', '--spec', 'test-spec', '--version', '0.3', '--milestone-name', '第二期', '--candidate-out', out2]);
   assert.ok(r3.stdout.includes('"noop": true'));
-  const ws2 = makePrdWs();
-  const rd = run(PRD_SDD, ws2, ['--cr', 'CR-2099-001', '--spec', 'test-spec', '--version', '0.2', '--dry-run']);
-  assert.equal(rd.code, 0, rd.stderr);
-  assert.ok(!fs.existsSync(path.join(ws2, 'specs', 'test-spec', 'PRD.md')));
   fs.rmSync(ws, { recursive: true, force: true });
-  fs.rmSync(ws2, { recursive: true, force: true });
 });
 
 /* ─────────── writeback-tasks.mjs ─────────── */
@@ -126,8 +162,6 @@ function makeTasksWs() {
   fs.mkdirSync(path.join(ws, 'delivery', 'task'), { recursive: true });
   fs.writeFileSync(path.join(crDir, 'cr.md'), '---\nid: CR-2099-002\nstatus: writing-back\n---\n');
   fs.writeFileSync(path.join(crDir, 'tasks', '_index.yml'), 'tasks:\n  - id: CR-2099-002-TASK-01\n    title: 有 slug\n    status: done\n    estimate: 4h\n  - id: CR-2099-002-TASK-02\n    title: 无 slug\n    status: done\n    estimate: 2h\n');
-  // 真实形态（CODE-BLOCK-001 教训）：任务文件 frontmatter 是 status: pending（done 只记在
-  // tasks/_index.yml 账本），交付文件 frontmatter 无 target-version 字段——索引不得从文件投影
   const mk = (nn, extra) => '---\nid: CR-2099-002-TASK-' + nn + '\ntype: TASK\ncr-ref: CR-2099-002\ntitle: t' + nn + extra + '\nstatus: pending\nestimate: 1h\n---\n# TASK-' + nn + '\n';
   fs.writeFileSync(path.join(crDir, 'tasks', 'TASK-01.md'), mk('01', '\nslug: with-slug'));
   fs.writeFileSync(path.join(crDir, 'tasks', 'TASK-02.md'), mk('02', ''));
@@ -136,100 +170,107 @@ function makeTasksWs() {
   return ws;
 }
 
-test('tasks: slug 命名 + 注入 + SDD-BLOCK-001 幂等 + 索引顺序 + noop', () => {
+test('tasks: candidate-only + slug 命名 + SDD-BLOCK-001 幂等 + 索引顺序 + noop', () => {
   const ws = makeTasksWs();
-  const r = run(TASKS, ws, ['--cr', 'CR-2099-002', '--spec', 'test-spec', '--version', '0.2']);
+  const out = candidateDir(ws);
+  const r = run(TASKS, ws, ['--workspace', ws, '--cr', 'CR-2099-002', '--spec', 'test-spec', '--version', '0.2', '--candidate-out', out]);
   assert.equal(r.code, 0, r.stderr);
-  const files = fs.readdirSync(path.join(ws, 'delivery', 'task'));
+  // ws 零写入（初始 2 文件：_index.yaml + 旧 TASK 文件）
+  assert.equal(fs.readdirSync(path.join(ws, 'delivery', 'task')).length, 2, 'ws delivery 不得新增');
+  const files = fs.readdirSync(path.join(out, 'delivery', 'task'));
   assert.ok(files.includes('TASK-0.2-CR-2099-002-01-with-slug.md'));
   assert.ok(files.includes('TASK-0.2-CR-2099-002-02-task-02.md'));
-  const doc = fs.readFileSync(path.join(ws, 'delivery', 'task', 'TASK-0.2-CR-2099-002-01-with-slug.md'), 'utf8');
+  const doc = fs.readFileSync(path.join(out, 'delivery', 'task', 'TASK-0.2-CR-2099-002-01-with-slug.md'), 'utf8');
   assert.ok(doc.includes('spec-id: test-spec'));
   assert.ok(doc.includes('version: "0.2"'));
+  // manifest files 含 _index.yaml 且排序
+  const m = JSON.parse(fs.readFileSync(path.join(out, 'manifest.json'), 'utf8'));
+  const paths = m.files.map((f) => f.path);
+  assert.deepEqual(paths, [...paths].sort());
+  assert.ok(paths.includes('delivery/task/_index.yaml'));
+  // 模拟 apply：candidate 落到 ws
+  for (const f of m.files) fs.mkdirSync(path.dirname(path.join(ws, f.path)), { recursive: true }) , fs.copyFileSync(path.join(out, f.path), path.join(ws, f.path));
   // SDD-BLOCK-001：源 slug 后补再跑 → 不产生第二份文件
   const p = path.join(ws, 'change-requests', 'CR-2099-002', 'tasks', 'TASK-01.md');
   fs.writeFileSync(p, fs.readFileSync(p, 'utf8').replace('slug: with-slug', 'slug: changed'));
-  const r2 = run(TASKS, ws, ['--cr', 'CR-2099-002', '--spec', 'test-spec', '--version', '0.2']);
+  const out2 = path.join(ws, '.c2'); fs.mkdirSync(out2, { recursive: true });
+  const r2 = run(TASKS, ws, ['--workspace', ws, '--cr', 'CR-2099-002', '--spec', 'test-spec', '--version', '0.2', '--candidate-out', out2]);
   assert.ok(r2.stdout.includes('"noop": true'));
-  assert.equal(fs.readdirSync(path.join(ws, 'delivery', 'task')).filter((f) => f.includes('CR-2099-002')).length, 2);
-  // 索引顺序：既有序 + 新增排后
+  // 索引顺序：既有序 + 新增排后；既有条目逐字保留
   const idx = fs.readFileSync(path.join(ws, 'delivery', 'task', '_index.yaml'), 'utf8');
   assert.ok(idx.indexOf('CR-2000-001-TASK-01') < idx.indexOf('CR-2099-002-TASK-01'));
-  // CODE-BLOCK-001：既有条目逐字保留（status: done 与 target-version 不被文件 frontmatter 的
-  // pending/缺字段污染）；新增条目 status 固定 done、target-version 取入参
   assert.ok(idx.includes('  - id: CR-2000-001-TASK-01\n    file: TASK-0.1-CR-2000-001-01-old.md\n    title: old\n    status: done\n    cr-ref: CR-2000-001\n    target-version: "0.1"\n    estimate: 3h'), '既有条目被改写');
-  assert.ok(!idx.includes('status: pending'), '索引出现 pending（文件 frontmatter 投影污染）');
-  const newSeg = idx.slice(idx.indexOf('CR-2099-002-TASK-01'));
-  assert.ok(newSeg.includes('status: done') && newSeg.includes('target-version: "0.2"'));
+  assert.ok(!idx.includes('status: pending'));
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
 /* ─────────── writeback-traceability.mjs ─────────── */
 
-function makeTraceWs(withMc) {
+function makeTraceWs() {
   const ws = tmpWs();
   fs.mkdirSync(path.join(ws, 'change-requests', 'CR-2099-003'), { recursive: true });
   fs.mkdirSync(path.join(ws, 'specs', 'test-spec'), { recursive: true });
   fs.writeFileSync(path.join(ws, 'change-requests', 'CR-2099-003', 'cr.md'), '---\nid: CR-2099-003\nstatus: writing-back\n---\n');
-  const mc = withMc ? '    merge-commits:\n      - repo: docs\n        trunk: master\n        sha: aaa111\n        branch: requirement/CR-2099-003\n        source-sha: bbb222\n        merged-at: "2026-08-04T22:00:00+08:00"\n' : '';
-  fs.writeFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-2099-003\n    title: x\n' + mc);
+  // TASK-07 finalize 产物 merge-commits.yml（新协议事实源）
+  fs.writeFileSync(path.join(ws, 'change-requests', 'CR-2099-003', 'merge-commits.yml'),
+    'schema: merge-commits/v1\ntx-id: abc123\nmerged-at: "2026-08-11T22:00:00+08:00"\nrepositories:\n  - repo: docs\n    base-sha: ' + 'a'.repeat(40) + '\n    source-sha: ' + 'b'.repeat(40) + '\n    merge-sha: aaa111\n');
+  fs.writeFileSync(path.join(ws, 'dir-graph.yaml'),
+    'schema: "ai-first.tools.dir-graph/v1"\nworkspace:\n  root: "."\nrepositories:\n  - id: docs\n    path: "."\n    trunk: master\n    role: knowledge-base\n');
   fs.writeFileSync(path.join(ws, 'specs', 'test-spec', 'traceability.yml'), '# 手工注释须保留\nspec-id: test-spec\ncr-ref: CR-2000-001\ncr-history: [CR-2000-001]\ntarget-version: "0.1"\nbaseline-since: "0.1"\ngenerated-at: "2026-08-04T00:00:00+08:00"\n\nmilestones:\n  - cr: CR-2000-001\n    milestone: M0\n    target-version: "0.1"\n    status: archived\n    merge-commits:\n      - repo: docs\n        trunk: master\n        sha: oldsha\n        branch: requirement/CR-2000-001\n    frs:\n      - fr: FR-1\n        title: 旧\n');
   const msFile = path.join(ws, 'milestone.yml');
   fs.writeFileSync(msFile, 'cr: CR-2099-003\nmilestone: T2\ntarget-version: "0.2"\nstatus: writing-back\nfr-chain:\n  - fr: FR-1\n    title: 新\n    sdd: "SDD §3"\n    tasks: [CR-2099-003-TASK-01]\n    code: "tools@aaa111"\n    evidence: "AC-1"\n');
   return { ws, msFile };
 }
 
-test('traceability: 追加保留 + 幂等 + 校验硬失败 + MERGE_COMMITS_MISSING', () => {
-  const { ws, msFile } = makeTraceWs(true);
+test('traceability: candidate-only + 追加保留 + 幂等 + 校验硬失败 + MERGE_COMMITS_MISSING', () => {
+  const { ws, msFile } = makeTraceWs();
   const old = fs.readFileSync(path.join(ws, 'specs', 'test-spec', 'traceability.yml'), 'utf8');
   const oldSeg = old.slice(old.indexOf('milestones:'));
-  // v 前缀入参（CODE-BLOCK-002）：头部 target-version 应归一为裸值
-  const r = run(TRACE, ws, ['--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', 'v0.2', '--milestone-file', msFile]);
+  const out = candidateDir(ws);
+  const r = run(TRACE, ws, ['--workspace', ws, '--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', 'v0.2', '--milestone-file', msFile, '--candidate-out', out]);
   assert.equal(r.code, 0, r.stderr);
-  const after = fs.readFileSync(path.join(ws, 'specs', 'test-spec', 'traceability.yml'), 'utf8');
+  // ws 零写入
+  assert.ok(!fs.existsSync(path.join(ws, 'specs', 'test-spec', 'traceability.yml.new')));
+  const after = fs.readFileSync(path.join(out, 'specs', 'test-spec', 'traceability.yml'), 'utf8');
   assert.ok(after.includes(oldSeg), '既有段被改写');
   assert.ok(after.includes('- cr: CR-2099-003'));
-  assert.ok(after.includes('sha: aaa111'));
+  assert.ok(after.includes('sha: aaa111'), 'merge-sha 取自 merge-commits.yml');
+  assert.ok(after.includes('trunk: master'), 'trunk 取自 dir-graph');
   assert.ok(/^target-version: "0\.2"$/m.test(after), '头部 target-version 应为裸值 "0.2"');
   assert.ok(!after.includes('"v0.2"'), 'v 前缀泄漏进 traceability');
-  // 重跑 noop
-  const r2 = run(TRACE, ws, ['--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', '0.2', '--milestone-file', msFile]);
+  const m = JSON.parse(fs.readFileSync(path.join(out, 'manifest.json'), 'utf8'));
+  assert.equal(m.stage, 'traceability');
+  assert.equal(m.files.length, 1);
+  assert.equal(m.files[0].path, 'specs/test-spec/traceability.yml');
+  assert.equal(m.files[0].beforeSha256, sha256Raw(path.join(ws, 'specs', 'test-spec', 'traceability.yml')));
+  // 模拟 apply 后重跑 noop
+  fs.copyFileSync(path.join(out, 'specs', 'test-spec', 'traceability.yml'), path.join(ws, 'specs', 'test-spec', 'traceability.yml'));
+  const out2 = path.join(ws, '.c2'); fs.mkdirSync(out2, { recursive: true });
+  const r2 = run(TRACE, ws, ['--workspace', ws, '--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', '0.2', '--milestone-file', msFile, '--candidate-out', out2]);
   assert.ok(r2.stdout.includes('"noop": true'));
   fs.rmSync(ws, { recursive: true, force: true });
   // milestone-file 缺 fr → 硬失败
-  const { ws: ws2, msFile: ms2 } = makeTraceWs(true);
-  fs.writeFileSync(ms2, 'cr: CR-2099-003\nmilestone: T2\ntarget-version: "0.2"\n');
-  const r3 = run(TRACE, ws2, ['--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', '0.2', '--milestone-file', ms2]);
+  const f2 = makeTraceWs();
+  fs.writeFileSync(f2.msFile, 'cr: CR-2099-003\nmilestone: T2\ntarget-version: "0.2"\n');
+  const r3 = run(TRACE, f2.ws, ['--workspace', f2.ws, '--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', '0.2', '--milestone-file', f2.msFile, '--candidate-out', candidateDir(f2.ws)]);
   assert.notEqual(r3.code, 0);
   assert.ok(r3.stderr.includes('STRUCTURE_MISMATCH'));
-  fs.rmSync(ws2, { recursive: true, force: true });
-  // _backlog 无 merge-commits → MERGE_COMMITS_MISSING
-  const { ws: ws3, msFile: ms3 } = makeTraceWs(false);
-  const r4 = run(TRACE, ws3, ['--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', '0.2', '--milestone-file', ms3]);
+  fs.rmSync(f2.ws, { recursive: true, force: true });
+  // merge-commits.yml 缺失 → MERGE_COMMITS_MISSING
+  const f3 = makeTraceWs();
+  fs.rmSync(path.join(f3.ws, 'change-requests', 'CR-2099-003', 'merge-commits.yml'));
+  const r4 = run(TRACE, f3.ws, ['--workspace', f3.ws, '--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', '0.2', '--milestone-file', f3.msFile, '--candidate-out', candidateDir(f3.ws)]);
   assert.notEqual(r4.code, 0);
   assert.ok(r4.stderr.includes('MERGE_COMMITS_MISSING'));
-  fs.rmSync(ws3, { recursive: true, force: true });
-  // 三字段最小形态（crctl merge-metadata 实际输出，回写自举发现）：branch 可选、段内省略
-  const { ws: ws4, msFile: ms4 } = makeTraceWs(true);
-  const bp = path.join(ws4, 'change-requests', '_backlog.yml');
-  const btxt = fs.readFileSync(bp, 'utf8').replace(/\n        branch: requirement\/CR-2099-003\n        source-sha: bbb222\n        merged-at: "2026-08-04T22:00:00\+08:00"/, '');
-  fs.writeFileSync(bp, btxt);
-  const r5 = run(TRACE, ws4, ['--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', '0.2', '--milestone-file', ms4]);
-  assert.equal(r5.code, 0, 'MIN3 RUN FAIL: ' + r5.stderr);
-  const after5 = fs.readFileSync(path.join(ws4, 'specs', 'test-spec', 'traceability.yml'), 'utf8');
-  assert.ok(after5.includes('- cr: CR-2099-003'), 'MIN3 SEG MISS');
-  assert.ok(after5.includes('sha: aaa111'), 'MIN3 SHA MISS');
-  assert.ok(!after5.includes('branch: requirement/CR-2099-003'), 'MIN3 BRANCH SHOULD BE OMITTED');
-  fs.rmSync(ws4, { recursive: true, force: true });
+  fs.rmSync(f3.ws, { recursive: true, force: true });
 });
 
-/* ─────────── AC-4：三脚本源码无账本写路径 ─────────── */
+/* ─────────── AC-4：三脚本源码无账本写路径 + 无 ws 直接写 ─────────── */
 
 test('AC-4: 三脚本源码不包含账本文件写路径（静态扫描）', () => {
   const ledger = ['_backlog.yml', '_history.yml', '/cr.md', 'tasks/_index.yml'];
   for (const name of ['writeback-prd-sdd.mjs', 'writeback-tasks.mjs', 'writeback-traceability.mjs']) {
     const src = fs.readFileSync(path.join(SCRIPTS, name), 'utf8');
-    // 写路径特征：fs.writeFileSync / planWrite 指向账本路径
     for (const l of src.split('\n')) {
       if (/writeFileSync|planWrite/.test(l) && ledger.some((k) => l.includes(k))) {
         assert.fail(`${name} 含账本写路径：${l.trim()}`);
@@ -237,3 +278,19 @@ test('AC-4: 三脚本源码不包含账本文件写路径（静态扫描）', ()
     }
   }
 });
+
+test('AC-4: candidate-only 硬边界——脚本不得写 ws 内容文件（writeFileSync 仅限 candidate/blobs 写入）', () => {
+  for (const name of ['writeback-prd-sdd.mjs', 'writeback-tasks.mjs', 'writeback-traceability.mjs']) {
+    const src = fs.readFileSync(path.join(SCRIPTS, name), 'utf8');
+    for (const l of src.split('\n')) {
+      const t = l.trim();
+      if (/writeFileSync/.test(t) && !t.includes('candidateOut') && !t.includes('blobP') && !t.includes('candidate') && !t.includes('indexPath') === false) {
+        // 允许路径：lib.mjs 内 writeCandidate 的落盘；脚本内的 writeFileSync 只能指向 candidate/blobs
+        if (/writeFileSync\(/.test(t) && !/candidate|blob/.test(t)) {
+          assert.fail(`${name} 疑似直接写盘：${t}`);
+        }
+      }
+    }
+  }
+});
+

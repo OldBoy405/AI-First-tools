@@ -40,13 +40,13 @@ updated: "2026-08-05T15:10:00+08:00"
 
 ### `skills/shared/crctl/scripts/crctl.mjs`
 
-状态机与账本的唯一可执行治理工具。**刻意单文件**（当前 1400+ 行），不因体量拆分——拆分会打散"状态机 + CAS + 审计"这条强内聚的写入路径，抵消单文件带来的"改动即全貌可见"优势（对标 esbuild/Litestream 的单文件哲学）。**本轮不创建 `commands/` 模块目录**；若未来需要模块化，必须独立立项并先修订本文档（CR-2026-027 FR-2 拍板）。
+状态机与账本的唯一可执行治理入口。CLI/门禁留在 `crctl.mjs`；YAML 子集、repository/workspace 事务与持久化原语分别下沉到同级 `lib/yaml-subset.mjs`、`lib/workspace-transactions.mjs`、`lib/durable-tx.mjs`。lib 不反向依赖 CLI，也不形成第二命令入口。
 
-CR-2026-021 起写入子命令族扩至覆盖：`review-annotations/{stage}.yml`（review-record）、`approval.yml#supplemental-reviews[]`（review-note）、`_backlog` 非 status 字段（checkpoint-add/backlog-set/inbox-emit）、**Owner 双投影 + 唯一责任历史 + 隔离 commit（owner-set，CR-2026-030 起不再是单一 _backlog 写入）**、CR-ID/TASK-ID 分配与首次建档（cr-init/task allocate）、只读聚合（worktree-path/report/cr-metrics）、`git commit --template` 消息模板。全部沿用「状态机 + CAS + `.crctl/audit.log` 审计」同一条写入路径，无旁路。
+`register`、`merge`、`writeback-apply`、`archive` 使用 journal envelope、目录锁与 recoverable write-set。`approve`、`review-record`、`owner-set` 的多文件写使用同一 `durable-tx.mjs` 中的 command-level ledger transaction：commit 前中断按持久化 before snapshots 整组回滚；commit 后中断按 `AI-First-Tx` trailer 确认 authority 后只清理 journal。旧 `casWriteMulti` 与专属半状态故障点已删除。其余单文件账本命令继续使用 hash-CAS；所有路径共享 `.crctl/audit.log` 与 controlled Git，无旁路。
 
 ### `skills/shared/crctl/gates.json` + `dir-graph.yaml`
 
-CR 状态机（15 具名状态 + 注册前 `(new)`，27 条声明转移、wildcard 展开 49 条）与门禁判据的唯一事实源。**任何使用方仓库不得复刻这两处声明**，只能引用。
+CR 状态机（15 具名状态 + 注册前 `(new)`，**28 条声明转移、wildcard 展开 50 条**）与门禁判据的唯一事实源。**任何使用方仓库不得复刻这两处声明**，只能引用。
 
 ### `skills/shared/engineering-docs/`
 
@@ -86,7 +86,7 @@ crctl（scripts/crctl.mjs）          # 状态与账本的唯一写入执行器�
 2. **账本单一写入通道**：`_backlog.yml`/`tasks/_index.yml`/`_history.yml` 等账本文件的写入只能经 crctl 子命令（CAS + `.crctl/audit.log` 审计），禁止会话内现写脚本或 Skill 文档指导手工编辑 YAML（核查：`grep -rn "手工编辑\|手动改" skills --include=SKILL.md` 应为空，或仅命中"禁止"类措辞）。
 3. **零第三方依赖**：`crctl.mjs` 只用 Node 标准库；YAML 读写用行级定向正则改写（非通用序列化器），避免引入解析器依赖与"全量重排打乱字段序"的副作用（核查：`crctl.mjs` 顶部 `import` 语句只含 `node:*` 内建模块）。
 4. **行尾与硬失败纪律**：任何对账本文件做哈希、跨行正则、逐行解析的代码，读入先 `\r\n → \n` 规范化，解析器用 `split(/\r?\n/)`；跨行正则匹配失败必须硬失败报错，禁止静默降级为空结果（核查：新增解析函数是否在 `replaceAll('\r\n','\n')` 之后才做正则匹配；匹配失败路径是否调用 `fail(...)` 而非返回原文/空值）。
-5. **状态机口径唯一**：状态机 = 15 个具名状态 + 注册前 `(new)`；转移 = 27 条声明，wildcard 展开后 49 条。任何文档/断言/代码注释引用状态机规模必须与此口径一致（核查：新文档若提及"N 个状态/M 条转移"，核对是否为该口径）。
+5. **状态机口径唯一**：状态机 = 15 个具名状态 + 注册前 `(new)`；转移 = 28 条声明，wildcard 展开后 50 条。任何文档/断言/代码注释引用状态机规模必须与此口径一致（核查：新文档若提及"N 个状态/M 条转移"，核对是否为该口径）。
 6. **git 是权威，outbox 只是投影**：`crctl` 状态/事件写入 git 后才是权威事实；`.crctl/outbox/` 事件写入失败只记审计、不阻塞主操作（核查：`emitOutboxEvent` 的失败分支是否仍返回主命令的 `ok()` 结果）。
 7. **人工审批无旁路**：需求/架构/开发启动/代码四个人工审批节点只能经 `crctl approve`（交互式 TTY）或 Ed25519 签名授权完成，非 TTY 调用一律拒绝（核查：`cmdApprove` 的 TTY/签名校验分支是否可被参数绕过）。
 
@@ -95,7 +95,7 @@ crctl（scripts/crctl.mjs）          # 状态与账本的唯一写入执行器�
 | 不做什么 | 为什么（否决记录） | 何时重新考虑 |
 |---|---|---|
 | 独立账本操作脚本库（如 `tools/skills/shared/scripts/`） | CR-2026-012 复盘明确否决：会在 crctl 之外开第二条账本写入通道，绕开 CAS 复核/审计日志/门禁校验，长期必然漂移。（范围澄清，CR-2026-020：否决对象是**账本操作**脚本库；specs/delivery 内容文件回写脚本落点收窄为 `skills/writeback/scripts/`，不是 `skills/shared/scripts/`——防后续 CR 误以为本否决已推翻而把账本脚本堆入该目录） | 若 crctl 子命令模式被证明无法覆盖某类账本操作（如需要跨仓事务），重新评估 |
-| 双文件/多文件写入的 WAL 或两阶段提交 | 单写者不变量（不变量 7）下，`casWriteMulti` 的"全校验→全 temp→连续 rename"窗口足够小，过度设计（YAGNI） | 若出现并发 crctl 写者场景，改为文件锁或事务日志 |
+| 另一套独立 WAL/事务框架 | 跨文件与跨仓写入统一复用 `durable-tx.mjs` 的锁、journal envelope 与 recoverable write-set；再造第二套会分裂恢复语义 | 仅当现有事务 envelope 无法表达新的原子边界，先修订本文档再评估 |
 | 引入通用 YAML 序列化库 | 全量重排会打乱既有文件的注释与字段序，扩大 diff 面；且违反零依赖不变量（不变量 3） | 若行级正则改写的维护成本显著超过引入依赖的成本，重新评估 |
 
 ## 7. 横切关注点（Cross-Cutting Concerns）
@@ -131,13 +131,8 @@ crctl（scripts/crctl.mjs）          # 状态与账本的唯一写入执行器�
 
 ## 8. 本文档的维护规则
 
+本文档只记录当前架构与重大决议，不逐 TASK 记录实施日记；CR 的过程事实留在 `change-requests/{CR-ID}/` 与 Git 历史。
+
 - 触发修订的变更：新增/删除 skills 顶层分组、Pipeline 结构性变化、crctl 新增写入子命令、状态机口径变化、否决一个重大方案。
-  - 已登记：CR-2026-021（T1.3）crctl 新增 8 写 + 2 只读 + 1 处 git commit 扩展子命令（review-record/review-note/checkpoint-add/owner-set/backlog-set/inbox-emit/cr-init/task allocate + worktree-path/report/cr-metrics + --template），§3 代码地图已同步；不改 §5/§6 判据（全部合既有不变量）。
-  - 已登记：CR-2026-024 新增 active skill `coding-discipline`（develop 域，dev-agent owns；内化开发纪律，不触 crctl/状态机）+ code-implementation.pipeline.json 新增 `suggestion_policy` select input（strict 默认，评审期 suggestions 策略化分流）——合 §4 依赖方向与 §5 全部不变量。
-  - 已登记：CR-2026-022 状态机口径 23→25 声明 / 45→47 展开（新增两条 reject 转换：approve-requirement:reject -> write-requirement-prd、approve-dev-start:reject -> write-dev-plan）；cr-init 补 --summary/--source/--target-version 旗标；git commit --template 补 --cr 旗标且生成形态对齐 commit 白名单；checkpoint-add LEGAL 改状态机派生（全非终态）；approve decline 分支执行状态机 reject 回退（REJECT_ROLLBACK 映射）；gates.json 删 review-planning-report 死配置；§5 不变量 5 口径已同步（25/47）。
-  - 已登记：CR-2026-025 crctl 命令面语义扩展（task done 一跳 depends-on 守卫 + review-record 三账本一致写/投影 + next drafting 摘要路由）与 check-skill-matrix 检查 4（external 引用点校验）+ 首个测试文件——§3 代码地图的 crctl 段与测试面已随改动落地；合 §4 依赖方向与 §5 全部不变量（不新增子命令/旗标，不触状态机与 gates 判据），仅按 §8 维护规则登记。
-  - 已登记：CR-2026-026 新增 review-dev-plan 编码前合并评审（dev-agent owns / quality-reviewer-agent can-call）——crctl REVIEW_STAGE 四映射扩展（dev-plan stage + resolveDevPlanRoute 双轨路由 + repair-target 顶层字段枚举校验 + upstream 跳过 bump）、code-implementation.pipeline.json 插入 review-dev-plan reviewLoop 节点（onBlock 二分：NORMAL replay / UPSTREAM abort）、gates.json 变更（dev-start evidence 三键 + passCondition、developing 五条件、reviewLoops 映射）、状态机口径 25→27 声明 / 47→49 展开（两条转换：review-dev-plan:block / review-dev-plan:upstream-design-blocker）——合 §4 依赖方向与 §5 全部不变量。
-  - 已登记：CR-2026-030 TCA-001~004 契约收敛（不改状态机/gates/§5 判据）——cr-init 三角色 Owner 显式必填（FR-1）、register commit 成功后以真实 SHA 发 status+owners 事件（FR-2）、worktree-path 返回 canonical branch（FR-2）；owner-set 收敛为正式移交原语（tracked clean 前置 + 双投影校验 + 只含两账本的隔离 commit + CAS 回滚 + owners/inbox 同 SHA 事件，FR-3~FR-5）；approve/reject 共用 grant v1 完整验证，合法 reject 走 REJECT_ROLLBACK 权威回退 + 紧邻结果态幂等（FR-6~FR-7）；performAdvance 内核提取（standalone commit 失败不发 status outbox，FR-8）；R7 直读 dir-graph.yaml transitions 静态校验 advance 字面量（FR-9）；review-dev-plan 持有两条精确 advance、code-implementation pipeline 只留路由/replay（FR-8）。**评审回修（pass-at-max）**：attemptsWithinLimit 门禁在最新一轮评审 verdict=pass 且轮次到顶（current≥max）时不判 LOOP_EXHAUSTED——pass 无需再自修复，与 review-code「pass 即可推进 code-reviewing」契约一致；block/缺证据仍阻断。
-  - 已登记：CR-2026-027（Phase 0/1 基线统一与正确性修复）——§3/§5 状态机口径统一为 27/49、§4 crctl-Pipeline 依赖描述修订（FR-3）、§7a 指标基线固化（FR-7）、approve 原子提交（approveAndAdvance + evidence override + assertCandidateStatus，FR-8）、archived TASK 门禁五步判定（FR-9，gates.json 声明不动）、migrate-backlog 幽灵条目清理（FR-10）、archive-move 三账本 CAS + 归档事件同批（FR-11）、status/next 终态只读查询（FR-12）、review-record 输出深化 + post-PASS review cycle（FR-13/FR-16）、next 路由 freshness（FR-16）、inbox-emit 空 to 硬失败（FR-11）——合 §4 依赖方向与 §5 全部不变量（不新增子命令/账本类型，crctl 保持单文件）。
 - 普通 Skill 文档措辞调整、单个 CR 的功能改动**不需要**改本文档——若发现必须改，说明该改动是架构级变更，先过设计评审。
 - 评审对照：`review-tech-design` 的"架构合理性"维度逐条对照 §4/§5/§6 判定。

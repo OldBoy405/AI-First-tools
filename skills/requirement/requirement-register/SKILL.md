@@ -1,22 +1,21 @@
 ---
 name: requirement-register
-description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登记 CR 并提交注册记录，再按 dir-graph.yaml repositories 为所有 active repo 创建同名 requirement/CR-* worktree。
+description: 需求编写期入口：一次调用 crctl register 深原语完成 CR-ID 分配、三账本注册、注册 commit/lease push 与逐仓 worktree ensure；Skill 只做前置确认与结果分类，不写任何 Git 命令序列、不手写账本。
 ---
 
 # Skill: requirement-register
 
-**类型**: 需求期 Skill（requirement/ 组，入口节点）  
+**类型**: 需求期 Skill（requirement/ 组，入口节点）
 **调用时机**: requirement-authoring pipeline 第 1 节点
 
 ---
 
 ## 用途
 
-需求编写的起点。完成以下四件事：
-1. 生成唯一 CR-ID（格式 `CR-YYYY-NNN`，NNN 自增）
-2. 在 `change-requests/_backlog.yml` 注册 CR 条目（不含 status/updated-at，status 只落 cr.md），并在 `change-requests/_index.yml` 追加条目<!-- lint-prompts:ignore --> 描述性：登记由 crctl cr-init 原子完成（Step 2）
-3. 将注册记录提交到 knowledge-base trunk，保证 main 可感知在途 CR
-4. 按 `dir-graph.yaml#repositories` 为所有 `active != false` 的 repo 创建由 `crctl worktree-path` 返回的 worktree 分支（不切换当前 HEAD）
+需求编写的起点：生成唯一 CR-ID（`CR-YYYY-NNN`）、在 knowledge-base trunk 登记 CR（`_backlog.yml` + `_index.yml` + `cr.md` 三账本同批）、注册 commit + trailer + lease push、并按 `dir-graph.yaml#repositories` 为所有 active repo 创建 `requirement/{cr_id}` worktree。
+以上全部由深原语 `crctl register` 独占完成（CR-2026-031 TASK-05）：CR-ID 分配、账本编辑、commit/lease push、worktree ensure 均不再由模型手写。
+
+本 Skill 只拥有：**业务前置确认、一次深原语调用、结果分类**。
 
 ---
 
@@ -24,96 +23,61 @@ description: 需求编写期入口：生成 CR-ID，在 knowledge-base trunk 登
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `title` | string | ✅ | 需求标题（写入 cr.md） |
-| `summary` | string | ✅ | 需求摘要（1-3 句，写入 cr.md） |
-| `requirement_owner` | string | ✅ | 需求负责人（写入 cr.md owners.requirement） |
-| `dev_owner` | string | ✅ | 开发负责人（写入 cr.md owners.development） |
-| `test_owner` | string | ✅ | 测试负责人（写入 cr.md owners.test） |
-| `target_version` | string | ❌ | 目标版本（写入 cr.md frontmatter） |
-| `source` | string | ❌ | 来源（如 planning-report 路径 / user-feedback / idea） |
+| `title` | string | ✅ | 需求标题 |
+| `registration_key` | string | ✅ | 注册幂等键（同键同输入续跑、输入漂移拒绝） |
+| `requirement_owner` | string | ✅ | 需求负责人 |
+| `dev_owner` | string | ✅ | 开发负责人 |
+| `test_owner` | string | ✅ | 测试负责人 |
+| `summary` | string | ❌ | 需求摘要 |
+| `target_version` | string | ❌ | 目标版本 |
+| `source` | string | ❌ | 来源 |
 
 ---
 
 ## 执行步骤
 
-### Step 1 — 读取 graph 并确定 CR-ID
+### Step 1 — 前置确认
 
-1. 读取 `AGENTS.md`、`dir-graph.yaml`。
-2. 解析 `repositories[*]` 中 `active != false` 的参与仓：
-   - `role=knowledge-base` 的仓作为注册仓，bucket 固定为 `knowledge-base`
-   - 其他 active repo 的 bucket 使用 `repo.id`
-   - 每个 repo 的 trunk 取 `repo.trunk`，缺失则返回 `REPO_TRUNK_UNRESOLVED`
-3. 确认 knowledge-base trunk 工作区 clean；若存在未提交变更，返回 `REGISTRATION_TRUNK_DIRTY`，不得继续。
+1. 读取 `AGENTS.md`、`dir-graph.yaml`（只读，解析工作区布局与参与仓）。
+2. 确认 knowledge-base trunk 工作区 clean；存在未提交变更返回 `REGISTRATION_TRUNK_DIRTY`，不得继续。
+3. 确认 `registration_key` 为本次注册意图的唯一稳定标识（如来源 + 标题摘要）。
 
-### Step 2 — 权威注册：crctl cr-init（S8，唯一权威分配与建档）
+### Step 2 — 一次深原语调用
 
-1. 运行 `crctl cr-init --title "{title}" --owner-requirement {requirement_owner} --owner-development {dev_owner} --owner-test {test_owner} --summary "{summary}" --source {source} --target-version {target_version} [--year Y] --workspace <ws>`（**不取显式 cr-id 入参**——SDD-BLOCK-001 语义：内部分配 `CR-{Y}-{NNN+1}`，以 `casWriteMulti` 原子写 `cr.md`(新建) + `_backlog.yml`(追加) + `_index.yml`(登记)，成功后在输出 JSON 返回分配到的 `cr` 与完整三角色 `owners`）。
-   - `cr.md` frontmatter 全量由 crctl 生成（owners/owner-history/时间戳 = identity(ws)/nowIso()）；**三角色 Owner 显式必填**（CR-2026-030 FR-1：缺任一角色 BAD_ARGS 零写入，无隐式继承）；`--summary`/`--source`/`--target-version` 为注册元信息旗标（CR-2026-022 FR-9，缺省 summary="" / source=manual / target-version=tbd），**一次传齐，不得建档后二次补写**（CR-2026-028 FR-6）。
-   - 并发下后到者见 `_index`/`_backlog` hash 已变 → `CAS_CONFLICT`，三文件全不落盘 → **重跑 cr-init**（重读 max、自动拿新号），不撞号。
-   - `cr_id` 变量 = cr-init 返回的 `cr` 字段；三个 owner 变量 = cr-init 返回的 `owners` 投影。
-2. **模型不得手写 `cr.md`/追加 `_backlog.yml`/登记 `_index.yml`**（guard deny + cr-init 独占，含 CAS+审计）。`summary`/`source`/`target-version` 已随 cr-init 写入 `cr.md` frontmatter（CR-2026-028 FR-6 废除建档后手工补 frontmatter）。
-
-### Step 3 — 提交注册记录到 knowledge-base trunk
-
-> **执行方式**：所有 git 命令 **必须**通过受控 shell 执行（详见 `skills/shared/controlled-shell/SKILL.md`）。
-> Tauri 桌面壳、opencode session 或其他运行时必须提供平台注入的受控 git 适配器。
-> **禁止**在失败时输出「请在终端运行」类手工指引；应返回结构化错误 `{ code: "SHELL_UNAVAILABLE" | ... }`。
-
-在创建任何 CR worktree 之前，必须先把注册记录提交到 knowledge-base trunk：
-
-```ts
-<!-- lint-prompts:ignore --> 受控 shell 代码块：runGit = 受控 git 适配器（S10 模板经 crctl git commit）
-await runGit({ subcommand: "add", args: ["change-requests/_backlog.yml", "change-requests/_index.yml", `change-requests/${crId}/cr.md`], cwd: knowledgeBaseRepo.path });
-const registerCommit = await runGit({ subcommand: "commit", args: ["--template", "register", "--cr", crId, "-m", title], cwd: knowledgeBaseRepo.path });  // S10（FR-10）：--cr 直传 cr-init 返回的已知 CR 号，跳过分支探测/subject 正则反向解析
-// CR-2026-030 FR-2：register commit 成功后 crctl 以真实 HEAD SHA 产生 status((new)->drafting) + owners(initial-assignment x3) 两类注册事件；
-// 只消费返回 JSON 的 commit.sha / outbox / warnings，不自行读 HEAD、不拼 branch/path/SHA/事件（AC-5）
-await runGit({ subcommand: "push", args: ["origin", knowledgeBaseRepo.trunk], cwd: knowledgeBaseRepo.path });
+```text
+crctl register --registration-key {registration_key} --title "{title}"
+  --owner-requirement {requirement_owner} --owner-development {dev_owner} --owner-test {test_owner}
+  [--summary "{summary}"] [--source {source}] [--target-version {target_version}] [--year Y]
+  --workspace {knowledge-base 主 checkout}
 ```
 
-> 这样新建的 knowledge-base CR worktree 会从包含 `cr.md` / `_backlog.yml` 注册记录的 trunk 派生，后续 `write-requirement-prd` 不会读到空 worktree。
+深原语内部完成（Skill 不重复、不干预）：
 
-### Step 5 — 为所有 active repo 创建 worktree 分支（通过受控 shell 执行）
+- CR-ID 分配（`CR-{Y}-{NNN+1}`，scanMaxCrNumber + CAS 账本写）；
+- 三账本（`cr.md` 新建 + `_backlog.yml` 追加 + `_index.yml` 登记）同批 recoverable write-set（CRLF→LF + SHA-256 CAS 锚点）；
+- 注册 commit + trailer（AI-First-Op: register）+ lease push；
+- 逐仓 worktree ensure（`requirement/{cr_id}` 分支从 trunk 派生，不切换主工作区 HEAD）；
+- 全程事务 journal，任意中断后**重跑同一条命令**即从断点续跑（同 registration_key 同输入）。
 
-对 Step 1 解析出的每个 active repo 执行：
+### Step 3 — 结果分类（只透传深原语 JSON，不发明第二套字段）
 
-**受控 shell 调用序列**：
+| 深原语输出 | 分类与动作 |
+|------|------|
+| exit 0，含 `cr` + `owners` 投影 | 注册完成。`cr_id` = 返回的 `cr`，后续节点在返回的 worktree 继续 |
+| `REGISTRATION_INPUT_MISMATCH` | 同 key 不同输入，零写入。核对 registration_key 后重试 |
+| `CAS_CONFLICT` / `TX_RECOVERY_CONFLICT` | 并发或第三方修改，零写入。重跑同命令自动重分配不撞号 |
+| `REGISTRATION_TRUNK_DIRTY` / `TX_GIT_FAILED` | 前置或 git 失败，按错误信息处理后重跑 |
+| 非零且 journal 有中间态 | 事务已持久化：直接**重跑同一条命令**续跑（幂等恢复），禁止手工清理 |
 
-```ts
-// 路径拼接用 crctl worktree-path 的唯一权威规则（S9）：bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id；branch 由 worktree-path 返回
-const wt = await runCrctl(["worktree-path", crId, "--repo", repo.id, "--workspace", workspaceRoot]);
-const branch = wt.branch; // CR-2026-030 FR-2：canonical branch 只由原语返回，不在 Skill 内拼接
-await runGit({ subcommand: "fetch", args: ["origin"], cwd: repo.path });
-await runGit({ subcommand: "worktree",
-  args: ["add", "-b", branch,
-         wt.path,
-         repo.trunk],
-  cwd: repo.path });
-```
-
-> **注意**：worktree 创建后不自动切换当前主工作区 HEAD。任一 active repo 创建失败时，返回结构化错误并列出已创建的 worktree，交由受控清理入口处理；不得继续写 PRD。fetch 失败属降级路径（见错误表 `STALE_BASE`），不算创建失败，但摘要必须显式标注基线滞后。
-
-### Step 6 — 输出摘要
+### Step 4 — 输出摘要
 
 ```
 ✅ CR 已注册
-   CR-ID       : {CR-ID}
-   分支        : {execution_context.branch}
-   需求负责人  : {requirement_owner} @ {timestamp}
-   开发负责人  : {dev_owner} @ {timestamp}
-   测试负责人  : {test_owner} @ {timestamp}
-   注册提交    : knowledge-base trunk 已包含 cr.md / _backlog.yml
-   Worktree    : {execution_context.repo_worktrees}
-<!-- lint-prompts:ignore --> 输出摘要：仅展示路径
-   cr.md       : change-requests/{CR-ID}/cr.md
+   CR-ID       : {cr}
+   owners      : {owners 投影（三角色 + assigned-at）}
+   注册提交    : knowledge-base trunk 已含 cr.md / _backlog.yml / _index.yml
+   Worktree    : 各 active repo 已 ensure requirement/{cr}
    下一步      : 以 `crctl next {cr_id}` 为准（在 worktree 中继续撰写 PRD）
-```
-
-```yaml
-execution_context:
-  cr_id: {CR-ID}
-  branch: {execution_context.branch}
-  knowledge_base_worktree: {execution_context.knowledge_base_worktree}
-  repo_worktrees: {execution_context.repo_worktrees}
 ```
 
 ---
@@ -122,11 +86,6 @@ execution_context:
 
 | 错误 | 处理 |
 |------|------|
-| `_index.yml` 不存在 | 初始化新建，从 001 开始编号 |
-| knowledge-base trunk 不干净 | 返回 `REGISTRATION_TRUNK_DIRTY`，要求先保存或清理当前变更 |
-| `repo.trunk` 缺失 | 返回 `REPO_TRUNK_UNRESOLVED`，不得创建任何 worktree |
-| 分支已存在 | 停止执行，提示先检查是否重复注册 |
-| 受控 shell 不可用（`SHELL_UNAVAILABLE`） | 停止执行，返回结构化错误；**禁止**输出「请在终端运行」提示 |
-| git 命令执行失败（`EXEC_FAILED`） | 展示 stderr；对 `worktree add` 重复分支错误，回退到「分支已存在」分支处理 |
-| 单仓 `fetch` 失败（如 SSL 证书校验失败，`EXEC_FAILED` 之外） | 降级为「从本地 trunk 派生 worktree，并在输出摘要中标注 `STALE_BASE`」——不 abort，也不静默视为成功（基线滞后必须显式提示；后续 push 前先补 fetch）（CR-2026-022 FR-14，注册实录坐实） |
-| commit/push/worktree 任一步失败（`REGISTRATION_INCOMPLETE`，CR-2026-030 FR-2/AC-6） | `cr-init` 成功后锁定 `cr_id`，**不得再次调用 cr-init**、不输出成功 execution_context；返回 `{code: REGISTRATION_INCOMPLETE, cr_id, failed_step, completed_steps, commit_sha, created_worktrees, warnings}`，含已完成的步骤与已创建 worktree；不回收 CR-ID，不做跨进程续跑 |
+| knowledge-base trunk 不干净 | 返回 `REGISTRATION_TRUNK_DIRTY`，先保存或清理再重跑 |
+| 深原语非零退出 | 按 Step 3 分类表处理；中间态一律重跑同命令续跑，不做手工补偿或回收 CR-ID |
+| 受控 shell 不可用 | 返回 `SHELL_UNAVAILABLE` 结构化错误，不输出手工 git 指令 |

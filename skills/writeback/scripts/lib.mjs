@@ -6,6 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 /* ────────────────────────── 输出 / 错误（风格对齐 crctl.mjs）────────────────────────── */
 
@@ -188,4 +189,67 @@ export const LEDGER_PATTERNS = [
 export function isLedgerPath(p) {
   const norm = p.replace(/\\/g, '/');
   return LEDGER_PATTERNS.some((re) => re.test(norm));
+}
+
+/* ────────────────────────── candidate-only 输出（CR-2026-031 TASK-08）──────────────────────────
+ * 三个 writeback generator 不再直接写 baseline：只输出 candidate 目录
+ * （<candidate-out>/<path> 文件 + <candidate-out>/blobs/<sha> + <candidate-out>/manifest.json），
+ * 由 crctl writeback-apply 校验、应用、stage、commit、lease push（SDD §3.5/§5.3）。
+ */
+
+export function sha256(text) {
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+/** 磁盘字节 sha256（不做 CRLF 归一）：before/after 的 CAS 锚点语义 = 工作区现状字节，
+ * 与 crctl applyWriteSet 的 readHash 一致（Windows autocrlf 检出 CRLF 不影响锚点一致性）。 */
+export function readHashRaw(p) {
+  let buf;
+  try { buf = fs.readFileSync(p); } catch { return null; }
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
+/** manifest v1 canonical 序列化（SDD §3.5）：字段固定顺序、files 按 path 排序后取
+ * path/beforeSha256/afterSha256——inputDigest 即其 sha256。apply 侧（workspace-transactions.mjs）
+ * 用同一公式重算比对，防 manifest 篡改/重放（WRITEBACK_MANIFEST_TAMPERED）。 */
+export function computeInputDigest({ v, stage, cr, specId, targetVersion, generator, files }) {
+  const canon = JSON.stringify({
+    v, stage, cr, specId, targetVersion,
+    generator: { id: generator.id, sha256: generator.sha256 },
+    files: files.map((f) => ({ path: f.path, beforeSha256: f.beforeSha256 == null ? null : f.beforeSha256, afterSha256: f.afterSha256 })),
+  });
+  return sha256(canon);
+}
+
+/** candidate 写盘：blob 落盘 → manifest 落盘（inputDigest 自校验锚点）。返回 manifest 对象。
+ * 幂等：相同内容重跑生成相同 sha/blob，candidate 目录整体可删除重生成。 */
+export function writeCandidate({ candidateOut, stage, cr, specId, targetVersion, generator, files, contentOf }) {
+  fs.mkdirSync(candidateOut, { recursive: true });
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)); // manifest 要求 POSIX 字典序（SDD §3.5）
+  for (const f of files) {
+    const content = contentOf(f.path);
+    if (typeof content !== 'string') fail('CANDIDATE_CONTENT_MISSING', `candidate 文件无内容: ${f.path}`);
+    const after = sha256(content);
+    if (f.afterSha256 != null && f.afterSha256 !== after) {
+      fail('CANDIDATE_HASH_MISMATCH', `candidate ${f.path} 内容哈希 ${after} != 声明 ${f.afterSha256}`);
+    }
+    f.afterSha256 = after;
+    f.blob = `blobs/${after}`;
+    const blobP = path.join(candidateOut, 'blobs', after);
+    if (!fs.existsSync(blobP)) {
+      fs.mkdirSync(path.dirname(blobP), { recursive: true });
+      fs.writeFileSync(blobP, content, 'utf8');
+    }
+    fs.mkdirSync(path.dirname(path.join(candidateOut, f.path)), { recursive: true });
+    fs.writeFileSync(path.join(candidateOut, f.path), content, 'utf8');
+  }
+  const manifest = {
+    v: 1, stage, cr, specId, targetVersion,
+    inputDigest: '', generator,
+    files: files.map((f) => ({ path: f.path, beforeSha256: f.beforeSha256 == null ? null : f.beforeSha256, afterSha256: f.afterSha256, blob: f.blob })),
+  };
+  manifest.inputDigest = computeInputDigest(manifest);
+  const manifestPath = path.join(candidateOut, 'manifest.json');
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+  return { manifest, manifestPath };
 }

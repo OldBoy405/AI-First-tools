@@ -1,26 +1,28 @@
-// writeback-traceability.mjs — traceability 回写脚本（CR-2026-020，SDD §4.3 / FR-3、FR-7）
+// writeback-traceability.mjs — traceability 回写脚本（CR-2026-020，SDD §4.3 / FR-3、FR-7；CR-2026-031 TASK-08 candidate-only）
 // 职责：specs/{spec}/traceability.yml 头部结构化字段更新 + 本 CR milestone 段末尾追加。
 //       不是全量重建（SDD §8 D3）：头部手工注释与既有 milestones 段逐字节保留。
 // merge-commits：从 change-requests/_backlog.yml 定向提取（六字段齐全性断言，缺失 MERGE_COMMITS_MISSING）；
 //       写入 specs 侧时输出与既有段一致的 4 字段（repo/trunk/sha/branch，见 CR-2026-018/019 段先例）。
-// 边界：_backlog.yml 只读（账本）；只写 specs/ 内容文件（NFR-5）。
+// 边界（TASK-08 起）：_backlog.yml 只读（账本）；只输出 candidate 目录，由 crctl writeback-apply 应用。
 // 用法：node writeback-traceability.mjs --workspace <ws> --cr <CR-ID> --spec <spec_id> --version <ver>
-//       --milestone-file <path> [--dry-run]
+//       --milestone-file <path> --candidate-out <dir>
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {
-  parseArgs, fail, ok, nowIso, readFile, planWrite,
-  readFrontmatter, extractBlock,
+  parseArgs, fail, ok, nowIso, readFile, normalize,
+  readFrontmatter,
+  sha256, readHashRaw, writeCandidate,
 } from './lib.mjs';
 
 const args = parseArgs(process.argv.slice(2));
-const { workspace: ws, cr, spec, version } = args;
+const { workspace: ws, cr, spec, version, 'candidate-out': candidateOut } = args;
 const milestoneFile = args['milestone-file'];
-if (!ws || !cr || !spec || !version || !milestoneFile) {
-  fail('BAD_ARGS', '缺少必填参数 --workspace / --cr / --spec / --version / --milestone-file');
+if (!ws || !cr || !spec || !version || !milestoneFile || !candidateOut) {
+  fail('BAD_ARGS', '缺少必填参数 --workspace / --cr / --spec / --version / --milestone-file / --candidate-out');
 }
-const dryRun = !!args['dry-run'];
+const generatorSha = sha256(fs.readFileSync(new URL(import.meta.url), 'utf8'));
 // 版本入参归一（CODE-BLOCK-002）：对齐既有基线 target-version: "0.20.1" 裸值惯例
 const verNoV = version.startsWith('v') ? version.slice(1) : version;
 const crDir = path.join(ws, 'change-requests', cr);
@@ -34,32 +36,50 @@ if (crFm.status !== 'writing-back') {
   fail('CR_STATUS_MISMATCH', `writeback-traceability 要求 CR status=writing-back，当前=${crFm.status}`, { cr });
 }
 
-/* ── merge-commits 提取：_backlog.yml 定向提取（只读，六字段齐全性断言）── */
-const backlog = readFile(path.join(ws, 'change-requests', '_backlog.yml'));
-if (backlog === null) fail('STRUCTURE_MISMATCH', 'change-requests/_backlog.yml 不存在');
-const entry = extractBlock(backlog, new RegExp(`^- id: ${escapeRe(cr)}$`));
-if (entry === null) fail('MERGE_COMMITS_MISSING', `_backlog.yml 中无 ${cr} 条目`);
-const mcBlock = extractBlock(entry.text, /^merge-commits:$/);
-if (mcBlock === null) fail('MERGE_COMMITS_MISSING', `${cr} 条目无 merge-commits[]（未合并或未记录）`);
+/* ── merge-commits 提取（TASK-08 起）：change-requests/{cr}/merge-commits.yml（TASK-07 finalize 产物，
+   新协议事实源）——schema merge-commits/v1，repositories[] 含 repo/base-sha/source-sha/merge-sha；
+   trunk 从 dir-graph.yaml#repositories 提取；branch 恒为 requirement/{cr}。
+   （旧 _backlog.yml 提取路径随 TASK-10 收敛删除，不留永久迁移兼容。）── */
+const mcPath = path.join(crDir, 'merge-commits.yml');
+const mcText = readFile(mcPath);
+if (mcText === null) fail('MERGE_COMMITS_MISSING', `change-requests/${cr}/merge-commits.yml 不存在（未 merge 或 finalize 缺失）`, { cr });
+const graphText = readFile(path.join(ws, 'dir-graph.yaml')) ?? '';
+const trunkOf = (repoId) => {
+  // 轻量提取：repositories 列表中 id 条目后最近的 trunk 行
+  const lines = graphText.split('\n');
+  let cur = null;
+  for (const line of lines) {
+    const t = line.trim();
+    const mId = /^- id: (\S+)/.exec(t);
+    if (mId) { cur = mId[1]; continue; }
+    const mTr = /^trunk: (\S+)/.exec(t);
+    if (mTr && cur === repoId) return mTr[1];
+  }
+  return null;
+};
 const mergeCommits = [];
 {
   let cur = null;
-  for (const line of mcBlock.text.split('\n')) {
-    const t = line.trimStart();
-    if (/^- repo:/.test(t)) { cur = { repo: t.slice(7).trim() }; mergeCommits.push(cur); }
-    else if (cur) {
-      const m = /^([a-z-]+):\s*(.*)$/.exec(t);
-      if (m && m[1] !== 'repo') cur[m[1]] = m[2].replace(/^"|"$/g, '');
-    }
+  for (const line of mcText.split('\n')) {
+    const t = line.trim();
+    if (/^- repo:/.test(t)) { cur = { repo: t.slice(7).trim() }; mergeCommits.push(cur); continue; }
+    const m = /^([a-z-]+):\s*(\S+)$/.exec(t);
+    if (!m || !cur) continue;
+    if (m[1] === 'base-sha') cur.baseSha = m[2];
+    else if (m[1] === 'source-sha') cur.sourceSha = m[2];
+    else if (m[1] === 'merge-sha') cur.mergeSha = m[2];
   }
 }
-// 必填字段按 019 merge-metadata 定型的账本最小字段集 {repo,trunk,sha}（SDD §0 六字段为早期手工形态；
-// 实测 merge-metadata 输出仅三字段，branch/source-sha/merged-at 为可选，有则提取、无则段内省略——
-// 本 CR 回写自举发现，按真实账本形态适配）
-const REQUIRED = ['repo', 'trunk', 'sha'];
+const REQUIRED = ['repo', 'mergeSha'];
 const missing = mergeCommits.flatMap((mc) => REQUIRED.filter((f) => !mc[f]).map((f) => `${mc.repo}.${f}`));
 if (missing.length) {
-  fail('MERGE_COMMITS_MISSING', `merge-commits[] 字段不齐全：${missing.join(', ')}（不猜测、不取 trunk 最新提交）`, { cr });
+  fail('MERGE_COMMITS_MISSING', `merge-commits.yml 字段不齐全：${missing.join(', ')}（不猜测、不取 trunk 最新提交）`, { cr });
+}
+for (const mc of mergeCommits) {
+  mc.trunk = trunkOf(mc.repo) || 'master';
+  mc.sha = mc.mergeSha;
+  mc.branch = `requirement/${cr}`;
+  delete mc.baseSha; delete mc.sourceSha; delete mc.mergeSha;
 }
 
 /* ── milestone-file：结构校验（cr/milestone/target-version/fr-chain[].fr 必填）── */
@@ -160,7 +180,6 @@ function buildSegment() {
 }
 
 /* ── 主流程 ── */
-const now = nowIso();
 let newText;
 if (old === null) {
   newText = buildFirstHeader() + buildSegment() + '\n';
@@ -168,16 +187,17 @@ if (old === null) {
   const patched = patchHeader(old);
   newText = patched.replace(/\n*$/, '\n') + buildSegment() + '\n';
 }
-const res = planWrite(tracePath, newText, { dryRun, label: 'traceability.yml' });
+const relPath = `specs/${spec}/traceability.yml`;
+const { manifest, manifestPath } = writeCandidate({
+  candidateOut, stage: 'traceability', cr, specId: spec, targetVersion: verNoV,
+  generator: { id: 'writeback-traceability', sha256: generatorSha },
+  files: [{ path: relPath, beforeSha256: old == null ? null : readHashRaw(tracePath), afterSha256: null, content: newText }],
+  contentOf: () => newText,
+});
 
-if (dryRun) {
-  ok({ op: 'writeback-traceability', cr, spec, version, dryRun: true, mergeCommits: mergeCommits.map((m) => `${m.repo}@${m.sha}`) });
-  process.exit(0);
-}
-
-/* ── 末尾自检 ── */
+/* ── 末尾自检（candidate 目录内）── */
 const errors = [];
-const after = readFile(tracePath) ?? '';
+const after = readFile(path.join(candidateOut, relPath)) ?? '';
 if (!after.includes(`- cr: ${cr}`)) errors.push('milestone 段缺失');
 const cnt = (after.match(new RegExp(`- cr: ${escapeRe(cr)}$`, 'gm')) || []).length;
 if (cnt !== 1) errors.push(`- cr: ${cr} 段出现 ${cnt} 次`);
@@ -190,7 +210,12 @@ if (oldSeg && !after.includes(oldSeg)) errors.push('既有 milestones 段被改�
 if (after.includes('\r')) errors.push('traceability.yml 含 CRLF');
 if (errors.length) fail('SELF_CHECK_FAILED', '自检断言失败：' + errors.join('；'), { errors });
 
-ok({ op: 'writeback-traceability', cr, spec, version, noop: false, mergeCommits: mergeCommits.map((m) => `${m.repo}@${m.sha}`), milestone: ms.milestone });
+ok({
+  op: 'writeback-traceability', cr, spec, version, noop: false,
+  candidateDir: candidateOut, manifestPath, inputDigest: manifest.inputDigest,
+  files: manifest.files.map((f) => f.path),
+  mergeCommits: mergeCommits.map((m) => `${m.repo}@${m.sha}`), milestone: ms.milestone,
+});
 
 /* ── 轻量 YAML 解析（milestone-file，结构固定）── */
 function parseMilestoneFile(text) {

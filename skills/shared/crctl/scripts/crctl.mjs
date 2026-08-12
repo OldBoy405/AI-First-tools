@@ -19,6 +19,19 @@ import crypto from 'node:crypto';
 import readline from 'node:readline';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+// CR-2026-031 TASK-03：YAML 子集解析器与 workspace 基础设施同源共享（lib/ 下，禁止在 crctl.mjs 复刻）。
+import { parseYaml } from './lib/yaml-subset.mjs';
+import {
+  deriveInstallRoot, TxError, resolveRepositories, registerCr, ensureWorkspace,
+  assertSupportedBacklogSchemaText,
+  buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
+  matchFrontmatter, crMdStatusText, mergeCr, mergeStatus, resolveOperationalWorkspace,
+  applyWriteback, archiveCr, checkUpgrade,
+} from './lib/workspace-transactions.mjs';
+import {
+  FAULT_POINTS, faultPoint, nowIso,
+  hasLedgerTransaction, recoverLedgerTransaction, beginLedgerTransaction, abortLedgerTransaction, finishLedgerTransaction,
+} from './lib/durable-tx.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -34,18 +47,7 @@ function ok(obj) {
   process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
 }
 
-function nowIso() {
-  // 本地时区 ISO 8601（含偏移），由代码生成，不接受外部传入（治理⑩）
-  const d = new Date();
-  const pad = (n, w = 2) => String(Math.abs(n)).padStart(w, '0');
-  const off = -d.getTimezoneOffset();
-  const sign = off >= 0 ? '+' : '-';
-  return (
-    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
-    `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}` +
-    `${sign}${pad(Math.floor(off / 60))}:${pad(off % 60)}`
-  );
-}
+// nowIso 与 FAULT_POINTS 自 TASK-04 起 re-import 自 lib/durable-tx.mjs（唯一实现）。
 
 // CR-2026-027 代码评审回修（b4）：reviewed-at 时间戳统一解析为 epoch 毫秒后再比较。
 // ISO 字符串字典序比较在跨时区偏移时会产生错误先后判定（如 +08:00 vs Z）；
@@ -109,181 +111,6 @@ function verifyGrantSignature(ws, grant) {
   } catch (e) {
     return { ok: false, code: 'SIGNATURE_INVALID', why: `验签异常: ${String(e && e.message || e)}` };
   }
-}
-
-/* ────────────────────────── YAML 子集解析器 ──────────────────────────
- * 支持：块映射、块序列、flow 映射 {k: v}、flow 序列 [a, b]、引号字符串、
- * 注释、多行块标量 | 与 >（保守处理为拼接文本）。
- * 不支持：锚点、别名、tag、多文档。对本包受控文件足够。
- */
-
-function parseYaml(text) {
-  const rawLines = text.split(/\r?\n/);
-  const lines = [];
-  for (let i = 0; i < rawLines.length; i++) {
-    const stripped = stripComment(rawLines[i]);
-    if (stripped.trim() === '') continue;
-    lines.push({ indent: stripped.length - stripped.trimStart().length, text: stripped.trimEnd(), raw: rawLines[i], no: i + 1 });
-  }
-  const [value] = parseBlock(lines, 0, 0);
-  return value;
-}
-
-function stripComment(line) {
-  let inS = false, inD = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === "'" && !inD) inS = !inS;
-    else if (c === '"' && !inS && !isEscaped(line, i)) inD = !inD;
-    else if (c === '#' && !inS && !inD && (i === 0 || /\s/.test(line[i - 1]))) return line.slice(0, i);
-  }
-  return line;
-}
-
-function isEscaped(text, index) {
-  let slashes = 0;
-  for (let i = index - 1; i >= 0 && text[i] === '\\'; i--) slashes++;
-  return slashes % 2 === 1;
-}
-
-function parseBlock(lines, idx, minIndent) {
-  if (idx >= lines.length || lines[idx].indent < minIndent) return [null, idx];
-  const indent = lines[idx].indent;
-  const content = lines[idx].text.trimStart();
-  if (content.startsWith('- ') || content === '-') return parseSeq(lines, idx, indent);
-  return parseMap(lines, idx, indent);
-}
-
-function parseSeq(lines, idx, indent) {
-  const arr = [];
-  let i = idx;
-  while (i < lines.length && lines[i].indent === indent) {
-    const content = lines[i].text.trimStart();
-    if (!(content.startsWith('- ') || content === '-')) break;
-    const rest = content === '-' ? '' : content.slice(2).trim();
-    if (rest === '') {
-      const [v, ni] = parseBlock(lines, i + 1, indent + 1);
-      arr.push(v); i = ni;
-    } else if (rest.startsWith('{') || rest.startsWith('[')) {
-      arr.push(parseInline(rest)); i += 1;
-    } else if (/^[^\s:]+(\s*):(\s|$)/.test(rest) || /^["'][^"']*["']\s*:(\s|$)/.test(rest)) {
-      // 序列项内联映射："- id: x" 后续行以更深缩进续写同一映射
-      const virtualIndent = lines[i].indent + (lines[i].text.trimStart().length - rest.length);
-      const fake = { indent: virtualIndent, text: ' '.repeat(virtualIndent) + rest, raw: lines[i].raw, no: lines[i].no };
-      const sub = [fake];
-      let j = i + 1;
-      while (j < lines.length && lines[j].indent >= virtualIndent && !(lines[j].indent === indent && /^-(\s|$)/.test(lines[j].text.trimStart()))) {
-        sub.push(lines[j]); j++;
-      }
-      const [v] = parseMap(sub, 0, virtualIndent);
-      arr.push(v); i = j;
-    } else {
-      arr.push(parseScalar(rest)); i += 1;
-    }
-  }
-  return [arr, i];
-}
-
-function parseMap(lines, idx, indent) {
-  const obj = {};
-  let i = idx;
-  while (i < lines.length && lines[i].indent === indent) {
-    const content = lines[i].text.trimStart();
-    if (content.startsWith('- ')) break;
-    const m = content.match(/^("(?:[^"\\]|\\.)*"|'[^']*'|[^:\s][^:]*?)\s*:(.*)$/);
-    if (!m) { i += 1; continue; }
-    const key = unquote(m[1].trim());
-    let rest = m[2].trim();
-    if (rest === '' ) {
-      const [v, ni] = parseBlock(lines, i + 1, indent + 1);
-      obj[key] = v; i = ni;
-    } else if (rest === '|' || rest === '>' || rest === '|-' || rest === '>-') {
-      const parts = [];
-      let j = i + 1;
-      while (j < lines.length && lines[j].indent > indent) { parts.push(lines[j].text.trim()); j++; }
-      obj[key] = parts.join('\n'); i = j;
-    } else {
-      obj[key] = parseInline(rest); i += 1;
-    }
-  }
-  return [obj, i];
-}
-
-function parseInline(s) {
-  s = s.trim();
-  if (s.startsWith('{')) return parseFlow(s).value;
-  if (s.startsWith('[')) return parseFlow(s).value;
-  return parseScalar(s);
-}
-
-function parseFlow(s) {
-  let i = 0;
-  function ws() { while (i < s.length && /\s/.test(s[i])) i++; }
-  function value() {
-    ws();
-    if (s[i] === '{') {
-      i++; const o = {};
-      ws();
-      if (s[i] === '}') { i++; return o; }
-      for (;;) {
-        ws();
-        const k = flowScalar([':']); i++; // skip ':'
-        o[unquote(k.trim())] = value();
-        ws();
-        if (s[i] === ',') { i++; continue; }
-        if (s[i] === '}') { i++; return o; }
-        throw new Error(`flow map 解析失败 @${i}: ${s}`);
-      }
-    }
-    if (s[i] === '[') {
-      i++; const a = [];
-      ws();
-      if (s[i] === ']') { i++; return a; }
-      for (;;) {
-        a.push(value());
-        ws();
-        if (s[i] === ',') { i++; continue; }
-        if (s[i] === ']') { i++; return a; }
-        throw new Error(`flow seq 解析失败 @${i}: ${s}`);
-      }
-    }
-    return parseScalar(flowScalar([',', '}', ']']));
-  }
-  function flowScalar(stops) {
-    ws();
-    if (s[i] === '"' || s[i] === "'") {
-      const q = s[i]; let j = i + 1;
-      while (j < s.length && s[j] !== q) { if (q === '"' && s[j] === '\\') j++; j++; }
-      const out = s.slice(i, j + 1); i = j + 1; ws();
-      return out;
-    }
-    let j = i;
-    while (j < s.length && !stops.includes(s[j])) j++;
-    const out = s.slice(i, j); i = j;
-    return out;
-  }
-  const v = value();
-  return { value: v, rest: s.slice(i) };
-}
-
-function unquote(s) {
-  if (s.startsWith('"') && s.endsWith('"')) {
-    try { return JSON.parse(s); } catch { return s.slice(1, -1).replace(/\\(.)/g, '$1'); }
-  }
-  if (s.startsWith("'") && s.endsWith("'")) return s.slice(1, -1);
-  return s;
-}
-
-function parseScalar(s) {
-  s = s.trim();
-  if (s === '' || s === '~' || s === 'null') return null;
-  if (s === 'true') return true;
-  if (s === 'false') return false;
-  if (s === '[]') return [];
-  if (s === '{}') return {};
-  if (/^-?\d+$/.test(s)) return parseInt(s, 10);
-  if (/^-?\d+\.\d+$/.test(s)) return parseFloat(s);
-  return unquote(s);
 }
 
 // Dynamic YAML strings use JSON's quoted-string form, which is valid YAML and
@@ -396,10 +223,20 @@ function loadPipeline(ws, id) {
 function crDir(ws, cr) { return path.join(ws, 'change-requests', cr); }
 function backlogPath(ws) { return path.join(ws, 'change-requests', '_backlog.yml'); }
 
+// CR-2026-031 TASK-02：最低支持 schema = cr-backlog/v2。v1 / 缺声明一律硬失败（UNSUPPORTED_BACKLOG_SCHEMA），
+// migrate-backlog 永久迁移兼容已删除；TASK-05/09 的所有账本事务复用本检查。
+function assertSupportedBacklogSchema(text) {
+  try { assertSupportedBacklogSchemaText(text); } catch (e) {
+    if (e instanceof TxError) fail(e.code, e.message, e.extra);
+    throw e;
+  }
+}
+
 function loadBacklogEntry(ws, cr) {
   const p = backlogPath(ws);
   const text = readFileChecked(p);
   if (!text) fail('BACKLOG_NOT_FOUND', `缺少 ${p}`);
+  assertSupportedBacklogSchema(text);
   const doc = parseYaml(text);
   const list = Array.isArray(doc) ? doc : doc['change-requests'] || doc.backlog || doc.items || doc.crs;
   if (!Array.isArray(list)) fail('BACKLOG_SHAPE', `_backlog.yml 顶层既不是序列也没有 change-requests/backlog/items 键`);
@@ -569,11 +406,6 @@ function controlledGit(ws, sub, args, cwd, caller, options = {}) {
  * 唯一收敛点：此正则此前在 5 处逐字复制（readEvidenceDoc / updateCrMdStatus /
  * readCrMdFrontmatter / detectStatusDivergence / validate）。刻意只收敛正则、不代解析——
  * updateCrMdStatus 只做字符串改写不 parse，代解析会引入无谓 parseYaml 调用。 */
-function matchFrontmatter(text) {
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  return m ? { match: m[0], body: m[1] } : null;
-}
-
 function parseEvidenceText(p, text) {
   if (p.endsWith('.md')) {
     const m = matchFrontmatter(text);
@@ -773,28 +605,39 @@ function casWrite(p, expectedHash, newText) {
   if (sha256(cur) !== expectedHash) fail('CAS_CONFLICT', `${p} 在读取后被其他进程修改，本次写入中止。请重新执行。`);
   fs.writeFileSync(p, newText, 'utf8');
 }
-/* casWriteMulti — 多文件全有或全无 CAS 写（CR-2026-019 TASK-01，archive-move 双文件原子）
- * 三阶段：全校验 → 全写 temp → 连续 rename。任一侧读后被改则整体 CAS_CONFLICT 中止，
- * 不落任何一侧（NFR-2：绝不产生 backlog 已删而 history 未写的半状态）。
- * expectedHash 为 null 表示"期望目标文件不存在"（首次归档时 _history.yml 可缺省）：
- * 文件实际不存在则放行（新建），文件实际存在则 CAS_CONFLICT（创建冲突）。
- * 残余窗口（ponytail 天花板）：两次 rename 间进程崩溃留半状态，SDD §4.3 判定为可接受：
- * rename 微秒级窗口 + 账本随 --embedded 进同一 git 提交可整体回滚 + 单写者不变量下无并发。
- */
-function casWriteMulti(writes) {
-  for (const w of writes) {
-    const cur = readFileChecked(w.path);
-    if (cur == null && w.expectedHash == null) continue;
-    if (cur == null) fail('CAS_FILE_MISSING', `写入前文件消失: ${w.path}`);
-    if (w.expectedHash == null || sha256(cur) !== w.expectedHash)
-      fail('CAS_CONFLICT', `${w.path} 在读取后被其他进程修改（或与预期存在状态不符），本次写入中止，两侧均未落盘。请重新执行。`);
-  }
-  const staged = writes.map((w) => {
-    const tmp = w.path + `.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, w.newText, 'utf8');
-    return { tmp, dst: w.path };
-  });
-  for (const s of staged) fs.renameSync(s.tmp, s.dst);
+function ledgerTxKey(op, cr, stage = '') {
+  return `${op}-${cr}${stage ? `-${stage}` : ''}`.replace(/[^A-Za-z0-9._-]/g, '-');
+}
+
+function syncLedgerIndex(ws, paths, caller) {
+  const tracked = queryTrackedChanges(ws, { audit: false });
+  const staged = new Set(tracked.ok ? tracked.staged : []);
+  const syncPaths = paths.filter((p) => fs.existsSync(path.join(ws, ...p.split('/'))) || staged.has(p));
+  if (!syncPaths.length) return;
+  const add = controlledGit(ws, 'add', ['-A', '--', ...syncPaths], ws, caller);
+  if (!add.ok) throw new TxError('TX_GIT_FAILED', `ledger rollback 后 index 恢复失败: ${add.stderr || add.message}`, { paths: syncPaths });
+}
+
+async function recoverLedgerCommand(ws, key) {
+  const root = deriveInstallRoot(ws);
+  if (!hasLedgerTransaction({ root, key })) return { recovered: false, paths: [] };
+  const head = gitHeadSha(ws);
+  const log = controlledGit(ws, 'log', ['--format=%B', '-1'], ws, 'crctl-ledger-recovery');
+  const recovered = await runTxAsync(recoverLedgerTransaction({ root, key, currentHead: head, headMessage: log.ok ? log.stdout : '' }));
+  if (recovered.rolledBack && recovered.paths.length && head) await runTxAsync((async () => syncLedgerIndex(ws, recovered.paths, 'crctl-ledger-recovery'))());
+  return recovered;
+}
+
+async function injectLedgerFault(point) {
+  return runTxAsync((async () => faultPoint(point))());
+}
+
+async function beginLedgerCommand(ws, key, writes, commitRequired) {
+  const inputDigest = sha256(JSON.stringify(writes.map((w) => ({ path: path.relative(ws, w.path).split(path.sep).join('/'), expectedHash: w.expectedHash, afterSha256: sha256(w.newText) }))));
+  return runTxAsync(beginLedgerTransaction({
+    root: deriveInstallRoot(ws), targetRoot: ws, key, inputDigest, writes,
+    headBefore: gitHeadSha(ws), commitRequired,
+  }));
 }
 /* ────────────────────────── 账本编辑纯函数（CR-2026-019） ──────────────────────────
  * 行级正则改写，纯 string→string（SDD §1.1）；匹配不到一律 fail 硬失败（纪律 #1），
@@ -866,111 +709,6 @@ function guardDependsOn(normText, taskId) {
     { notDone: notDone.map((d) => ({ id: d, status: byId.get(d).status })) });
 }
 
-/** merge-metadata：条目 merge-commits[] 追加 {repo,trunk,sha,branch}，无则创建键（SDD §4.2）。
- * branch 由 CR id 按硬约定（分支恒为 requirement/{cr}）自动补全——必填集仍为 {repo,trunk,sha}
- * （唯一生产者保证输出的集合），branch 是可推导的富化字段（CR-2026-020 复盘 FR-8：字段契约收敛）。 */
-function editMergeMetadata(text, cr, commit) {
-  const norm = text.replaceAll('\r\n', '\n');
-  const block = matchEntryBlock(norm, cr);
-  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
-  const lines = block.text.split('\n');
-  const mcIdx = lines.findIndex((l) => /^[ \t]*merge-commits:/.test(l));
-  const itemIndent = ' '.repeat(block.indent + 4);
-  const fieldIndent = ' '.repeat(block.indent + 6);
-  const item = `${itemIndent}- repo: ${commit.repo}\n${fieldIndent}trunk: ${commit.trunk}\n${fieldIndent}sha: ${commit.sha}\n${fieldIndent}branch: requirement/${cr}`;
-  if (mcIdx === -1) {
-    const fieldIndent2 = ' '.repeat(block.indent + 2);
-    lines.push(`${fieldIndent2}merge-commits:`, item);
-  } else {
-    if (/^[ \t]*merge-commits:\s*\[\]\s*$/.test(lines[mcIdx])) lines[mcIdx] = lines[mcIdx].replace(/:\s*\[\]\s*$/, ':');
-    // 段边界：merge-commits 键行之后第一个缩进不深于键的行（含块尾）
-    const mcIndent = lines[mcIdx].match(/^[ \t]*/)[0].length;
-    let segEnd = lines.length;
-    for (let i = mcIdx + 1; i < lines.length; i++) {
-      if (lines[i].match(/^[ \t]*/)[0].length <= mcIndent) { segEnd = i; break; }
-    }
-    // 段内最后一个列表项行
-    let lastItem = -1;
-    for (let i = segEnd - 1; i > mcIdx; i--) {
-      if (/^[ \t]*- /.test(lines[i])) { lastItem = i; break; }
-    }
-    // 插入点 = 最后一项行 + 其嵌套字段行之后（段尾前）；无项则紧跟键行
-    let insAt = lastItem === -1 ? mcIdx + 1 : lastItem + 1;
-    if (lastItem !== -1) {
-      const itemInd = lines[lastItem].match(/^[ \t]*/)[0].length;
-      while (insAt < segEnd && lines[insAt].match(/^[ \t]*/)[0].length > itemInd) insAt++;
-    }
-    lines.splice(insAt, 0, item);
-  }
-  return norm.slice(0, block.start) + lines.join('\n') + norm.slice(block.end);
-}
-
-/** archive-move：生成 newBacklog（删块）+ newHistory（history 追加富化块）（SDD §4.3）。 */
-function editArchiveMove(textB, textH, cr, meta) {
-  const normB = textB.replaceAll('\r\n', '\n');
-  const block = matchEntryBlock(normB, cr);
-  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
-  const newBacklog = normB.slice(0, block.start) + normB.slice(block.end);
-  const normH = textH == null ? '' : textH.replaceAll('\r\n', '\n');
-  if (normH && matchEntryBlock(normH, cr)) fail('ENTRY_ALREADY_IN_HISTORY', `${cr} 已在 _history.yml，禁止重复归档`);
-  // minIndent 必须排除空行（block.text 结尾换行会产生空串，其缩进为 0，会把整块错压成 +2 缩进——CR-2026-027 TASK-07 实测）
-  const minIndent = Math.min(...block.text.split('\n').filter((l) => l.trim() !== '').map((l) => (l.match(/^[ \t]*/) || [''])[0].length));
-  const entry = block.text.split('\n').map((l) => '  ' + l.slice(minIndent)).join('\n');
-  const reason = String(meta.archiveReason || '').replaceAll('"', '\\"');
-  const enrich = [
-    `    final-status: ${meta.finalStatus}`,
-    `    archive-reason: "${reason}"`,
-    meta.specId ? `    writeback-spec-id: ${meta.specId}` : null,
-    `    archived-at: "${nowIso()}"`,
-  ].filter(Boolean).join('\n');
-  // CR-2026-027 FR-11/TASK-06：归档事件随 history 条目同批写入（meta.notifyLog 行数组，4 空格基准缩进）
-  const notifyLog = meta.notifyLog && meta.notifyLog.length ? '\n' + meta.notifyLog.join('\n') : '';
-  const record = entry + '\n' + enrich + notifyLog + '\n';
-  const newHistory = (normH.trim() === '' ? 'history:' : normH.trimEnd()) + '\n' + record;
-  return { newBacklog, newHistory };
-}
-
-// CR-2026-027 FR-11/TASK-06：归档事件行构造（与 editInboxEmit 同构：at/event/to/payload）。
-// 收件人由 resolveArchiveRecipients 解析（owners 三角色去重 → legacy 顶层 owner → 空则硬失败）。
-function buildArchiveNotifyLog(finalStatus, to, payload) {
-  return [
-    '    notify-log:',
-    `      - at: "${nowIso()}"`,
-    `        event: ${finalStatus}`,
-    `        to: ${JSON.stringify(to)}`,
-    `        payload: ${JSON.stringify(payload)}`,
-  ];
-}
-
-// CR-2026-027 FR-11/TASK-06：收件人解析（D-10）。
-function resolveArchiveRecipients(ws, cr) {
-  const snap = loadBacklogEntry(ws, cr);
-  const o = snap.entry.owners || {};
-  const to = [...new Set([o.requirement && o.requirement.id, o.development && o.development.id, o.test && o.test.id].filter(Boolean))];
-  if (to.length === 0 && snap.entry.owner) to.push(String(snap.entry.owner));
-  if (to.length === 0) fail('ARCHIVE_RECIPIENTS_MISSING', `归档事件收件人为空：${cr} 缺少 owners 三角色且无顶层 owner，CAS 前拒绝归档`);
-  return to;
-}
-
-// CR-2026-027 FR-11/TASK-06：_index.yml 终态字段更新（只写 status/archived-at/可选 writeback-spec-id，D-2）。
-function editIndexFinalStatus(text, cr, finalStatus, specId) {
-  const norm = text.replaceAll('\r\n', '\n');
-  const block = matchEntryBlock(norm, cr);
-  if (!block) fail('INDEX_ENTRY_NOT_FOUND', `${cr} 不在 _index.yml`);
-  const fieldIndent = ' '.repeat(block.indent + 2);
-  let body = block.text;
-  const set = (key, val) => {
-    const re = new RegExp(`^([ \\t]*)${key}:.*$`, 'm');
-    return re.test(body) ? body.replace(re, `$1${key}: ${val}`) : body + `\n${fieldIndent}${key}: ${val}`;
-  };
-  body = set('status', finalStatus);
-  body = set('archived-at', `"${nowIso()}"`);
-  if (specId) body = set('writeback-spec-id', String(specId));
-  return norm.slice(0, block.start) + body + norm.slice(block.end);
-}
-
-
-
 function updateCrMdStatus(ws, cr, newStatus) {
   const p = path.join(crDir(ws, cr), 'cr.md');
   const text = readFileChecked(p);
@@ -983,16 +721,6 @@ function updateCrMdStatus(ws, cr, newStatus) {
 }
 
 // CR-2026-027 FR-8/TASK-03：cr.md 状态文本生成纯函数（status + updated-at 更新），供 approve 原子提交在内存生成候选文本。
-function crMdStatusText(text, newStatus) {
-  const m = matchFrontmatter(text);
-  if (!m) return null;
-  let fm = m.body;
-  if (/^status:\s*.*$/m.test(fm)) fm = fm.replace(/^status:\s*.*$/m, `status: ${newStatus}`);
-  else fm = fm + `\nstatus: ${newStatus}`;
-  if (/^updated-at:\s*.*$/m.test(fm)) fm = fm.replace(/^updated-at:\s*.*$/m, `updated-at: "${nowIso()}"`);
-  return text.replace(m.match, `---\n${fm}\n---`);
-}
-
 /* ────────────────────────── 状态读取收敛（CR-2026-018 FR-2） ──────────────────────────
  * 状态权威源 = cr.md frontmatter；_backlog.yml 退化为注册索引（owners/merge-commits 等低频字段）。
  * 迁移期兼容读：cr.md 无 status 时回退 backlog 条目 status（deprecated since v0.2.0，计划 v0.3.0 移除）。
@@ -1015,9 +743,8 @@ function resolveCrState(ws, cr) {
     const mixed = snap.entry.status && snap.entry.status !== md.status;
     return { snap, status: md.status, statusSource: 'cr.md', mixedLayout: mixed };
   }
-  if (snap.entry.status)                             // 迁移期兼容读（FR-2，deprecated）
-    return { snap, status: snap.entry.status, statusSource: '_backlog.yml', legacySource: true, mixedLayout: false };
-  fail('CR_MD_STATUS_MISSING', `${cr} 在 cr.md 与 _backlog.yml 中均无 status`);
+  // CR-2026-031 TASK-02：v1 回退读（backlog entry.status）随永久迁移兼容一并删除；cr.md 是状态唯一权威。
+  fail('CR_MD_STATUS_MISSING', `${cr} 的 cr.md 缺少 status 字段（_backlog.yml 不再是状态来源）`);
 }
 
 // CR-2026-027 FR-12/TASK-07：终态只读查询——从 _history.yml 找 CR 条目（仅 status/next 使用；写命令不 fallback）。
@@ -1087,7 +814,7 @@ function readAttempts(ws, cr, loopRef, gates) {
 }
 
 /** review-loop.yml 全量渲染纯函数（CR-2026-025 I-1 拆分：bumpAttempt 与 review-record 共用同一渲染，
- * 使 review-record 能"先算后写"并入 casWriteMulti 同批，消除半状态，B-16）。 */
+ * 使 review-record 能“先算后写”并入 durable ledger transaction，消除半状态，B-16）。 */
 function renderLoopText(loopsMap) {
   const lines = ['# 由 crctl attempt 维护，请勿手工编辑', 'loops:'];
   for (const [k, v] of Object.entries(loopsMap)) {
@@ -1182,14 +909,12 @@ function cmdStatus(ws, cr, gates, flags) {
     }
   }
   const warnings = [];
-  if (state.mixedLayout) warnings.push({ code: 'MIXED_LAYOUT_WARN', message: `cr.md status=${current} 与 _backlog.yml status=${snap.entry.status} 不一致，以 cr.md 为准；workspace 可能被新旧 crctl 混用，建议统一版本后执行 migrate-backlog` });
-  if (state.legacySource) warnings.push({ code: 'MIXED_LAYOUT_WARN', message: `状态从 _backlog.yml 回退读取（cr.md 无 status），workspace 布局为旧版；建议执行 migrate-backlog 升级到 v2` });
+  if (state.mixedLayout) warnings.push({ code: 'MIXED_LAYOUT_WARN', message: `cr.md status=${current} 与 _backlog.yml status=${snap.entry.status} 不一致，以 cr.md 为准；_backlog.yml 条目中的 status 行是 v2 schema 下的残留字段，应清除` });
   const diverged = detectStatusDivergence(ws, cr, current);
   if (diverged) warnings.push(diverged);
   ok({
     cr, status: current,
     source: { backlog: snap.path, backlogSha256: snap.hash.slice(0, 12), crMd: path.join(crDir(ws, cr), 'cr.md'), stateMachine: source },
-    ...(state.legacySource ? { legacySource: '_backlog.yml' } : {}),
     owners: snap.entry.owners || null,
     legalNext: nexts,
     reviewLoops: loops,
@@ -1306,16 +1031,27 @@ function assertCandidateStatus(crMdText, expectStatus) {
 
 // CR-2026-027 FR-8/TASK-03：approval 与 status 的原子提交核心（TTY 与 --grant 共用）。
 // 流程：预检（调用方完成）→ 内存生成候选两文件 → runGateChecks（approval.yml evidence override）→
-// assertCandidateStatus → casWriteMulti 两文件 → controlledGit add/commit 单次提交 → commit 成功后发 status outbox。
+// assertCandidateStatus → durable ledger transaction → controlledGit add/commit 单次提交 → commit 成功后发 status outbox。
 // 失败边界：gate/候选校验失败零写入；CAS 冲突两文件均不写；commit 失败两文件共同留在工作区、不发 outbox、返回结构化恢复信息。
-function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
+async function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
   const { approver, via, evidenceHash, grant, outboxEvidence, specId, fromStatus } = ctx;
+  // TASK-06（SDD §3.4）：code 审批重核机器注入的 release-subjects，任一漂移零写入拒绝；
+  // TTY 与 grant 两条路径在此单缝汇合，通过后原样复制到 approval.yml#code.release-subjects。
+  if (stageCfg.approvalSection === 'code') {
+    ctx.releaseSubjects = await runTxAsync((async () => {
+      const snap = readCodeReleaseSubjects(ws, cr);
+      if (!snap) fail('RELEASE_SUBJECT_DRIFT', 'code 审批需要 review-annotations/code.yml#release-subjects（机器注入），当前缺失或形状非法，拒绝签入', { kind: 'missing' });
+      const v = await verifyReleaseSubjects(resolveRepositories(ws), cr, snap);
+      if (!v.ok) fail('RELEASE_SUBJECT_DRIFT', `release-subjects 漂移（kind=${v.kind}），零写入拒绝审批`, { kind: v.kind, ...v.details });
+      return snap;
+    })());
+  }
   const crMdP = path.join(crDir(ws, cr), 'cr.md');
   const approvalP = path.join(crDir(ws, cr), 'approval.yml');
   const crMdText = readFileChecked(crMdP);
   if (crMdText == null) fail('CR_MD_WRITE_FAILED', `cr.md 不存在: ${crMdP}`);
   // 1) 内存生成候选文本（零落盘）
-  const approvalText = buildApprovalSectionText(approvalP, stageCfg, approver, evidenceHash, { via, grant });
+  const approvalText = buildApprovalSectionText(approvalP, stageCfg, approver, evidenceHash, { via, grant, releaseSubjects: ctx.releaseSubjects });
   const nextCrMd = crMdStatusText(crMdText, stageCfg.to);
   if (nextCrMd == null) fail('CANDIDATE_STATUS_MISMATCH', '候选 cr.md 无 frontmatter，无法生成目标态文本');
   // 2) 按候选 approval 复核目标 gate（evidence override，approval.yml 不落盘）
@@ -1329,18 +1065,26 @@ function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
   }
   // 3) 候选 cr.md 独立 invariant 校验（零写入前提）
   assertCandidateStatus(nextCrMd, stageCfg.to);
-  // 4) 两文件同一 CAS：全校验→全 temp→连续 rename，任一冲突整体中止
+  // 4) 两文件进入 command-level durable transaction；commit 前崩溃会在同命令下次启动时整体回滚。
   const approvalHash = readFileChecked(approvalP) == null ? null : sha256(readFileChecked(approvalP));
-  casWriteMulti([
+  const ledgerTx = await beginLedgerCommand(ws, ledgerTxKey('approve', cr, stage), [
     { path: approvalP, expectedHash: approvalHash, newText: approvalText },
     { path: crMdP, expectedHash: sha256(crMdText), newText: nextCrMd },
-  ]);
-  // 5) 单次 commit（approval.yml + cr.md 同批可见）
+  ], true);
+  // 5) 单次 commit（approval.yml + cr.md 同批可见），tx trailer 供 crash-after-commit 恢复判定。
   const addR = controlledGit(ws, 'add', [`change-requests/${cr}/approval.yml`, `change-requests/${cr}/cr.md`], ws, 'crctl-approve');
   const msg = `[cr] approve ${cr} ${stage} approval+status -> ${stageCfg.to}`;
-  const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-approve') : addR;
-  auditLog(ws, { kind: 'approve', cr, stage, approver, via, result: 'approved', commit: commitR.ok ? msg : 'commit-failed' });
-  const result = { advanced: true, op: 'approve', cr, stage, from: fromStatus, to: stageCfg.to, trigger: stageCfg.trigger, crMd: { updated: true, path: crMdP }, files: [approvalP, crMdP], commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR, note: 'approval.yml 与 cr.md 已同批写入工作区；commit 失败时两文件共同保留、未发 status outbox，请修复后手工经 crctl git 提交' } };
+  const commitMsg = `${msg}\n\nAI-First-Tx: ${ledgerTx.txId}`;
+  const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', commitMsg], ws, 'crctl-approve') : addR;
+  if (!commitR.ok) {
+    const rolled = await runTxAsync(abortLedgerTransaction(ledgerTx));
+    if (rolled.paths.length) await runTxAsync((async () => syncLedgerIndex(ws, rolled.paths, 'crctl-approve'))());
+  } else {
+    await injectLedgerFault('ledger-after-commit');
+    await runTxAsync(finishLedgerTransaction(ledgerTx));
+  }
+  auditLog(ws, { kind: 'approve', cr, stage, approver, via, result: commitR.ok ? 'approved' : 'commit-failed', commit: commitR.ok ? msg : 'rolled-back' });
+  const result = { advanced: commitR.ok, op: 'approve', cr, stage, from: fromStatus, to: stageCfg.to, trigger: stageCfg.trigger, crMd: { updated: commitR.ok, path: crMdP }, files: [approvalP, crMdP], commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR, rolledBack: true } };
   // 6) commit 成功后发 status outbox（git 是权威、outbox 只是投影）；commit 失败不发
   if (commitR.ok) {
     result.outbox = emitOutboxEvent(ws, {
@@ -1353,10 +1097,11 @@ function approveAndAdvance(ws, cr, gates, stage, stageCfg, ctx) {
   if (!commitR.ok) process.exit(1);
 }
 
-function cmdApprove(ws, cr, gates, flags) {
+async function cmdApprove(ws, cr, gates, flags) {
   const stage = flags.stage;
   const stageCfg = gates.approvalStages[stage];
   if (!stageCfg) fail('BAD_ARGS', `--stage 必须是 ${Object.keys(gates.approvalStages).join(' | ')}`);
+  await recoverLedgerCommand(ws, ledgerTxKey('approve', cr, stage));
   // CR-2026-027 代码评审回修（b10）：受控历史审批迁移路径（TTY 人类在环，无旁路）——
   // 证据定义变更（如 dev-start 剔除 task-index）后既有 approval 段 digest 按旧定义签发，
   // 门禁复算不一致报 EVIDENCE_DRIFT；--resign 只重算当前定义下 digest 并改写该段，保留审批本体。
@@ -1398,7 +1143,7 @@ function cmdApprove(ws, cr, gates, flags) {
   process.stdout.write(summaryLines.join('\n') + '\n');
   const approver = flags.approver || identity(ws);
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  rl.question(`以 approver=${approver} 批准该阶段？只有输入 yes 才会写入 approval.yml [yes/N] `, (answer) => {
+  rl.question(`以 approver=${approver} 批准该阶段？只有输入 yes 才会写入 approval.yml [yes/N] `, async (answer) => {
     rl.close();
     if (answer.trim().toLowerCase() !== 'yes') {
       auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined' });
@@ -1414,7 +1159,7 @@ function cmdApprove(ws, cr, gates, flags) {
       fail('APPROVAL_DECLINED_ROLLED_BACK', `审批未通过，CR 已回退到 ${rollback.to}，请重跑 ${rollback.write}`, { rolledBackTo: rollback.to, rerunHint: rollback.write });
     }
     // CR-2026-027 FR-8/TASK-03：TTY 确认后走 approveAndAdvance（approval.yml + cr.md 单次原子提交），替代原分提交路径
-    approveAndAdvance(ws, cr, gates, stage, stageCfg, {
+    await approveAndAdvance(ws, cr, gates, stage, stageCfg, {
       approver, via: 'crctl-approve', evidenceHash,
       outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
       specId: flags['spec-id'], fromStatus: current,
@@ -1517,13 +1262,12 @@ function approveWithGrant(ws, cr, gates, flags, stage, stageCfg) {
   // 7) 副作用 / 幂等分支
   if (grant.decision === 'approve') {
     if (cls === 'fresh') {
-      // approveAndAdvance 内部已 ok() 输出成功结果并处理 commit 失败退出，这里直接返回
-      approveAndAdvance(ws, cr, gates, stage, stageCfg, {
+      // approveAndAdvance 内部已 ok() 输出成功结果并处理 commit 失败退出；TASK-06 起为 async（code 重核），返回 promise 给调用链
+      return approveAndAdvance(ws, cr, gates, stage, stageCfg, {
         approver: grant.approver, via: 'server-approve', evidenceHash: digest || null, grant,
         outboxEvidence: collectOutboxEvidence(ws, cr, stageCfg),
         specId: flags['spec-id'], fromStatus: current,
       });
-      return;
     }
     assertAdjacentApprove(ws, cr, stageCfg, grant, current);
     assertResultLedgersCommitted(ws, [`change-requests/${cr}/approval.yml`, `change-requests/${cr}/cr.md`]);
@@ -1631,17 +1375,6 @@ function collectOutboxEvidence(ws, cr, stageCfg) {
   return out;
 }
 
-function writeApprovalSection(ws, cr, stage, stageCfg, approver, evidenceHash, opts = {}) {
-  const p = path.join(crDir(ws, cr), 'approval.yml');
-  const existing = readFileChecked(p);
-  const next = buildApprovalSectionText(p, stageCfg, approver, evidenceHash, opts);
-  if (existing == null) {
-    fs.writeFileSync(p, next, 'utf8');
-    return;
-  }
-  casWrite(p, sha256(existing), next);
-}
-
 // CR-2026-027 FR-8/TASK-03：approval.yml 候选文本生成（含既有文件段落合并），供 approve 原子提交在内存构造。
 function buildApprovalSectionText(p, stageCfg, approver, evidenceHash, opts = {}) {
   const section = stageCfg.approvalSection;
@@ -1657,7 +1390,7 @@ function buildApprovalSectionText(p, stageCfg, approver, evidenceHash, opts = {}
 function buildApprovalBlock(stageCfg, approver, evidenceHash, opts = {}) {
   const section = stageCfg.approvalSection;
   const g = opts.grant || null;
-  return [
+  const lines = [
     `${section}:`,
     `  approver: "${approver}"`,
     `  approved-at: "${nowIso()}"`,
@@ -1667,7 +1400,20 @@ function buildApprovalBlock(stageCfg, approver, evidenceHash, opts = {}) {
     g ? `  signature: "${g.signature}"` : null,
     g ? `  grant-approved-at: "${g.approved_at}"` : null,
     `  target-status: ${stageCfg.to}`,
-  ].filter(Boolean).join('\n');
+  ].filter(Boolean);
+  // TASK-06：release-subjects 原样复制到 approval.yml#code 段内（与 annotation 块字节语义一致，缩进 2 格嵌套）
+  if (opts.releaseSubjects) lines.push(...renderReleaseSubjects(opts.releaseSubjects).map((l) => `  ${l}`));
+  return lines.join('\n');
+}
+
+/** TASK-06：读取 review-annotations/code.yml#release-subjects（机器注入块）；缺失/非法返回 null。 */
+function readCodeReleaseSubjects(ws, cr) {
+  const p = path.join(crDir(ws, cr), 'review-annotations', REVIEW_STAGE_FILES.code);
+  const text = readFileChecked(p);
+  if (text == null) return null;
+  const doc = parseYaml(text.replaceAll('\r\n', '\n'));
+  const rs = doc && typeof doc === 'object' && !Array.isArray(doc) ? doc['release-subjects'] : null;
+  return rs && typeof rs === 'object' && !Array.isArray(rs) ? rs : null;
 }
 
 function cmdValidate(ws, target, gates) {
@@ -1705,28 +1451,15 @@ function cmdValidate(ws, target, gates) {
       validateOwners(fm.owners, 'cr.md');
     }
   } else if (base === '_backlog.yml') {
+    assertSupportedBacklogSchema(text); // CR-2026-031 TASK-02：v1 布局不再支持，validate 同样硬失败
     const doc = parseYaml(text);
     const list = Array.isArray(doc) ? doc : doc['change-requests'] || doc.backlog || doc.items || [];
-    const schemaVer = (doc && !Array.isArray(doc) && doc.schema) || '';
-    const isV2 = schemaVer === 'cr-backlog/v2';
-    const { sm } = loadStateMachine(ws);
-    const allStatuses = new Set([...(sm.transitions || []).flatMap((t) => [t.from, t.to]), ...(sm.terminal || [])]);
     for (const e of list) {
       const where = `_backlog.yml#${e?.id || '?'}`;
       pushIf(!e.id, `${where}: 缺少 id`);
-      if (isV2) {
-        // v2 布局：status/updated-at 已撤出，不应再出现
-        warnIf(e.status !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 status 行（值=${e.status}），应执行 migrate-backlog 清除`);
-        warnIf(e['updated-at'] !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 updated-at 行，应执行 migrate-backlog 清除`);
-      } else {
-        // v1 布局（迁移期）：status 必填，但与 cr.md 不一致时告警
-        pushIf(!e.status, `${where}: 缺少 status`);
-        pushIf(e.status && !allStatuses.has(e.status), `${where}: status=${e.status} 不在状态机枚举内`);
-        if (e.id && e.status) {
-          const md = readCrMdFrontmatter(ws, e.id);
-          warnIf(md && md.status && md.status !== e.status, `${where}: 漂移 — backlog status=${e.status} 与 cr.md status=${md.status} 不一致，以 cr.md 为准；建议执行 migrate-backlog`);
-        }
-      }
+      // v2 布局：status/updated-at 已撤出，不应再出现
+      warnIf(e.status !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 status 行（值=${e.status}），应清除`);
+      warnIf(e['updated-at'] !== undefined, `${where}: LEGACY_STATUS_FIELD — v2 schema 条目仍含 updated-at 行，应清除`);
       validateOwners(e.owners, where);
     }
   } else if (/review-annotations[\\/].+\.yml$/.test(p) || ['requirement.yml', 'sdd.yml', 'code.yml'].includes(base)) {
@@ -1795,93 +1528,6 @@ function cmdTaskDone(ws, cr, gates, flags) {
   casWrite(p, sha256(text), newText);
   auditLog(ws, { kind: 'ledger', op: 'task-done', cr, actor: identity(ws), before: { taskId: flags.task, from: 'pending' }, after: { taskId: flags.task, to: 'done' } });
   ok({ op: 'task-done', cr, task: flags.task, status: 'done', file: p });
-}
-
-function cmdMergeMetadata(ws, cr, gates, flags) {
-  if (!flags.repo || !flags.trunk || !flags.sha) fail('BAD_ARGS', 'merge-metadata 需要 --repo <r> --trunk <t> --sha <sha>');
-  const state = resolveCrState(ws, cr);
-  const LEGAL = ['merging', 'writing-back'];
-  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `merge-metadata 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}。请先 crctl advance 到 ${LEGAL[0]} 再写 merge 元数据（状态前置强制：先推进状态，后写账本）`, { current: state.status, expect: LEGAL });
-  const snap = loadBacklogEntry(ws, cr);
-  const before = (snap.entry['merge-commits'] || []).length;
-  const dup = (snap.entry['merge-commits'] || []).some((c) => c && String(c.sha) === String(flags.sha));
-  if (dup) {
-    auditLog(ws, { kind: 'ledger', op: 'merge-metadata', cr, actor: identity(ws), result: 'dup-idempotent', sha: flags.sha });
-    return ok({ op: 'merge-metadata', cr, sha: flags.sha, result: 'dup-idempotent', note: '同 sha 已存在，未重复写入' });
-  }
-  const newText = editMergeMetadata(snap.text, cr, { repo: flags.repo, trunk: flags.trunk, sha: flags.sha });
-  casWrite(snap.path, snap.hash, newText);
-  auditLog(ws, { kind: 'ledger', op: 'merge-metadata', cr, actor: identity(ws), before: { count: before }, after: { sha: flags.sha, count: before + 1 } });
-  ok({ op: 'merge-metadata', cr, repo: flags.repo, trunk: flags.trunk, sha: flags.sha, branch: `requirement/${cr}`, result: 'appended' });
-}
-
-function cmdArchiveMove(ws, cr, gates, flags) {
-  if (!flags['final-status']) fail('BAD_ARGS', 'archive-move 需要 --final-status <status>');
-  // CR-2026-027 FR-11/TASK-06：重复调用检测（TD-BL-3 拍板）——先查 history：
-  // 同 CR 且 final-status 一致 → already-archived 幂等（零写入、不发 outbox）；不一致 → FINAL_STATUS_MISMATCH。
-  const hp = path.join(ws, 'change-requests', '_history.yml');
-  const hText = readFileChecked(hp);
-  if (hText != null) {
-    const hDoc = parseYaml(hText);
-    const hList = Array.isArray(hDoc) ? hDoc : hDoc['change-requests'] || hDoc['history'] || [];
-    const histEntry = hList.find((e) => e && e.id === cr);
-    if (histEntry) {
-      // CR-2026-027 代码评审回修（b2）：幂等前提是 CR 已移出 backlog；backlog/history 双存是数据冲突，不得静默判为幂等成功
-      const bpText = readFileChecked(backlogPath(ws));
-      if (bpText != null && matchEntryBlock(bpText.replaceAll('\r\n', '\n'), cr)) {
-        fail('CR_LOCATION_CONFLICT', `${cr} 同时存在于 _backlog.yml 与 _history.yml，重复归档判定拒绝（数据冲突，非幂等）`, { location: 'both' });
-      }
-      if (String(histEntry['final-status']) === String(flags['final-status'])) {
-        auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), result: 'already-archived', finalStatus: flags['final-status'] });
-        ok({ op: 'archive-move', cr, result: 'already-archived', finalStatus: flags['final-status'] });
-        return;
-      }
-      fail('FINAL_STATUS_MISMATCH', `history 中 ${cr} 的 final-status=${histEntry['final-status']}，与 --final-status ${flags['final-status']} 不一致`, { current: histEntry['final-status'], expect: flags['final-status'] });
-    }
-  }
-  const state = resolveCrState(ws, cr);
-  // CR-2026-027 FR-11/TASK-06：前置态放宽为三种终态，且 --final-status 必须与 cr.md 当前 status 完全一致（D-8）
-  if (!['archived', 'rejected', 'withdrawn'].includes(state.status)) {
-    fail('ILLEGAL_LEDGER_STATE', `archive-move 仅允许在终态 archived/rejected/withdrawn 执行，当前 ${state.status}。请先 crctl advance 到终态再 archive-move（状态前置强制）`, { current: state.status, expect: ['archived', 'rejected', 'withdrawn'] });
-  }
-  if (String(flags['final-status']) !== String(state.status)) {
-    fail('FINAL_STATUS_MISMATCH', `--final-status ${flags['final-status']} 与 cr.md 当前状态 ${state.status} 不一致`, { current: state.status, expect: flags['final-status'] });
-  }
-  const bp = backlogPath(ws);
-  const ip = path.join(ws, 'change-requests', '_index.yml');
-  const textB = readFileChecked(bp);
-  if (textB == null) fail('BACKLOG_NOT_FOUND', `缺少 ${bp}`);
-  // 收件人解析（CAS 前，空则硬失败）
-  const to = resolveArchiveRecipients(ws, cr);
-  const payload = {
-    'final-status': flags['final-status'],
-    'archive-reason': flags['archive-reason'] || '',
-    ...(flags['spec-id'] ? { 'writeback-spec-id': flags['spec-id'] } : {}),
-    'archived-at': nowIso(),
-  };
-  const parts = editArchiveMove(textB, hText, cr, {
-    finalStatus: flags['final-status'],
-    archiveReason: flags['archive-reason'] || '',
-    specId: flags['spec-id'] || null,
-    notifyLog: buildArchiveNotifyLog(flags['final-status'], to, payload),
-  });
-  // _index.yml 终态更新（D-2：只写 status/archived-at/可选 writeback-spec-id，不复制 history、不删除条目）
-  const textI = readFileChecked(ip);
-  if (textI == null) fail('INDEX_NOT_FOUND', `缺少 ${ip}`);
-  const newIndex = editIndexFinalStatus(textI, cr, flags['final-status'], flags['spec-id'] || null);
-  // 三账本同一 CAS：事件与 backlog/history/index 要么同生要么同灭
-  casWriteMulti([
-    { path: bp, expectedHash: sha256(textB), newText: parts.newBacklog },
-    { path: hp, expectedHash: hText == null ? null : sha256(hText), newText: parts.newHistory },
-    { path: ip, expectedHash: sha256(textI), newText: newIndex },
-  ]);
-  auditLog(ws, { kind: 'ledger', op: 'archive-move', cr, actor: identity(ws), before: { inBacklog: true }, after: { inBacklog: false, inHistory: true, inIndex: true, finalStatus: flags['final-status'] } });
-  // CAS 成功后发 archive outbox（git 是权威、outbox 只是投影）
-  const outbox = emitOutboxEvent(ws, {
-    event_kind: 'archive', cr_id: cr, from_status: state.status, to_status: flags['final-status'],
-    actor: identity(ws), payload,
-  });
-  ok({ op: 'archive-move', cr, finalStatus: flags['final-status'], recipients: to, backlog: bp, history: hp, index: ip, outbox });
 }
 
 function cmdAttempt(ws, cr, gates, flags) {
@@ -2006,10 +1652,11 @@ function upsertReviewsStage(traceNorm, cr, stage, blockText) {
   return [...lines.slice(0, re), ...blockLines, ...lines.slice(re)].join('\n');
 }
 
-function cmdReviewRecord(ws, cr, gates, flags) {
+async function cmdReviewRecord(ws, cr, gates, flags) {
   const stage = flags.stage;
   const fileName = REVIEW_STAGE_FILES[stage];
   if (!fileName) fail('STAGE_UNKNOWN', `--stage 必须是 ${Object.keys(REVIEW_STAGE_FILES).join(' | ')}`);
+  await recoverLedgerCommand(ws, ledgerTxKey('review', cr, stage));
   const expect = REVIEW_STAGE_EXPECT[stage];
   const state = resolveCrState(ws, cr);
   if (!expect.includes(state.status)) {
@@ -2027,6 +1674,10 @@ function cmdReviewRecord(ws, cr, gates, flags) {
   if (!Array.isArray(payload.blockers)) fail('SCHEMA_INVALID', 'blockers 必须是列表（可空）');
   if (!payload.dimensions || typeof payload.dimensions !== 'object' || Array.isArray(payload.dimensions)) {
     fail('SCHEMA_INVALID', 'dimensions 缺失或不是映射（该 stage 门禁要求的维度必须齐全）');
+  }
+  // TASK-06（SDD §3.4）：release-subjects 只由 crctl 机器注入；payload 提供/覆盖一律零写入拒绝
+  if (stage === 'code' && payload['release-subjects'] !== undefined) {
+    fail('RELEASE_SUBJECTS_FORGED', 'release-subjects 只能由 crctl review-record 机器注入，模型 payload 不得提供或覆盖', { stage });
   }
   const bumpFlag = !!flags['bump-attempt'];
   // dev-plan 双轨路由（CR-2026-026，TD-BL-2）：bump 之前判定；repair-target 枚举校验（非法值 SCHEMA_INVALID 不写）；
@@ -2117,7 +1768,7 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     }
   }
 
-  // ── 构造三份新文本（同一 recordedAt），再交 casWriteMulti 统一写入（FR-17/D-11，复用 B-18 语义）──
+  // ── 构造三份新文本（同一 recordedAt），再交 durable ledger transaction 统一写入（FR-17/D-11）──
   const target = path.join(crDir(ws, cr), 'review-annotations', fileName);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const existing = readFileChecked(target);
@@ -2153,6 +1804,11 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     lines.push(`subject-file: change-requests/${cr}/sdd.md`);
     lines.push(`subject-sha256: ${sha256(sddRaw.replaceAll('\r\n', '\n'))}`);
   }
+  if (stage === 'code') {
+    // TASK-06（SDD §3.4）：机器注入逐仓 source SHA 与受控 artifact digest；approve-code 重核后原样签入
+    const rs = await runTxAsync((async () => buildReleaseSubjects(resolveRepositories(ws), cr))());
+    lines.push(...renderReleaseSubjects(rs));
+  }
   lines.push('');
   const annotationText = lines.join('\n');
   const blockText = renderReviewsStageBlock(stage, {
@@ -2179,7 +1835,8 @@ function cmdReviewRecord(ws, cr, gates, flags) {
     };
     writes.push({ path: loopPath, expectedHash: loopRaw == null ? null : sha256(loopRaw), newText: renderLoopText(all.loops) });
   }
-  casWriteMulti(writes); // 任一前置校验/CAS 失败时本次涉及的受控文件均不落盘；保留 B-18 已声明的连续 rename 极小崩溃窗口，不另造事务
+  const ledgerTx = await beginLedgerCommand(ws, ledgerTxKey('review', cr, stage), writes, false);
+  await runTxAsync(finishLedgerTransaction(ledgerTx));
   auditLog(ws, { kind: 'ledger', op: 'review-record', cr, stage, verdict: payload.verdict, actor: reviewer, file: target });
   emitOutboxEvent(ws, {
     event_kind: 'review', cr_id: cr, actor: reviewer,
@@ -2317,7 +1974,7 @@ function editCheckpointAdd(text, cr, meta) {
 /** owner-set：块内 owners.{role} 的 id + assigned-at 更新（crctl 生成时间戳）。 */
 /* ────────────────────────── Owner 正式移交原语（CR-2026-030 TASK-03，SDD §2.2~§2.5/§3.5/§4.4~§4.7） ──────────────────────────
  * owner-set 收敛为受控账本原语：tracked clean 前置 → 双投影一致性校验 → 唯一时间戳两账本候选 →
- * 一次 casWriteMulti → 只 add 两受控路径并复核 staged set → 一次隔离正式 commit → 成功后同 SHA 发 owners/inbox 事件。
+ * 一次 durable ledger transaction → 只 add 两受控路径并复核 staged set → 一次隔离正式 commit → 成功后同 SHA 发 owners/inbox 事件。
  * 失败回滚以候选 hash 为 CAS 前提恢复原始快照并复核 clean baseline；禁止 reset/checkout/补偿 commit。
  */
 
@@ -2443,33 +2100,11 @@ function editBacklogOwnerProjection(text, cr, role, newId, inboxPayload, handove
   return editInboxEmit(nb, cr, { at: handoverAt, event: 'owner-handover', to: inboxPayload.to, payload: inboxPayload });
 }
 
-/** casWriteMulti 的软失败变体（回滚专用，SDD §4.7）：语义一致（全校验→全 temp→连续 rename），失败抛 Error 而非 process.exit。 */
-function tryCasWriteMulti(writes) {
-  for (const w of writes) {
-    const cur = readFileChecked(w.path);
-    if (cur == null && w.expectedHash == null) continue;
-    if (cur == null) throw new Error(`写入前文件消失: ${w.path}`);
-    if (w.expectedHash == null || sha256(cur) !== w.expectedHash) {
-      throw new Error(`${w.path} CAS 失配（候选 hash ${String(w.expectedHash).slice(0, 8)}…），疑似并发修改`);
-    }
-  }
-  const staged = writes.map((w) => {
-    const tmp = w.path + `.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, w.newText, 'utf8');
-    return { tmp, dst: w.path };
-  });
-  for (const s of staged) fs.renameSync(s.tmp, s.dst);
-}
-
-/** FR-5 失败回滚：以候选 hash 为 CAS 前提恢复两原始快照，撤销本次暂存，复核 clean baseline。
- * 任一步失败 → OWNER_COMMIT_ROLLBACK_FAILED（不吞外部并发变化，不 reset/checkout）。 */
-function rollbackOwnerWrite(ws, os, candidateHashes, rels) {
+/** FR-5 失败回滚：复用 durable ledger transaction 的 before snapshots，撤销暂存并复核 clean baseline。 */
+async function rollbackOwnerWrite(ws, ledgerTx, rels) {
   try {
-    tryCasWriteMulti([
-      { path: os.crMd.path, expectedHash: candidateHashes.crMd, newText: os.crMd.text },
-      { path: os.backlog.path, expectedHash: candidateHashes.backlog, newText: os.backlog.text },
-    ]);
-    const unR = controlledGit(ws, 'add', rels, ws, 'crctl-owner-set'); // 原文等于 HEAD → 清除本次 staged diff
+    await runTxAsync(abortLedgerTransaction(ledgerTx));
+    const unR = controlledGit(ws, 'add', rels, ws, 'crctl-owner-set');
     if (!unR.ok) throw new Error(`撤销本次暂存失败: git add ${rels.join(' ')}`);
     const clean = queryTrackedChanges(ws, { audit: true });
     if (!clean.ok || clean.staged.length || clean.unstaged.length) {
@@ -2478,7 +2113,7 @@ function rollbackOwnerWrite(ws, os, candidateHashes, rels) {
   } catch (e) {
     fail('OWNER_COMMIT_ROLLBACK_FAILED', `正式移交提交失败后的恢复未完成：${String(e && e.message || e)}`, { affected: rels });
   }
-  fail('OWNER_COMMIT_FAILED', '正式移交提交失败，已恢复两个原始快照并撤销本次暂存（tracked clean baseline 已复原），请修复后重试', { changed: false, rolled_back: true });
+  fail('OWNER_COMMIT_FAILED', '正式移交提交失败，已由 durable transaction 恢复两个原始快照并撤销暂存', { changed: false, rolled_back: true });
 }
 
 /** backlog-set：白名单标量字段 prd-path/sdd-path 替换或插入。 */
@@ -2512,9 +2147,10 @@ function cmdCheckpointAdd(ws, cr, gates, flags) {
   ok({ op: 'checkpoint-add', cr, repo: flags.repo, sha: flags.sha, file: snap.path });
 }
 
-function cmdOwnerSet(ws, cr, gates, flags) {
+async function cmdOwnerSet(ws, cr, gates, flags) {
   if (!flags.role || !flags.id) fail('BAD_ARGS', 'owner-set 需要 --role <requirement|development|test> --id <id> [--note <text>]');
   if (!['requirement', 'development', 'test'].includes(flags.role)) fail('BAD_ARGS', `--role 必须是 requirement|development|test（当前 ${flags.role}）`);
+  await recoverLedgerCommand(ws, ledgerTxKey('owner', cr));
   const state = resolveCrState(ws, cr);
   const { sm } = loadStateMachine(ws);
   if ((sm.terminal || []).includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `owner-set 不允许在终态 ${state.status} 修改负责人`, { current: state.status, expect: '非终态' });
@@ -2548,20 +2184,20 @@ function cmdOwnerSet(ws, cr, gates, flags) {
   const relBacklog = path.relative(ws, os.backlog.path).split(path.sep).join('/');
   const rels = [relCrMd, relBacklog];
   const expected = [...rels].sort();
-  const candidateHashes = { crMd: sha256(newCrMd), backlog: sha256(newBacklog) };
-  // FR-5：两账本候选一次 CAS 写入
-  casWriteMulti([
+  const ledgerTx = await beginLedgerCommand(ws, ledgerTxKey('owner', cr), [
     { path: os.crMd.path, expectedHash: os.crMd.hash, newText: newCrMd },
     { path: os.backlog.path, expectedHash: os.backlog.hash, newText: newBacklog },
-  ]);
+  ], true);
   // FR-5：只 add 两受控路径，commit 前复核 staged set 恰好等于两文件且无其他 tracked working-tree 变化
   const addR = controlledGit(ws, 'add', rels, ws, 'crctl-owner-set');
   if (addR.ok) {
     const iso = queryTrackedChanges(ws, { audit: false });
     if (iso.ok && iso.unstaged.length === 0 && JSON.stringify(iso.staged) === JSON.stringify(expected)) {
       const msg = `[cr] owner handover ${cr} ${flags.role} ${from} -> ${newId}`;
-      const commitR = controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-owner-set');
+      const commitR = controlledGit(ws, 'commit', ['-m', `${msg}\n\nAI-First-Tx: ${ledgerTx.txId}`], ws, 'crctl-owner-set');
       if (commitR.ok) {
+        await injectLedgerFault('ledger-after-commit');
+        await runTxAsync(finishLedgerTransaction(ledgerTx));
         const sha = gitHeadSha(ws);
         auditLog(ws, { kind: 'ledger', op: 'owner-set', cr, actor: identity(ws), role: flags.role, from, to: newId, handover_at: handoverAt, result: 'ok' });
         // FR-5：同一真实 SHA 分别尝试 owners + inbox 事件；outbox 失败只 warning，不回滚 commit
@@ -2588,13 +2224,13 @@ function cmdOwnerSet(ws, cr, gates, flags) {
     }
   }
   // add/commit/隔离复核失败 → 回滚恢复 clean baseline
-  rollbackOwnerWrite(ws, os, candidateHashes, rels);
+  await rollbackOwnerWrite(ws, ledgerTx, rels);
 }
 
 function cmdBacklogSet(ws, cr, gates, flags) {
   if (!flags.field || flags.value === undefined) fail('BAD_ARGS', 'backlog-set 需要 --field <prd-path|sdd-path> --value <v>');
   if (!BACKLOG_SET_FIELDS.includes(flags.field)) {
-    fail('FIELD_NOT_ALLOWED', `backlog-set 白名单仅允许 ${BACKLOG_SET_FIELDS.join(' | ')}；${flags.field} 属受控字段，各有专命令（status→advance、updated-at/owners→crctl 自动维护、merge-commits→merge-metadata）`, { field: flags.field, allowed: BACKLOG_SET_FIELDS });
+    fail('FIELD_NOT_ALLOWED', `backlog-set 白名单仅允许 ${BACKLOG_SET_FIELDS.join(' | ')}；${flags.field} 属受控字段，各有专命令（status→advance、updated-at/owners→crctl 自动维护、merge-commits→crctl merge）`, { field: flags.field, allowed: BACKLOG_SET_FIELDS });
   }
   const state = resolveCrState(ws, cr);
   const { sm } = loadStateMachine(ws);
@@ -2685,222 +2321,6 @@ function cmdInboxEmit(ws, cr, gates, flags) {
   ok({ op: 'inbox-emit', cr, event: flags.event, to, file: snap.path });
 }
 
-/* ────────────────────────── cr-init（S8，CR-2026-021 TASK-06） ──────────────────────────
- * SDD §2.3/§4.2（SDD-BLOCK-001 修复语义）：
- * cr-init = 唯一权威原子分配：不取显式 cr-id 入参，内部读 max → 计算 → casWriteMulti 一次写
- *   cr.md(新建,expectedHash=null) + _backlog(追加) + _index(登记) → 输出返回分配到的 cr-id。
- * 并发下后到者见 _index/_backlog hash 已变 → CAS_CONFLICT，三文件全不落盘，调用方重跑拿新号。
- * 唯一并发冲突码是 CAS_CONFLICT；正常路径无 CR_ALREADY_EXISTS（无外部传入 id，无 TOCTOU）。
- */
-
-function scanMaxCrNumber(ws, year) {
-  const re = new RegExp('^CR-' + year + '-(\\d{3})$');
-  let max = 0;
-  for (const p of [path.join(ws, 'change-requests', '_index.yml'), backlogPath(ws)]) {
-    const text = readFileChecked(p);
-    if (text == null) continue;
-    for (const m of text.matchAll(/^\s*- id:\s*["']?(CR-\d{4}-\d{3})["']?\s*$/gm)) {
-      const mm = m[1].match(re);
-      if (mm) max = Math.max(max, Number(mm[1]));
-    }
-  }
-  return max;
-}
-
-function formatCrId(year, n) { return `CR-${year}-${String(n).padStart(3, '0')}`; }
-
-function cmdCrInit(ws, gates, flags) {
-  if (!flags.title) fail('BAD_ARGS', 'cr-init 需要 --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id> [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]');
-  // FR-1（CR-2026-030）：三角色显式必填，缺任一参数在读取/创建任何文件之前零写入；不保留复制兼容路径
-  const req = String(flags['owner-requirement'] || '');
-  const dev = String(flags['owner-development'] || '');
-  const tst = String(flags['owner-test'] || '');
-  if (!req || !dev || !tst) {
-    fail('BAD_ARGS', 'cr-init 需要显式 --owner-requirement <id> --owner-development <id> --owner-test <id>（三角色独立指定，无隐式继承）');
-  }
-  const year = flags.year || String(new Date().getFullYear());
-  const cr = formatCrId(year, scanMaxCrNumber(ws, year) + 1);
-  const now = nowIso();
-  const by = identity(ws);
-  // FR-9（CR-2026-022）：注册元信息可选旗标，缺省值与旧硬编码同义（summary="" / source=manual / target-version=tbd），向后兼容
-  const summary = flags.summary ?? '';
-  const source = flags.source ?? 'manual';
-  const tv = flags['target-version'] ?? 'tbd';
-  // FR-1：同一个注册时间戳 now 复用于三角色当前 Owner 与三条 initial-assignment history
-  const ownerSlot = (id, indent) => [`${' '.repeat(indent)}id: ${id}`, `${' '.repeat(indent)}assigned-at: "${now}"`];
-  // cr.md 全量 frontmatter（owners/owner-history/时间戳全 crctl 生成）
-  const fm = [
-    '---',
-    `id: ${cr}`,
-    `title: ${flags.title.replaceAll('"', '\\"')}`,
-    `summary: ${yamlScalar(summary)}`,
-    `owner: ${req}`,
-    'owners:',
-    '  requirement:',
-    ...ownerSlot(req, 4),
-    '  development:',
-    ...ownerSlot(dev, 4),
-    '  test:',
-    ...ownerSlot(tst, 4),
-    `target-version: ${yamlScalar(tv)}`,
-    `source: ${yamlScalar(source)}`,
-    'status: drafting',
-    `created: "${now}"`,
-    `updated: "${now}"`,
-    'remote-ref: ""',
-    'last-push-at: ""',
-    'last-push-by: ""',
-    'owner-history:',
-    `  - { role: requirement, from: "", to: ${req}, at: "${now}", reason: initial-assignment }`,
-    `  - { role: development, from: "", to: ${dev}, at: "${now}", reason: initial-assignment }`,
-    `  - { role: test, from: "", to: ${tst}, at: "${now}", reason: initial-assignment }`,
-    'handover-history: []',
-    '---',
-    '',
-  ].join('\n');
-  // _backlog 条目追加
-  const bp = backlogPath(ws);
-  const backlogText = readFileChecked(bp);
-  if (backlogText == null) fail('BACKLOG_NOT_FOUND', `缺少 ${bp}`);
-  const backlogEntry = [
-    `  - id: ${cr}`,
-    `    title: ${flags.title.replaceAll('"', '\\"')}`,
-    `    summary: ${yamlScalar(summary)}`,
-    `    owner: ${req}`,
-    '    owners:',
-    '      requirement:',
-    ...ownerSlot(req, 8),
-    '      development:',
-    ...ownerSlot(dev, 8),
-    '      test:',
-    ...ownerSlot(tst, 8),
-    `    target-version: ${yamlScalar(tv)}`,
-    `    source: ${yamlScalar(source)}`,
-    '    prd-path: ""',
-    `    created: "${now}"`,
-    `    updated: "${now}"`,
-  ].join('\n');
-  const newBacklog = backlogText.trimEnd() + '\n' + backlogEntry + '\n';
-  // _index 条目追加
-  const ip = path.join(ws, 'change-requests', '_index.yml');
-  const indexText = readFileChecked(ip);
-  if (indexText == null) fail('INDEX_NOT_FOUND', `缺少 ${ip}`);
-  const indexEntry = [
-    `  - id: ${cr}`,
-    `    title: ${flags.title.replaceAll('"', '\\"')}`,
-    '    status: drafting',
-    `    created: "${now}"`,
-  ].join('\n');
-  const newIndex = indexText.trimEnd() + '\n' + indexEntry + '\n';
-  // 原子三文件写：cr.md 期望不存在（创建冲突即 CAS_CONFLICT）；_backlog/_index 用读时 sha256
-  const crDirPath = crDir(ws, cr);
-  fs.mkdirSync(crDirPath, { recursive: true });
-  casWriteMulti([
-    { path: path.join(crDirPath, 'cr.md'), expectedHash: null, newText: fm },
-    { path: bp, expectedHash: sha256(backlogText), newText: newBacklog },
-    { path: ip, expectedHash: sha256(indexText), newText: newIndex },
-  ]);
-  // FR-1/FR-2：成功 audit 记录完整 Owner 投影与三项初始变化；不记录 branch/worktree/commit SHA/outbox 成功事实（尚未发生）
-  auditLog(ws, {
-    kind: 'ledger', op: 'cr-init', cr, actor: by, title: flags.title,
-    owners: { requirement: req, development: dev, test: tst },
-    changes: ['requirement', 'development', 'test'].map((role) => ({ role, from: '', to: role === 'requirement' ? req : role === 'development' ? dev : tst, at: now, reason: 'initial-assignment' })),
-  });
-  // FR-2：cr-init 自身不发 outbox——注册事实由 register commit 成功后以真实 SHA 产生
-  ok({
-    op: 'cr-init', cr, title: flags.title, status: 'drafting',
-    owners: {
-      requirement: { id: req, 'assigned-at': now },
-      development: { id: dev, 'assigned-at': now },
-      test: { id: tst, 'assigned-at': now },
-    },
-    files: { crMd: path.join('change-requests', cr, 'cr.md'), backlog: bp, index: ip },
-  });
-}
-
-/* ────────────────────────── task allocate（S7，CR-2026-021 TASK-07） ──────────────────────────
- * 扩展现有 task 子命令族：CAS 保护的 TASK-ID 分配（SDD §2.3）。
- * 分配即写、不接受调用方传入编号：内部扫 tasks/_index.yml 现有 max → {cr}-TASK-{NN+1}，
- * slug 缺失回退 task-{NN}（与 writeback-tasks.mjs 的 slug 兜底风格对齐）。唯一并发冲突码 CAS_CONFLICT。
- */
-function scanMaxTaskNumber(text, cr) {
-  const re = new RegExp('- id:\\s*["\']?' + cr + '-TASK-(\\d+)', 'g');
-  let max = 0;
-  for (const m of text.matchAll(re)) max = Math.max(max, Number(m[1]));
-  return max;
-}
-
-/** tasks/_index.yml 追加最小条目 {id, slug, status: pending}（title/estimate/depends-on 由 write-dev-tasks 后续填充）。 */
-function appendTaskEntry(text, cr, taskId, slug) {
-  const norm = text.replaceAll('\r\n', '\n');
-  const lines = norm.split('\n');
-  const idx = lines.findIndex((l) => /^tasks:/.test(l));
-  if (idx === -1) fail('TASK_INDEX_SHAPE', 'tasks/_index.yml 缺少 tasks: 段，结构异常');
-  if (lines.some((l) => new RegExp('- id:\\s*["\']?' + taskId + '["\']?\\s*$').test(l))) {
-    fail('TASK_ALREADY_EXISTS', `${taskId} 已存在于 tasks/_index.yml`);
-  }
-  const entry = `  - id: ${taskId}\n    slug: ${slug}\n    status: pending`;
-  // 定位 tasks: 段尾（下一个顶层键或 EOF）
-  let tail = lines.length;
-  for (let i = idx + 1; i < lines.length; i++) {
-    const m = lines[i].match(/^[ \t]*/)[0];
-    if (m.length === 0 && /^[A-Za-z0-9_-]+:/.test(lines[i])) { tail = i; break; }
-  }
-  lines.splice(tail, 0, entry);
-  return lines.join('\n');
-}
-
-function cmdTaskAllocate(ws, cr, gates, flags) {
-  const state = resolveCrState(ws, cr);
-  const LEGAL = ['task-breakdown', 'developing'];
-  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `task allocate 仅允许在前置态 ${LEGAL.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
-  const p = path.join(crDir(ws, cr), 'tasks', '_index.yml');
-  const text = readFileChecked(p);
-  if (text == null) fail('TASK_INDEX_NOT_FOUND', `缺少 ${p}（请先由 write-dev-tasks 创建 tasks/_index.yml 骨架）`);
-  const n = scanMaxTaskNumber(text, cr) + 1;
-  const nn = String(n).padStart(2, '0');
-  const taskId = `${cr}-TASK-${nn}`;
-  const slug = flags.slug || `task-${nn}`;
-  const newText = appendTaskEntry(text, cr, taskId, slug);
-  casWrite(p, sha256(text), newText);
-  auditLog(ws, { kind: 'ledger', op: 'task-allocate', cr, actor: identity(ws), task: taskId, slug });
-  ok({ op: 'task-allocate', cr, task: taskId, slug, file: p });
-}
-
-/* ────────────────────────── worktree-path / report / cr-metrics（S9/S11，CR-2026-021 TASK-08 + CR-2026-028 FR-2） ──────────────────────────
- * 只读子命令（SDD §3.2/§3.3）：不写任何文件、无 CAS。
- * - worktree-path <cr> --repo <r>：唯一权威拼接规则（从 requirement-register 等 4+ 处 SKILL prose 提炼）：
- *   bucket = role==='knowledge-base' ? 'knowledge-base' : repo.id；path = {installRoot}/.rayai-worktrees/{bucket}/requirement/{cr}
- *   installRoot = Installation Workspace（deriveInstallRoot）：linked worktree 场景由 git common-dir 派生主 checkout，
- *   避免从 CR worktree 内部再拼出第二个 .rayai-worktrees（CR-2026-028 FR-2 实测 bug）。
- * - report / cr-metrics [--period <N>d]：跨 CR 聚合（对齐 cr-dashboard Step 2 口径）——
- *   状态直方图（在途 cr.md frontmatter + _history.yml 归档 final-status，累计口径，不受 --period 影响）、
- *   周期活动计数 periodActivity（按 archived-at，仅当传 --period 时按窗口过滤，格式仅支持 <N>d 如 7d/30d，
- *   非法格式 BAD_ARGS 硬拒而非静默忽略）、SLA 阈值比较（change-requests/_config.yml#sla，缺省跳过，累计口径）。
- */
-
-/**
- * Installation Workspace（InstWS）：Tools Root 相对路径与 .rayai-worktrees/ 的解析基准（CR-2026-028 FR-2）。
- * linked worktree 场景 git common-dir 指向主 checkout 的 .git，其 dirname 即主 checkout 根；
- * 非 git 目录（普通 checkout / 测试临时目录）回退 opWs。仅 spawn git 只读查询，无副作用。
- */
-function deriveInstallRoot(opWs) {
-  const r = spawnSync('git', ['rev-parse', '--git-common-dir'], { cwd: opWs, encoding: 'utf8', shell: false });
-  if (r.status === 0 && r.stdout && r.stdout.trim()) {
-    const commonDir = path.resolve(opWs, r.stdout.trim());
-    return path.dirname(commonDir);
-  }
-  return opWs;
-}
-
-function cmdWorktreePath(ws, cr, gates, flags) {
-  if (!flags.repo) fail('BAD_ARGS', 'worktree-path 需要 --repo <repo-id>');
-  const bucket = flags.repo === 'knowledge-base' || flags.repo === 'ai-first-platform-docs' ? 'knowledge-base' : flags.repo;
-  const p = path.join(deriveInstallRoot(ws), '.rayai-worktrees', bucket, 'requirement', cr);
-  // CR-2026-030 TASK-02（FR-2/AC-5）：canonical branch 只在此处生成，Skill/Pipeline 不再拼接
-  ok({ op: 'worktree-path', cr, repo: flags.repo, bucket, branch: `requirement/${cr}`, path: p });
-}
-
 /** 解析 --period（仅支持 <N>d，如 7d/30d），返回该窗口起始的日期字符串（YYYY-MM-DD）；无 period 输入返回 null。 */
 function periodCutoffDay(period) {
   const m = /^(\d+)d$/.exec(String(period).trim());
@@ -2964,81 +2384,6 @@ function cmdReport(ws, gates, flags) {
   });
 }
 
-function cmdCrMetrics(ws, gates, flags) {
-  const period = flags.period || '7d';
-  return cmdReport(ws, gates, { ...flags, period });
-}
-
-/* ────────────────────────── git commit --template（S10，CR-2026-021 TASK-09） ──────────────────────────
- * 给既有 git commit 分支加格式化模板（不是新顶层子命令）：
- *   register:        [cr] register {cr}: {subject}
- *   task-breakdown:  feat({cr}): task breakdown ({subject})
- *   writeback:       writeback({cr}): {subject}
- * cr 从 --cwd 当前分支名 requirement/{cr} 提取（提取不到则要求 subject 自带 CR 前缀）。
- * 不改变现有 -m 直传路径的白名单校验（--template 是新增可选分支）。
- */
-const COMMIT_TEMPLATES = {
-  // CR-2026-022 TASK-04：生成形态必须命中 controlled-shell commit 白名单（-m 前缀 wip: | [cr] | merge(）——
-  // task-breakdown/writeback 原 feat()/writeback() 前缀被 FORBIDDEN_SUBCOMMAND 拒绝，统一改 [cr] 前缀（现场坐实：CR-2026-022 任务拆分 commit）
-  register: (cr, subject) => `[cr] register ${cr}: ${subject}`,
-  'task-breakdown': (cr, subject) => `[cr] task-breakdown ${cr}: ${subject}`,
-  writeback: (cr, subject) => `[cr] writeback ${cr}: ${subject}`,
-};
-
-function resolveTemplateCr(ws, cwd, subject) {
-  const r = controlledGit(ws, 'branch', ['--show-current'], cwd, 'crctl-commit-template');
-  if (r.ok && r.stdout) {
-    const m = r.stdout.trim().match(/requirement\/(CR-[\w-]+)/); // 兼容 CR-YYYY-NNN 与测试短 ID
-    if (m) return m[1];
-  }
-  const sm = subject.match(/CR-\d{4}-\d{3}/);
-  if (sm) return sm[0];
-  fail('BAD_ARGS', 'git commit --template 无法确定 cr：--cwd 分支非 requirement/CR-* 且 subject 不含 CR 编号');
-}
-
-// CR-2026-030 TASK-02：cr.md 权威 Owner 投影读取（register commit 后置事件的数据源）。
-// 软失败变体：commit 已是权威事实，Owner 校验失败只返回结构化原因，由调用方记 warning + SKIPPED audit（SDD §4.2）。
-function tryReadCrOwnerProjection(ws, cr) {
-  try {
-    const md = readCrMdFrontmatter(ws, cr);
-    if (!md || !md.owners) return { ok: false, why: `cr.md 缺少 owners 投影: ${cr}` };
-    const slots = {};
-    for (const role of ['requirement', 'development', 'test']) {
-      const s = md.owners[role];
-      if (!s || !s.id) return { ok: false, why: `cr.md owners.${role} 缺失，无法产生注册事件` };
-      slots[role] = { id: String(s.id), 'assigned-at': s['assigned-at'] ? String(s['assigned-at']) : '' };
-    }
-    return { ok: true, owners: slots };
-  } catch (e) {
-    return { ok: false, why: String(e && e.message || e) };
-  }
-}
-
-function applyCommitTemplate(ws, argv, flags) {
-  const kind = flags.template;
-  const tpl = COMMIT_TEMPLATES[kind];
-  if (!tpl) fail('BAD_ARGS', `--template 必须是 ${Object.keys(COMMIT_TEMPLATES).join(' | ')}（当前 ${kind}）`);
-  const mi = argv.indexOf('-m');
-  if (mi === -1) fail('BAD_ARGS', 'git commit --template 需要同时提供 -m <subject>（作为模板的 subject 部分）');
-  const subject = String(argv[mi + 1] || '').trim();
-  if (!subject) fail('BAD_ARGS', '-m subject 为空');
-  // FR-10（CR-2026-022）：--cr 显式旗标直传已知值，跳过「分支探测→subject 正则」反向解析；缺省走原兜底
-  let cr;
-  if (flags.cr) {
-    const m = String(flags.cr).match(/^CR-\d{4}-\d{3}$/);
-    if (!m) fail('BAD_ARGS', `--cr 必须是 CR-YYYY-NNN 格式（当前 ${flags.cr}）`);
-    const crp = path.join(ws, 'change-requests', String(flags.cr));
-    if (!fs.existsSync(crp)) fail('BAD_ARGS', `--cr ${flags.cr} 在 change-requests/ 下不存在`);
-    cr = String(flags.cr);
-  } else {
-    cr = resolveTemplateCr(ws, flags.cwd ? path.resolve(flags.cwd) : ws, subject);
-  }
-  argv[mi + 1] = tpl(cr, subject);
-  // CR-2026-030 TASK-02：返回模板上下文（register 模板在 commit 成功后触发真实 SHA 注册事件）
-  return { args: argv, templateContext: { kind, cr } };
-}
-
-/** 行级追加 supplemental-reviews 段条目（硬失败：无该段则创建，段结构异常则报错）。 */
 function appendSupplementalReview(text, entry) {
   const norm = text.replaceAll('\r\n', '\n');
   const lines = norm.split('\n');
@@ -3109,215 +2454,6 @@ function cmdTest(ws, cr, gates, flags) {
   fs.writeFileSync(reportPath, lines.join('\n'), 'utf8');
   ok({ report: reportPath, status: allPass ? 'pass' : 'block', tester, runs });
   if (!allPass) process.exit(1);
-}
-
-/* ────────────────────────── migrate-backlog（CR-2026-018 FR-5） ──────────────────────────
- * 一次性迁移命令：_backlog.yml 从 v1（含 status/updated-at）升为 v2（注册索引）。
- * 预检逐条目比对 backlog status 与 cr.md status，不一致则硬失败不写文件（纪律#1）。
- * 幂等：v2 + 无 status 行时输出 already-migrated，退出码 0。
- */
-
-// CR-2026-027 FR-10/TASK-05：迁移提前返回路径的统一收尾——幽灵清理若删除了条目且非 embedded，需 standalone commit。
-function finishMigrateBacklog(ws, flags, base, ghostResult) {
-  if (ghostResult.ghost && ghostResult.ghost.removed && !flags.embedded && !flags['no-commit']) {
-    const addR = controlledGit(ws, 'add', ['change-requests/_backlog.yml'], ws, 'crctl-migrate');
-    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', `[cr] migrate backlog ghost cleanup: ${ghostResult.ghost.title}`], ws, 'crctl-migrate') : addR;
-    base.commit = commitR.ok ? { message: 'ghost cleanup' } : { failed: true, detail: commitR };
-    if (commitR && !commitR.ok) process.exit(1);
-  }
-  ok({ ...base, ...ghostResult });
-}
-
-function cmdMigrateBacklog(ws, gates, flags) {
-  const p = backlogPath(ws);
-  const text = readFileChecked(p);
-  if (!text) fail('BACKLOG_NOT_FOUND', `缺少 ${p}`);
-  const hash = sha256(text);
-  const doc = parseYaml(text);
-  const list = Array.isArray(doc) ? doc : doc['change-requests'] || doc.backlog || doc.items || [];
-  const schemaVer = (doc && !Array.isArray(doc) && doc.schema) || '';
-  const isV2 = schemaVer === 'cr-backlog/v2';
-
-  // 幂等检查：v2 且所有条目无 status/updated-at（仍执行幽灵清理——清理独立于 v1→v2 迁移）
-  if (isV2) {
-    const hasLegacy = list.some((e) => e && (e.status !== undefined || e['updated-at'] !== undefined));
-    if (!hasLegacy) {
-      const ghostResult = migrateGhostCleanup(ws, text);
-      if (ghostResult.ghost.removed) casWrite(p, hash, ghostResult.cleanedText);
-      auditGhostCleanup(ws, ghostResult); // b10：casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
-      finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
-      return;
-    }
-  }
-
-  // 预检：逐条目比对 backlog status 与 cr.md status
-  const diffs = [];
-  const toMigrate = [];
-  for (const e of list) {
-    if (!e || !e.id) continue;
-    if (e.status === undefined && e['updated-at'] === undefined) continue; // 已迁移
-    const md = readCrMdFrontmatter(ws, e.id);
-    if (!md || !md.status) {
-      diffs.push({ id: e.id, backlogStatus: e.status, crMdStatus: null, why: 'cr.md 缺失或无 status' });
-      continue;
-    }
-    if (e.status !== undefined && e.status !== md.status) {
-      diffs.push({ id: e.id, backlogStatus: e.status, crMdStatus: md.status, why: 'backlog 与 cr.md status 不一致' });
-      continue;
-    }
-    toMigrate.push(e.id);
-  }
-  if (diffs.length) {
-    fail('MIGRATE_STATUS_MISMATCH', `迁移预检发现 ${diffs.length} 个条目 backlog 与 cr.md 状态不一致，拒绝写入`, { diffs });
-  }
-  if (!toMigrate.length) {
-    const ghostResult = migrateGhostCleanup(ws, text);
-    if (ghostResult.ghost.removed) casWrite(p, hash, ghostResult.cleanedText);
-    auditGhostCleanup(ws, ghostResult); // b10：casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
-    finishMigrateBacklog(ws, flags, { migrated: false, reason: 'already-migrated', entries: list.length }, ghostResult);
-    return;
-  }
-
-  // 行级定点删除各条目 status:/updated-at: 行
-  const lines = text.split(/\r?\n/);
-  const eol = text.includes('\r\n') ? '\r\n' : '\n';
-  const removed = [];
-  for (const crId of toMigrate) {
-    let entryStart = -1, entryIndent = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(/^(\s*)-\s+id:\s*["']?([^"'\s]+)["']?\s*$/);
-      if (m && m[2] === crId) { entryStart = i; entryIndent = m[1].length; break; }
-    }
-    if (entryStart < 0) continue;
-    let entryEnd = lines.length;
-    for (let i = entryStart + 1; i < lines.length; i++) {
-      const m = lines[i].match(/^(\s*)-\s+id:\s*/);
-      if (m && m[1].length <= entryIndent) { entryEnd = i; break; }
-    }
-    // 从尾到头删，避免行号偏移
-    for (let i = entryEnd - 1; i >= entryStart; i--) {
-      if (/^\s*status:\s*/.test(lines[i]) || /^\s*updated-at:\s*/.test(lines[i])) {
-        removed.push(lines[i].trim());
-        lines.splice(i, 1);
-      }
-    }
-  }
-
-  // 顶层 schema 升 v2
-  let finalText = lines.join(eol);
-  if (!isV2) {
-    if (/^schema:\s*.+$/m.test(finalText)) {
-      finalText = finalText.replace(/^schema:\s*.+$/m, 'schema: cr-backlog/v2');
-    } else {
-      finalText = 'schema: cr-backlog/v2\n' + finalText;
-    }
-  }
-
-  // CR-2026-027 FR-10/TASK-05 + 代码评审回修（b5）：幽灵块归属校验必须前置于任何写入——
-  // orphan 时 GHOST_ENTRY_ORPHANED 硬失败且 backlog 文件保持不变；通过则迁移+清理合并为一次 casWrite（原子）。
-  const ghostResult = migrateGhostCleanup(ws, finalText);
-  const writeText = ghostResult.ghost.removed ? ghostResult.cleanedText : finalText;
-  casWrite(p, hash, writeText);
-  auditGhostCleanup(ws, ghostResult); // b10：迁移+清理合并 casWrite 成功后才记幽灵审计（CAS_CONFLICT 时零成功记录）
-
-  // 迁移报告（gitignored）
-  const reportDir = path.join(ws, '.crctl');
-  fs.mkdirSync(reportDir, { recursive: true });
-  const gi = path.join(reportDir, '.gitignore');
-  if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n');
-  const report = {
-    'migrated-at': nowIso(),
-    entries: toMigrate.map((id) => ({ id, 'status-at-migration': 'consistent', consistent: true })),
-    'removed-lines': removed.length,
-    schema: 'cr-backlog/v1 -> cr-backlog/v2',
-  };
-  fs.writeFileSync(path.join(reportDir, 'migrate-backlog-report.yml'),
-    Object.entries(report).map(([k, v]) => {
-      if (Array.isArray(v)) return `${k}:\n${v.map((e) => `  - { id: ${e.id}, status-at-migration: ${e['status-at-migration']}, consistent: ${e.consistent} }`).join('\n')}`;
-      return `${k}: ${v}`;
-    }).join('\n') + '\n', 'utf8');
-
-  auditLog(ws, { kind: 'migrate-backlog', entries: toMigrate.length, removedLines: removed.length, by: identity(ws) });
-
-  // standalone commit
-  const msg = `[cr] migrate backlog to v2: ${toMigrate.length} entries, status->cr.md`;
-  if (flags.embedded || flags['no-commit']) {
-    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, ...ghostResult, commit: 'embedded：由调用方在同一事务中提交' });
-  } else {
-    const addR = controlledGit(ws, 'add', ['change-requests/_backlog.yml'], ws, 'crctl-migrate');
-    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-migrate') : addR;
-    ok({ migrated: true, entries: toMigrate.length, removedLines: removed.length, ...ghostResult, commit: commitR.ok ? { message: msg } : { failed: true, detail: commitR } });
-    if (commitR && !commitR.ok) process.exit(1);
-  }
-}
-
-// CR-2026-027 FR-10/TASK-05：幽灵条目清理（幂等；删除依据 = history 存在同 title 归档条目）。
-// B-12 实测形态：幽灵块是某条目块内的重复字段 key（如 title 二次出现，CR-2026-024 归档残留），
-// 后续可能有正常条目（如 CR-2026-027），因此遍历所有条目块，删除范围 = 重复 key 行 到 下一个条目行。
-// CR-2026-027 代码评审回修（b5）：本函数只做幽灵块检测与归属校验（orphan 硬失败），不写盘；
-// 调用方拿到 cleanedText 后再统一 casWrite，保证"失败时文件不变"。
-// 代码评审回修（b10）：审计事件移出本函数——幽灵审计必须发生在 casWrite 成功之后（见 auditGhostCleanup），
-// CAS_CONFLICT 时 _backlog.yml 不变且 audit.log 不得误记已清理（FR-10 一致性边界）。
-function migrateGhostCleanup(ws, text) {
-  const norm = text.replaceAll('\r\n', '\n');
-  const lines = norm.split('\n');
-  // 列表项缩进（'  - id:' 的缩进）与条目字段层缩进（itemIndent+2）
-  let itemIndent = -1;
-  for (const l of lines) {
-    const m = l.match(/^(\s*)-\s+id:/);
-    if (m) { itemIndent = m[1].length; break; }
-  }
-  if (itemIndent < 0) return { ghost: { removed: false, reason: 'no-list-items' } };
-  const fieldIndent = itemIndent + 2;
-  // 所有条目行号
-  const idLines = [];
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s*)-\s+id:\s*["']?([^"'\s]+)["']?\s*$/);
-    if (m && m[1].length === itemIndent) idLines.push(i);
-  }
-  if (idLines.length === 0) return { ghost: { removed: false, reason: 'no-list-items' } };
-  // 遍历每个条目块，找第一个重复字段 key（幽灵起点）；只统计字段层缩进（嵌套子字段不参与）
-  let ghostStart = -1, ghostEnd = -1, ghostTitle = '';
-  for (let k = 0; k < idLines.length && ghostStart < 0; k++) {
-    const start = idLines[k] + 1;
-    const end = k + 1 < idLines.length ? idLines[k + 1] : lines.length;
-    const seen = new Set();
-    for (let i = start; i < end; i++) {
-      const l = lines[i];
-      if (l.trim() === '') continue;
-      const ind = l.match(/^[ \t]*/)[0].length;
-      if (ind <= itemIndent) break;
-      if (ind !== fieldIndent) continue;
-      const km = l.match(/^\s*([a-zA-Z0-9_-]+):\s*(.*)$/);
-      if (!km) continue;
-      if (seen.has(km[1])) { ghostStart = i; ghostEnd = end; ghostTitle = km[2].replace(/^["']|["']$/g, '').trim(); break; }
-      seen.add(km[1]);
-    }
-  }
-  if (ghostStart < 0) return { ghost: { removed: false, reason: 'already-clean' } };
-  // 归属判定：_history.yml 存在同 title 的终态条目（行级匹配，不依赖 YAML 解析器对复杂标量的解析）
-  const hText = readFileChecked(path.join(ws, 'change-requests', '_history.yml'));
-  let archived = false;
-  if (hText != null && ghostTitle) {
-    archived = hText.replaceAll('\r\n', '\n').split('\n').some((l) => {
-      const tm = l.match(/^\s*title:\s*(.*)$/);
-      return tm && tm[1].replace(/^["']|["']$/g, '').trim() === ghostTitle;
-    });
-  }
-  if (!archived) {
-    fail('GHOST_ENTRY_ORPHANED', `_backlog.yml 条目块内存在无 id 归属的重复字段块（title=${ghostTitle || '(未解析)'}），但 _history.yml 无对应归档条目，拒绝删除`);
-  }
-  const cleaned = lines.slice(0, ghostStart).concat(lines.slice(ghostEnd)).join('\n').replace(/\s+$/, '') + '\n';
-  return { ghost: { removed: true, title: ghostTitle, reason: 'archived-in-history' }, cleanedText: cleaned };
-}
-
-// CR-2026-027 代码评审回修（b10）：幽灵清理的审计事件必须发生在 casWrite 成功之后——
-// CAS_CONFLICT 时 _backlog.yml 保持不变而 audit.log 不得误记已清理（FR-10 一致性边界）。
-// 调用方在 casWrite 成功后才调用本函数补记审计；迁移+清理合并的单次 casWrite 同样适用。
-function auditGhostCleanup(ws, ghostResult) {
-  if (ghostResult.ghost && ghostResult.ghost.removed) {
-    auditLog(ws, { kind: 'migrate-backlog-ghost', removed: true, title: ghostResult.ghost.title, by: identity(ws) });
-  }
 }
 
 function cmdNext(ws, cr, gates, flags) {
@@ -3435,57 +2571,11 @@ function cmdNext(ws, cr, gates, flags) {
 function cmdGit(ws, argv, flags) {
   const sub = argv[0];
   if (!sub) fail('BAD_ARGS', 'git 需要子命令，如 crctl git status --short --cwd <path>');
-  let args = argv.slice(1);
-  // S10（CR-2026-021 TASK-09）：git commit --template <kind> 生成规范 message（可选分支，不影响 -m 直传白名单校验）
-  let templateContext = null;
-  if (sub === 'commit' && flags.template) {
-    const t = applyCommitTemplate(ws, args, flags);
-    args = t.args;
-    templateContext = t.templateContext;
-  }
-  const r = controlledGit(ws, sub, args, flags.cwd ? path.resolve(flags.cwd) : ws, flags.caller);
+  const args = argv.slice(1);
+  const r = controlledGit(ws, sub, args, flags.cwd ? path.resolve(flags.cwd) : ws, 'crctl-git');
   if (r.code === 'FORBIDDEN_SUBCOMMAND') fail('FORBIDDEN_SUBCOMMAND', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   if (r.code === 'SHELL_UNAVAILABLE') fail('SHELL_UNAVAILABLE', r.message, { attempted: `git ${sub} ${args.join(' ')}` });
   let outbox = null;
-  let registerMeta = null;
-  // CR-2026-030 TASK-02（FR-2）：register commit 成功后，以真实 HEAD SHA 产生 status + owners 两类注册事件。
-  // commit 失败不读 HEAD、不发事件；单个 outbox 写出失败对应 null + warnings EMIT_FAILED，commit 不回滚（Git 是权威）。
-  if (r.ok && sub === 'commit' && templateContext && templateContext.kind === 'register') {
-    const cwd = flags.cwd ? path.resolve(flags.cwd) : ws;
-    const cr = templateContext.cr;
-    const sha = gitHeadSha(ws, cwd);
-    const warnings = [];
-    const emit = (ev) => {
-      const name = emitOutboxEvent(ws, ev);
-      if (!name) warnings.push({ code: 'EMIT_FAILED', event_kind: ev.event_kind });
-      return name;
-    };
-    try {
-      const proj = tryReadCrOwnerProjection(ws, cr);
-      if (!proj.ok) {
-        auditLog(ws, { kind: 'register-events', cr, result: 'SKIPPED', why: proj.why });
-        registerMeta = { commit: { sha }, outbox: { status: null, owners: null }, warnings: [{ code: 'REGISTER_EVENTS_SKIPPED', why: proj.why }] };
-      } else {
-        const owners = proj.owners;
-        const changes = ['requirement', 'development', 'test'].map((role) => ({
-          role, from: '', to: owners[role].id, at: owners[role]['assigned-at'], reason: 'initial-assignment',
-        }));
-        registerMeta = {
-          commit: { sha },
-          outbox: {
-            status: emit({ event_kind: 'status', cr_id: cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: sha, actor: identity(ws) }),
-            owners: emit({ event_kind: 'owners', cr_id: cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: sha, actor: identity(ws), payload: { owners, changes } }),
-          },
-          warnings,
-        };
-      }
-    } catch (e) {
-      // commit 已是权威事实，不回滚；事件构造异常仅结构化 warning + audit（SDD §4.2）
-      const why = String(e && e.message || e);
-      auditLog(ws, { kind: 'register-events', cr, result: 'SKIPPED', why });
-      registerMeta = { commit: { sha }, outbox: { status: null, owners: null }, warnings: [{ code: 'REGISTER_EVENTS_SKIPPED', why }] };
-    }
-  }
   if (r.ok && sub === 'push' && !args.includes('--delete')) {
     // checkpoint 事件：携带被推送仓的 HEAD sha，供 worker 补全 --embedded 状态事件的空 commit_sha（§A.5）。
     // CR 上下文从 HEAD 提交信息或分支参数提取；提不到（非 CR 相关推送）则不发。
@@ -3503,12 +2593,110 @@ function cmdGit(ws, argv, flags) {
   }
   process.stdout.write(r.stdout || '');
   process.stderr.write(r.stderr || '');
-  const extra = registerMeta ? { commit: registerMeta.commit, outbox: registerMeta.outbox, warnings: registerMeta.warnings } : (outbox ? { outbox } : {});
-  ok({ ok: r.ok, exit: r.exit, ...extra });
+  ok({ ok: r.ok, exit: r.exit, ...(outbox ? { outbox } : {}) });
   if (!r.ok) process.exit(r.exit || 1);
 }
 
 /* ────────────────────────── CLI 入口 ────────────────────────── */
+
+/* ──────────────────── CR-2026-031 TASK-05：幂等 register 与 workspace 生命周期 ────────────────────
+ * 事务逻辑唯一实现在 lib/workspace-transactions.mjs；本处只做 flag 解析、TxError→fail 转换与 audit 登记。
+ * TASK-10 统一切换后 cr-init 删除，register 成为注册唯一入口。 */
+async function runTxAsync(promise) {
+  try { return await promise; } catch (e) {
+    if (e instanceof TxError) fail(e.code, e.message, e.extra);
+    throw e;
+  }
+}
+
+async function cmdRegister(ws, flags) {
+  for (const f of ['registration-key', 'title', 'owner-requirement', 'owner-development', 'owner-test']) {
+    if (!flags[f]) fail('BAD_ARGS', `register 需要 --${f} <v>`);
+  }
+  const input = {
+    registrationKey: String(flags['registration-key']),
+    title: String(flags.title),
+    summary: flags.summary == null ? undefined : String(flags.summary),
+    source: flags.source == null ? undefined : String(flags.source),
+    targetVersion: flags['target-version'] == null ? undefined : String(flags['target-version']),
+    year: flags.year ? String(flags.year) : undefined,
+    workspace: ws,
+    owners: { requirement: String(flags['owner-requirement']), development: String(flags['owner-development']), test: String(flags['owner-test']) },
+  };
+  const ctx = resolveRepositories(ws);
+  const result = await runTxAsync(registerCr(ctx, input));
+  auditLog(ws, { kind: 'ledger', op: 'register', cr: result.cr, txId: result.txId, actor: identity(ws), title: input.title, phase: result.phase, changed: result.changed });
+  if (!result.changed) return ok({ op: 'register', ...result });
+  // 注册事件（TASK-10：语义自原 cmdGit --template register 分支迁移至此）：register commit 落盘后以真实 SHA 发 status + owners 事件；
+  // 单个 outbox 写出失败对应 null + warnings EMIT_FAILED，事务不回滚（Git 是权威）。
+  const commitSe = (result.sideEffects || []).find((s) => s.kind === 'commit');
+  const commitSha = commitSe ? commitSe.sha : null;
+  const now = nowIso();
+  const owners = {
+    requirement: { id: input.owners.requirement, 'assigned-at': now },
+    development: { id: input.owners.development, 'assigned-at': now },
+    test: { id: input.owners.test, 'assigned-at': now },
+  };
+  const changes = ['requirement', 'development', 'test'].map((role) => ({ role, from: '', to: owners[role].id, at: now, reason: 'initial-assignment' }));
+  const warnings = [];
+  const emit = (ev) => { const name = emitOutboxEvent(ws, ev); if (!name) warnings.push({ code: 'EMIT_FAILED', event_kind: ev.event_kind }); return name; };
+  const outbox = {
+    status: emit({ event_kind: 'status', cr_id: result.cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: commitSha, actor: identity(ws) }),
+    owners: emit({ event_kind: 'owners', cr_id: result.cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: commitSha, actor: identity(ws), payload: { owners, changes } }),
+  };
+  ok({ op: 'register', ...result, outbox, warnings });
+}
+
+async function cmdWorkspace(ws, positional, flags) {
+  const sub = positional[0];
+  const cr = positional[1];
+  if (!['inspect', 'ensure', 'cleanup'].includes(sub)) fail('BAD_ARGS', 'workspace 支持 inspect|ensure|cleanup <CR-ID> [--mode <m>]');
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'workspace 需要 CR-ID');
+  if (sub === 'ensure' && flags.mode !== 'resume') fail('BAD_ARGS', 'workspace ensure 需要 --mode resume');
+  if (sub === 'cleanup' && !['partial', 'archived'].includes(flags.mode)) fail('BAD_ARGS', 'workspace cleanup 需要 --mode partial|archived');
+  const ctx = resolveRepositories(ws);
+  const mode = sub === 'inspect' ? 'inspect' : sub === 'ensure' ? 'resume' : flags.mode;
+  const result = await runTxAsync(ensureWorkspace(ctx, { cr, mode }));
+  ok({ op: `workspace-${sub}`, cr, mode, ...result });
+}
+
+async function cmdMerge(ws, positional, flags) {
+  const sub = positional[0];
+  if (sub === 'status') {
+    const cr = positional[1];
+    if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'merge status 需要 CR-ID');
+    const ctx = resolveRepositories(ws);
+    ok({ op: 'merge-status', ...mergeStatus(ctx, cr) });
+    return;
+  }
+  const cr = sub;
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'merge 需要 CR-ID');
+  const ctx = resolveRepositories(ws);
+  const authority = resolveOperationalWorkspace(ctx, cr);
+  const authWs = authority.path;
+  const gates = loadGates(ctx.installRoot);
+  const state = resolveCrState(authWs, cr);
+  if (state.status !== 'code-approved') {
+    fail('MERGE_STATE_MISMATCH', `merge 需要 status=code-approved，实际 ${state.status}`, { cr, status: state.status });
+  }
+  const gate = runGateChecks(authWs, cr, 'code-approved', gates, {});
+  if (!gate.pass) {
+    const why = gate.checks.filter((c) => !c.ok).map((c) => c.why).filter(Boolean).join('；');
+    fail('GATE_BLOCKED', `merge 前置门禁未通过，拒绝写入${why ? '：' + why : ''}`, { gate });
+  }
+  const result = await runTxAsync(mergeCr(ctx, { cr, workspace: authWs }));
+  if (result.phase === 'release-drift') {
+    // 零 publish 的 code/source/TASK 漂移：原子回退 code-approved -> developing（唯一回退转换）
+    auditLog(authWs, { kind: 'merge', cr, result: 'release-drift', drift: result.drift, actor: identity(authWs) });
+    const adv = performAdvance(authWs, cr, gates, {
+      to: 'developing', trigger: 'merge-feature-branch:release-drift -> implement-code', expect: 'code-approved',
+    });
+    ok({ op: 'merge', ...result, advanced: { to: 'developing', trigger: adv.trigger, committed: adv.committed } });
+    return;
+  }
+  auditLog(authWs, { kind: 'merge', cr, txId: result.txId, phase: result.phase, changed: result.changed, actor: identity(authWs) });
+  ok({ op: 'merge', ...result });
+}
 
 const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
 
@@ -3518,33 +2706,34 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl advance <cr_id> --to <s> --trigger <t>   校验转换+门禁后写入 cr.md 并 commit
                         [--expect <cur>] [--embedded] [--spec-id <id>]
   crctl approve <cr_id> --stage <requirement|tech-design|dev-start|code>
-                        [--approver <id>] [--spec-id <id>]   仅限交互式终端（人类在环）
+                        [--approver <id>] [--spec-id <id>]   仅限交互式终端（人类在环）；code 审批重核 release-subjects，漂移零写入拒绝（TASK-06）
   crctl approve <cr_id> --stage <stage> --resign <reason>   受控历史审批迁移：仅限交互式终端迁移 via=crctl-approve；server-approve 必须由服务端重签 grant
   crctl validate <file>                          受控产物 schema 校验（validate-doc 代码化）
   crctl attempt <cr_id> --loop <ref>             review-loop 轮次唯一记账点；超限返回 LOOP_EXHAUSTED
   crctl review-record <cr_id> --stage <requirement|tech-design|code> --from <payload.yml> [--bump-attempt]
-                                                schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）
+                                                schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）；code 阶段机器注入 release-subjects（payload 提供/覆盖 → RELEASE_SUBJECTS_FORGED）
   crctl review-note  <cr_id> [--stage <s>] --note <text>  approval.yml supplemental-reviews[] 追加（不接受 --by，身份 crctl 生成）
   crctl checkpoint-add <cr_id> --repo <r> --sha <sha> [--remote-ref <ref>]   _backlog checkpoints[] 追加 + 推送元数据（developing~writing-back）
   crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   双投影 owners 更新 + 正式移交 commit（非终态）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
-  crctl cr-init     --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
-                        [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
-  crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
-  crctl report | crctl cr-metrics [--period <N>d]   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
+  crctl register  --registration-key <k> --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
+                        [--summary <s>] [--source <s>] [--target-version <v>] [--year Y]   幂等注册事务：CR-ID+三账本+commit/lease push+worktree ensure（TASK-05，TASK-10 起取代 cr-init）
+  crctl workspace inspect <cr_id>                  各 active repo workspace 事实分类（只读）
+  crctl workspace ensure  <cr_id> --mode resume    只补齐可证明缺失的 workspace 资源（零删除）
+  crctl workspace cleanup <cr_id> --mode partial|archived   只删干净 worktree；dirty/unknown/未合并 ref 保留
+  crctl merge <cr_id>                                可恢复跨仓 merge saga：prepare(commit-tree) → 逐仓 lease publish → 全部 confirmed 后 detached Transaction Workspace 单 finalize commit（status=merging + merge-commits.yml + merge-verification.md）→ lease push
+  crctl merge status <cr_id>                        只读快照：journal phase + 每仓 intent/observation（零写入、零 fetch）
+  crctl writeback-apply <cr_id> --stage <s> --candidate <manifest.json> --spec-id <id>
+                                                    candidate-only writeback 应用：manifest 校验（schema/allowlist/path/blob/before/inputDigest/snapshot）→ txws 应用 → 精确 stage → commit+trailer → lease push（TASK-08）
+  crctl archive <cr_id> [--spec-id <id>]                          单一幂等归档：四账本同批 write-set + archive commit + lease push → cleanup（txws/CR worktree/本地 ref）；cleanup 失败返回 CR_ARCHIVE_CLEANUP_PENDING，重跑只续清理；rejected/withdrawn 未合并远端 ref 保留为 preservedRefs（TASK-09）
+  crctl upgrade-check                                         临时只读预检（TASK-11）：origin 权威事实分类新协议激活风险（safe/requiresReapproval/blocksUpgrade/canActivate）；有 blocker 或事实不确定 exit 1，全程零写入；协议切换后随 CUSTOM-TODO-009 整体删除
+  crctl report [--period <N>d]                   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
   crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
-  crctl migrate-backlog                          _backlog.yml v1->v2 迁移（撤出 status/updated-at，升 schema）
-  crctl git     <sub> [args...] [--cwd <p>] [--caller <skill>]   controlled-shell 白名单执行
-                （git commit 可加 --template <register|task-breakdown|writeback> [--cr <CR-ID>] 生成规范 message；--cr 显式直传，缺省走分支/subject 反向解析）
+  crctl git     <sub> [args...] [--cwd <p>]      controlled-shell 白名单执行（只读/安全面；写路径一律走深原语）
   crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
-  crctl task allocate <cr_id> [--slug <s>]   tasks/_index.yml CAS 分配 TASK-ID（task-breakdown/developing 态）
-  crctl merge-metadata <cr_id> --repo <r> --trunk <t> --sha <sha>
-                                                _backlog.yml merge-commits[] 追加（merging/writing-back 态）
-  crctl archive-move <cr_id> --final-status <s> [--archive-reason <r>] [--spec-id <id>]
-                                                backlog→history 原子移动（archived 态，双文件 CAS）
 
 
 全局: --workspace <path> 指定目标 workspace（默认从 cwd 向上探测 change-requests/_backlog.yml）
@@ -3568,7 +2757,7 @@ function parseArgs(argv) {
 
 /** git 子命令专用解析：只抽取 crctl 自己的旗标，git 的旗标（--short 等）原样透传 */
 function parseGitArgs(argv) {
-  const CRCTL_FLAGS = ['--cwd', '--caller', '--workspace', '--template', '--cr']; // --template/--cr 是 crctl 的 commit 模板旗标（FR-10），不透传给 git
+  const CRCTL_FLAGS = ['--cwd', '--workspace']; // crctl 自己的旗标，不透传给 git
   const flags = {};
   const positional = [];
   for (let i = 0; i < argv.length; i++) {
@@ -3578,7 +2767,10 @@ function parseGitArgs(argv) {
   return { flags, positional };
 }
 
-function main() {
+async function main() {
+  const wantFault = process.env.CRCTL_FAULT_POINT;
+  if (wantFault && !FAULT_POINTS.includes(wantFault))
+    fail('UNKNOWN_FAULT_POINT', `未知故障注入点: ${wantFault}（已登记: ${FAULT_POINTS.join(', ')}）`, { known: FAULT_POINTS });
   const [cmd, ...rest] = process.argv.slice(2);
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') { process.stdout.write(HELP); return; }
   const { flags, positional } = cmd === 'git' ? parseGitArgs(rest) : parseArgs(rest);
@@ -3600,21 +2792,20 @@ function main() {
     case 'owner-set': return cmdOwnerSet(ws, requireCr(positional), gates, flags);
     case 'backlog-set': return cmdBacklogSet(ws, requireCr(positional), gates, flags);
     case 'inbox-emit': return cmdInboxEmit(ws, requireCr(positional), gates, flags);
-    case 'cr-init': return cmdCrInit(ws, gates, flags);
-    case 'worktree-path': return cmdWorktreePath(ws, requireCr(positional), gates, flags);
+    case 'register': return cmdRegister(ws, flags);
+    case 'workspace': return cmdWorkspace(ws, positional, flags);
+    case 'merge': return cmdMerge(ws, positional, flags);
+    case 'writeback-apply': return cmdWritebackApply(ws, positional, flags);
+    case 'archive': return cmdArchive(ws, positional, flags);
+    case 'upgrade-check': return cmdUpgradeCheck(ws, flags);
     case 'report': return cmdReport(ws, gates, flags);
-    case 'cr-metrics': return cmdCrMetrics(ws, gates, flags);
     case 'task': {
       if (positional[0] === 'done') return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
-      if (positional[0] === 'allocate') return cmdTaskAllocate(ws, requireCr(positional.slice(1)), gates, flags);
-      fail('BAD_ARGS', 'task 仅支持子命令 done/allocate：crctl task done <CR-ID> --task <TASK-ID> | crctl task allocate <CR-ID> [--slug <s>]');
+      fail('BAD_ARGS', 'task 仅支持子命令 done：crctl task done <CR-ID> --task <TASK-ID>');
     }
-    case 'merge-metadata': return cmdMergeMetadata(ws, requireCr(positional), gates, flags);
-    case 'archive-move': return cmdArchiveMove(ws, requireCr(positional), gates, flags);
 
     case 'test': return cmdTest(ws, requireCr(positional), gates, flags);
     case 'next': return cmdNext(ws, requireCr(positional), gates, flags);
-    case 'migrate-backlog': return cmdMigrateBacklog(ws, gates, flags);
     case 'git': return cmdGit(ws, positional, flags);
     default: fail('BAD_ARGS', `未知子命令 ${cmd}。运行 crctl help 查看用法`);
   }
@@ -3625,4 +2816,38 @@ function requireCr(positional) {
   return positional[0];
 }
 
-main();
+main().catch((e) => { fail('INTERNAL_ERROR', e && e.stack ? e.stack : String(e)); });
+
+
+function cmdUpgradeCheck(ws, flags) {
+  // 临时只读预检（TASK-11）：从 origin 权威事实分类新协议激活风险；有 blocker 或事实不确定 exit 1，全程零写入。
+  // 全部安装完成协议切换且无旧事务后，按 CUSTOM-TODO-009 连同 dispatch/help/tests 整体删除。
+  const ctx = resolveRepositories(ws);
+  const result = checkUpgrade(ctx);
+  ok({ op: 'upgrade-check', temporary: true, ...result });
+  if (!result.canActivate) process.exit(1);
+}
+
+async function cmdArchive(ws, positional, flags) {
+  const cr = positional[0];
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'archive 需要 CR-ID');
+  const specId = flags['spec-id'] == null ? undefined : String(flags['spec-id']);
+  const ctx = resolveRepositories(ws);
+  const result = await runTxAsync(archiveCr(ctx, { cr, specId, workspace: ws }));
+  auditLog(ws, { kind: 'archive', cr, txId: result.txId, phase: result.phase, status: result.status, changed: result.changed, actor: identity(ws) });
+  ok({ op: 'archive', ...result });
+}
+async function cmdWritebackApply(ws, positional, flags) {
+  const cr = positional[0];
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'writeback-apply 需要 CR-ID');
+  const stage = flags.stage;
+  const candidate = flags.candidate;
+  const specId = flags['spec-id'];
+  if (!['baseline', 'tasks', 'traceability'].includes(stage)) fail('BAD_ARGS', 'writeback-apply 需要 --stage baseline|tasks|traceability');
+  if (!candidate) fail('BAD_ARGS', 'writeback-apply 需要 --candidate <manifest.json>');
+  if (!specId) fail('BAD_ARGS', 'writeback-apply 需要 --spec-id <id>');
+  const ctx = resolveRepositories(ws);
+  const result = await runTxAsync(applyWriteback(ctx, { cr, stage, candidate, specId, workspace: ws }));
+  auditLog(ws, { kind: 'writeback', cr, txId: result.txId, stage, phase: result.phase, changed: result.changed, actor: identity(ws) });
+  ok({ op: 'writeback-apply', ...result });
+}
