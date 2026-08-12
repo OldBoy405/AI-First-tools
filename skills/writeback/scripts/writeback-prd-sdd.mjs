@@ -1,25 +1,28 @@
-// writeback-prd-sdd.mjs — PRD/SDD 增量回写脚本（CR-2026-020，SDD §4.1 / FR-1）
+// writeback-prd-sdd.mjs — PRD/SDD 增量回写脚本（CR-2026-020，SDD §4.1 / FR-1；CR-2026-031 TASK-08 candidate-only）
 // 职责：首次回写整份落地 + frontmatter 补齐；增量回写按里程碑分节追加（原文 H 级 +1）；
 //       specs/_index.yml 结构化字段更新（current/cr-ref/updated/cr-history 追加去重，brief 仅显式传入时替换）。
-// 边界：change-requests/ 下文件只读（cr.md 仅做状态前置校验）；只写 specs/ 内容文件（NFR-5）。
+// 边界（TASK-08 起）：本脚本只读 workspace（cr.md/prd.md/sdd.md/specs/_index.yml），
+//       只输出 candidate 目录（文件 + blobs + manifest.json），由 crctl writeback-apply 校验/应用/commit。
 // 用法：node writeback-prd-sdd.mjs --workspace <ws> --cr <CR-ID> --spec <spec_id> --version <ver>
-//       [--milestone-name <名>] [--brief "<text>"] [--dry-run]
+//       --candidate-out <dir> [--milestone-name <名>] [--brief "<text>"]
 
+import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {
-  parseArgs, fail, ok, nowIso, readFile, planWrite,
+  parseArgs, fail, ok, nowIso, readFile, normalize,
   splitFrontmatter, readFrontmatter, patchFrontmatterField,
-  extractBlock,
+  extractBlock, sha256, readHashRaw, writeCandidate,
 } from './lib.mjs';
 
 const args = parseArgs(process.argv.slice(2));
-const { workspace: ws, cr, spec, version } = args;
-if (!ws || !cr || !spec || !version) {
-  fail('BAD_ARGS', '缺少必填参数 --workspace / --cr / --spec / --version');
+const { workspace: ws, cr, spec, version, 'candidate-out': candidateOut } = args;
+if (!ws || !cr || !spec || !version || !candidateOut) {
+  fail('BAD_ARGS', '缺少必填参数 --workspace / --cr / --spec / --version / --candidate-out');
 }
-const dryRun = !!args['dry-run'];
 const milestoneName = args['milestone-name'] || null;
 const brief = args.brief !== undefined ? args.brief : null;
+const generatorSha = sha256(fs.readFileSync(new URL(import.meta.url), 'utf8'));
 
 const crDir = path.join(ws, 'change-requests', cr);
 const specsDir = path.join(ws, 'specs', spec);
@@ -28,8 +31,8 @@ const specsDir = path.join(ws, 'specs', spec);
 const crMd = readFile(path.join(crDir, 'cr.md'));
 if (crMd === null) fail('CR_NOT_FOUND', `cr.md 不存在：${path.join(crDir, 'cr.md')}`);
 const fm = readFrontmatter(crMd);
-if (fm.status !== 'merging') {
-  fail('CR_STATUS_MISMATCH', `writeback-prd-sdd 要求 CR status=merging，当前=${fm.status}`, { cr });
+if (fm.status !== 'merging' && fm.status !== 'writing-back') {
+  fail('CR_STATUS_MISMATCH', `writeback-prd-sdd 要求 CR status=merging/writing-back，当前=${fm.status}`, { cr });
 }
 
 const prdSrc = readFile(path.join(crDir, 'prd.md'));
@@ -144,80 +147,68 @@ function escapeRe(s) {
 }
 
 /* ── 主流程 ── */
-function run() {
-  const now = nowIso();
-  const targets = [];
-  let allNoop = true;
+const now = nowIso();
+const files = [];
+let allNoop = true;
 
-  for (const [kind, src] of [['PRD', prdSrc], ['SDD', sddSrc]]) {
-    const target = path.join(specsDir, `${kind}.md`);
-    const old = readFile(target);
-    let newText;
-    let noop = false;
-    if (old === null) {
-      newText = buildFirstWrite(src);
-    } else if (hasMilestone(old)) {
-      noop = true;
-      newText = old;
-    } else {
-      newText = old.replace(/\n*$/, '\n') + buildMilestoneSection(src);
-    }
-    if (!noop) allNoop = false;
-    const res = planWrite(target, newText, { dryRun, label: `${kind}.md` });
-    targets.push({ kind, changed: res.changed || !noop, noop, written: res.written });
+for (const [kind, src] of [['PRD', prdSrc], ['SDD', sddSrc]]) {
+  const relPath = `specs/${spec}/${kind}.md`;
+  const old = readFile(path.join(ws, relPath));
+  const oldRaw = readHashRaw(path.join(ws, relPath));
+  let newText;
+  if (old === null) {
+    newText = buildFirstWrite(src);
+  } else if (hasMilestone(old)) {
+    continue; // noop
+  } else {
+    newText = old.replace(/\n*$/, '\n') + buildMilestoneSection(src);
   }
+  allNoop = false;
+  files.push({ path: relPath, beforeSha256: old == null ? null : oldRaw, afterSha256: null, content: newText });
+}
 
+{
   const indexPath = path.join(ws, 'specs', '_index.yml');
   const indexNew = buildIndex(indexPath, now);
   const indexOld = readFile(indexPath) ?? '';
-  if (indexOld !== indexNew) allNoop = false;
-  if (dryRun) {
-    if (indexOld !== indexNew) process.stdout.write('--- specs/_index.yml\n' + diffOnly(indexOld, indexNew) + '\n');
-  } else if (indexOld !== indexNew) {
-    planWrite(indexPath, indexNew, { dryRun: false });
+  if (indexOld !== indexNew) {
+    allNoop = false;
+    files.push({ path: 'specs/_index.yml', beforeSha256: readHashRaw(indexPath), afterSha256: null, content: indexNew });
   }
-
-  if (allNoop) {
-    ok({ op: 'writeback-prd-sdd', cr, spec, version, noop: true, reason: '里程碑标题已存在，无需回写' });
-    return;
-  }
-  if (dryRun) {
-    ok({ op: 'writeback-prd-sdd', cr, spec, version, dryRun: true, targets });
-    return;
-  }
-
-  // 末尾自检（SELF_CHECK_FAILED）
-  selfCheck();
-  ok({ op: 'writeback-prd-sdd', cr, spec, version, noop: false, targets });
 }
 
-function diffOnly(a, b) {
-  const al = a.split('\n'); const bl = b.split('\n');
-  let pre = 0;
-  while (pre < al.length && pre < bl.length && al[pre] === bl[pre]) pre++;
-  let suf = 0;
-  while (suf < al.length - pre && suf < bl.length - pre && al[al.length - 1 - suf] === bl[bl.length - 1 - suf]) suf++;
-  const out = [];
-  for (const l of al.slice(pre, al.length - suf)) out.push(`- ${l}`);
-  for (const l of bl.slice(pre, bl.length - suf)) out.push(`+ ${l}`);
-  return out.join('\n');
+if (allNoop) {
+  ok({ op: 'writeback-prd-sdd', cr, spec, version, noop: true, reason: '里程碑标题已存在，无需回写' });
+  process.exit(0);
 }
+
+const { manifest, manifestPath } = writeCandidate({
+  candidateOut, stage: 'baseline', cr, specId: spec, targetVersion: verNoV,
+  generator: { id: 'writeback-prd-sdd', sha256: generatorSha },
+  files,
+  contentOf: (p) => files.find((f) => f.path === p).content,
+});
+selfCheck();
+ok({
+  op: 'writeback-prd-sdd', cr, spec, version, noop: false,
+  candidateDir: candidateOut, manifestPath, inputDigest: manifest.inputDigest,
+  files: manifest.files.map((f) => f.path),
+});
 
 function selfCheck() {
   const errors = [];
   for (const kind of ['PRD', 'SDD']) {
-    const t = readFile(path.join(specsDir, `${kind}.md`));
+    const p = path.join(candidateOut, 'specs', spec, `${kind}.md`);
+    const t = readFile(p);
     if (t === null) { errors.push(`${kind}.md 不存在`); continue; }
     const first = t.indexOf(heading);
     const last = t.lastIndexOf(heading);
     if (first === -1 || first !== last) errors.push(`${kind}.md 里程碑标题 ${heading} 出现 ${first === -1 ? 0 : '多次'} 次`);
     if (t.includes('\r')) errors.push(`${kind}.md 含 CRLF`);
   }
-  const idx = readFile(path.join(ws, 'specs', '_index.yml')) ?? '';
+  const idx = readFile(path.join(candidateOut, 'specs', '_index.yml')) ?? '';
   if ((idx.match(new RegExp(`- id: ${escapeRe(spec)}$`, 'gm')) || []).length !== 1) {
     errors.push(`specs/_index.yml 中 ${spec} 条目数 != 1`);
   }
   if (errors.length) fail('SELF_CHECK_FAILED', '自检断言失败：' + errors.join('；'), { errors });
 }
-
-run();

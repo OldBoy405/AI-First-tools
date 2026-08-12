@@ -1,24 +1,28 @@
-// writeback-tasks.mjs — TASK 回写脚本（CR-2026-020，SDD §4.2 / FR-2）
+// writeback-tasks.mjs — TASK 回写脚本（CR-2026-020，SDD §4.2 / FR-2；CR-2026-031 TASK-08 candidate-only）
 // 职责：done 任务拷贝到 delivery/task/（命名 TASK-{version}-{cr}-{NN}-{slug}）+ frontmatter 注入
 //       spec-id/version + delivery/task/_index.yaml 维护（既有条目逐字保留 + 新增从源数据构造追加，
 //       不做扫描重投影——真实交付文件 frontmatter 不含可信 status/target-version，投影必然失真）。
 // 幂等判据（SDD-BLOCK-001 修复版）：扫描 delivery/task/*.md frontmatter 的 id 集合，不看目标文件名。
-// 边界：change-requests/{cr}/tasks/_index.yml 只读（账本）；只写 delivery/ 内容文件（NFR-5）。
-// 用法：node writeback-tasks.mjs --workspace <ws> --cr <CR-ID> --spec <spec_id> --version <ver> [--dry-run]
+// 边界（TASK-08 起）：change-requests/{cr}/tasks/_index.yml 只读（账本）；只输出 candidate 目录，
+//       由 crctl writeback-apply 校验/应用/commit。
+// 用法：node writeback-tasks.mjs --workspace <ws> --cr <CR-ID> --spec <spec_id> --version <ver>
+//       --candidate-out <dir>
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {
-  parseArgs, fail, ok, readFile, planWrite,
+  parseArgs, fail, ok, readFile, normalize,
   splitFrontmatter, readFrontmatter,
+  sha256, readHashRaw, writeCandidate,
 } from './lib.mjs';
 
 const args = parseArgs(process.argv.slice(2));
-const { workspace: ws, cr, spec, version } = args;
-if (!ws || !cr || !spec || !version) {
-  fail('BAD_ARGS', '缺少必填参数 --workspace / --cr / --spec / --version');
+const { workspace: ws, cr, spec, version, 'candidate-out': candidateOut } = args;
+if (!ws || !cr || !spec || !version || !candidateOut) {
+  fail('BAD_ARGS', '缺少必填参数 --workspace / --cr / --spec / --version / --candidate-out');
 }
-const dryRun = !!args['dry-run'];
+const generatorSha = sha256(fs.readFileSync(new URL(import.meta.url), 'utf8'));
 const verNoV = version.startsWith('v') ? version.slice(1) : version;
 const crDir = path.join(ws, 'change-requests', cr);
 const deliveryDir = path.join(ws, 'delivery', 'task');
@@ -84,12 +88,8 @@ for (const id of todo) {
   if (!src) fail('STRUCTURE_MISMATCH', `tasks/_index.yml 标记 done 的任务 ${id} 无对应 tasks/TASK-*.md`);
   if (delivered.has(id)) continue; // 幂等：id 已交付即跳过（不看文件名）
   const target = buildTarget(src);
-  if (dryRun) {
-    process.stdout.write(`+ ${target.fileName}（${id}）\n`);
-  } else {
-    planWrite(path.join(deliveryDir, target.fileName), target.text, { dryRun: false });
-  }
-  toWrite.push({ id, fileName: target.fileName });
+  const relPath = `delivery/task/${target.fileName}`;
+  toWrite.push({ id, fileName: target.fileName, relPath, text: target.text });
 }
 if (toWrite.length === 0) {
   ok({ op: 'writeback-tasks', cr, spec, version, noop: true, reason: '全部 done 任务 id 已在交付集合' });
@@ -125,23 +125,25 @@ function buildIndex() {
 const oldIdxPath = path.join(deliveryDir, '_index.yaml');
 const newIndex = buildIndex();
 const oldIdx = readFile(oldIdxPath) ?? '';
+const files = [];
+for (const t of toWrite) {
+  files.push({ path: t.relPath, beforeSha256: null, afterSha256: null, content: t.text });
+}
 if (oldIdx !== newIndex) {
-  if (dryRun) {
-    process.stdout.write(`~ delivery/task/_index.yaml（既有条目保留，追加 ${toWrite.length} 条）\n`);
-  } else {
-    planWrite(oldIdxPath, newIndex, { dryRun: false });
-  }
+  files.push({ path: 'delivery/task/_index.yaml', beforeSha256: oldIdx === '' ? null : readHashRaw(oldIdxPath), afterSha256: null, content: newIndex });
 }
 
-if (dryRun) {
-  ok({ op: 'writeback-tasks', cr, spec, version, dryRun: true, toWrite: toWrite.map((t) => t.fileName) });
-  process.exit(0);
-}
+const { manifest, manifestPath } = writeCandidate({
+  candidateOut, stage: 'tasks', cr, specId: spec, targetVersion: verNoV,
+  generator: { id: 'writeback-tasks', sha256: generatorSha },
+  files,
+  contentOf: (p) => files.find((f) => f.path === p).content,
+});
 
-/* ── 末尾自检：新增 id 恰 1 条、字段齐全、无 \r ── */
+/* ── 末尾自检（candidate 目录内）：新增 id 恰 1 条、字段齐全、无 \r ── */
 const errors = [];
 for (const t of toWrite) {
-  const targetPath = path.join(deliveryDir, t.fileName);
+  const targetPath = path.join(candidateOut, t.relPath);
   const doc = readFile(targetPath);
   if (doc === null) { errors.push(`${t.fileName} 未落盘`); continue; }
   if (doc.includes('\r')) errors.push(`${t.fileName} 含 CRLF`);
@@ -149,7 +151,7 @@ for (const t of toWrite) {
   if (fld['spec-id'] !== spec || !fld.version) errors.push(`${t.fileName} frontmatter 注入缺失`);
 }
 {
-  const idx = readFile(oldIdxPath) ?? '';
+  const idx = readFile(path.join(candidateOut, 'delivery', 'task', '_index.yaml')) ?? '';
   for (const t of toWrite) {
     const n = (idx.match(new RegExp(`- id: ${t.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'gm')) || []).length;
     if (n !== 1) errors.push(`_index.yaml 中 ${t.id} 条目数=${n}`);
@@ -158,4 +160,8 @@ for (const t of toWrite) {
 }
 if (errors.length) fail('SELF_CHECK_FAILED', '自检断言失败：' + errors.join('；'), { errors });
 
-ok({ op: 'writeback-tasks', cr, spec, version, noop: false, written: toWrite.map((t) => t.fileName) });
+ok({
+  op: 'writeback-tasks', cr, spec, version, noop: false,
+  candidateDir: candidateOut, manifestPath, inputDigest: manifest.inputDigest,
+  files: manifest.files.map((f) => f.path),
+});

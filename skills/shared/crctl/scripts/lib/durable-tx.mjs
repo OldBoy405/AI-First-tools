@@ -28,6 +28,12 @@ export const FAULT_POINTS = [
   'merge-before-finalize',           // 全部 confirmed 后、finalize 写集前（TASK-07）
   'merge-after-finalize-commit',     // finalize commit 落盘后、lease push 前（TASK-07）
   'merge-after-finalize-push',       // finalize lease push 落盘后（TASK-07）
+  'writeback-after-apply',           // write-set 应用落盘后、stage/commit 前（TASK-08）
+  'writeback-after-commit',          // writeback commit 落盘后、lease push 前（TASK-08）
+  'writeback-after-push',            // writeback lease push 落盘后（TASK-08）
+  'archive-after-commit',            // archive commit 落盘后、lease push 前（TASK-09）
+  'archive-after-push',              // archive lease push 落盘后、cleanup 前（TASK-09）
+  'archive-during-cleanup',          // 每个清理单元落盘后、下一单元前（TASK-09）
 ];
 export function faultPoint(point, context) {
   if (process.env.CRCTL_FAULT_POINT === point) {

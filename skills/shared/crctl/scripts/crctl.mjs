@@ -26,6 +26,7 @@ import {
   scanMaxCrNumber, formatCrId, buildRegistrationTexts, assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
   matchFrontmatter, crMdStatusText, mergeCr, mergeStatus, resolveOperationalWorkspace,
+  applyWriteback,
 } from './lib/workspace-transactions.mjs';
 import { FAULT_POINTS, faultPoint, nowIso } from './lib/durable-tx.mjs';
 
@@ -3111,6 +3112,8 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl workspace cleanup <cr_id> --mode partial|archived   只删干净 worktree；dirty/unknown/未合并 ref 保留
   crctl merge <cr_id>                                可恢复跨仓 merge saga：prepare(commit-tree) → 逐仓 lease publish → 全部 confirmed 后 detached Transaction Workspace 单 finalize commit（status=merging + merge-commits.yml + merge-verification.md）→ lease push
   crctl merge status <cr_id>                        只读快照：journal phase + 每仓 intent/observation（零写入、零 fetch）
+  crctl writeback-apply <cr_id> --stage <s> --candidate <manifest.json> --spec-id <id>
+                                                    candidate-only writeback 应用：manifest 校验（schema/allowlist/path/blob/before/inputDigest/snapshot）→ txws 应用 → 精确 stage → commit+trailer → lease push（TASK-08）
   crctl cr-init     --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
                         [--year Y] [--summary <s>] [--source <s>] [--target-version <v>]   权威原子分配：内部 max+1 + 三文件 casWriteMulti 建档登记（注册元信息一次写齐）
   crctl worktree-path <cr_id> --repo <r>       派生 worktree bucket/path（只读，唯一权威拼接规则）
@@ -3187,6 +3190,7 @@ async function main() {
     case 'register': return cmdRegister(ws, flags);
     case 'workspace': return cmdWorkspace(ws, positional, flags);
     case 'merge': return cmdMerge(ws, positional, flags);
+    case 'writeback-apply': return cmdWritebackApply(ws, positional, flags);
     case 'worktree-path': return cmdWorktreePath(ws, requireCr(positional), gates, flags);
     case 'report': return cmdReport(ws, gates, flags);
     case 'task': {
@@ -3209,3 +3213,17 @@ function requireCr(positional) {
 }
 
 main().catch((e) => { fail('INTERNAL_ERROR', e && e.stack ? e.stack : String(e)); });
+async function cmdWritebackApply(ws, positional, flags) {
+  const cr = positional[0];
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'writeback-apply 需要 CR-ID');
+  const stage = flags.stage;
+  const candidate = flags.candidate;
+  const specId = flags['spec-id'];
+  if (!['baseline', 'tasks', 'traceability'].includes(stage)) fail('BAD_ARGS', 'writeback-apply 需要 --stage baseline|tasks|traceability');
+  if (!candidate) fail('BAD_ARGS', 'writeback-apply 需要 --candidate <manifest.json>');
+  if (!specId) fail('BAD_ARGS', 'writeback-apply 需要 --spec-id <id>');
+  const ctx = resolveRepositories(ws);
+  const result = await runTxAsync(applyWriteback(ctx, { cr, stage, candidate, specId, workspace: ws }));
+  auditLog(ws, { kind: 'writeback', cr, txId: result.txId, stage, phase: result.phase, changed: result.changed, actor: identity(ws) });
+  ok({ op: 'writeback-apply', ...result });
+}
