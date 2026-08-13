@@ -70,7 +70,7 @@ const head = await runGit({ subcommand: "rev-parse", args: ["HEAD"], cwd: repo.w
    CR              : {cr_id}
    repos           : [{repo.id}:{old-sha-8} → {new-sha-8}, ...]
    CR 当前状态     : {status}
-   最近推送者      : {last-push-by}（{last-push-at}）
+   最近推送者      : {author}（{committer-at}，自 KB metadata commit Git 事实派生）
 ```
 
 ---

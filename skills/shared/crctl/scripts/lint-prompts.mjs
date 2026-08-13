@@ -121,7 +121,7 @@ function loadJudgements(root) {
 
 const LITERAL_BLACKLIST = {
   R3: ['cr-status-set'],                       // deprecated 机制引用
-  R4: ['source-sha', 'merged-at', '六字段'],    // merge-commits 过时口径（必填 3 字段，FR-8）
+  R4: ['merged-at', '六字段'],    // merge-commits 过时口径（必填 3 字段，FR-8）；source-sha 已由 checkpoint latest-checkpoint 重新引入（CR-2026-033），不再全局黑名单
   R5: ['review-loop.current-attempt', 'attempts[]'], // 手写 review-loop 记账
 };
 

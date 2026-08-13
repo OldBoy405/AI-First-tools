@@ -95,7 +95,7 @@
       "kind": "skill",
       "label": "推送 PRD 草稿到远端",
       "ref": "push-progress",
-      "prompt": "若 {{inputs.auto_push_after_prd}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则读取 node-1.md 的 execution_context，执行 push-progress：\n- cr_id: {execution_context.cr_id}\n- 按 dir-graph active repos 提交并推送 requirement/{cr_id}；knowledge-base 提交 PRD 和 backlog 更新，其他 repo clean 时只 push 确认远端分支\n- 经 `crctl checkpoint-add` 更新 _backlog 条目的 remote-ref/last-push/checkpoints（S3）\n\n在 node-3.md 输出各 repo 推送结果与远端分支 URL（若可获取）。",
+      "prompt": "若 {{inputs.auto_push_after_prd}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则读取 node-1.md 的 execution_context，执行 push-progress：cr_id={execution_context.cr_id}，message=PRD 草稿。\n\n在 node-3.md 输出 batchId、repositories、phase 与远端分支 URL（若可获取）；phase 非 complete 时中止。",
       "onFail": "skip",
       "timeoutMinutes": 10
     },

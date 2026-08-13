@@ -116,6 +116,17 @@ test('fault harness：point 已设置但执行路径未挂接 → 命令正常�
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('checkpoint fault points 已登记（CR-2026-033 T01）', async () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'drafting');
+    for (const p of ['checkpoint-after-source-commit', 'checkpoint-after-push', 'checkpoint-after-confirm', 'checkpoint-after-metadata-commit', 'checkpoint-after-metadata-push']) {
+      const r = await runCrctl(['status', 'CR-T1', '--workspace', ws], { env: { [FAULT_ENV]: p }, expectExit: 0 });
+      assert.equal(r.stdout.status, 'drafting', `${p} 已登记（不报 UNKNOWN_FAULT_POINT）`);
+    }
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
 test('review repair：ledger rename 间隙中断后，下次同命令先整组回滚再成功重试', async () => {
   const ws = makeWorkspace();
   try {

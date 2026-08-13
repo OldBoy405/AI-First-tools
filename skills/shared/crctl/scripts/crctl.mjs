@@ -20,13 +20,13 @@ import readline from 'node:readline';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 // CR-2026-031 TASK-03：YAML 子集解析器与 workspace 基础设施同源共享（lib/ 下，禁止在 crctl.mjs 复刻）。
-import { parseYaml } from './lib/yaml-subset.mjs';
+import { parseYaml, matchEntryBlock } from './lib/yaml-subset.mjs';
 import {
   deriveInstallRoot, TxError, resolveRepositories, registerCr, ensureWorkspace,
   assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
   matchFrontmatter, crMdStatusText, mergeCr, mergeStatus, resolveOperationalWorkspace,
-  applyWriteback, archiveCr, checkUpgrade,
+  applyWriteback, archiveCr, checkUpgrade, checkpointCr,
 } from './lib/workspace-transactions.mjs';
 import {
   FAULT_POINTS, faultPoint, nowIso,
@@ -644,28 +644,6 @@ async function beginLedgerCommand(ws, key, writes, commitRequired) {
  * 禁止静默返回原文（T04 教训）。三个子命令只做账本编辑、不发 status 事件（纪律 #5：
  * 状态唯一写者仍是 advance）。
  */
-
-/** 锚定 "- id: <id>" 条目块（该行到下一个同缩进 "- id:" 或 EOF）。返回 {start,end,text,indent}（start/end 为字符偏移）。 */
-function matchEntryBlock(text, id) {
-  const lines = text.split('\n');
-  let startLine = -1, indent = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
-    if (m && m[2] === id) { startLine = i; indent = m[1].length; break; }
-  }
-  if (startLine === -1) return null;
-  let endLine = lines.length;
-  for (let i = startLine + 1; i < lines.length; i++) {
-    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
-    if (m && m[1].length <= indent) { endLine = i; break; }
-  }
-  let start = 0;
-  for (let i = 0; i < startLine; i++) start += lines[i].length + 1;
-  let end = start;
-  for (let i = startLine; i < endLine; i++) end += lines[i].length + 1;
-  if (endLine === lines.length && text.endsWith('\n')) end -= 1;
-  return { start, end, text: lines.slice(startLine, endLine).join('\n'), indent };
-}
 
 /** task done：块内 status 行替换 + done-at 插入，一次完成（SDD §4.1）。 */
 function editTaskDone(text, taskId) {
@@ -2080,29 +2058,34 @@ function upsertTopField(lines, indent, key, value) {
   return hit ? lines.map((l) => (re.test(l) ? newLine : l)) : [...lines, newLine];
 }
 
-/** checkpoint-add：块内 checkpoints[] 追加 + remote-ref/last-push-at/last-push-by 更新（SDD §3.1）。 */
-function editCheckpointAdd(text, cr, meta) {
-  const norm = text.replaceAll('\r\n', '\n');
-  const block = matchEntryBlock(norm, cr);
-  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
-  const lines = block.text.split('\n');
-  const fieldIndent = ' '.repeat(block.indent + 2);
-  const itemIndent = ' '.repeat(block.indent + 4);
-  const subIndent = ' '.repeat(block.indent + 6);
-  // 1) checkpoints[] 追加（无键则创建；空 flow [] 展开为块序列）
-  const cpItem = [
-    `${itemIndent}- repo: ${meta.repo}`,
-    `${subIndent}sha: ${meta.sha}`,
-    meta.remoteRef ? `${subIndent}remote-ref: "${meta.remoteRef}"` : null,
-    `${subIndent}pushed-at: "${nowIso()}"`,
-    `${subIndent}by: "${meta.by}"`,
-  ].filter(Boolean).join('\n');
-  let result = appendToBlockSequence(lines, 'checkpoints', cpItem, fieldIndent);
-  // 2) remote-ref / last-push-at / last-push-by 更新（无则插入到条目块尾部）
-  if (meta.remoteRef) result = upsertTopField(result, fieldIndent, 'remote-ref', meta.remoteRef);
-  result = upsertTopField(result, fieldIndent, 'last-push-at', nowIso());
-  result = upsertTopField(result, fieldIndent, 'last-push-by', meta.by);
-  return norm.slice(0, block.start) + result.join('\n') + norm.slice(block.end);
+/** checkpoint：单一深原语。状态守卫在 CLI 层（从 KB CR worktree cr.md 读 status，非主 checkout）；
+ * 事务逻辑唯一实现在 workspace-transactions.mjs。 */
+async function cmdCheckpoint(ws, cr, gates, flags) {
+  const ctx = resolveRepositories(ws);
+  const kb = ctx.repositories.find((r) => r.role === 'knowledge-base');
+  if (!kb) fail('REPO_GRAPH_INVALID', 'repositories 缺 knowledge-base role');
+  const crMdP = path.join(kb.worktreePath, cr, 'change-requests', cr, 'cr.md');
+  let status = null;
+  try {
+    const text = fs.readFileSync(crMdP, 'utf8').replaceAll('\r\n', '\n');
+    const m = matchFrontmatter(text);
+    if (m) { const doc = parseYaml(m.body); status = doc && doc.status; }
+  } catch { /* status 缺失由 checkpointCr 的 worktree 校验兜底 */ }
+  if (status == null) fail('CR_MD_STATUS_MISSING', `${cr} 的 KB CR worktree cr.md 缺少 status: ${crMdP}`);
+  const { sm } = loadStateMachine(ws);
+  if ((sm.terminal || []).includes(status)) {
+    fail('ILLEGAL_LEDGER_STATE', `checkpoint 不允许在终态 ${status} 执行`, { current: status, expect: '非终态' });
+  }
+  const result = await runTxAsync(checkpointCr(ctx, { cr, message: flags.message == null ? undefined : String(flags.message), workspace: ws }));
+  auditLog(ws, { kind: 'checkpoint', cr, txId: result.txId, batchId: result.batchId, phase: result.phase, changed: result.changed, actor: identity(ws) });
+  if (result.changed && result.metadataCommit) {
+    emitOutboxEvent(ws, {
+      event_kind: 'checkpoint', cr_id: cr, commit_sha: result.metadataCommit, actor: identity(ws),
+      payload: { batch_id: result.batchId, repositories: (result.repositories || []).map((r) => ({ repo: r.repo, sourceSha: r.sourceSha })) },
+      dedup_name: `checkpoint-${cr}-${result.metadataCommit}.json`,
+    });
+  }
+  ok({ op: 'checkpoint', ...result });
 }
 
 /** owner-set：块内 owners.{role} 的 id + assigned-at 更新（crctl 生成时间戳）。 */
@@ -2260,25 +2243,6 @@ function editBacklogSet(text, cr, field, value) {
   const fieldIndent = ' '.repeat(block.indent + 2);
   const out = upsertTopField(lines, fieldIndent, field, value);
   return norm.slice(0, block.start) + out.join('\n') + norm.slice(block.end);
-}
-
-function cmdCheckpointAdd(ws, cr, gates, flags) {
-  if (!flags.repo || !flags.sha) fail('BAD_ARGS', 'checkpoint-add 需要 --repo <r> --sha <sha> [--remote-ref <ref>]');
-  const state = resolveCrState(ws, cr);
-  // FR-11（CR-2026-022）：LEGAL 从状态机派生全非终态（transitions from/to + wildcards 展开，排除 (new) 与 terminal），
-  // 不硬编码列表——push-progress 在 drafting/task-breakdown 等阶段也会被调用，窄列表会炸 ILLEGAL_LEDGER_STATE；
-  // 与 cmdOwnerSet 的 sm.terminal 判断同源，状态机增态自动覆盖。
-  const { sm } = loadStateMachine(ws);
-  const known = new Set();
-  for (const t of sm.transitions || []) { known.add(t.from); known.add(t.to); }
-  for (const list of Object.values(sm.wildcards || {})) for (const s of list) known.add(s);
-  const LEGAL = [...known].filter((s) => s !== '(new)' && !(sm.terminal || []).includes(s));
-  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `checkpoint-add 仅允许在非终态执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
-  const snap = loadBacklogEntry(ws, cr);
-  const newText = editCheckpointAdd(snap.text, cr, { repo: flags.repo, sha: flags.sha, remoteRef: flags['remote-ref'] || null, by: identity(ws) });
-  casWrite(snap.path, snap.hash, newText);
-  auditLog(ws, { kind: 'ledger', op: 'checkpoint-add', cr, actor: identity(ws), repo: flags.repo, sha: flags.sha });
-  ok({ op: 'checkpoint-add', cr, repo: flags.repo, sha: flags.sha, file: snap.path });
 }
 
 async function cmdOwnerSet(ws, cr, gates, flags) {
@@ -2849,7 +2813,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl review-record <cr_id> --stage <requirement|tech-design|code> --from <payload.yml> [--bump-attempt]
                                                 schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）；code 阶段机器注入 release-subjects（payload 提供/覆盖 → RELEASE_SUBJECTS_FORGED）
   crctl review-note  <cr_id> [--stage <s>] --note <text>  approval.yml supplemental-reviews[] 追加（不接受 --by，身份 crctl 生成）
-  crctl checkpoint-add <cr_id> --repo <r> --sha <sha> [--remote-ref <ref>]   _backlog checkpoints[] 追加 + 推送元数据（developing~writing-back）
+  crctl checkpoint <cr_id> [--message <text>]   单一深原语：全仓 source commit → 非 KB lease publish → KB metadata commit 唯一完整批次可见点（非终态）
   crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   双投影 owners 更新 + 正式移交 commit（非终态）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
@@ -2925,7 +2889,7 @@ async function main() {
     case 'attempt': return cmdAttempt(ws, requireCr(positional), gates, flags);
     case 'review-record': return cmdReviewRecord(ws, requireCr(positional), gates, flags);
     case 'review-note': return cmdReviewNote(ws, requireCr(positional), gates, flags);
-    case 'checkpoint-add': return cmdCheckpointAdd(ws, requireCr(positional), gates, flags);
+    case 'checkpoint': return cmdCheckpoint(ws, requireCr(positional), gates, flags);
     case 'owner-set': return cmdOwnerSet(ws, requireCr(positional), gates, flags);
     case 'backlog-set': return cmdBacklogSet(ws, requireCr(positional), gates, flags);
     case 'inbox-emit': return cmdInboxEmit(ws, requireCr(positional), gates, flags);

@@ -42,7 +42,7 @@ updated: "2026-08-05T15:10:00+08:00"
 
 状态机与账本的唯一可执行治理入口。CLI/门禁留在 `crctl.mjs`；YAML 子集、repository/workspace 事务与持久化原语分别下沉到同级 `lib/yaml-subset.mjs`、`lib/workspace-transactions.mjs`、`lib/durable-tx.mjs`。lib 不反向依赖 CLI，也不形成第二命令入口。
 
-`register`、`merge`、`writeback-apply`、`archive` 使用 journal envelope、目录锁与 recoverable write-set。`approve`、`review-record`、`owner-set` 的多文件写使用同一 `durable-tx.mjs` 中的 command-level ledger transaction：commit 前中断按持久化 before snapshots 整组回滚；commit 后中断按 `AI-First-Tx` trailer 确认 authority 后只清理 journal。旧 `casWriteMulti` 与专属半状态故障点已删除。其余单文件账本命令继续使用 hash-CAS；所有路径共享 `.crctl/audit.log` 与 controlled Git，无旁路。
+`register`、`merge`、`writeback-apply`、`archive`、`checkpoint` 使用 journal envelope、目录锁与 recoverable write-set。`checkpoint`（CR-2026-033）是单一深原语：复用既有 durable 层与 `workspace-transactions.mjs#checkpointCr`，将逐仓 Git 算法收敛为全仓 source commit → 非 KB lease publish → KB `latest-checkpoint` + metadata commit 唯一完整批次可见点；业务 payload 校验归 workspace-transactions（durable-tx 只做 generic envelope/op-payload slot），测试入口 `skills/shared/crctl/scripts/test/checkpoint-tx.test.mjs`。`approve`、`review-record`、`owner-set` 的多文件写使用同一 `durable-tx.mjs` 中的 command-level ledger transaction：commit 前中断按持久化 before snapshots 整组回滚；commit 后中断按 `AI-First-Tx` trailer 确认 authority 后只清理 journal。旧 `casWriteMulti` 与专属半状态故障点已删除。其余单文件账本命令继续使用 hash-CAS；所有路径共享 `.crctl/audit.log` 与 controlled Git，无旁路。
 
 ### `skills/shared/crctl/gates.json` + `dir-graph.yaml`
 
