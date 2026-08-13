@@ -268,3 +268,20 @@ test('TASK-04：cleanupTxBlobs 幂等；blob 与 afterSha256 不符 → TX_BLOB_
     await expectTx(applyWriteSet({ root, txId: journal.txId, entries: [{ path: 'd.txt', beforeSha256: null, afterSha256: after, content: 'different' }] }), 'TX_BLOB_MISMATCH');
   } finally { rm(root); }
 });
+
+test('CR-2026-033 T02：checkpoint op/payload slot generic 校验（不涉及业务字段）', async () => {
+  const root = mkRoot();
+  try {
+    // checkpoint op 可创建 journal，envelope 有 checkpoint:null
+    const { journal } = await loadOrCreateJournal({ root, op: 'checkpoint', cr: 'CR-2026-033', graphDigest: 'g', inputDigest: 'd' });
+    assert.equal(journal.op, 'checkpoint');
+    assert.equal(journal.checkpoint, null);
+    // 置位 checkpoint payload 后可 save；op-payload 对应（generic 层）
+    journal.checkpoint = { repositories: [], batchId: null, kbSourceSha: null, metadataCommit: null };
+    journal.phase = 'init';
+    await saveJournal({ path: path.join(root, '.crctl', 'transactions', 'checkpoint', 'CR-2026-033', journal.txId, 'journal.json'), journal });
+    // 多个 payload 非空 → generic envelope 拒绝
+    journal.ledger = { phase: 'x' };
+    await expectTx(saveJournal({ path: path.join(root, '.crctl', 'transactions', 'checkpoint', 'CR-2026-033', journal.txId, 'journal.json'), journal }), 'TX_JOURNAL_INVALID');
+  } finally { rm(root); }
+});

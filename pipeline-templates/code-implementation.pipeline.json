@@ -121,7 +121,7 @@
       "kind": "skill",
       "label": "推送设计/任务到远端",
       "ref": "push-progress",
-      "prompt": "若 {{inputs.auto_push_after_task}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则执行 push-progress：\n- 在 CR worktree 中提交 plan.md、tasks/ 与相关 traceability 改动\n- commit message 使用 `wip: {{inputs.cr_id}} plan & tasks`\n- 按 dir-graph active repos 推送 requirement/{{inputs.cr_id}} 到 origin\n- 经 `crctl checkpoint-add` 更新 _backlog 的 remote-ref/last-push/checkpoints（S3）\n\n在 node-3.md 输出各 repo 推送结果。",
+      "prompt": "若 {{inputs.auto_push_after_task}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则执行 push-progress：调用一次 `crctl checkpoint {{inputs.cr_id}} [--message <阶段摘要>] --workspace <installation-workspace>`，由 crctl 独占提交 plan.md、tasks/ 与 traceability 改动并推送到 requirement/{{inputs.cr_id}}。\n\n在 node-3.md 输出 batchId 与各 repo 推送结果。",
       "onFail": "skip",
       "timeoutMinutes": 10
     },
@@ -198,7 +198,7 @@
       "kind": "skill",
       "label": "推送代码+文档统一 checkpoint",
       "ref": "push-progress",
-      "prompt": "执行 push-progress，必须覆盖同一 CR workspace 下全部参与仓库，禁止只推文档或只推代码：\n- knowledge-base worktree 提交并推送 requirement/{{inputs.cr_id}}\n- 每个独立代码仓 CR worktree 提交并推送 requirement/{{inputs.cr_id}}\n- 非独立代码目录随 knowledge-base worktree 一起提交\n- 提交 change-requests/{{inputs.cr_id}}/test-report.md 与 traceability.yml#tests\n- 经 `crctl checkpoint-add` 更新 _backlog 的 remote-ref/last-push 并记录 checkpoint SHA（S3）\n\n在 node-8.md 输出各仓提交 SHA、远端分支和是否存在未提交改动。",
+      "prompt": "执行 push-progress：调用一次 `crctl checkpoint {{inputs.cr_id}} [--message <阶段摘要>] --workspace <installation-workspace>`，由 crctl 覆盖同一 CR workspace 下全部参与仓库（knowledge-base + 每个独立代码仓），提交并推送 test-report.md 与 traceability.yml#tests。\n\n在 node-8.md 输出 batchId、各仓提交 SHA、远端分支和是否存在未提交改动。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -288,7 +288,7 @@
       "kind": "skill",
       "label": "推送代码审批结果到远端",
       "ref": "push-progress",
-      "prompt": "执行 push-progress，经 `crctl git add/commit` 提交评审/审批/测试证据与账本 code-approved 状态：\n- commit message 使用 `wip: {{inputs.cr_id}} code approved`\n- 按 dir-graph active repos 推送 requirement/{{inputs.cr_id}} 到 origin\n- 经 `crctl checkpoint-add` 更新 _backlog 的 remote-ref/last-push/checkpoints（S3，与节点 3/8 一致）\n\n在 node-12.md 输出各仓提交 SHA、远端分支和是否存在未提交改动。",
+      "prompt": "执行 push-progress：调用一次 `crctl checkpoint {{inputs.cr_id}} [--message <阶段摘要>] --workspace <installation-workspace>`，由 crctl 独占提交评审/审批/测试证据与账本 code-approved 状态并推送到 requirement/{{inputs.cr_id}}。\n\n在 node-12.md 输出 batchId、各仓提交 SHA、远端分支和是否存在未提交改动。",
       "onFail": "skip",
       "timeoutMinutes": 10
     }

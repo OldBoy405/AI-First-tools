@@ -46,9 +46,10 @@ await runGit({ subcommand: "ls-remote", args: ["--heads", "origin", cr_id ? `req
 ### Step 2 — 收集 CR 元数据
 
 对每个远端分支中的 `requirement/{cr_id}`：
-1. 从 `change-requests/{cr_id}/cr.md` frontmatter 读取 `status`（权威状态源，CR-2026-018）；cr.md 缺失时回退 `_backlog.yml` 条目 `status`（旧布局兼容）
-2. 从 `change-requests/_backlog.yml` 查找对应条目，获取注册字段：`owners`、兼容 `owner`、`last-push-at`、`last-push-by`、`title`、`checkpoints[]`
-3. 对比远端 SHA 与 `checkpoints[]` 中对应 repo 的 SHA，标记 `synced | drift | unknown`
+1. 从 `change-requests/{cr_id}/cr.md` frontmatter 读取 `status`（权威状态源，CR-2026-018）；不回退 backlog status
+2. 从 KB 远端 requirement 分支的 `change-requests/_backlog.yml` 读取单一 `latest-checkpoint`（不再读 `checkpoints[]`/`remote-ref`/`last-push-*`）
+3. 对比远端 SHA 与 `latest-checkpoint.repositories[]`：非 KB repo remote HEAD 精确等于其 `source-sha`；KB remote HEAD 等于 `latest-checkpoint` 的 metadata commit 且其直接父等于 KB `source-sha`；任一缺仓/超前/分叉/结构错误标记 `drift | unknown`，不把祖先关系当 synced
+4. “最后推送时间/人”从 KB metadata commit 的 Git author/committer 事实派生
 
 > 若 `_backlog.yml` 中没有对应条目（已 archived 或未登记），从分支名推断 cr_id，status 仍尝试读 cr.md，其余字段标为 `unknown`。
 

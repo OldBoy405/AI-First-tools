@@ -1269,41 +1269,7 @@ test('review-note：同一文件二次追加 → 两条记录共存（数组追�
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-// ── CR-2026-021 TASK-04：checkpoint-add / owner-set / backlog-set（S3/S4/S5）──
-
-test('checkpoint-add：追加 checkpoints[] + remote-ref/last-push 元数据（AC-3）', () => {
-  const ws = makeWorkspace();
-  try {
-    writeCrEntry(ws, 'CR-T1', 'developing');
-    const r = runCrctl(['checkpoint-add', 'CR-T1', '--repo', 'ai-first-platform-docs', '--sha', 'abc123', '--remote-ref', 'refs/heads/master', '--workspace', ws]);
-    assert.equal(r.status, 0);
-    assert.equal(r.stdout.op, 'checkpoint-add');
-    const out = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
-    assert.ok(out.includes('checkpoints:'), 'checkpoints 段创建');
-    assert.ok(out.includes('- repo: ai-first-platform-docs'), 'checkpoint 条目');
-    assert.ok(out.includes('sha: abc123'), 'sha 写入');
-    assert.ok(out.includes('remote-ref: "refs/heads/master"'), 'remote-ref 写入');
-    assert.ok(out.includes('last-push-at:') && out.includes('last-push-by:'), '推送元数据由 crctl 生成');
-  } finally { rmSync(ws, { recursive: true, force: true }); }
-});
-
-test('checkpoint-add：终态拒绝零写；非终态（含 drafting）可用（FR-11，CR-2026-022）', () => {
-  const ws = makeWorkspace();
-  try {
-    // 终态（archived）拒绝，零写
-    writeCrEntry(ws, 'CR-T1', 'archived');
-    const before = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
-    const r1 = runCrctl(['checkpoint-add', 'CR-T1', '--repo', 'r', '--sha', 's', '--workspace', ws]);
-    assert.equal(r1.status, 1);
-    assert.equal(r1.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
-    assert.equal(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8'), before);
-    // 非终态 drafting 可用（push-progress 在需求期也会调用，旧窄列表会炸 ILLEGAL_LEDGER_STATE）
-    writeCrEntry(ws, 'CR-T2', 'drafting');
-    const r2 = runCrctl(['checkpoint-add', 'CR-T2', '--repo', 'r', '--sha', 's2', '--workspace', ws]);
-    assert.equal(r2.status, 0, r2.stderr);
-    assert.ok(readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8').includes('sha: s2'), 'drafting 态 checkpoint 落账');
-  } finally { rmSync(ws, { recursive: true, force: true }); }
-});
+// ── CR-2026-021 TASK-04：owner-set / backlog-set（S4/S5）；checkpoint-add 已随 CR-2026-033 删除，checkpoint 深原语测试见 checkpoint-tx.test.mjs ──
 
 test('owner-set：更新 owners.{role}.id + assigned-at（AC-3）', () => {
   const ws = makeGitWorkspace();

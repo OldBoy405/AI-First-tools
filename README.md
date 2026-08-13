@@ -373,7 +373,7 @@ flowchart TD
 |------|------------|------------|------------|--------|
 | 注册 CR + 派生 worktree | `title`、`cr_id`、`summary`、`source`、`target_version`、`requirement_owner`、`dev_owner`、`test_owner`、`dir-graph.yaml#repositories` | 创建 CR 元数据，写入三角色 owner 与 assigned-at，先提交 registration commit，再为所有 active repo 创建同名 worktree | `change-requests/{CR-ID}/cr.md`、`_backlog.yml`、`_index.yml`、`execution_context` | 否 |
 | 撰写 PRD | `execution_context.cr_id`、`knowledge_base_worktree`、`summary`、`source`、可选 `review_feedback` | 生成可评审 PRD；若为回修轮次，则按 blocker 定点修订 | `change-requests/{CR-ID}/prd.md`、fixed-blockers | 否 |
-| 推送 PRD checkpoint | `execution_context.cr_id`、repo worktree map | 保存 PRD 草稿和 backlog 更新到远端分支 | `origin/requirement/{CR-ID}` checkpoint、`checkpoints[]` 更新 | 是，`auto_push_after_prd=false` |
+| 推送 PRD checkpoint | `execution_context.cr_id`、repo worktree map | 保存 PRD 草稿和 backlog 更新到远端分支 | `origin/requirement/{CR-ID}` checkpoint、`latest-checkpoint` 更新 | 是，`auto_push_after_prd=false` |
 | 需求评审 | `prd.md`、`source` | 检查完整性、可测试性、范围和对齐情况；block 时回到 PRD 修订 | `review-annotations/requirement.yml`、`traceability.yml`、通过时 status=`requirement-reviewing` | 否 |
 | 需求审批 | `prd.md`、已通过的需求评审记录 | 仅在 `verdict=pass` 且 `blockers=[]` 后人工判断 PRD 是否可进入架构设计 | 通过或驳回结论 | 否 |
 | 记录审批并推进 | `execution_context.cr_id`、`owners.requirement.id` | 写入审批证据并推进状态 | `approval.yml#requirement`、status=`requirement-approved` | 否 |
@@ -410,7 +410,7 @@ flowchart TD
 | 架构设计评审 | `sdd.md`、`prd.md` | 检查 PRD 对齐、架构合理性、接口完整性、可测试性；block 时回到 SDD 修订 | `review-annotations/sdd.yml`、`traceability.yml` | 否 |
 | 架构审批 | `sdd.md`、已通过的技术评审记录、`owners.development.id` | 仅在 `verdict=pass` 且 `blockers=[]` 后人工决定是否可进入开发任务拆分 | 通过或驳回结论 | 否 |
 | 记录审批并推进 | `cr_id`、`owners.development.id` | 写入技术审批证据并推进状态 | `approval.yml#tech-design`、status=`tech-design-reviewed` | 否 |
-| 推送架构 checkpoint | `sdd.md`、评审记录、审批记录 | 保存架构阶段产物到远端分支 | 远端 checkpoint、`checkpoints[]` 更新 | 是，`auto_push_after_sdd=false` |
+| 推送架构 checkpoint | `sdd.md`、评审记录、审批记录 | 保存架构阶段产物到远端分支 | 远端 checkpoint、`latest-checkpoint` 更新 | 是，`auto_push_after_sdd=false` |
 
 ## 3. 代码编写流程
 
@@ -454,7 +454,7 @@ flowchart TD
 | 编写开发计划 | `sdd.md`、`target_version` | 规划里程碑、依赖、风险、验收和发布策略 | `change-requests/{CR-ID}/plan.md` | 否 |
 | 拆分开发任务 | `plan.md`、`sdd.md` | 拆成可执行 TASK，明确文件、实现要点和验收条件 | `tasks/TASK-NN.md`、`tasks/_index.yml`、status=`task-breakdown` | 否 |
 | 计划与 TASK 合并评审 | `sdd.md`、`plan.md`、`tasks/`、`review-annotations/sdd.yml` | 编码前八类维度评审；PASS 保持 task-breakdown，BLOCK 双轨路由（普通轨回 tech-design-reviewed 重放 / 上游疑点回 tech-design-review-pending） | `review-annotations/dev-plan.yml`、三账本投影（CR-2026-026） | 否 |
-| 推送任务 checkpoint | `plan.md`、`tasks/`、traceability 改动 | 保存设计与任务拆分进度 | 远端 checkpoint、`checkpoints[]` 更新 | 是，`auto_push_after_task=false` |
+| 推送任务 checkpoint | `plan.md`、`tasks/`、traceability 改动 | 保存设计与任务拆分进度 | 远端 checkpoint、`latest-checkpoint` 更新 | 是，`auto_push_after_task=false` |
 | 确认进入开发 | `plan.md`、`tasks/`、`owners.development.id` | 人工确认任务拆分可进入编码 | 通过或暂缓结论 | 否 |
 | 记录开发启动 | `cr_id`、`owners.development.id` | 写入开发启动确认并解锁编码 | `approval.yml#development-start`、status=`developing` | 否 |
 | 代码编写 | PRD、SDD、TASK、repo worktree map、coding runtime、`owners.development.id`、可选 `review_feedback` | 按 TASK 在 CR worktree 中实现代码；若为回修轮次，则只修复测试或代码评审指出的问题 | 代码变更、验证命令与结果、runtime 信息、fixed-blockers | 否 |

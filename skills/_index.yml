@@ -269,7 +269,7 @@ skills:
 
   - id: crctl
     path: ./shared/crctl/SKILL.md
-    brief: "CR 状态机与持久事务 CLI：status/next/gate/advance/approve/review-record、register、workspace inspect|ensure|cleanup、merge/status、writeback-apply、archive、upgrade-check，以及仍受支持的 task done/review-note/checkpoint-add/owner-set/backlog-set/inbox-emit/report/git；注册、workspace 恢复、合并、回写、归档均由对应深原语独占 Git/账本算法。"
+    brief: "CR 状态机与持久事务 CLI：status/next/gate/advance/approve/review-record、register、workspace inspect|ensure|cleanup、merge/status、writeback-apply、archive、upgrade-check、checkpoint，以及 task done/review-note/owner-set/backlog-set/inbox-emit/report/git；注册、workspace 恢复、合并、回写、归档与 checkpoint 均由对应深原语独占 Git/账本算法。"
     status: active
 
   # ─── Change Request (CR) 通用 Skill（cr/ 子目录，保留部分）─────────────
