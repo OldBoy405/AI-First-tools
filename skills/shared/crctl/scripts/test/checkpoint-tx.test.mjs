@@ -360,6 +360,9 @@ test('checkpoint 仅非 KB 变化：KB source 沿用上一 metadata HEAD，只�
     const kbSource = second.json.repositories.find((r) => r.repo === 'kb').sourceSha;
     assert.equal(kbSource, first.json.metadataCommit);
     assert.equal(git(path.join(f.base, 'origin-kb.git'), ['rev-parse', `${second.json.metadataCommit}^`]), first.json.metadataCommit);
+    assert.deepEqual(second.json.sideEffects.map((x) => `${x.kind}:${x.repo}`).sort(), [
+      'commit:knowledge-base', 'commit:tools', 'push:knowledge-base', 'push:tools',
+    ]);
   } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
 });
 

@@ -1270,10 +1270,18 @@ function readCheckpointSnapshot(kbCrRoot, cr) {
 function checkpointBuildSideEffects(payload) {
   const se = [];
   for (const r of payload.repositories || []) {
-    if (r.sourceSha && r.phase && r.phase !== 'prepared') se.push({ kind: 'commit', repo: r.repo, sha: r.sourceSha });
-    if (r.phase === 'pushed' || r.phase === 'confirmed') se.push({ kind: 'push', repo: r.repo, ref: r.remoteRef });
+    if (r.sourceSha && r.baseSha && r.sourceSha !== r.baseSha) se.push({ kind: 'commit', repo: r.repo, sha: r.sourceSha });
+    if ((r.phase === 'pushed' || r.phase === 'confirmed') && r.sourceSha && r.remoteBefore !== r.sourceSha) {
+      se.push({ kind: 'push', repo: r.repo, ref: r.remoteRef });
+    }
   }
-  if (payload.metadataCommit) se.push({ kind: 'commit', repo: 'knowledge-base', sha: payload.metadataCommit, metadata: true });
+  if (payload.metadataCommit) {
+    se.push({ kind: 'commit', repo: 'knowledge-base', sha: payload.metadataCommit, metadata: true });
+    if (payload.phase === 'metadata-pushed' || payload.phase === 'complete') {
+      const kb = (payload.repositories || []).find((r) => r.sourceSha === payload.kbSourceSha);
+      se.push({ kind: 'push', repo: 'knowledge-base', ref: kb && kb.remoteRef, metadata: true });
+    }
+  }
   return se;
 }
 
@@ -1432,6 +1440,7 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
       const status = gitRun(wtPath, ['status', '--porcelain']);
       if (status.status !== 0) throw new TxError('TX_GIT_FAILED', `${r.repo}: git status 失败（exit=${status.status}）: ${status.stderr}`, { repo: r.repo });
       const dirty = status.stdout !== '';
+      rec.baseSha = head;
       if (!dirty) {
         if (rec.sourceSha && head !== rec.sourceSha) throw new TxError('TX_RECOVERY_CONFLICT', `${r.repo}: HEAD ${head} 与 journal sourceSha ${rec.sourceSha} 不一致（第三方修改）`, { repo: r.repo });
         rec.sourceSha = head;
