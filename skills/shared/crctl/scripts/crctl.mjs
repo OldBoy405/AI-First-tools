@@ -1514,6 +1514,140 @@ function cmdValidate(ws, target, gates) {
 }
 
 
+function taskCardInvalid(file, field, why) {
+  fail('TASK_CARD_INVALID', `${file} 的 ${field} 非法：${why}`, { file, field });
+}
+
+function loadTaskCards(ws, cr) {
+  const dir = path.join(crDir(ws, cr), 'tasks');
+  const names = fs.existsSync(dir)
+    ? fs.readdirSync(dir).filter((name) => /^TASK-\d{2}\.md$/.test(name)).sort((a, b) => Number(a.slice(5, 7)) - Number(b.slice(5, 7)))
+    : [];
+  if (!names.length) fail('TASK_SET_EMPTY', `${dir} 中没有 TASK-NN.md`);
+  const cards = [];
+  const ids = new Set();
+  for (const file of names) {
+    const p = path.join(dir, file);
+    const raw = readFileChecked(p);
+    if (raw == null) fail('TASK_SET_CHANGED', `读取后 TASK 文件消失: ${file}`, { file });
+    const fm = matchFrontmatter(raw.replaceAll('\r\n', '\n'));
+    if (!fm) taskCardInvalid(file, 'frontmatter', '缺失');
+    let doc;
+    try { doc = parseYaml(fm.body); }
+    catch (e) { taskCardInvalid(file, 'frontmatter', String(e && e.message || e)); }
+    if (!doc || typeof doc !== 'object' || Array.isArray(doc)) taskCardInvalid(file, 'frontmatter', '顶层必须是映射');
+    const nn = file.slice(5, 7);
+    const expectedId = `${cr}-TASK-${nn}`;
+    if (doc.id !== expectedId) taskCardInvalid(file, 'id', `必须为 ${expectedId}`);
+    if (doc.type !== 'TASK') taskCardInvalid(file, 'type', '必须为 TASK');
+    if (doc['cr-ref'] !== cr) taskCardInvalid(file, 'cr-ref', `必须为 ${cr}`);
+    if (typeof doc.title !== 'string' || !doc.title.trim()) taskCardInvalid(file, 'title', '必须为非空字符串');
+    if (doc.status !== 'pending') taskCardInvalid(file, 'status', '初始化时必须为 pending');
+    if (typeof doc.estimate !== 'string' || !/^[1-9]\d*h$/.test(doc.estimate)) taskCardInvalid(file, 'estimate', '必须为正整数小时，如 4h');
+    if (!Array.isArray(doc['depends-on']) || doc['depends-on'].some((v) => typeof v !== 'string')) taskCardInvalid(file, 'depends-on', '必须为字符串数组');
+    if (ids.has(doc.id)) taskCardInvalid(file, 'id', '重复');
+    ids.add(doc.id);
+    cards.push({
+      file, number: Number(nn), id: doc.id, title: doc.title, status: doc.status,
+      estimate: doc.estimate, dependsOn: doc['depends-on'], sourceSha256: sha256(raw),
+    });
+  }
+  const byId = new Map(cards.map((card) => [card.id, card]));
+  for (const card of cards) {
+    const unknown = card.dependsOn.filter((id) => !byId.has(id));
+    if (unknown.length) fail('DEPENDS_ON_UNKNOWN', `${card.id} 引用了不存在的 TASK：${unknown.join(', ')}`, { taskId: card.id, unknown });
+  }
+  const visiting = new Set(), visited = new Set();
+  function visit(id, pathIds) {
+    if (visiting.has(id)) fail('TASK_DEPENDENCY_CYCLE', `TASK 依赖成环：${[...pathIds, id].join(' -> ')}`, { cycle: [...pathIds, id] });
+    if (visited.has(id)) return;
+    visiting.add(id);
+    for (const dep of byId.get(id).dependsOn) visit(dep, [...pathIds, id]);
+    visiting.delete(id);
+    visited.add(id);
+  }
+  for (const card of cards) visit(card.id, []);
+  return { dir, names, cards };
+}
+
+function renderTaskIndex(cr, cards) {
+  const lines = [`cr-id: ${cr}`, 'tasks:'];
+  for (const card of cards) {
+    lines.push(`  - id: ${card.id}`);
+    lines.push(`    title: ${yamlStringScalar(card.title)}`);
+    lines.push('    status: pending');
+    lines.push(`    estimate: ${card.estimate}`);
+    lines.push(`    depends-on: [${card.dependsOn.join(', ')}]`);
+  }
+  return lines.join('\n') + '\n';
+}
+
+function guardTaskIndexHasNoProgress(text, cr) {
+  let doc;
+  try { doc = parseYaml(text.replaceAll('\r\n', '\n')); }
+  catch { fail('TASK_INDEX_HAS_PROGRESS', '现有 tasks/_index.yml 无法证明全部 pending，拒绝覆盖'); }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)
+      || (doc['cr-id'] != null && doc['cr-id'] !== cr) || !Array.isArray(doc.tasks) || !doc.tasks.length
+      || doc.tasks.some((task) => !task || typeof task !== 'object' || Array.isArray(task)
+        || typeof task.id !== 'string' || task.status !== 'pending' || Object.hasOwn(task, 'done-at'))) {
+    fail('TASK_INDEX_HAS_PROGRESS', '现有 tasks/_index.yml 无法证明全部 pending，拒绝覆盖');
+  }
+}
+
+function assertTaskCardsFresh(set) {
+  const currentNames = fs.existsSync(set.dir)
+    ? fs.readdirSync(set.dir).filter((name) => /^TASK-\d{2}\.md$/.test(name)).sort((a, b) => Number(a.slice(5, 7)) - Number(b.slice(5, 7)))
+    : [];
+  if (JSON.stringify(currentNames) !== JSON.stringify(set.names)) fail('TASK_SET_CHANGED', 'TASK 文件集合在读取后发生变化');
+  for (const card of set.cards) {
+    const raw = readFileChecked(path.join(set.dir, card.file));
+    if (raw == null || sha256(raw) !== card.sourceSha256) fail('TASK_SET_CHANGED', `TASK 文件在读取后发生变化: ${card.file}`, { file: card.file });
+  }
+}
+
+function createFileExclusive(p, text) {
+  let fd;
+  let created = false;
+  try {
+    fd = fs.openSync(p, 'wx');
+    created = true;
+    fs.writeFileSync(fd, text, 'utf8');
+    fs.closeSync(fd);
+    fd = undefined;
+  } catch (e) {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* preserve original error */ } }
+    if (created) { try { fs.unlinkSync(p); } catch { /* preserve original error */ } }
+    if (e && e.code === 'EEXIST') fail('CAS_CONFLICT', `${p} 在读取后被其他进程创建，本次写入中止。请重新执行。`);
+    throw e;
+  }
+}
+
+function cmdTaskInit(ws, cr) {
+  const state = resolveCrState(ws, cr);
+  const legal = ['tech-design-reviewed', 'task-breakdown'];
+  if (!legal.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `task init 仅允许在前置态 ${legal.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: legal });
+  const set = loadTaskCards(ws, cr);
+  const canonical = renderTaskIndex(cr, set.cards);
+  const p = path.join(set.dir, '_index.yml');
+  const current = readFileChecked(p);
+  if (current != null) {
+    guardTaskIndexHasNoProgress(current, cr);
+    const expectedHash = sha256(current);
+    assertTaskCardsFresh(set);
+    if (current.replaceAll('\r\n', '\n') === canonical) {
+      return ok({ op: 'task-init', cr, file: p, taskCount: set.cards.length,
+        totalEstimateHours: set.cards.reduce((sum, card) => sum + Number.parseInt(card.estimate, 10), 0), changed: false });
+    }
+    casWrite(p, expectedHash, canonical);
+  } else {
+    assertTaskCardsFresh(set);
+    createFileExclusive(p, canonical);
+  }
+  auditLog(ws, { kind: 'ledger', op: 'task-init', cr, actor: identity(ws), taskCount: set.cards.length, changed: true });
+  ok({ op: 'task-init', cr, file: p, taskCount: set.cards.length,
+    totalEstimateHours: set.cards.reduce((sum, card) => sum + Number.parseInt(card.estimate, 10), 0), changed: true });
+}
+
 function cmdTaskDone(ws, cr, gates, flags) {
   if (!flags.task) fail('BAD_ARGS', 'task done 需要 --task <TASK-ID>');
   const state = resolveCrState(ws, cr);
@@ -2733,6 +2867,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
                         [--cwd <p>] [--timeout <sec>]
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
   crctl git     <sub> [args...] [--cwd <p>]      controlled-shell 白名单执行（只读/安全面；写路径一律走深原语）
+  crctl task init <cr_id>                       从 TASK-NN.md 确定性创建/刷新 tasks/_index.yml（开发启动前，CAS+审计）
   crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
 
 
@@ -2800,8 +2935,12 @@ async function main() {
     case 'upgrade-check': return cmdUpgradeCheck(ws, flags);
     case 'report': return cmdReport(ws, gates, flags);
     case 'task': {
+      if (positional[0] === 'init') {
+        if (positional.length !== 2) fail('BAD_ARGS', 'task init 用法：crctl task init <CR-ID>');
+        return cmdTaskInit(ws, requireCr(positional.slice(1)));
+      }
       if (positional[0] === 'done') return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
-      fail('BAD_ARGS', 'task 仅支持子命令 done：crctl task done <CR-ID> --task <TASK-ID>');
+      fail('BAD_ARGS', 'task 仅支持子命令 init/done：crctl task init <CR-ID> | crctl task done <CR-ID> --task <TASK-ID>');
     }
 
     case 'test': return cmdTest(ws, requireCr(positional), gates, flags);

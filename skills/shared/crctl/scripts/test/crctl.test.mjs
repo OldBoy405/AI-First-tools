@@ -870,7 +870,7 @@ test('CR-2026-031 TASK-02：已退役命令统一拒绝（cr-metrics/migrate-bac
     const r3 = runCrctl(['task', 'allocate', 'CR-T1', '--workspace', ws]);
     assert.equal(r3.status, 1);
     assert.equal(r3.stderr.error.code, 'BAD_ARGS');
-    assert.match(r3.stderr.error.message, /仅支持子命令 done/);
+    assert.match(r3.stderr.error.message, /仅支持子命令 init\/done/);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -918,6 +918,156 @@ function writeTaskIndex(ws, cr, tasks) {
   }
   writeFileSync(path.join(dir, '_index.yml'), lines.join('\n') + '\n');
 }
+
+function writeTaskCard(ws, cr, number, { title, estimate = '4h', dependsOn = [], eol = '\n' }) {
+  const nn = String(number).padStart(2, '0');
+  const dir = path.join(ws, 'change-requests', cr, 'tasks');
+  mkdirSync(dir, { recursive: true });
+  const text = [
+    '---',
+    `id: ${cr}-TASK-${nn}`,
+    'type: TASK',
+    `cr-ref: ${cr}`,
+    `title: ${JSON.stringify(title)}`,
+    'status: pending',
+    `estimate: ${estimate}`,
+    `depends-on: ${JSON.stringify(dependsOn)}`,
+    '---',
+    '',
+    `# TASK-${nn}`,
+    '',
+  ].join('\n').replaceAll('\n', eol);
+  writeFileSync(path.join(dir, `TASK-${nn}.md`), text, 'utf8');
+}
+
+test('CR-2026-037 task init：合法 TASK 集合创建 canonical 索引并汇总工时', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-reviewed');
+    writeTaskCard(ws, 'CR-T1', 1, { title: 'core: init', estimate: '8h' });
+    writeTaskCard(ws, 'CR-T1', 2, { title: 'adopt', estimate: '4h', dependsOn: ['CR-T1-TASK-01'] });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.deepEqual({ op: r.stdout.op, taskCount: r.stdout.taskCount, totalEstimateHours: r.stdout.totalEstimateHours, changed: r.stdout.changed },
+      { op: 'task-init', taskCount: 2, totalEstimateHours: 12, changed: true });
+    const idx = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml'), 'utf8');
+    assert.equal(idx, [
+      'cr-id: CR-T1',
+      'tasks:',
+      '  - id: CR-T1-TASK-01',
+      '    title: "core: init"',
+      '    status: pending',
+      '    estimate: 8h',
+      '    depends-on: []',
+      '  - id: CR-T1-TASK-02',
+      '    title: "adopt"',
+      '    status: pending',
+      '    estimate: 4h',
+      '    depends-on: [CR-T1-TASK-01]',
+      '',
+    ].join('\n'));
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-037 task init：CRLF 输入、no-op 与 pending refresh 保持确定性', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    writeTaskCard(ws, 'CR-T1', 1, { title: 'quoted "title"', estimate: '3h', eol: '\r\n' });
+    const first = runCrctl(['task', 'init', 'CR-T1', '--workspace', ws]);
+    assert.equal(first.status, 0, first.rawStderr);
+    const p = path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml');
+    const canonical = readFileSync(p, 'utf8');
+    assert.ok(!canonical.includes('\r'));
+    const auditPath = path.join(ws, '.crctl', 'audit.log');
+    const auditBefore = readFileSync(auditPath, 'utf8');
+    const second = runCrctl(['task', 'init', 'CR-T1', '--workspace', ws]);
+    assert.equal(second.status, 0, second.rawStderr);
+    assert.equal(second.stdout.changed, false);
+    assert.equal(readFileSync(p, 'utf8'), canonical);
+    assert.equal(readFileSync(auditPath, 'utf8'), auditBefore);
+    writeTaskCard(ws, 'CR-T1', 1, { title: 'revised', estimate: '5h' });
+    const third = runCrctl(['task', 'init', 'CR-T1', '--workspace', ws]);
+    assert.equal(third.status, 0, third.rawStderr);
+    assert.equal(third.stdout.changed, true);
+    assert.equal(third.stdout.totalEstimateHours, 5);
+    assert.match(readFileSync(p, 'utf8'), /title: "revised"/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-037 task init：坏卡表驱动硬失败且零索引写入', () => {
+  const cases = [
+    ['empty', null, 'TASK_SET_EMPTY'],
+    ['bad-id', 'id: WRONG', 'TASK_CARD_INVALID'],
+    ['bad-estimate', 'estimate: 0h', 'TASK_CARD_INVALID'],
+    ['bad-depends', 'depends-on: nope', 'TASK_CARD_INVALID'],
+  ];
+  for (const [name, replacement, code] of cases) {
+    const ws = makeWorkspace();
+    try {
+      writeCrEntry(ws, 'CR-T1', 'tech-design-reviewed');
+      if (replacement) {
+        writeTaskCard(ws, 'CR-T1', 1, { title: name });
+        const p = path.join(ws, 'change-requests', 'CR-T1', 'tasks', 'TASK-01.md');
+        const raw = readFileSync(p, 'utf8');
+        const field = replacement.split(':')[0];
+        writeFileSync(p, raw.replace(new RegExp(`^${field}:.*$`, 'm'), replacement));
+      }
+      const r = runCrctl(['task', 'init', 'CR-T1', '--workspace', ws]);
+      assert.equal(r.status, 1, `${name}: ${r.rawStderr}`);
+      assert.equal(r.stderr.error.code, code, name);
+      assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml')), false, name);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-037 task init：悬空依赖与环均在写前拒绝', () => {
+  for (const mode of ['unknown', 'self', 'cycle']) {
+    const ws = makeWorkspace();
+    try {
+      writeCrEntry(ws, 'CR-T1', 'tech-design-reviewed');
+      if (mode === 'unknown') writeTaskCard(ws, 'CR-T1', 1, { title: 'x', dependsOn: ['CR-T1-TASK-99'] });
+      if (mode === 'self') writeTaskCard(ws, 'CR-T1', 1, { title: 'x', dependsOn: ['CR-T1-TASK-01'] });
+      if (mode === 'cycle') {
+        writeTaskCard(ws, 'CR-T1', 1, { title: 'x', dependsOn: ['CR-T1-TASK-02'] });
+        writeTaskCard(ws, 'CR-T1', 2, { title: 'y', dependsOn: ['CR-T1-TASK-01'] });
+      }
+      const r = runCrctl(['task', 'init', 'CR-T1', '--workspace', ws]);
+      assert.equal(r.status, 1, `${mode}: ${r.rawStderr}`);
+      assert.equal(r.stderr.error.code, mode === 'unknown' ? 'DEPENDS_ON_UNKNOWN' : 'TASK_DEPENDENCY_CYCLE');
+      assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml')), false);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-037 task init：已有进度与非法状态 fail-closed', () => {
+  for (const existing of [
+    [{ id: 'CR-T1-TASK-01', title: 'x', status: 'done', doneAt: '2026-08-13T00:00:00Z' }],
+    [{ id: 'CR-T1-TASK-01', title: 'x', status: 'unknown' }],
+  ]) {
+    const ws = makeWorkspace();
+    try {
+      writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+      writeTaskCard(ws, 'CR-T1', 1, { title: 'x' });
+      writeTaskIndex(ws, 'CR-T1', existing);
+      const p = path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml');
+      const before = readFileSync(p, 'utf8');
+      const r = runCrctl(['task', 'init', 'CR-T1', '--workspace', ws]);
+      assert.equal(r.status, 1, r.rawStderr);
+      assert.equal(r.stderr.error.code, 'TASK_INDEX_HAS_PROGRESS');
+      assert.equal(readFileSync(p, 'utf8'), before);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeTaskCard(ws, 'CR-T1', 1, { title: 'x' });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'ILLEGAL_LEDGER_STATE');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml')), false);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
 
 test('task done：正常路径 pending→done + done-at + audit 记录（AC-1）', () => {
   const ws = makeWorkspace();
