@@ -2651,8 +2651,10 @@ function cmdNext(ws, cr, gates, flags) {
     case 'task-breakdown': {
       const planOk = fs.existsSync(path.join(crDir(ws, cr), 'plan.md'));
       const tasksOk = fs.existsSync(path.join(crDir(ws, cr), 'tasks'));
+      const indexOk = fs.existsSync(path.join(crDir(ws, cr), 'tasks', '_index.yml'));
       if (!planOk) return suggest('write-dev-plan', 'plan.md 缺失');
       if (!tasksOk) return suggest('write-dev-tasks', 'tasks/ 缺失');
+      if (!indexOk) return suggest('write-dev-tasks', 'tasks/_index.yml 缺失，先调用 crctl task init');
       // CR-2026-027 FR-16/TASK-07：canonical dev-plan.yml 判定（缺失/畸形 → 评审；PASS → 审批；BLOCK → 按 annotation 重算 route）
       const dp = ev('change-requests/{cr}/review-annotations/dev-plan.yml');
       if (!dp.exists || !dp.data || !['pass', 'block'].includes(dp.data.verdict) || !Array.isArray(dp.data.blockers)) {

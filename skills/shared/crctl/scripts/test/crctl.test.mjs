@@ -1069,6 +1069,76 @@ test('CR-2026-037 task init：已有进度与非法状态 fail-closed', () => {
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('CR-2026-037 task-breakdown：缺索引时 gate/next 阻断，task init 后 gate 通过', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    writeFileSync(path.join(ws, 'change-requests', 'CR-T1', 'plan.md'), '# plan\n');
+    writeTaskCard(ws, 'CR-T1', 1, { title: 'x' });
+    let r = runCrctl(['gate', 'CR-T1', '--for', 'task-breakdown', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout.pass, false);
+    assert.ok(r.stdout.checks.some((check) => check.type === 'fileExists' && check.ok === false && path.basename(check.path) === '_index.yml'));
+    r = runCrctl(['advance', 'CR-T1', '--to', 'task-breakdown', '--trigger', 'write-dev-tasks', '--expect', 'task-breakdown', '--workspace', ws, '--no-commit']);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'GATE_BLOCKED');
+    r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.next, 'write-dev-tasks');
+    assert.match(r.stdout.why, /crctl task init/);
+    r = runCrctl(['task', 'init', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    r = runCrctl(['gate', 'CR-T1', '--for', 'task-breakdown', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.pass, true);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-037 task init：读间 TASK 变化与索引 CAS 冲突均零覆盖', () => {
+  for (const mode of ['task', 'index']) {
+    const ws = makeWorkspace();
+    try {
+      writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+      writeTaskCard(ws, 'CR-T1', 1, { title: 'x' });
+      if (mode === 'index') writeTaskIndex(ws, 'CR-T1', [{ id: 'CR-T1-TASK-01', title: 'old', status: 'pending' }]);
+      const suffix = mode === 'task' ? 'TASK-01.md' : '_index.yml';
+      const prelude = `
+        const fs = (await import('node:fs')).default;
+        const original = fs.readFileSync.bind(fs);
+        let reads = 0;
+        fs.readFileSync = function(p, ...args) {
+          if (String(p).endsWith(${JSON.stringify(suffix)})) {
+            reads++;
+            if (reads === 2) fs.appendFileSync(p, '# concurrent\\n');
+          }
+          return original(p, ...args);
+        };
+      `;
+      const indexPath = path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml');
+      const before = existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : null;
+      const r = runCrctlWrapped(['task', 'init', 'CR-T1', '--workspace', ws], prelude);
+      assert.equal(r.status, 1, `${mode}: ${r.rawStderr}`);
+      assert.equal(r.stderr.error.code, mode === 'task' ? 'TASK_SET_CHANGED' : 'CAS_CONFLICT');
+      if (mode === 'task') assert.equal(existsSync(indexPath), false);
+      else assert.equal(readFileSync(indexPath, 'utf8'), before + '# concurrent\n');
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-037 Prompt 采纳：Skill/Pipeline 调 task init 且不指导直写索引', () => {
+  const root = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
+  const skill = readFileSync(path.join(root, 'skills', 'develop', 'write-dev-tasks', 'SKILL.md'), 'utf8');
+  const pipelineText = readFileSync(path.join(root, 'pipeline-templates', 'code-implementation.pipeline.json'), 'utf8');
+  const pipeline = JSON.parse(pipelineText);
+  assert.match(skill, /crctl task init/);
+  assert.match(skill, /禁止 Agent\/Skill 手写/);
+  assert.doesNotMatch(skill, /重新生成.*TASK 与 `_index\.yml`/);
+  assert.match(pipelineText, /crctl task init/);
+  assert.match(pipelineText, /不得手写索引/);
+  assert.doesNotMatch(pipelineText, /同时生成 tasks\/_index\.yml/);
+  assert.equal(pipeline.nodes.length, 14);
+});
+
 test('task done：正常路径 pending→done + done-at + audit 记录（AC-1）', () => {
   const ws = makeWorkspace();
   try {
