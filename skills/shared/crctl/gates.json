@@ -68,6 +68,7 @@
     ],
     "task-breakdown": [
       { "type": "fileExists", "path": "change-requests/{cr}/plan.md" },
+      { "type": "fileExists", "path": "change-requests/{cr}/tasks/_index.yml" },
       { "type": "globNonEmpty", "dir": "change-requests/{cr}/tasks", "pattern": "^TASK-\\d+.*\\.md$" }
     ],
     "developing": [

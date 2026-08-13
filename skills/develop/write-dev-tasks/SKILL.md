@@ -46,7 +46,7 @@ description: 将 change-requests/{CR-ID}/plan.md 拆解为独立可执行的 TAS
 
 若存在 `review_feedback`（来自 review-dev-plan 普通轨 BLOCK）：
 
-1. 逐条消费 blockers 与 repair-instructions，**重新生成** TASK 与 `_index.yml`；不保留已被评审判废/删除的旧 TASK。
+1. 逐条消费 blockers 与 repair-instructions，**重新生成** TASK 卡并调用 `crctl task init` 刷新 `_index.yml`；不保留已被评审判废/删除的旧 TASK。
 2. 输出 `fixed-blockers` 清单；禁止只刷新评审证据而不修改被指出的产物。
 3. 回修期间允许 status=`tech-design-reviewed`（普通轨重放态）。
 
@@ -80,17 +80,24 @@ created: {YYYY-MM-DDTHH:mm:ss+08:00}
 5. **完成标志** — 定义"完成"的明确状态（如"单元测试通过 + lint 零报错"）
 6. **接口契约** — 消费：本 TASK 使用哪些上游 TASK 产出的精确函数名/参数/返回类型；产出：本 TASK 暴露给下游 TASK 的精确签名
 
-### Step 4 — 生成 TASK 索引
+### Step 4 — 初始化 TASK 索引
 
-在 `change-requests/{cr_id}/tasks/_index.yml` 中汇总所有 TASK 的 id / title / status / estimate / depends-on。
+TASK 卡全部写完后执行：
 
-**估算交叉校验（FR-23，CR-2026-022）**：汇总后核对 `plan.md` 章节 5 的估算总工时与 TASK 级 `estimate` 求和是否一致；不一致时输出 WARN 并说明差异（不静默覆盖 plan.md，由计划负责人决定以哪侧为准）。
+```bash
+crctl task init {cr_id} --workspace <knowledge-base CR worktree>
+```
+
+`tasks/_index.yml` 是受控账本，禁止 Agent/Skill 手写。`task init` 从 TASK frontmatter 确定性投影 id / title / status / estimate / depends-on；任一卡非法、依赖悬空/成环、已有进度或并发冲突时必须中止，不得推进状态。
+
+**估算交叉校验（FR-23，CR-2026-022）**：用命令返回的 `totalEstimateHours` 核对 `plan.md` 章节 5 的估算总工时是否一致；不一致时输出 WARN 并说明差异（不静默覆盖 plan.md，由计划负责人决定以哪侧为准）。
 
 **接口签名核对**：汇总后核对所有 TASK 声明的接口签名一致性——消费方引用的函数名/参数/返回类型必须与产出方声明的签名一致；命名对不上时输出 WARN 并列出差异（不静默覆盖，由计划负责人决定以哪侧为准）。
 
 ### Step 5 — 推进 CR status 并 commit
 
-- `crctl advance --to task-breakdown --trigger write-dev-tasks --expect tech-design-reviewed`
+- 初次拆分：`crctl advance --to task-breakdown --trigger write-dev-tasks --expect tech-design-reviewed`
+- `task-breakdown` 回修：使用状态机既有 `write-dev-tasks` 自环
 - Commit：`crctl git commit -m "task-breakdown {cr_id}: {N} tasks" --cwd <worktree>`
 
 ### Step 6 — 输出摘要

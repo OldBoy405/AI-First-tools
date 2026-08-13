@@ -66,7 +66,7 @@
       "kind": "skill",
       "label": "拆分开发任务",
       "ref": "write-dev-tasks",
-      "prompt": "将 CR worktree 中 change-requests/{{inputs.cr_id}}/plan.md 与 sdd.md 拆解为独立可执行的 TASK，每个 TASK 产出 change-requests/{{inputs.cr_id}}/tasks/TASK-NN.md：\n- 任务描述（目标、输入、输出）\n- 涉及文件/模块清单\n- 实现要点（引用 SDD 对应章节）\n- 验收条件（测试用例或验证步骤）\n- 依赖的其他 TASK\n- 接口契约（消费/产出的精确签名：函数名、参数、返回类型；跨 TASK 命名不得对不上）\n\n同时生成 tasks/_index.yml，并将 CR status 推进到 task-breakdown。在 node-2.md 输出 TASK 列表、总数和依赖关系。",
+      "prompt": "将 CR worktree 中 change-requests/{{inputs.cr_id}}/plan.md 与 sdd.md 拆解为独立可执行的 TASK，每个 TASK 产出 change-requests/{{inputs.cr_id}}/tasks/TASK-NN.md：\n- 任务描述（目标、输入、输出）\n- 涉及文件/模块清单\n- 实现要点（引用 SDD 对应章节）\n- 验收条件（测试用例或验证步骤）\n- 依赖的其他 TASK\n- 接口契约（消费/产出的精确签名：函数名、参数、返回类型；跨 TASK 命名不得对不上）\n\nTASK 卡全部写完后调用 `crctl task init {{inputs.cr_id}} --workspace <knowledge_base_worktree>` 生成受控 tasks/_index.yml；命令失败立即中止，不得手写索引。用返回的 totalEstimateHours 核对 plan 总估算，再通过既有 `write-dev-tasks` 转换将 CR status 推进或自环到 task-breakdown。在 node-2.md 输出 TASK 列表、总数、总工时和依赖关系。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },

@@ -498,6 +498,17 @@ flowchart TD
 | 回写追溯链 | PRD、SDD、TASK、`test-report.md`、评审记录、`merge-commits[]` | 生成完整需求到代码、测试、评审的追溯链 | `specs/{id}/traceability.yml` | 否 |
 | 归档 CR | `traceability.yml`、`_backlog.yml`、worktree map | 将 CR 移入历史，清理 worktree 和远端分支 | `change-requests/_history.yml`、`_index.yml` 更新、status=`archived` | 否 |
 
+### 归档的两阶段语义
+
+`crctl archive` 把“发布终态”与“资源清理”分开：
+
+1. **先发布终态事实**：四账本归档 commit 推送并确认后，CR 的 authority 终态即已生效（`status=archived/rejected/withdrawn`），正常归档同时发出 `archive` 投影事件。此后任何失败都不会反转这个终态。
+2. **再尝试资源清理**：随后才尝试删除 Transaction Workspace、CR worktree 与本地分支。清理只删“干净且可证明安全”的资源；dirty、unknown、未证明已合入的远端 ref 一律保守保留在 `remaining` / `preservedRefs`。
+
+因此 `phase=cleanup-pending` 表示“终态已发布、仅清理未完成”，不是归档失败：`lastCleanupError=null` 且 `remaining` 非空是保守保留，非空错误码才是清理执行异常；`warnings` 中的 `EMIT_FAILED` 表示投影事件发送失败，同样不代表 Git archive 失败。
+
+处理现场后**只重跑返回的 `recoverCommand` 这一条命令**续跑：禁止手工删除 dirty、unknown、未证明已合入或 `preservedRefs` 中的资源，禁止回滚或重建归档 commit，禁止手工生成投影事件。
+
 ## R. 接手在途 CR 流程
 
 ![接手在途 CR 流程](assets/readme-illustrations/cartoon/12-resume-cr.png)

@@ -2041,6 +2041,11 @@ function archiveCleanup(ctx, cr, status, journalTxId) {
 export async function archiveCr(ctx, input) {
   const { cr, specId } = input;
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) throw new TxError('ARCHIVE_CR_INVALID', `archive 需要合法 CR-ID，收到 ${cr}`, { cr });
+  // FR-03/TD-BL-1：必需 emitter 在任何副作用（lock/journal/commit/push/outbox）前 fail-fast；
+  // 当前生产调用点仅 cmdArchive，不保留无 adapter 兼容分支。
+  if (typeof input.emitArchiveEvent !== 'function') {
+    throw new TxError('ARCHIVE_EMITTER_REQUIRED', 'archive 需要 emitArchiveEvent adapter（cmdArchive 注入 emitOutboxEvent）', { cr });
+  }
   const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
   const recoverCommand = `crctl archive ${cr}${specId ? ` --spec-id ${JSON.stringify(specId)}` : ''} --workspace ${JSON.stringify((input && input.workspace) || ctx.installRoot)}`;
   const lock = await acquireLock({ root: ctx.installRoot, scope: `archive-${cr}`, op: 'archive', cr });
@@ -2052,6 +2057,47 @@ export async function archiveCr(ctx, input) {
     const wasComplete = payload.phase === 'complete';
     let did = false;
     const save = async (phase) => { payload.phase = phase; journal.phase = phase; await saveJournal({ path: journalPath, journal }); };
+    // FR-01：统一固定返回构造——所有成功/待清理/幂等重放路径复用，不导出、不新建模块。
+    const result = (phase, changed, warnings = [], outbox) => {
+      if ((payload.pushed || payload.phase === 'complete') && !payload.commit) {
+        throw new TxError('TX_JOURNAL_INVALID', `archive journal 损坏：pushed/complete 但 commit 为空，不得返回占位 SHA`, { cr });
+      }
+      return {
+        cr, txId: journal.txId, phase,
+        status: payload.status === 'writing-back' ? 'archived' : payload.status,
+        changed,
+        commit: payload.commit,
+        lastCleanupError: payload.lastCleanupError ?? null,
+        remaining: payload.remaining ?? [],
+        preservedRefs: payload.preservedRefs ?? [],
+        recoverCommand,
+        warnings,
+        ...(outbox ? { outbox } : {}),
+      };
+    };
+    // FR-03/FR-04/FR-05：首次发送与恢复补发（SDD §4.2）。仅 writing-back；journal outboxEmitted 阻断重复；
+    // 失败只追加 warning 不改变 phase；成功先持久化发送事实再继续。回调抛错同失败处理。
+    const emitArchiveIfNeeded = async () => {
+      const warnings = [];
+      let outbox;
+      if (payload.status !== 'writing-back') return { warnings, outbox };
+      if (payload.outboxEmitted === true) return { warnings, outbox };
+      if (!payload.pushed || !payload.commit) {
+        throw new TxError('TX_JOURNAL_INVALID', `archive journal 损坏：writing-back 事件未发送但 pushed=${payload.pushed} commit=${payload.commit}`, { cr });
+      }
+      try {
+        outbox = input.emitArchiveEvent({ cr, commit: payload.commit });
+      } catch {
+        outbox = null;
+      }
+      if (outbox) {
+        payload.outboxEmitted = true;
+        await save(payload.phase); // 只持久化发送事实，不改变 authority phase
+      } else {
+        warnings.push({ code: 'EMIT_FAILED', event_kind: 'archive' });
+      }
+      return { warnings, outbox };
+    };
     const assertGraph = () => {
       if ((payload.committed || payload.pushed) && journal.graphDigest !== ctx.graphDigest) {
         throw new TxError('GRAPH_CHANGED_DURING_TRANSACTION', 'archive 事务出现副作用后 dir-graph 声明发生变化，拒绝继续', { journalDigest: journal.graphDigest, currentDigest: ctx.graphDigest });
@@ -2059,9 +2105,11 @@ export async function archiveCr(ctx, input) {
     };
     await recoverWriteSet({ txRoot: ctx.installRoot, txId: journal.txId });
 
-    // 幂等重放：complete 事务直接返回（cleanup 后 CR worktree 已删，authority 解析会失败）
+    // 幂等重放：complete 事务直接返回（cleanup 后 CR worktree 已删，authority 解析会失败）；
+    // FR-04：历史/失败 journal（phase=complete 但 outboxEmitted 未标记）重放仍重试事件，不新增 commit。
     if (payload.phase === 'complete') {
-      return { cr, txId: journal.txId, phase: 'complete', status: payload.status, changed: false, preservedRefs: payload.preservedRefs || [], remaining: payload.remaining || [], recoverCommand };
+      const { warnings, outbox } = await emitArchiveIfNeeded();
+      return result('complete', false, warnings, outbox);
     }
 
     // authority 与终态判定（仅 publish 阶段需要；cleanup 续跑时 CR worktree 可能已被删，跳过解析）：
@@ -2166,7 +2214,13 @@ export async function archiveCr(ctx, input) {
         throw new TxError('ARCHIVE_REMOTE_HISTORY_REWRITTEN', 'archive commit 遇远端 trunk history rewrite，硬阻断（不猜测、不自动 force）', { cr, remoteSha, expectedBase: payload.baseSha });
       }
       if (cls === 'rebuild') {
-        // 他人推进 trunk：编辑位置 reset 到新 base 后重建四账本 write-set（编辑是纯函数可重算）
+        // 他人推进 trunk：编辑位置 reset 到新 base 后重建四账本 write-set（编辑是纯函数可重算）。
+        // committed=true 重放（fault 恢复）时 editRoot 尚未解析，按 journal 原始 status 重新定位。
+        if (!editRoot) {
+          editRoot = payload.status === 'writing-back'
+            ? resolveOperationalWorkspace(ctx, cr).path
+            : txWorkspacePath(ctx, cr);
+        }
         gitMust(editRoot, ['fetch', 'origin']);
         gitMust(editRoot, ['reset', '--hard', remoteSha]);
         if (payload.status === 'writing-back') gitMust(editRoot, ['checkout', '--detach', remoteSha]);
@@ -2190,6 +2244,9 @@ export async function archiveCr(ctx, input) {
     }
     if (!payload.pushed) throw new TxError('ARCHIVE_REMOTE_STALE', 'archive push 连续 rebuild 超过上限，无法收敛', { cr });
 
+    // origin confirmed → cleanup 前发送 archive outbox（FR-03 时序：不依赖 cleanup 可能删除的 worktree）
+    const { warnings, outbox } = await emitArchiveIfNeeded();
+
     // origin confirmed → cleanup（逐单元落盘 + fault；失败不抛错，返回 cleanup-pending）
     await save('cleanup-pending');
     if (!payload.cleanupDone) {
@@ -2211,9 +2268,9 @@ export async function archiveCr(ctx, input) {
     }
     if (payload.remaining.length === 0 && !payload.lastCleanupError) {
       await save('complete');
-      return { cr, txId: journal.txId, phase: 'complete', status: finalStatus, changed: did && !wasComplete, preservedRefs: payload.preservedRefs, remaining: [], recoverCommand };
+      return result('complete', did && !wasComplete, warnings, outbox);
     }
-    return { cr, txId: journal.txId, phase: 'cleanup-pending', status: finalStatus, changed: did && !wasComplete, preservedRefs: payload.preservedRefs, remaining: payload.remaining, recoverCommand };
+    return result('cleanup-pending', did && !wasComplete, warnings, outbox);
   } finally {
     await lock.release();
   }
