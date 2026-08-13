@@ -2833,7 +2833,21 @@ async function cmdArchive(ws, positional, flags) {
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'archive 需要 CR-ID');
   const specId = flags['spec-id'] == null ? undefined : String(flags['spec-id']);
   const ctx = resolveRepositories(ws);
-  const result = await runTxAsync(archiveCr(ctx, { cr, specId, workspace: ws }));
+  const result = await runTxAsync(archiveCr(ctx, {
+    cr, specId, workspace: ws,
+    // FR-03：唯一生产 adapter——schema v1 archive 事件 + 确定性 dedup 文件名；
+    // 发送失败由 emitOutboxEvent 返回 null，archiveCr 转为 EMIT_FAILED warning（不阻断归档）。
+    emitArchiveEvent: ({ cr, commit }) => emitOutboxEvent(ws, {
+      event_kind: 'archive',
+      cr_id: cr,
+      from_status: 'writing-back',
+      to_status: 'archived',
+      trigger: 'cr-archive',
+      commit_sha: commit,
+      actor: identity(ws),
+      dedup_name: `archive-${cr}-${commit}.json`,
+    }),
+  }));
   auditLog(ws, { kind: 'archive', cr, txId: result.txId, phase: result.phase, status: result.status, changed: result.changed, actor: identity(ws) });
   ok({ op: 'archive', ...result });
 }
