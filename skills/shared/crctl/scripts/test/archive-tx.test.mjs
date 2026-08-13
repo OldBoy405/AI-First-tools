@@ -184,6 +184,16 @@ function archiveOutboxFiles(kb, cr) {
   return fs.readdirSync(dir).filter((f) => f.startsWith(`archive-${cr}-`));
 }
 
+/** 读取 kb installation workspace outbox 中本 CR 的全部事件 JSON（内容级断言；解析失败硬失败，不静默降级）。 */
+function outboxEventsForCr(kb, cr) {
+  const dir = path.join(kb, '.crctl', 'outbox');
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir)
+    .filter((f) => f.endsWith('.json'))
+    .map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')))
+    .filter((ev) => ev.cr_id === cr);
+}
+
 test('TASK-01 RED-1：happy path 固定返回 commit/lastCleanupError/recoverCommand/warnings', () => {
   const { base, kb, cr, txws } = makeWritebackFixture();
   try {
@@ -339,7 +349,7 @@ test('TASK-01 RED-7：预存确定性 dedup 文件 → 命中同名补记，数�
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
-test('TASK-01 RED-8：rejected/withdrawn — 固定返回且永不产生 archive 事件', () => {
+test('TASK-01 RED-8：rejected/withdrawn — 固定返回、零事件（archive/status）、preservedRefs 保留', () => {
   for (const finalStatus of ['rejected', 'withdrawn']) {
     const f = makeCodeApprovedFixture();
     const { base, kb, kbWt, cr } = f;
@@ -358,6 +368,12 @@ test('TASK-01 RED-8：rejected/withdrawn — 固定返回且永不产生 archive
       assert.deepEqual(r.json.warnings, []);
       assert.equal(r.json.outbox, undefined, `${finalStatus} 不发送事件`);
       assert.deepEqual(archiveOutboxFiles(kb, cr), [], `${finalStatus} 无 archive 事件文件`);
+      // AC-5 / SDD §4.6：内容级断言两种终止状态均无 archive 事件，也无第二终态 status 事件
+      const evs = outboxEventsForCr(kb, cr);
+      assert.equal(evs.filter((e) => e.event_kind === 'archive').length, 0, `${finalStatus} 无 archive 事件（outbox JSON 内容级）`);
+      assert.equal(evs.filter((e) => e.event_kind === 'status').length, 0, `${finalStatus} 无第二终态 status 事件`);
+      // AC-5：preservedRefs 既有行为保持——未合并远端 requirement ref 保留
+      assert.ok(r.json.preservedRefs.some((x) => x.includes('kb') && x.includes(`requirement/${cr}`)), `${finalStatus} preservedRefs 含 kb 未合并 ref: ` + JSON.stringify(r.json.preservedRefs));
     } finally { fs.rmSync(base, { recursive: true, force: true }); }
   }
 });
