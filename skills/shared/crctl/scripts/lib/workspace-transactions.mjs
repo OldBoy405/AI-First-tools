@@ -1305,12 +1305,6 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
     // journal 前 no-op（§4.2）：snapshot 一旦存在必须先完整校验；畸形时零写硬失败。
     const latest = readCheckpointSnapshot(kbCrRoot, cr);
     if (latest) {
-      const currentIds = ctx.repositories.map((r) => r.id);
-      const snapshotIds = latest.repositories.map((r) => r.repo);
-      if (JSON.stringify(currentIds) === JSON.stringify(snapshotIds)
-        && checkpointBatchId({ cr, graphDigest: ctx.graphDigest, repositories: latest.repositories }) !== latest.batchId) {
-        throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', 'latest-checkpoint batch-id 与当前 graph/source facts 不一致', { cr });
-      }
       let allClean = true;
       for (const repo of ctx.repositories) {
         const st = gitRun(path.join(repo.worktreePath, cr), ['status', '--porcelain']);
@@ -1396,10 +1390,38 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
     }
 
     const known = new Map(payload.repositories.map((r) => [r.repo, r]));
+    const kbWt = kbCrRoot;
 
-    // 逐仓 source commit（含恢复重扫）；batchId 非空表示 metadata source 集合已冻结。
+    // metadata commit/save 窗口：trailer 命中即恢复；仅 write-set 候选存在则撤回候选后重扫 source。
+    if (!payload.metadataCommit && payload.batchId) {
+      const head = gitMust(kbWt, ['rev-parse', 'HEAD']);
+      if (head !== payload.kbSourceSha) {
+        const parent = gitRun(kbWt, ['rev-parse', `${head}^`]).stdout || null;
+        const body = gitRun(kbWt, ['log', '-1', '--format=%B', head]).stdout;
+        if (parent !== payload.kbSourceSha || !body.includes('AI-First-Op: checkpoint') || !body.includes(`AI-First-Tx: ${journal.txId}`) || !body.includes(`AI-First-CR: ${cr}`)) {
+          throw new TxError('TX_RECOVERY_CONFLICT', `knowledge-base HEAD ${head} 不是本 checkpoint 的 metadata commit`, { cr, head });
+        }
+        payload.metadataCommit = head;
+        await save('metadata-committed');
+      } else {
+        const rel = 'change-requests/_backlog.yml';
+        const before = `${gitMust(kbWt, ['show', `${payload.kbSourceSha}:${rel}`])}\n`;
+        const snapRepos = payload.repositories.map((r) => ({ repo: r.repo, sourceSha: r.sourceSha, remoteRef: r.remoteRef }));
+        const candidate = editLatestCheckpoint(before, cr, { batchId: payload.batchId, repositories: snapRepos });
+        const current = fs.readFileSync(path.join(kbWt, rel), 'utf8').replaceAll('\r\n', '\n');
+        if (current === candidate.replaceAll('\r\n', '\n')) {
+          fs.writeFileSync(path.join(kbWt, rel), before, 'utf8');
+          gitMust(kbWt, ['reset', '--', rel]);
+        }
+        payload.batchId = null;
+        payload.kbSourceSha = null;
+        await save('repos-confirmed');
+      }
+    }
+
+    // metadata 尚未 commit 时逐仓恢复重扫；旧 confirmed repo 出现变化也必须重新 publish。
     let did = false;
-    if (!payload.batchId) {
+    if (!payload.metadataCommit) {
     for (const r of repos) {
       const rec = known.get(r.repo);
       assertGraph();
@@ -1467,8 +1489,7 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
     await save('repos-confirmed');
     }
 
-    // KB metadata commit（唯一完整批次可见点）。先 durable 冻结 source facts，重跑据此识别账本候选/已落 commit。
-    const kbWt = kbCrRoot;
+    // KB metadata commit（唯一完整批次可见点）。先 durable 保存待提交 source facts。
     if (!payload.batchId) {
       assertGraph();
       for (const r of repos) {
@@ -1495,34 +1516,23 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
     }
 
     if (!payload.metadataCommit) {
-      const head = gitMust(kbWt, ['rev-parse', 'HEAD']);
-      if (head !== payload.kbSourceSha) {
-        const parent = gitRun(kbWt, ['rev-parse', `${head}^`]).stdout || null;
-        const body = gitRun(kbWt, ['log', '-1', '--format=%B', head]).stdout;
-        if (parent !== payload.kbSourceSha || !body.includes(`AI-First-Op: checkpoint`) || !body.includes(`AI-First-Tx: ${journal.txId}`) || !body.includes(`AI-First-CR: ${cr}`)) {
-          throw new TxError('TX_RECOVERY_CONFLICT', `knowledge-base HEAD ${head} 不是本 checkpoint 的 metadata commit`, { cr, head });
-        }
-        payload.metadataCommit = head;
-        await save('metadata-committed');
-      } else {
-        const snapRepos = payload.repositories.map((r) => ({ repo: r.repo, sourceSha: r.sourceSha, remoteRef: r.remoteRef }));
-        const backlogP = path.join(kbWt, 'change-requests', '_backlog.yml');
-        const backlogText = fs.readFileSync(backlogP, 'utf8');
-        assertSupportedBacklogSchemaText(backlogText);
-        const after = editLatestCheckpoint(backlogText, cr, { batchId: payload.batchId, repositories: snapRepos });
-        await applyWriteSet({ root: kbWt, txRoot: ctx.installRoot, txId: journal.txId, entries: [
-          { path: 'change-requests/_backlog.yml', beforeSha256: sha256(backlogText), afterSha256: sha256(after), content: after },
-        ] });
-        gitMust(kbWt, ['add', 'change-requests/_backlog.yml']);
-        const staged = gitRun(kbWt, ['diff', '--cached', '--name-only']).stdout.split('\n').filter(Boolean);
-        if (staged.length !== 1 || staged[0] !== 'change-requests/_backlog.yml') {
-          throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', `metadata stage 集合非法: ${staged.join(',')}`);
-        }
-        gitMust(kbWt, ['commit', '--no-gpg-sign', '--file=-'], { input: `[cr] checkpoint ${cr} batch ${payload.batchId}\n\nAI-First-Op: checkpoint\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\n` });
-        payload.metadataCommit = gitMust(kbWt, ['rev-parse', 'HEAD']);
-        did = true;
-        await save('metadata-committed');
+      const snapRepos = payload.repositories.map((r) => ({ repo: r.repo, sourceSha: r.sourceSha, remoteRef: r.remoteRef }));
+      const backlogP = path.join(kbWt, 'change-requests', '_backlog.yml');
+      const backlogText = fs.readFileSync(backlogP, 'utf8');
+      assertSupportedBacklogSchemaText(backlogText);
+      const after = editLatestCheckpoint(backlogText, cr, { batchId: payload.batchId, repositories: snapRepos });
+      await applyWriteSet({ root: kbWt, txRoot: ctx.installRoot, txId: journal.txId, entries: [
+        { path: 'change-requests/_backlog.yml', beforeSha256: sha256(backlogText), afterSha256: sha256(after), content: after },
+      ] });
+      gitMust(kbWt, ['add', 'change-requests/_backlog.yml']);
+      const staged = gitRun(kbWt, ['diff', '--cached', '--name-only']).stdout.split('\n').filter(Boolean);
+      if (staged.length !== 1 || staged[0] !== 'change-requests/_backlog.yml') {
+        throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', `metadata stage 集合非法: ${staged.join(',')}`);
       }
+      gitMust(kbWt, ['commit', '--no-gpg-sign', '--file=-'], { input: `[cr] checkpoint ${cr} batch ${payload.batchId}\n\nAI-First-Op: checkpoint\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\n` });
+      payload.metadataCommit = gitMust(kbWt, ['rev-parse', 'HEAD']);
+      did = true;
+      await save('metadata-committed');
       faultPoint('checkpoint-after-metadata-commit', { cr });
       const parent = gitRun(kbWt, ['rev-parse', `${payload.metadataCommit}^`]).stdout || null;
       if (parent !== payload.kbSourceSha) throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', `metadata commit 直接父 ${parent} 不等于 kbSourceSha ${payload.kbSourceSha}`, { cr });

@@ -271,6 +271,34 @@ test('checkpoint metadata commit/save 窗口：由 trailer 恢复而非 TX_RECOV
   } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
 });
 
+test('checkpoint metadata write-set/commit 窗口：撤回账本候选后重扫，不把 snapshot 吞入 KB source', () => {
+  const f = makeCheckpointFixture();
+  try {
+    const hooks = path.join(f.kb, '.git', 'hooks');
+    const hook = path.join(hooks, 'pre-commit');
+    git(f.kb, ['config', 'core.hooksPath', hooks]);
+    fs.writeFileSync(hook, '#!/bin/sh\nexit 1\n');
+    fs.chmodSync(hook, 0o755);
+    const first = runCrctl(['checkpoint', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(first.status, 1);
+    assert.equal(first.errJson.error.code, 'TX_GIT_FAILED');
+    const jp = path.join(f.kb, '.crctl', 'transactions', 'checkpoint', CR, first.errJson.error.txId, 'journal.json');
+    const j = JSON.parse(fs.readFileSync(jp, 'utf8'));
+    assert.ok(j.checkpoint.batchId);
+    assert.equal(j.checkpoint.metadataCommit, null);
+    fs.rmSync(hook);
+    fs.appendFileSync(path.join(wtPath(f.kb, 'tools', CR), 'feature.txt'), 'after metadata candidate\n');
+    const second = runCrctl(['checkpoint', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(second.status, 0, second.stderr);
+    const kbSource = second.json.repositories.find((r) => r.repo === 'kb').sourceSha;
+    const sourceBacklog = git(path.join(f.base, 'origin-kb.git'), ['show', `${kbSource}:change-requests/_backlog.yml`]);
+    const metadataBacklog = git(path.join(f.base, 'origin-kb.git'), ['show', `${second.json.metadataCommit}:change-requests/_backlog.yml`]);
+    assert.doesNotMatch(sourceBacklog, /latest-checkpoint:/);
+    assert.match(metadataBacklog, /latest-checkpoint:/);
+    assert.match(git(path.join(f.base, 'origin-tools.git'), ['show', `requirement/${CR}:feature.txt`]), /after metadata candidate/);
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
 test('checkpoint confirmed 仓新增变化：source save 前先降 phase，重跑必须重新 publish', () => {
   const f = makeCheckpointFixture();
   try {
