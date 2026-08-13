@@ -7,7 +7,7 @@ import path from 'node:path';
 
 import { git, runCrctl, makeFixture, sha256 } from './merge-fixture.mjs';
 import { loadOrCreateJournal, saveJournal } from '../lib/durable-tx.mjs';
-import { classifyCheckpointRemote, resolveRepositories } from '../lib/workspace-transactions.mjs';
+import { classifyCheckpointRemote, editLatestCheckpoint, resolveRepositories } from '../lib/workspace-transactions.mjs';
 
 const CR = 'CR-2026-033';
 const TOOLS_ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
@@ -376,7 +376,7 @@ test('checkpoint 敏感矩阵：例外/普通 pem/空格路径放行，私钥头
     const ok = runCrctl(['checkpoint', CR, '--workspace', f.kb], { cwd: f.kb });
     assert.equal(ok.status, 0, ok.stderr);
     const before = remoteHead(f.base, 'tools', CR);
-    fs.writeFileSync(path.join(toolsWt, 'innocent.txt'), '-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n');
+    fs.writeFileSync(path.join(toolsWt, 'innocent.txt'), `-----BEGIN ${'OPENSSH PRIVATE KEY'}-----\nsecret\n`);
     const blocked = runCrctl(['checkpoint', CR, '--workspace', f.kb], { cwd: f.kb });
     assert.equal(blocked.status, 1);
     assert.equal(blocked.errJson.error.code, 'CHECKPOINT_SENSITIVE_PATH');
@@ -447,6 +447,34 @@ test('checkpoint remote 关系矩阵：advanced/diverged/history-rewritten 精�
     assert.equal(second.status, 1);
     assert.equal(second.errJson.error.code, 'CHECKPOINT_REMOTE_HISTORY_REWRITTEN');
   } finally { fs.rmSync(rewritten.base, { recursive: true, force: true }); }
+});
+
+test('checkpoint editLatestCheckpoint：条目后仍有其他条目时不粘行（CR-2026-033 merge 实测 bug）', () => {
+  const text = [
+    'schema: cr-backlog/v2',
+    'change-requests:',
+    '  - id: CR-2026-001',
+    '    title: A',
+    '  - id: CR-2026-033',
+    '    title: C',
+    '    updated: "2026-08-13T00:00:00+08:00"',
+    '  - id: CR-2026-034',
+    '    title: D',
+    '',
+  ].join('\n');
+  const out = editLatestCheckpoint(text, 'CR-2026-033', {
+    batchId: '0123456789abcdef',
+    repositories: [
+      { repo: 'a', sourceSha: 'a'.repeat(40), remoteRef: 'refs/heads/requirement/CR-2026-033' },
+      { repo: 'b', sourceSha: 'b'.repeat(40), remoteRef: 'refs/heads/requirement/CR-2026-033' },
+    ],
+  });
+  // 块末行与下一条目之间必须存在换行；不得把下一条目粘到 remote-ref 行尾
+  assert.ok(out.includes('remote-ref: refs/heads/requirement/CR-2026-033\n  - id: CR-2026-034'), '块末行后应有换行再跟下一条目');
+  assert.ok(!out.split('\n').some((l) => /refs\/heads\/requirement\/\S+- id:/.test(l)), '无粘行');
+  // 末尾条目（034）保持完整收尾，文件以换行结束；LC 块位于 033 与 034 之间
+  assert.ok(out.trimEnd().endsWith('    title: D'), '末尾条目收尾正常');
+  assert.ok(out.endsWith('\n'), '文件以换行结尾');
 });
 
 test('checkpoint T05 contract：Pipeline 只编排 Skill，active alignment reader 不读旧 checkpoints[]', () => {

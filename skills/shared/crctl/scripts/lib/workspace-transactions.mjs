@@ -427,7 +427,11 @@ export function editLatestCheckpoint(backlogText, cr, snapshot) {
     while (out.length && out[out.length - 1].trim() === '') out.pop();
     out.push(...renderCheckpointSnapshot(snapshot, fieldIndent));
   }
-  return norm.slice(0, block.start) + out.join('\n') + norm.slice(block.end);
+  // 条目后仍跟其他条目时 block.end 指向下一条目行首；out.join 丢弃了条目末尾换行，
+  // 必须补回，否则下一条目会被粘到块末行（entry-not-last 场景，CR-2026-033 merge 实测）。
+  const joined = out.join('\n');
+  const sep = out.length && out[out.length - 1] === '' ? '' : '\n';
+  return norm.slice(0, block.start) + joined + sep + norm.slice(block.end);
 }
 
 /* ────────────────────────── workspace 分类与补齐（SDD §4.2，TASK-05） ────────────────────────── */
