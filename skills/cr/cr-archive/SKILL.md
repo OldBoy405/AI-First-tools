@@ -55,14 +55,16 @@ crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 chec
 - 精确 staged set 断言 + 归档 commit（trailer）+ lease push（远端前进自动 rebuild 重算）；
 - origin confirmed 后逐单元 cleanup：Transaction Workspace、各仓 CR worktree、本地 requirement 分支——**clean 才删，dirty/unknown 零删除保留现场**；
 - `archived` 删除远端 requirement 分支；`rejected` / `withdrawn` 的未合并远端 ref **保留**（输出 `preservedRefs`）；
+- writing-back 路径在 origin confirmed 后、cleanup 前发送 schema v1 `archive` outbox 事件；发送失败只记 warning，不阻断归档，重跑补发；
 - 全程事务 journal，任意中断后**重跑同一条命令**即从断点续跑/续清理。
 
 ### Step 3 — 结果分类（只透传深原语 JSON，不发明第二套字段）
 
 | 深原语输出 | 分类与动作 |
 |------|------|
-| exit 0，`phase=complete`，`remaining=[]` | 归档与清理全部完成 |
-| exit 0，`phase=cleanup-pending`，`remaining` 非空或 `lastCleanupError` 存在 | 归档已发布（status 已是终态），仅清理未完成（如 CR worktree dirty）。处理 `remaining` 列出的现场后**重跑同一条命令**续清理 |
+| exit 0，`phase=complete`，`remaining=[]` | 归档与清理全部完成。固定返回透传：`commit`（已确认 authority SHA）、`lastCleanupError`（cleanup 执行异常码或 null）、`remaining`、`preservedRefs`、`recoverCommand`、`warnings` |
+| exit 0，`phase=cleanup-pending` | **终态 authority 已发布（status 已是终态），仅安全资源清理未完成**。`lastCleanupError=null` 且 `remaining` 非空 = 保守保留现场（dirty/unknown/未证明合入），不是错误；`lastCleanupError` 非空 = cleanup 执行异常。处理 `remaining` 后**只重跑 `recoverCommand` 续清理** |
+| `warnings=[{code:EMIT_FAILED,event_kind:archive}]` | 实时投影事件发送失败，**不表示 Git archive 失败**——authority 已发布。重跑同一 `recoverCommand` 会补发；禁止回滚 commit、重建 commit 或手工生成事件 |
 | `ARCHIVE_TASKS_PENDING` | tasks/_index.yml 仍有非 done 任务，回开发期补齐 |
 | `ARCHIVE_TRACEABILITY_MISSING` | 先运行 `writeback-traceability` |
 | `ARCHIVE_APPROVAL_MISSING` / `ARCHIVE_SPEC_REQUIRED` | 前置缺失，按错误信息补齐后重跑 |
@@ -75,11 +77,15 @@ crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 chec
 
 ```
 ✅ CR {cr_id} 已归档
-   final-status : {深原语 status 字段}
-   phase        : {complete | cleanup-pending}
-   preservedRefs: {rejected/withdrawn 保留的远端 ref 列表，archived 为空}
-   remaining    : {待清理现场列表，complete 时为空}
-   下一步       : 以 `crctl next {cr_id}` 为准（终态 CR 返回 next:null）
+   final-status    : {深原语 status 字段}
+   phase           : {complete | cleanup-pending}
+   commit          : {已确认 authority SHA}
+   lastCleanupError: {cleanup 执行异常码 | null}
+   preservedRefs   : {rejected/withdrawn 保留的远端 ref 列表，archived 为空}
+   remaining       : {待清理现场列表，complete 时为空}
+   warnings        : {投影发送失败警告列表，通常为空}
+   恢复            : 未完成时只重跑 recoverCommand: {recoverCommand}
+   下一步          : 以 `crctl next {cr_id}` 为准（终态 CR 返回 next:null）
 ```
 
 ---
@@ -89,5 +95,5 @@ crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 chec
 | 错误 | 处理 |
 |------|------|
 | CR 不在终态 | 停止执行，先完成对应 gate |
-| cleanup-pending | 保留现场，按 `remaining` 处理后重跑同命令，禁止手工删除未验证资源 |
+| cleanup-pending | **终态已发布、仅清理未完成**。按 `remaining` 处理现场后只重跑 `recoverCommand`（唯一续跑入口），禁止手工删除未验证资源 |
 | 深原语其他非零退出 | 按 Step 3 分类表处理，不做手工补偿 |
