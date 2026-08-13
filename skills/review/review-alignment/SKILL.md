@@ -28,7 +28,7 @@ readonly: true
 
 1. 读 `dir-graph.yaml#agent_hints.skill_context.review-alignment`
 <!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用
-2. 读 `change-requests/{cr_id}/cr.md` frontmatter — 取目标 CR 的 `status`；读 `change-requests/_backlog.yml` — 取 `checkpoints[]` / `merge-commits[]`
+2. 读 `change-requests/{cr_id}/cr.md` frontmatter — 取目标 CR 的 `status`；读 `change-requests/_backlog.yml` — 取单一 `latest-checkpoint`；合并事实读 `change-requests/{cr_id}/merge-commits.yml`
 3. 对 in-flight CR：读 knowledge-base CR worktree 中 `change-requests/{cr_id}/{prd.md,sdd.md,plan.md,tasks/,traceability.yml}`
 4. 对已 writeback 的 CR：读 `specs/{spec_id}/{PRD.md,SDD.md,traceability.yml}` 与 `delivery/task/_index.yaml`
 <!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用

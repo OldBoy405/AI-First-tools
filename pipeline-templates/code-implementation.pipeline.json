@@ -121,7 +121,7 @@
       "kind": "skill",
       "label": "推送设计/任务到远端",
       "ref": "push-progress",
-      "prompt": "若 {{inputs.auto_push_after_task}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则执行 push-progress：调用一次 `crctl checkpoint {{inputs.cr_id}} [--message <阶段摘要>] --workspace <installation-workspace>`，由 crctl 独占提交 plan.md、tasks/ 与 traceability 改动并推送到 requirement/{{inputs.cr_id}}。\n\n在 node-3.md 输出 batchId 与各 repo 推送结果。",
+      "prompt": "若 {{inputs.auto_push_after_task}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则执行 push-progress：cr_id={{inputs.cr_id}}，message=计划与任务。\n\n在 node-3.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
       "onFail": "skip",
       "timeoutMinutes": 10
     },
@@ -198,7 +198,7 @@
       "kind": "skill",
       "label": "推送代码+文档统一 checkpoint",
       "ref": "push-progress",
-      "prompt": "执行 push-progress：调用一次 `crctl checkpoint {{inputs.cr_id}} [--message <阶段摘要>] --workspace <installation-workspace>`，由 crctl 覆盖同一 CR workspace 下全部参与仓库（knowledge-base + 每个独立代码仓），提交并推送 test-report.md 与 traceability.yml#tests。\n\n在 node-8.md 输出 batchId、各仓提交 SHA、远端分支和是否存在未提交改动。",
+      "prompt": "执行 push-progress：cr_id={{inputs.cr_id}}，message=代码与测试证据。\n\n在 node-8.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -288,7 +288,7 @@
       "kind": "skill",
       "label": "推送代码审批结果到远端",
       "ref": "push-progress",
-      "prompt": "执行 push-progress：调用一次 `crctl checkpoint {{inputs.cr_id}} [--message <阶段摘要>] --workspace <installation-workspace>`，由 crctl 独占提交评审/审批/测试证据与账本 code-approved 状态并推送到 requirement/{{inputs.cr_id}}。\n\n在 node-12.md 输出 batchId、各仓提交 SHA、远端分支和是否存在未提交改动。",
+      "prompt": "执行 push-progress：cr_id={{inputs.cr_id}}，message=代码审批结果。\n\n在 node-12.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
       "onFail": "skip",
       "timeoutMinutes": 10
     }

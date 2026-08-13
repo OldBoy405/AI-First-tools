@@ -21,7 +21,7 @@
       "kind": "skill",
       "label": "核对远端 checkpoint",
       "ref": "list-remote-checkpoints",
-      "prompt": "执行 list-remote-checkpoints（如实传 `cr_id={{inputs.cr_id}}` 单 CR 过滤）：对每个 active repo 查询 `requirement/{{inputs.cr_id}}` 远端分支，并与 KB 远端分支内 `change-requests/_backlog.yml` 的单一 `latest-checkpoint` 比对，按 exact-head 判 synced/drift/unknown（非 KB repo remote HEAD 精确等于 source-sha；KB remote HEAD 等于 metadata commit 且其直接父等于 source-sha）。\n- 若任一 active repo 远端不存在分支：abort，提示原 owner 先执行 push-progress\n- 若某仓 remote HEAD 与 source-sha 不一致：标记 drift，由用户决定\n\n在 node-1.md 输出各 repo 最新 checkpoint 的 batch-id 与 source-sha、drift 仓列表。",
+      "prompt": "执行 list-remote-checkpoints：cr_id={{inputs.cr_id}}。\n\n在 node-1.md 输出 batchId、repositories、状态分类与 drift 仓列表；任一 active repo 缺失时 abort，其余 drift 交由用户决定。",
       "onFail": "abort",
       "timeoutMinutes": 5
     },

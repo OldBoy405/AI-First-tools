@@ -320,7 +320,7 @@ export function classifyRemoteCommit({ remoteSha, expectedBase, commitSha, commi
  */
 export function classifyCheckpointRemote({ remoteSha, sourceSha, remoteIsSourceAncestor, sourceIsRemoteAncestor, journalSaysPublished }) {
   if (remoteSha != null && remoteSha === sourceSha) return 'confirmed';
-  if (journalSaysPublished) return 'history-rewritten'; // 已发布但 remote 不再精确包含 source
+  if (journalSaysPublished) return sourceIsRemoteAncestor ? 'advanced' : 'history-rewritten';
   if (remoteSha == null) return 'create';
   if (remoteIsSourceAncestor) return 'pushable';
   if (sourceIsRemoteAncestor) return 'advanced';
@@ -1164,11 +1164,22 @@ function checkpointPrivateKeyHeader(text) {
 function checkpointChangedPaths(wtPath) {
   const diff = gitRun(wtPath, ['diff', '--name-only', '-z', '--diff-filter=ACMR', 'HEAD', '--']);
   const untracked = gitRun(wtPath, ['ls-files', '--others', '--exclude-standard', '-z']);
+  for (const [label, r] of [['diff', diff], ['ls-files', untracked]]) {
+    if (r.status !== 0) throw new TxError('TX_GIT_FAILED', `checkpoint 敏感预检 git ${label} 失败（exit=${r.status}）: ${r.stderr || r.stdout}`, { cwd: wtPath, git: label });
+  }
   const paths = new Set();
   for (const s of [diff.stdout, untracked.stdout]) {
     for (const p of String(s || '').split('\0')) if (p) paths.add(p);
   }
   return [...paths];
+}
+
+function checkpointRemoteHead(repoRoot, branch) {
+  const ref = `refs/remotes/origin/${branch}`;
+  const r = gitRun(repoRoot, ['rev-parse', '--verify', '-q', ref]);
+  if (r.status === 0 && /^[0-9a-f]{40}$/.test(r.stdout)) return r.stdout;
+  if (r.status === 1 && !r.stdout) return null;
+  throw new TxError('TX_GIT_FAILED', `git rev-parse --verify ${ref} 失败（exit=${r.status}）: ${r.stderr || r.stdout}`, { repoRoot, ref });
 }
 
 /** 敏感预检：固定路径规则 + 私钥头；命中全仓零 add/commit/push。 */
@@ -1189,23 +1200,71 @@ function checkpointPreflightSensitive(repos) {
 }
 
 /** checkpoint 业务 payload 校验（SDD §2.3，归属本模块而非 durable-tx）。 */
-function assertCheckpointPayload(payload, cr) {
-  if (!payload || typeof payload !== 'object' || !Array.isArray(payload.repositories)) {
-    throw new TxError('TX_RECOVERY_CONFLICT', `checkpoint journal 业务 payload 非法: ${cr}`, { cr });
+function assertCheckpointPayload(payload, cr, expectedRepos) {
+  const bad = (message, extra = {}) => { throw new TxError('TX_RECOVERY_CONFLICT', message, { cr, ...extra }); };
+  if (!payload || typeof payload !== 'object' || !Array.isArray(payload.repositories) || payload.repositories.length === 0) {
+    bad(`checkpoint journal 业务 payload 非法: ${cr}`);
   }
+  if (!['prepared', 'sources-committed', 'repos-confirmed', 'metadata-committed', 'metadata-pushed', 'complete'].includes(payload.phase)) {
+    bad(`checkpoint 顶层 phase 非法: ${payload.phase}`);
+  }
+  const expected = [...expectedRepos].sort();
   const seen = new Set();
   for (const r of payload.repositories) {
-    if (!r || typeof r.repo !== 'string' || !r.repo) throw new TxError('TX_RECOVERY_CONFLICT', 'checkpoint repo 记录缺 repo', { cr });
-    if (seen.has(r.repo)) throw new TxError('TX_RECOVERY_CONFLICT', `checkpoint repo 记录重复: ${r.repo}`, { cr });
+    if (!r || typeof r.repo !== 'string' || !r.repo) bad('checkpoint repo 记录缺 repo');
+    if (seen.has(r.repo)) bad(`checkpoint repo 记录重复: ${r.repo}`);
     seen.add(r.repo);
-    if (r.remoteRef !== 'refs/heads/' + branchForCr(cr)) throw new TxError('TX_RECOVERY_CONFLICT', `checkpoint repo ${r.repo} remoteRef 非法`, { cr });
+    if (r.remoteRef !== 'refs/heads/' + branchForCr(cr)) bad(`checkpoint repo ${r.repo} remoteRef 非法`);
     for (const f of ['baseSha', 'sourceSha', 'remoteBefore']) {
-      if (r[f] != null && !/^[0-9a-f]{40}$/.test(String(r[f]))) throw new TxError('TX_RECOVERY_CONFLICT', `checkpoint repo ${r.repo} ${f} 非法`, { cr });
+      if (r[f] != null && !/^[0-9a-f]{40}$/.test(String(r[f]))) bad(`checkpoint repo ${r.repo} ${f} 非法`);
     }
-    if (!['prepared', 'committed-local', 'pushed', 'confirmed'].includes(r.phase)) {
-      throw new TxError('TX_RECOVERY_CONFLICT', `checkpoint repo ${r.repo} phase 非法: ${r.phase}`, { cr });
-    }
+    if (!['prepared', 'committed-local', 'pushed', 'confirmed'].includes(r.phase)) bad(`checkpoint repo ${r.repo} phase 非法: ${r.phase}`);
   }
+  const actual = [...seen].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) bad('checkpoint journal repo 集合与当前 graph 不一致', { expected, actual });
+  if (payload.batchId != null && !/^[0-9a-f]{16}$/.test(String(payload.batchId))) bad('checkpoint batchId 非法');
+  for (const f of ['kbSourceSha', 'metadataCommit']) {
+    if (payload[f] != null && !/^[0-9a-f]{40}$/.test(String(payload[f]))) bad(`checkpoint ${f} 非法`);
+  }
+  if (payload.batchId && !payload.kbSourceSha) bad('checkpoint batchId 存在但 kbSourceSha 缺失');
+  if (payload.metadataCommit && !['metadata-committed', 'metadata-pushed', 'complete'].includes(payload.phase)) bad(`checkpoint ${payload.phase} 不允许已有 metadataCommit`);
+  if (['metadata-committed', 'metadata-pushed', 'complete'].includes(payload.phase)
+    && (!payload.batchId || !payload.kbSourceSha || !payload.metadataCommit)) bad(`checkpoint ${payload.phase} 缺冻结 metadata 事实`);
+  if (payload.phase === 'complete' && payload.repositories.some((r) => r.phase !== 'confirmed')) bad('complete checkpoint 含未 confirmed repo');
+}
+
+function readCheckpointSnapshot(kbCrRoot, cr) {
+  const bp = path.join(kbCrRoot, 'change-requests', '_backlog.yml');
+  let text;
+  try { text = fs.readFileSync(bp, 'utf8'); }
+  catch { throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', `checkpoint backlog 不存在: ${bp}`, { cr }); }
+  const norm = text.replaceAll('\r\n', '\n');
+  assertSupportedBacklogSchemaText(norm);
+  let doc;
+  try { doc = parseYaml(norm); }
+  catch { throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', 'checkpoint backlog YAML 非法', { cr }); }
+  const list = doc && doc['change-requests'];
+  if (!Array.isArray(list)) throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', 'checkpoint backlog change-requests 非数组', { cr });
+  const entries = list.filter((e) => e && e.id === cr);
+  if (entries.length !== 1) throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', `checkpoint backlog ${cr} 条目数量=${entries.length}`, { cr });
+  const latest = entries[0]['latest-checkpoint'];
+  if (latest == null) return null;
+  if (!latest || typeof latest !== 'object' || !/^[0-9a-f]{16}$/.test(String(latest['batch-id'] || '')) || !Array.isArray(latest.repositories) || latest.repositories.length === 0) {
+    throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', 'latest-checkpoint 结构非法', { cr });
+  }
+  const seen = new Set();
+  const repositories = latest.repositories.map((r) => {
+    if (!r || typeof r.repo !== 'string' || !r.repo || seen.has(r.repo)
+      || !/^[0-9a-f]{40}$/.test(String(r['source-sha'] || ''))
+      || r['remote-ref'] !== `refs/heads/${branchForCr(cr)}`) {
+      throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', `latest-checkpoint repo 条目非法: ${r && r.repo}`, { cr });
+    }
+    seen.add(r.repo);
+    return { repo: r.repo, sourceSha: r['source-sha'], remoteRef: r['remote-ref'] };
+  });
+  const sorted = [...repositories].sort((a, b) => (a.repo < b.repo ? -1 : a.repo > b.repo ? 1 : 0));
+  if (repositories.some((r, i) => r.repo !== sorted[i].repo)) throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', 'latest-checkpoint repositories 未按 repo id 排序', { cr });
+  return { batchId: latest['batch-id'], repositories };
 }
 
 function checkpointBuildSideEffects(payload) {
@@ -1225,6 +1284,7 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
   const remoteRef = `refs/heads/${branch}`;
   const inputDigest = sha256(JSON.stringify({ cr, graphDigest: ctx.graphDigest }));
   const recoverCommand = `crctl checkpoint ${cr}${message ? ` --message ${JSON.stringify(message)}` : ''} --workspace ${JSON.stringify(workspace || ctx.installRoot)}`;
+  let journal = null, journalPath = null, payload = null;
   const lock = await acquireLock({ root: ctx.installRoot, scope: `checkpoint-${cr}`, op: 'checkpoint' });
   try {
     // 逐仓 worktree 事实校验（零写入）
@@ -1242,88 +1302,114 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
     checkpointPreflightSensitive(repos);
 
     const kbCrRoot = path.join(kb.worktreePath, cr);
-    const readLatest = () => {
-      const bp = path.join(kbCrRoot, 'change-requests', '_backlog.yml');
-      let text; try { text = fs.readFileSync(bp, 'utf8'); } catch { return null; }
-      const doc = parseYaml(text.replaceAll('\r\n', '\n'));
-      const list = doc && doc['change-requests'];
-      if (!Array.isArray(list)) return null;
-      const entry = list.find((e) => e && e.id === cr);
-      return entry && entry['latest-checkpoint'] ? entry['latest-checkpoint'] : null;
-    };
-    // journal 前 no-op（§4.2）
-    const latest = readLatest();
-    if (latest && typeof latest['batch-id'] === 'string' && Array.isArray(latest.repositories)) {
+    // journal 前 no-op（§4.2）：snapshot 一旦存在必须先完整校验；畸形时零写硬失败。
+    const latest = readCheckpointSnapshot(kbCrRoot, cr);
+    if (latest) {
+      const currentIds = ctx.repositories.map((r) => r.id);
+      const snapshotIds = latest.repositories.map((r) => r.repo);
+      if (JSON.stringify(currentIds) === JSON.stringify(snapshotIds)
+        && checkpointBatchId({ cr, graphDigest: ctx.graphDigest, repositories: latest.repositories }) !== latest.batchId) {
+        throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', 'latest-checkpoint batch-id 与当前 graph/source facts 不一致', { cr });
+      }
       let allClean = true;
       for (const repo of ctx.repositories) {
-        if (gitRun(path.join(repo.worktreePath, cr), ['status', '--porcelain']).stdout !== '') { allClean = false; break; }
+        const st = gitRun(path.join(repo.worktreePath, cr), ['status', '--porcelain']);
+        if (st.status !== 0) throw new TxError('TX_GIT_FAILED', `${repo.id}: git status 失败（exit=${st.status}）: ${st.stderr}`, { repo: repo.id });
+        if (st.stdout !== '') { allClean = false; break; }
       }
       if (allClean) {
-        let synced = true;
+        let synced = latest.repositories.length === ctx.repositories.length;
         for (const repo of ctx.repositories) {
           gitMust(repo.rootPath, ['fetch', 'origin']);
           const snap = latest.repositories.find((x) => x.repo === repo.id);
           if (!snap) { synced = false; break; }
           const wtPath = path.join(repo.worktreePath, cr);
           const localHead = gitMust(wtPath, ['rev-parse', 'HEAD']);
-          const remoteHead = gitRun(repo.rootPath, ['rev-parse', '-q', `refs/remotes/origin/${branch}`]).stdout || null;
+          const remoteHead = checkpointRemoteHead(repo.rootPath, branch);
           if (repo.id === ctx.knowledgeBaseRepoId) {
             const parent = gitRun(wtPath, ['rev-parse', `${localHead}^`]).stdout || null;
-            if (localHead !== remoteHead || parent !== snap['source-sha']) { synced = false; break; }
-          } else if (localHead !== remoteHead || localHead !== snap['source-sha']) {
+            if (localHead !== remoteHead || parent !== snap.sourceSha) { synced = false; break; }
+          } else if (localHead !== remoteHead || localHead !== snap.sourceSha) {
             synced = false; break;
           }
         }
-        if (synced) {
-          const snapRepos = latest.repositories.map((x) => ({ repo: x.repo, sourceSha: x['source-sha'], remoteRef: x['remote-ref'] }));
-          if (checkpointBatchId({ cr, graphDigest: ctx.graphDigest, repositories: snapRepos }) === latest['batch-id']) {
-            return { cr, txId: null, phase: 'complete', batchId: latest['batch-id'],
-              repositories: snapRepos.map((x) => ({ ...x, confirmed: true })),
-              metadataCommit: gitMust(kbCrRoot, ['rev-parse', 'HEAD']), changed: false, sideEffects: [], recoverCommand };
-          }
+        if (synced && checkpointBatchId({ cr, graphDigest: ctx.graphDigest, repositories: latest.repositories }) === latest.batchId) {
+          return { cr, txId: null, phase: 'complete', batchId: latest.batchId,
+            repositories: latest.repositories.map((x) => ({ ...x, confirmed: true })),
+            metadataCommit: gitMust(kbCrRoot, ['rev-parse', 'HEAD']), changed: false, sideEffects: [], recoverCommand };
         }
       }
     }
 
-    let journal, journalPath;
-    ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'checkpoint', key: cr, graphDigest: ctx.graphDigest, inputDigest }));
-    const payload = journal.checkpoint || { repositories: [], batchId: null, kbSourceSha: null, metadataCommit: null };
-    journal.checkpoint = payload;
-    const wasComplete = payload.phase === 'complete';
-    const save = async (phase) => { payload.phase = phase; journal.phase = phase; await saveJournal({ path: journalPath, journal }); };
+    let created;
+    ({ journal, journalPath, created } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'checkpoint', cr, key: cr, graphDigest: ctx.graphDigest, inputDigest: null }));
+    const freshPayload = () => ({
+      phase: 'prepared', batchId: null, kbSourceSha: null, metadataCommit: null,
+      repositories: repos.map((r) => ({ repo: r.repo, remoteRef, baseSha: null, sourceSha: null, remoteBefore: null, phase: 'prepared' })),
+    });
+    payload = journal.checkpoint;
+    const save = async (phase) => {
+      payload.phase = phase;
+      journal.phase = phase;
+      journal.cr = cr;
+      journal.inputDigest = inputDigest;
+      journal.sideEffects = checkpointBuildSideEffects(payload);
+      await saveJournal({ path: journalPath, journal });
+    };
+    if (payload == null) {
+      if (!created && journal.phase !== 'init') throw new TxError('TX_RECOVERY_CONFLICT', `checkpoint journal ${journal.txId} 缺业务 payload`, { cr });
+      payload = freshPayload();
+      journal.checkpoint = payload;
+      await save('prepared');
+    } else if (journal.inputDigest != null && journal.inputDigest !== inputDigest && payload.phase !== 'complete') {
+      throw new TxError('TX_INPUT_CONFLICT', `checkpoint/${cr} 已有在途事务且 inputDigest 不一致`, { txId: journal.txId });
+    }
+    assertCheckpointPayload(payload, cr, repos.map((r) => r.repo));
     const assertGraph = () => {
-      const hasSideEffects = (payload.repositories || []).some((r) => r.sourceSha || (r.phase && r.phase !== 'prepared')) || payload.metadataCommit;
+      const hasSideEffects = payload.repositories.some((r) => r.sourceSha || r.phase !== 'prepared') || payload.metadataCommit;
       if (hasSideEffects && journal.graphDigest !== ctx.graphDigest) {
         throw new TxError('GRAPH_CHANGED_DURING_TRANSACTION', 'checkpoint 事务出现副作用后 dir-graph 声明变化，拒绝继续', { journalDigest: journal.graphDigest, currentDigest: ctx.graphDigest });
       }
     };
     await recoverWriteSet({ txRoot: ctx.installRoot, txId: journal.txId });
 
+    // complete journal 只是可清理恢复状态；先复核远端 authority，再删除并在本调用创建下一批。
     if (payload.phase === 'complete') {
-      assertCheckpointPayload(payload, cr);
-      return { cr, txId: journal.txId, phase: 'complete', batchId: payload.batchId,
-        repositories: payload.repositories.map((r) => ({ repo: r.repo, sourceSha: r.sourceSha, remoteRef: r.remoteRef, confirmed: true })),
-        metadataCommit: payload.metadataCommit, changed: false, sideEffects: [], recoverCommand };
+      for (const r of repos) {
+        const rec = payload.repositories.find((x) => x.repo === r.repo);
+        gitMust(r.rootPath, ['fetch', 'origin']);
+        const remoteSha = checkpointRemoteHead(r.rootPath, branch);
+        if (r.isKb) {
+          const parent = payload.metadataCommit && gitRun(r.rootPath, ['rev-parse', `${payload.metadataCommit}^`]).stdout;
+          if (remoteSha !== payload.metadataCommit || parent !== payload.kbSourceSha) {
+            throw new TxError('CHECKPOINT_REMOTE_HISTORY_REWRITTEN', 'complete checkpoint 的 KB authority 不再成立', { repo: r.repo, remoteSha });
+          }
+        } else if (remoteSha !== rec.sourceSha) {
+          throw new TxError('CHECKPOINT_REMOTE_HISTORY_REWRITTEN', 'complete checkpoint 的 repo authority 不再成立', { repo: r.repo, remoteSha, sourceSha: rec.sourceSha });
+        }
+      }
+      fs.rmSync(path.dirname(journalPath), { recursive: true, force: true });
+      ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'checkpoint', cr, key: cr, graphDigest: ctx.graphDigest, inputDigest: null }));
+      payload = freshPayload();
+      journal.checkpoint = payload;
+      await save('prepared');
     }
-    assertCheckpointPayload(payload, cr);
 
-    // 对齐 repositories 记录与当前 graph（按 graph 排序）
-    const known = new Map((payload.repositories || []).map((r) => [r.repo, r]));
-    for (const r of repos) {
-      if (!known.has(r.repo)) known.set(r.repo, { repo: r.repo, remoteRef, baseSha: null, sourceSha: null, remoteBefore: null, phase: 'prepared' });
-    }
-    payload.repositories = repos.map((r) => known.get(r.repo));
+    const known = new Map(payload.repositories.map((r) => [r.repo, r]));
 
-    // 逐仓 source commit（含恢复重扫）
+    // 逐仓 source commit（含恢复重扫）；batchId 非空表示 metadata source 集合已冻结。
     let did = false;
+    if (!payload.batchId) {
     for (const r of repos) {
       const rec = known.get(r.repo);
       assertGraph();
       const wtPath = r.worktreePath;
       gitMust(r.rootPath, ['fetch', 'origin']);
-      rec.remoteBefore = gitRun(r.rootPath, ['rev-parse', '-q', `refs/remotes/origin/${branch}`]).stdout || null;
-      const head = gitRun(wtPath, ['rev-parse', 'HEAD']).stdout || null;
-      const dirty = gitRun(wtPath, ['status', '--porcelain']).stdout !== '';
+      rec.remoteBefore = checkpointRemoteHead(r.rootPath, branch);
+      const head = gitMust(wtPath, ['rev-parse', 'HEAD']);
+      const status = gitRun(wtPath, ['status', '--porcelain']);
+      if (status.status !== 0) throw new TxError('TX_GIT_FAILED', `${r.repo}: git status 失败（exit=${status.status}）: ${status.stderr}`, { repo: r.repo });
+      const dirty = status.stdout !== '';
       if (!dirty) {
         if (rec.sourceSha && head !== rec.sourceSha) throw new TxError('TX_RECOVERY_CONFLICT', `${r.repo}: HEAD ${head} 与 journal sourceSha ${rec.sourceSha} 不一致（第三方修改）`, { repo: r.repo });
         rec.sourceSha = head;
@@ -1338,17 +1424,21 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
         const msg = `wip: ${cr} ${r.repo} checkpoint${message ? ` ${message}` : ''}\n\nAI-First-Op: checkpoint\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\n`;
         gitMust(wtPath, ['commit', '--no-gpg-sign', '--file=-'], { input: msg });
         rec.sourceSha = gitMust(wtPath, ['rev-parse', 'HEAD']);
+        rec.phase = 'committed-local';
         did = true;
-        await save(`committed-local-${r.repo}`);
+        await save('sources-committed');
         faultPoint('checkpoint-after-source-commit', { repo: r.repo });
       } else {
         throw new TxError('TX_GIT_FAILED', `${r.repo}: git diff --cached --quiet 失败（exit=${cachedDiff.status}）`, { repo: r.repo, stderr: cachedDiff.stderr });
       }
-      if (gitRun(wtPath, ['status', '--porcelain']).stdout !== '') {
+      const stable = gitRun(wtPath, ['status', '--porcelain']);
+      if (stable.status !== 0) throw new TxError('TX_GIT_FAILED', `${r.repo}: source commit 后 git status 失败（exit=${stable.status}）`, { repo: r.repo });
+      if (stable.stdout !== '') {
         throw new TxError('CHECKPOINT_WORKTREE_CHANGED_DURING_TRANSACTION', `${r.repo}: source commit 后工作树仍有变化，不静稳`, { repo: r.repo });
       }
       rec.phase = 'committed-local';
     }
+    await save('sources-committed');
 
     // 非 KB publish（exact-head + lease）
     for (const r of repos) {
@@ -1357,11 +1447,11 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
       for (let attempt = 0; attempt < 3 && rec.phase !== 'confirmed'; attempt++) {
         assertGraph();
         gitMust(r.rootPath, ['fetch', 'origin']);
-        const remoteSha = gitRun(r.rootPath, ['rev-parse', '-q', `refs/remotes/origin/${branch}`]).stdout || null;
+        const remoteSha = checkpointRemoteHead(r.rootPath, branch);
         const remoteIsAncestor = remoteSha != null && gitRun(r.rootPath, ['merge-base', '--is-ancestor', remoteSha, rec.sourceSha]).status === 0;
         const sourceIsAncestor = remoteSha != null && gitRun(r.rootPath, ['merge-base', '--is-ancestor', rec.sourceSha, remoteSha]).status === 0;
         const cls = classifyCheckpointRemote({ remoteSha, sourceSha: rec.sourceSha, remoteIsSourceAncestor: remoteIsAncestor, sourceIsRemoteAncestor: sourceIsAncestor, journalSaysPublished: rec.phase === 'pushed' });
-        if (cls === 'confirmed') { rec.phase = 'confirmed'; did = true; await save(`confirmed-${r.repo}`); faultPoint('checkpoint-after-confirm', { repo: r.repo }); break; }
+        if (cls === 'confirmed') { rec.phase = 'confirmed'; did = true; await save(payload.phase); faultPoint('checkpoint-after-confirm', { repo: r.repo }); break; }
         if (cls === 'create') gitMust(r.rootPath, ['push', `--force-with-lease=${branch}:`, 'origin', `${rec.sourceSha}:refs/heads/${branch}`]);
         else if (cls === 'pushable') gitMust(r.rootPath, ['push', `--force-with-lease=${branch}:${remoteSha}`, 'origin', `${rec.sourceSha}:refs/heads/${branch}`]);
         else if (cls === 'advanced') throw new TxError('CHECKPOINT_REMOTE_ADVANCED', `${r.repo}: remote 领先 source，先 pull 后重做`, { repo: r.repo, remoteSha, sourceSha: rec.sourceSha });
@@ -1369,28 +1459,30 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
         else throw new TxError('CHECKPOINT_REMOTE_HISTORY_REWRITTEN', `${r.repo}: 已发布 source 不再被 remote 包含`, { repo: r.repo, remoteSha, sourceSha: rec.sourceSha });
         rec.phase = 'pushed';
         did = true;
-        await save(`pushed-${r.repo}`);
+        await save(payload.phase);
         faultPoint('checkpoint-after-push', { repo: r.repo });
       }
       if (rec.phase !== 'confirmed') throw new TxError('CHECKPOINT_REMOTE_ADVANCED', `${r.repo}: publish 阶段未收敛`, { repo: r.repo });
     }
+    await save('repos-confirmed');
+    }
 
-    // KB metadata commit（唯一完整批次可见点）
+    // KB metadata commit（唯一完整批次可见点）。先 durable 冻结 source facts，重跑据此识别账本候选/已落 commit。
     const kbWt = kbCrRoot;
-    if (!payload.metadataCommit) {
+    if (!payload.batchId) {
       assertGraph();
       for (const r of repos) {
         const rec = known.get(r.repo);
-        if (gitRun(r.worktreePath, ['rev-parse', 'HEAD']).stdout !== rec.sourceSha) {
+        if (gitMust(r.worktreePath, ['rev-parse', 'HEAD']) !== rec.sourceSha) {
           throw new TxError('CHECKPOINT_WORKTREE_CHANGED_DURING_TRANSACTION', `${r.repo}: HEAD 与 journal sourceSha 不一致`, { repo: r.repo });
         }
-        if (gitRun(r.worktreePath, ['status', '--porcelain']).stdout !== '') {
-          throw new TxError('CHECKPOINT_WORKTREE_CHANGED_DURING_TRANSACTION', `${r.repo}: metadata 前工作树不干净`, { repo: r.repo });
-        }
+        const st = gitRun(r.worktreePath, ['status', '--porcelain']);
+        if (st.status !== 0) throw new TxError('TX_GIT_FAILED', `${r.repo}: metadata 前 git status 失败（exit=${st.status}）`, { repo: r.repo });
+        if (st.stdout !== '') throw new TxError('CHECKPOINT_WORKTREE_CHANGED_DURING_TRANSACTION', `${r.repo}: metadata 前工作树不干净`, { repo: r.repo });
       }
       gitMust(kb.rootPath, ['fetch', 'origin']);
-      const kbRemoteSha = gitRun(kb.rootPath, ['rev-parse', '-q', `refs/remotes/origin/${branch}`]).stdout || null;
-      payload.kbSourceSha = gitRun(kbWt, ['rev-parse', 'HEAD']).stdout || null;
+      const kbRemoteSha = checkpointRemoteHead(kb.rootPath, branch);
+      payload.kbSourceSha = gitMust(kbWt, ['rev-parse', 'HEAD']);
       const kbRemoteIsAncestor = kbRemoteSha != null && gitRun(kb.rootPath, ['merge-base', '--is-ancestor', kbRemoteSha, payload.kbSourceSha]).status === 0;
       const kbHeadIsAncestor = kbRemoteSha != null && gitRun(kb.rootPath, ['merge-base', '--is-ancestor', payload.kbSourceSha, kbRemoteSha]).status === 0;
       const kbCls = classifyCheckpointRemote({ remoteSha: kbRemoteSha, sourceSha: payload.kbSourceSha, remoteIsSourceAncestor: kbRemoteIsAncestor, sourceIsRemoteAncestor: kbHeadIsAncestor, journalSaysPublished: false });
@@ -1399,22 +1491,38 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
       }
       const snapRepos = repos.map((r) => ({ repo: r.repo, sourceSha: known.get(r.repo).sourceSha, remoteRef }));
       payload.batchId = checkpointBatchId({ cr, graphDigest: ctx.graphDigest, repositories: snapRepos });
-      const backlogP = path.join(kbWt, 'change-requests', '_backlog.yml');
-      const backlogText = fs.readFileSync(backlogP, 'utf8');
-      assertSupportedBacklogSchemaText(backlogText);
-      const after = editLatestCheckpoint(backlogText, cr, { batchId: payload.batchId, repositories: snapRepos });
-      await applyWriteSet({ root: kbWt, txRoot: ctx.installRoot, txId: journal.txId, entries: [
-        { path: 'change-requests/_backlog.yml', beforeSha256: sha256(backlogText), afterSha256: sha256(after), content: after },
-      ] });
-      gitMust(kbWt, ['add', 'change-requests/_backlog.yml']);
-      const staged = gitRun(kbWt, ['diff', '--cached', '--name-only']).stdout.split('\n').filter(Boolean);
-      if (staged.length !== 1 || staged[0] !== 'change-requests/_backlog.yml') {
-        throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', `metadata stage 集合非法: ${staged.join(',')}`);
+      await save('repos-confirmed');
+    }
+
+    if (!payload.metadataCommit) {
+      const head = gitMust(kbWt, ['rev-parse', 'HEAD']);
+      if (head !== payload.kbSourceSha) {
+        const parent = gitRun(kbWt, ['rev-parse', `${head}^`]).stdout || null;
+        const body = gitRun(kbWt, ['log', '-1', '--format=%B', head]).stdout;
+        if (parent !== payload.kbSourceSha || !body.includes(`AI-First-Op: checkpoint`) || !body.includes(`AI-First-Tx: ${journal.txId}`) || !body.includes(`AI-First-CR: ${cr}`)) {
+          throw new TxError('TX_RECOVERY_CONFLICT', `knowledge-base HEAD ${head} 不是本 checkpoint 的 metadata commit`, { cr, head });
+        }
+        payload.metadataCommit = head;
+        await save('metadata-committed');
+      } else {
+        const snapRepos = payload.repositories.map((r) => ({ repo: r.repo, sourceSha: r.sourceSha, remoteRef: r.remoteRef }));
+        const backlogP = path.join(kbWt, 'change-requests', '_backlog.yml');
+        const backlogText = fs.readFileSync(backlogP, 'utf8');
+        assertSupportedBacklogSchemaText(backlogText);
+        const after = editLatestCheckpoint(backlogText, cr, { batchId: payload.batchId, repositories: snapRepos });
+        await applyWriteSet({ root: kbWt, txRoot: ctx.installRoot, txId: journal.txId, entries: [
+          { path: 'change-requests/_backlog.yml', beforeSha256: sha256(backlogText), afterSha256: sha256(after), content: after },
+        ] });
+        gitMust(kbWt, ['add', 'change-requests/_backlog.yml']);
+        const staged = gitRun(kbWt, ['diff', '--cached', '--name-only']).stdout.split('\n').filter(Boolean);
+        if (staged.length !== 1 || staged[0] !== 'change-requests/_backlog.yml') {
+          throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', `metadata stage 集合非法: ${staged.join(',')}`);
+        }
+        gitMust(kbWt, ['commit', '--no-gpg-sign', '--file=-'], { input: `[cr] checkpoint ${cr} batch ${payload.batchId}\n\nAI-First-Op: checkpoint\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\n` });
+        payload.metadataCommit = gitMust(kbWt, ['rev-parse', 'HEAD']);
+        did = true;
+        await save('metadata-committed');
       }
-      gitMust(kbWt, ['commit', '--no-gpg-sign', '--file=-'], { input: `[cr] checkpoint ${cr} batch ${payload.batchId}\n\nAI-First-Op: checkpoint\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\n` });
-      payload.metadataCommit = gitMust(kbWt, ['rev-parse', 'HEAD']);
-      did = true;
-      await save('metadata-committed');
       faultPoint('checkpoint-after-metadata-commit', { cr });
       const parent = gitRun(kbWt, ['rev-parse', `${payload.metadataCommit}^`]).stdout || null;
       if (parent !== payload.kbSourceSha) throw new TxError('CHECKPOINT_SNAPSHOT_INVALID', `metadata commit 直接父 ${parent} 不等于 kbSourceSha ${payload.kbSourceSha}`, { cr });
@@ -1423,7 +1531,7 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
     // KB metadata publish + 精确确认
     if (payload.phase !== 'complete') {
       gitMust(kb.rootPath, ['fetch', 'origin']);
-      const remoteSha = gitRun(kb.rootPath, ['rev-parse', '-q', `refs/remotes/origin/${branch}`]).stdout || null;
+      const remoteSha = checkpointRemoteHead(kb.rootPath, branch);
       if (remoteSha !== payload.metadataCommit) {
         const remoteIsAncestor = remoteSha != null && gitRun(kb.rootPath, ['merge-base', '--is-ancestor', remoteSha, payload.metadataCommit]).status === 0;
         const sourceIsAncestor = remoteSha != null && gitRun(kb.rootPath, ['merge-base', '--is-ancestor', payload.metadataCommit, remoteSha]).status === 0;
@@ -1438,15 +1546,24 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
         faultPoint('checkpoint-after-metadata-push', { cr });
       }
       gitMust(kb.rootPath, ['fetch', 'origin']);
-      const finalRemote = gitRun(kb.rootPath, ['rev-parse', '-q', `refs/remotes/origin/${branch}`]).stdout || null;
+      const finalRemote = checkpointRemoteHead(kb.rootPath, branch);
       if (finalRemote !== payload.metadataCommit) throw new TxError('CHECKPOINT_REMOTE_HISTORY_REWRITTEN', 'knowledge-base metadata push 后 remote 不等于 metadata commit', { cr, finalRemote, metadataCommit: payload.metadataCommit });
+      known.get(kb.id).phase = 'confirmed';
       await save('complete');
       try { fs.rmSync(path.dirname(journalPath), { recursive: true, force: true }); } catch { /* best-effort 清理 */ }
     }
 
     return { cr, txId: journal.txId, phase: 'complete', batchId: payload.batchId,
       repositories: payload.repositories.map((r) => ({ repo: r.repo, sourceSha: r.sourceSha, remoteRef: r.remoteRef, confirmed: true })),
-      metadataCommit: payload.metadataCommit, changed: did && !wasComplete, sideEffects: checkpointBuildSideEffects(payload), recoverCommand };
+      metadataCommit: payload.metadataCommit, changed: did, sideEffects: checkpointBuildSideEffects(payload), recoverCommand };
+  } catch (e) {
+    if (e instanceof TxError && journal) {
+      throw new TxError(e.code, e.message, {
+        ...e.extra, txId: journal.txId, phase: payload && payload.phase || journal.phase,
+        sideEffects: checkpointBuildSideEffects(payload || {}), recoverCommand,
+      });
+    }
+    throw e;
   } finally {
     await lock.release();
   }

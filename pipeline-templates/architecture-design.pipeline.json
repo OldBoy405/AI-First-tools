@@ -92,7 +92,7 @@
       "kind": "skill",
       "label": "推送架构设计到远端",
       "ref": "push-progress",
-      "prompt": "若 {{inputs.auto_push_after_sdd}}=false 则在 node-5.md 输出 SKIPPED 并 return。\n否则执行 push-progress：调用一次 `crctl checkpoint {{inputs.cr_id}} [--message <阶段摘要>] --workspace <installation-workspace>`，由 crctl 独占提交架构设计证据（sdd.md、评审记录、审批记录、traceability）并推送到 requirement/{{inputs.cr_id}}。\n\n在 node-5.md 输出 batchId、各 repo 推送结果、远端分支和提交 SHA。",
+      "prompt": "若 {{inputs.auto_push_after_sdd}}=false 则在 node-5.md 输出 SKIPPED 并 return。\n否则执行 push-progress：cr_id={{inputs.cr_id}}，message=架构设计已审批。\n\n在 node-5.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
       "onFail": "skip",
       "timeoutMinutes": 10
     }
