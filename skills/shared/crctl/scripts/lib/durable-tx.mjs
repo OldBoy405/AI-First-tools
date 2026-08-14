@@ -44,6 +44,11 @@ export const FAULT_POINTS = [
   'archive-after-commit',            // archive commit 落盘后、lease push 前（TASK-09）
   'archive-after-push',              // archive lease push 落盘后、cleanup 前（TASK-09）
   'archive-during-cleanup',          // 每个清理单元落盘后、下一单元前（TASK-09）
+  'checkpoint-after-source-commit',  // 每仓 source commit 落盘后、下一仓/静稳检查前（CR-2026-033）
+  'checkpoint-after-push',           // 每仓 lease push 落盘后、下一仓/精确确认前（CR-2026-033）
+  'checkpoint-after-confirm',        // 每仓精确 confirmed 落盘后、下一仓前（CR-2026-033）
+  'checkpoint-after-metadata-commit',// KB metadata commit 落盘后、lease push 前（CR-2026-033）
+  'checkpoint-after-metadata-push',  // KB metadata lease push 落盘后、精确确认前（CR-2026-033）
 ];
 export function faultPoint(point, context) {
   if (process.env.CRCTL_FAULT_POINT === point) {
@@ -96,7 +101,7 @@ function readJsonChecked(p, code, label) {
 /* ────────────────────────── 目录锁（SDD §3.2） ────────────────────────── */
 
 const LOCK_SCOPE_RE = /^[A-Za-z0-9:_-]+$/;
-const OPS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger'];
+const OPS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger', 'checkpoint'];
 
 /** PID 存活探针：同 hostname 下 process.kill(pid, 0)——无错/EPERM 视为存活，ESRCH 视为不存在。
  * 导出 _setPidProbe 仅为测试 seam（EPERM/ESRCH/PID reuse 矩阵），生产路径不得替换。 */
@@ -171,7 +176,7 @@ export async function acquireLock({ root, scope, op, cr }) {
 
 /* ────────────────────────── journal envelope（SDD §3.1） ────────────────────────── */
 
-const PAYLOAD_KEYS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger'];
+const PAYLOAD_KEYS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger', 'checkpoint'];
 
 const CR_OR_KEY_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -240,7 +245,7 @@ export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inpu
     inputDigest: inputDigest == null ? null : inputDigest,
     sideEffects: [], commit: null, lastError: null,
     createdAt: now, updatedAt: now,
-    register: null, workspace: null, merge: null, writeback: null, archive: null, ledger: null,
+    register: null, workspace: null, merge: null, writeback: null, archive: null, ledger: null, checkpoint: null,
   };
   const journalPath = path.join(base, txId, 'journal.json');
   durableWriteFile(journalPath, JSON.stringify(journal, null, 2));

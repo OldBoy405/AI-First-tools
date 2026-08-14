@@ -173,5 +173,29 @@ function parseScalar(s) {
   return unquote(s);
 }
 
+/** 锚定 "- id: <id>" 条目块（该行到下一个同缩进或更浅的 "- id:" 或 EOF）。
+ * 返回 {start,end,text,indent}（start/end 为字符偏移，text 为块内原始文本，indent 为条目缩进）。
+ * 定位首个精确 id 命中；未命中返回 null。调用方负责先 CRLF→LF 规范化。
+ * 自 crctl.mjs 原样下沉（CR-2026-033 T03a）；旧账本命令与 checkpoint editor 共用，禁止复刻。 */
+export function matchEntryBlock(text, id) {
+  const lines = text.split('\n');
+  let startLine = -1, indent = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
+    if (m && m[2] === id) { startLine = i; indent = m[1].length; break; }
+  }
+  if (startLine === -1) return null;
+  let endLine = lines.length;
+  for (let i = startLine + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
+    if (m && m[1].length <= indent) { endLine = i; break; }
+  }
+  let start = 0;
+  for (let i = 0; i < startLine; i++) start += lines[i].length + 1;
+  let end = start;
+  for (let i = startLine; i < endLine; i++) end += lines[i].length + 1;
+  if (endLine === lines.length && text.endsWith('\n')) end -= 1;
+  return { start, end, text: lines.slice(startLine, endLine).join('\n'), indent };
+}
 
 export { parseYaml };
