@@ -10,12 +10,24 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { git, runCrctl, sha256, makeCodeApprovedFixture, originMasterCount } from './merge-fixture.mjs';
-import { writebackInputDigest } from '../lib/workspace-transactions.mjs';
+import {
+  canonicalWritebackBusinessInput, prepareWritebackCandidate, resolveWritebackCandidate,
+  writebackInputDigest,
+} from '../lib/workspace-transactions.mjs';
 
 const SCRIPTS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WB_SCRIPTS = path.resolve(SCRIPTS, '..', '..', '..', '..', 'skills', 'writeback', 'scripts');
 const PRD_SDD = path.join(WB_SCRIPTS, 'writeback-prd-sdd.mjs');
 const TRACE = path.join(WB_SCRIPTS, 'writeback-traceability.mjs');
+
+test('CR-2026-038 TASK-01：writeback 业务输入使用固定键序 canonical digest', () => {
+  const got = canonicalWritebackBusinessInput({
+    cr: 'CR-2026-038', stage: 'traceability', specId: 'tools-cr-lifecycle',
+    targetVersion: 'v0.1.0', milestoneFile: 'change-requests\\CR-2026-038\\milestone.yml',
+  });
+  assert.equal(got.canonicalJson, '{"cr":"CR-2026-038","stage":"traceability","specId":"tools-cr-lifecycle","targetVersion":"0.1.0","milestoneName":null,"brief":null,"milestoneFile":"change-requests/CR-2026-038/milestone.yml"}');
+  assert.equal(got.digest, crypto.createHash('sha256').update(got.canonicalJson).digest('hex'));
+});
 
 function runScript(script, cwd, args) {
   const r = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8' });
@@ -34,6 +46,23 @@ function makeMergedFixture() {
   assert.ok(fs.existsSync(txws));
   return { base, kb, cr, txws };
 }
+
+test('CR-2026-038 TASK-01：固定 generator 只在 ignored candidate 目录生成单次 snapshot', () => {
+  const { base, cr, txws } = makeMergedFixture();
+  try {
+    const expected = resolveWritebackCandidate(txws, cr, 'baseline');
+    const got = prepareWritebackCandidate({
+      txws, cr, stage: 'baseline', specId: 'test-spec', targetVersion: 'v0.2',
+    });
+    assert.equal(got.noop, false);
+    assert.equal(got.candidate.manifest, expected.manifest);
+    assert.equal(got.snapshot.parsed.targetVersion, '0.2');
+    assert.deepEqual(got.snapshot.files.map((f) => f.path), [
+      'specs/_index.yml', 'specs/test-spec/PRD.md', 'specs/test-spec/SDD.md',
+    ]);
+    assert.equal(spawnSync('git', ['check-ignore', '-q', expected.dir], { cwd: txws }).status, 0);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
 
 /** 在 txws 跑 prd-sdd generator 生成 baseline candidate；返回 manifest 路径与 candidate 目录。 */
 function makeBaselineCandidate(txws, cr, tag) {

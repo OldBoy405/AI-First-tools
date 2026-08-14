@@ -1029,7 +1029,42 @@ export function mergeStatus(ctx, cr) {
  */
 
 const WRITEBACK_STAGES = ['baseline', 'tasks', 'traceability'];
+const WRITEBACK_GENERATORS = {
+  baseline: 'writeback-prd-sdd.mjs',
+  tasks: 'writeback-tasks.mjs',
+  traceability: 'writeback-traceability.mjs',
+};
 const HEX64 = /^[0-9a-f]{64}$/;
+
+/** 新 writeback 路径的固定业务输入摘要；键序是 journal 恢复协议的一部分。 */
+export function canonicalWritebackBusinessInput(input) {
+  const milestoneFile = input.milestoneFile == null ? null : String(input.milestoneFile).replaceAll('\\', '/');
+  if (milestoneFile != null) assertManifestPathSafe(milestoneFile, 'WRITEBACK_MILESTONE_PATH_INVALID');
+  const value = {
+    cr: input.cr,
+    stage: input.stage,
+    specId: input.specId,
+    targetVersion: typeof input.targetVersion === 'string' && input.targetVersion.startsWith('v')
+      ? input.targetVersion.slice(1) : input.targetVersion,
+    milestoneName: input.milestoneName ?? null,
+    brief: input.brief ?? null,
+    milestoneFile,
+  };
+  const canonicalJson = JSON.stringify(value);
+  return { value, canonicalJson, digest: sha256(canonicalJson) };
+}
+
+/** candidate 是 operational workspace 内部派生物，不接受调用方路径。 */
+export function resolveWritebackCandidate(txws, cr, stage) {
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) throw new TxError('WRITEBACK_CR_INVALID', `writeback 需要合法 CR-ID，收到 ${cr}`, { cr });
+  if (!WRITEBACK_STAGES.includes(stage)) throw new TxError('WRITEBACK_STAGE_INVALID', `stage 非法: ${stage}`, { stage });
+  const root = fs.realpathSync(txws);
+  const dir = path.join(root, '.crctl', 'candidates', cr, stage);
+  const rel = path.relative(root, dir);
+  if (path.isAbsolute(rel) || rel.startsWith(`..${path.sep}`)) throw new TxError('WRITEBACK_CANDIDATE_OUTSIDE_TX', `candidate 目录越界: ${dir}`);
+  assertNoSymlinkParents(root, `${rel.split(path.sep).join('/')}/manifest.json`);
+  return { dir, manifest: path.join(dir, 'manifest.json') };
+}
 
 /** manifest path 安全（SDD §3.5）：非 absolute、无 ..、无反斜杠、无重复分隔符、POSIX 相对路径。 */
 export function assertManifestPathSafe(relPath, code) {
@@ -1087,7 +1122,7 @@ export function writebackAllowlist(stage, specId) {
   throw new TxError('WRITEBACK_STAGE_INVALID', `stage 非法: ${stage}`, { stage });
 }
 
-function validateWritebackManifest(m, { cr, stage, specId, candidate, txws }) {
+function validateWritebackManifest(m, { cr, stage, specId, targetVersion, candidate, txws }) {
   if (!m || typeof m !== 'object') throw new TxError('WRITEBACK_MANIFEST_INVALID', 'manifest 非对象');
   if (m.v !== 1) throw new TxError('WRITEBACK_MANIFEST_INVALID', `manifest v=${m.v}（仅支持 v1）`);
   if (!WRITEBACK_STAGES.includes(m.stage)) throw new TxError('WRITEBACK_STAGE_INVALID', `manifest stage=${m.stage} 非法`, { stage: m.stage });
@@ -1095,6 +1130,9 @@ function validateWritebackManifest(m, { cr, stage, specId, candidate, txws }) {
   if (m.cr !== cr) throw new TxError('WRITEBACK_MANIFEST_MISMATCH', `manifest cr=${m.cr} 与 CR ${cr} 不一致`);
   if (m.specId !== specId) throw new TxError('WRITEBACK_MANIFEST_MISMATCH', `manifest specId=${m.specId} 与 --spec-id ${specId} 不一致`);
   if (typeof m.targetVersion !== 'string' || !m.targetVersion) throw new TxError('WRITEBACK_MANIFEST_INVALID', 'manifest 缺 targetVersion');
+  if (targetVersion != null && m.targetVersion !== targetVersion) {
+    throw new TxError('WRITEBACK_MANIFEST_MISMATCH', `manifest targetVersion=${m.targetVersion} 与业务输入 ${targetVersion} 不一致`);
+  }
   if (!m.generator || typeof m.generator.id !== 'string' || !/^writeback-(prd-sdd|tasks|traceability)$/.test(m.generator.id) || !HEX64.test(m.generator.sha256 || '')) {
     throw new TxError('WRITEBACK_MANIFEST_INVALID', 'manifest generator 声明非法（id/sha256）', { generator: m.generator });
   }
@@ -1136,10 +1174,79 @@ function validateWritebackManifest(m, { cr, stage, specId, candidate, txws }) {
   if (m.inputDigest !== writebackInputDigest(m)) {
     throw new TxError('WRITEBACK_MANIFEST_TAMPERED', 'manifest inputDigest 与 canonical 内容不符（篡改或重放）');
   }
+  return {
+    parsed: m,
+    files: m.files.map((f) => ({
+      path: f.path, beforeSha256: f.beforeSha256 == null ? null : f.beforeSha256,
+      afterSha256: f.afterSha256, blobText: f._blobText,
+    })),
+    plannedExisting: new Set(m.files.map((f) => f.path)),
+  };
 }
 
 function stageToGenerator(stage) {
   return stage === 'baseline' ? 'writeback-prd-sdd' : stage === 'tasks' ? 'writeback-tasks' : 'writeback-traceability';
+}
+
+function generatorError(result) {
+  let parsed = null;
+  try { parsed = JSON.parse(result.stderr || ''); } catch { /* generator 非结构化崩溃 */ }
+  const e = parsed && parsed.error;
+  return new TxError(e?.code || 'WRITEBACK_GENERATOR_FAILED', e?.message || `固定 generator 失败（exit=${result.status}）: ${(result.stderr || result.stdout || '').trim()}`, e || {});
+}
+
+/** 固定 generator → 单次 manifest/blob snapshot → before anchors；TASK-04 前不接公共 CLI。 */
+export function prepareWritebackCandidate(input) {
+  const business = canonicalWritebackBusinessInput(input);
+  const { cr, stage, specId } = business.value;
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) throw new TxError('WRITEBACK_CR_INVALID', `writeback 需要合法 CR-ID，收到 ${cr}`, { cr });
+  if (!WRITEBACK_STAGES.includes(stage)) throw new TxError('WRITEBACK_STAGE_INVALID', `stage 非法: ${stage}`, { stage });
+  if (typeof specId !== 'string' || !specId) throw new TxError('WRITEBACK_SPEC_INVALID', 'writeback 需要 specId');
+  if (typeof business.value.targetVersion !== 'string' || !business.value.targetVersion) throw new TxError('WRITEBACK_VERSION_INVALID', 'writeback 需要 targetVersion');
+  if (stage === 'traceability' && !business.value.milestoneFile) throw new TxError('WRITEBACK_MILESTONE_PATH_INVALID', 'traceability 需要 milestoneFile');
+  if (stage === 'tasks' && (business.value.milestoneName != null || business.value.brief != null || business.value.milestoneFile != null)) {
+    throw new TxError('WRITEBACK_STAGE_ARGS_INVALID', 'tasks 不接受 milestone 参数');
+  }
+
+  const txws = fs.realpathSync(input.txws);
+  const candidate = resolveWritebackCandidate(txws, cr, stage);
+  fs.rmSync(candidate.dir, { recursive: true, force: true });
+  fs.mkdirSync(candidate.dir, { recursive: true });
+  if (gitRun(txws, ['check-ignore', '-q', candidate.dir]).status !== 0) {
+    throw new TxError('WRITEBACK_CANDIDATE_NOT_IGNORED', `candidate 目录未被 Git ignore: ${candidate.dir}`);
+  }
+  const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'writeback', 'scripts', WRITEBACK_GENERATORS[stage]);
+  const args = [script, '--workspace', txws, '--cr', cr, '--spec', specId, '--version', business.value.targetVersion, '--candidate-out', candidate.dir];
+  if (business.value.milestoneName != null) args.push('--milestone-name', String(business.value.milestoneName));
+  if (business.value.brief != null) args.push('--brief', String(business.value.brief));
+  if (business.value.milestoneFile != null) args.push('--milestone-file', path.join(txws, ...business.value.milestoneFile.split('/')));
+  const result = spawnSync(process.execPath, args, { cwd: txws, encoding: 'utf8', shell: false });
+  if (result.status !== 0) throw generatorError(result);
+  let output = null;
+  try { output = JSON.parse(result.stdout || '{}'); } catch { throw new TxError('WRITEBACK_GENERATOR_OUTPUT_INVALID', '固定 generator stdout 非 JSON'); }
+  if (output.noop === true) return { noop: true, reason: output.reason || null, business, candidate };
+
+  let manifestText;
+  try { manifestText = fs.readFileSync(candidate.manifest, 'utf8').replaceAll('\r\n', '\n'); }
+  catch { throw new TxError('WRITEBACK_MANIFEST_MISSING', `固定 generator 未生成 manifest: ${candidate.manifest}`); }
+  let manifest;
+  try { manifest = JSON.parse(manifestText); }
+  catch { throw new TxError('WRITEBACK_MANIFEST_INVALID', `manifest JSON 非法: ${candidate.manifest}`); }
+  const validated = validateWritebackManifest(manifest, {
+    cr, stage, specId, targetVersion: business.value.targetVersion,
+    candidate: candidate.manifest, txws,
+  });
+  for (const f of validated.files) {
+    assertNoSymlinkParents(txws, f.path);
+    const current = readHashRaw(path.join(txws, ...f.path.split('/')));
+    if (current !== f.beforeSha256) {
+      throw new TxError('WRITEBACK_BEFORE_MISMATCH', `${f.path} 当前内容与 beforeSha256 不符`, { path: f.path, expected: f.beforeSha256, actual: current });
+    }
+  }
+  return {
+    noop: false, business, candidate,
+    snapshot: { textLf: manifestText, digest: sha256(manifestText), ...validated },
+  };
 }
 
 // before/after CAS 锚点 = 磁盘字节 sha256（与 durable-tx applyWriteSet 的 readHash 一致；

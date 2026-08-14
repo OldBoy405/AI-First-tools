@@ -502,6 +502,19 @@ function checkDeliveryIndexComplete(ws, cr) {
 }
 
 function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
+  const plannedExisting = opts.plannedExisting;
+  if (plannedExisting != null) {
+    if (!(plannedExisting instanceof Set)) fail('GATE_PLANNED_PATH_INVALID', 'plannedExisting 必须是 Set<string>');
+    for (const rel of plannedExisting) {
+      if (typeof rel !== 'string' || !rel || path.isAbsolute(rel) || rel.includes('\\')
+        || rel.split('/').some((seg) => !seg || seg === '.' || seg === '..')) {
+        fail('GATE_PLANNED_PATH_INVALID', `plannedExisting 含非法 workspace-relative POSIX path: ${rel}`);
+      }
+      const resolved = path.resolve(ws, ...rel.split('/'));
+      const root = path.resolve(ws) + path.sep;
+      if (!resolved.startsWith(root)) fail('GATE_PLANNED_PATH_INVALID', `plannedExisting 越出 workspace: ${rel}`);
+    }
+  }
   const checks = gates.statusGates[targetStatus];
   const out = { target: targetStatus, checks: [], pass: true };
   if (!checks) { out.note = `gates.json 未对状态 ${targetStatus} 声明门禁（默认放行，仅校验状态机转换）`; return out; }
@@ -511,7 +524,8 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
       if (check.path.includes('{spec}') && !opts.specId) {
         out.checks.push({ type: check.type, path: check.path, ok: false, why: '需要 --spec-id 参数才能校验 specs 落点' });
       } else {
-        const exists = fs.existsSync(p);
+        const rel = path.relative(ws, p).split(path.sep).join('/');
+        const exists = fs.existsSync(p) || (plannedExisting instanceof Set && plannedExisting.has(rel));
         out.checks.push({ type: check.type, path: p, ok: exists, why: exists ? null : '文件不存在' });
       }
     } else if (check.type === 'globNonEmpty') {
@@ -930,14 +944,10 @@ function cmdGate(ws, cr, gates, flags) {
   if (!result.pass) process.exit(1);
 }
 
-// CR-2026-030 TASK-04（SDD §4.9）：advance 内核——不打印 JSON，供 cmdAdvance 与 reject 回退共用。
-// “Git 是权威”：standalone commit 失败时不得发 status outbox；只有 commit 成功（或 embedded 由调用方提交）
-// 才返回 committed=true 并以真实/占位 SHA 发 outbox。返回 {committed, commitDetail, ...}。
-function performAdvance(ws, cr, gates, flags) {
+function preflightAdvance(ws, cr, gates, flags) {
   if (!flags.to || !flags.trigger) fail('BAD_ARGS', 'advance 需要 --to <status> --trigger <trigger>');
   const { sm } = loadStateMachine(ws);
   const state = resolveCrState(ws, cr);
-  const snap = state.snap;
   const current = state.status;
   if (flags.expect && flags.expect !== current) {
     fail('CR_STATUS_CURRENT_MISMATCH', `期望当前状态 ${flags.expect}，实际 ${current}`);
@@ -960,6 +970,21 @@ function performAdvance(ws, cr, gates, flags) {
     const why = gate.checks.filter((c) => !c.ok).map((c) => c.why).filter(Boolean).join('；');
     fail('GATE_BLOCKED', `目标状态 ${flags.to} 的门禁未通过，拒绝写入${why ? '：' + why : ''}`, { gate });
   }
+  const crMdPath = path.join(crDir(ws, cr), 'cr.md');
+  const beforeText = readFileChecked(crMdPath);
+  if (beforeText == null) fail('CR_MD_WRITE_FAILED', `advance 读取 cr.md 失败: ${crMdPath}`);
+  return {
+    from: current, to: flags.to, trigger: flags.trigger, gate,
+    path: `change-requests/${cr}/cr.md`, beforeText, beforeSha256: sha256(beforeText),
+  };
+}
+
+// CR-2026-030 TASK-04（SDD §4.9）：advance 内核——不打印 JSON，供 cmdAdvance 与 reject 回退共用。
+// “Git 是权威”：standalone commit 失败时不得发 status outbox；只有 commit 成功（或 embedded 由调用方提交）
+// 才返回 committed=true 并以真实/占位 SHA 发 outbox。返回 {committed, commitDetail, ...}。
+function performAdvance(ws, cr, gates, flags) {
+  const candidate = preflightAdvance(ws, cr, gates, flags);
+  const current = candidate.from;
   const crmd = updateCrMdStatus(ws, cr, flags.to);
   if (!crmd.updated) fail('CR_MD_WRITE_FAILED', `advance 写入 cr.md 失败: ${crmd.why}`);
   auditLog(ws, { kind: 'advance', cr, from: current, to: flags.to, trigger: flags.trigger, by: identity(ws) });
