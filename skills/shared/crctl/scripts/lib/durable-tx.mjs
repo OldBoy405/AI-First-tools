@@ -35,9 +35,12 @@ export const FAULT_POINTS = [
   'merge-before-finalize',           // 全部 confirmed 后、finalize 写集前（TASK-07）
   'merge-after-finalize-commit',     // finalize commit 落盘后、lease push 前（TASK-07）
   'merge-after-finalize-push',       // finalize lease push 落盘后（TASK-07）
+  'writeback-after-journal-create',  // journal envelope 已持久化、baseline status after image 前（CR-2026-038）
   'writeback-after-apply',           // write-set 应用落盘后、stage/commit 前（TASK-08）
   'writeback-after-commit',          // writeback commit 落盘后、lease push 前（TASK-08）
   'writeback-after-push',            // writeback lease push 落盘后（TASK-08）
+  'writeback-after-status-outbox',   // origin confirmed 后 status outbox 成功、marker 前后窗口（CR-2026-038）
+  'writeback-after-advance-audit',   // origin confirmed 后 advance audit 成功、marker 前后窗口（CR-2026-038）
   'archive-after-commit',            // archive commit 落盘后、lease push 前（TASK-09）
   'archive-after-push',              // archive lease push 落盘后、cleanup 前（TASK-09）
   'archive-during-cleanup',          // 每个清理单元落盘后、下一单元前（TASK-09）
@@ -203,10 +206,10 @@ function assertEnvelope(j, p) {
  * 无则新建空 envelope（六个 payload 均 null，业务首个 save 前必须置位 op 对应 payload）。
  * 任一已存在 journal 非法 → 硬失败（不静默跳过）。
  */
-export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inputDigest }) {
+export function loadExistingJournal({ root, op, cr, key, inputDigest }) {
   if (!OPS.includes(op)) throw new TxError('TX_JOURNAL_INVALID', `op 非法: ${op}`, { op });
   const crOrKey = cr || key;
-  if (!crOrKey) throw new TxError('TX_JOURNAL_INVALID', 'loadOrCreateJournal 需要 cr 或 key');
+  if (!crOrKey) throw new TxError('TX_JOURNAL_INVALID', 'loadExistingJournal 需要 cr 或 key');
   const base = journalDir(root, op, crOrKey);
   let latest = null;
   let latestPath = null;
@@ -222,12 +225,18 @@ export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inpu
       if (ta > tb || (ta === tb && j.txId > latest.txId)) { latest = j; latestPath = p; }
     }
   }
-  if (latest) {
-    if (inputDigest != null && latest.inputDigest != null && latest.inputDigest !== inputDigest) {
-      throw new TxError('TX_INPUT_CONFLICT', `${op}/${crOrKey} 已有在途事务且 inputDigest 不一致（旧=${latest.inputDigest} 新=${inputDigest}）`, { txId: latest.txId });
-    }
-    return { journal: latest, journalPath: latestPath, created: false };
+  if (!latest) return null;
+  if (inputDigest != null && latest.inputDigest != null && latest.inputDigest !== inputDigest) {
+    throw new TxError('TX_INPUT_CONFLICT', `${op}/${crOrKey} 已有在途事务且 inputDigest 不一致（旧=${latest.inputDigest} 新=${inputDigest}）`, { txId: latest.txId });
   }
+  return { journal: latest, journalPath: latestPath, created: false };
+}
+
+export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inputDigest }) {
+  const crOrKey = cr || key;
+  const base = journalDir(root, op, crOrKey);
+  const existing = loadExistingJournal({ root, op, cr, key, inputDigest });
+  if (existing) return existing;
   const txId = crypto.randomUUID().replaceAll('-', '').slice(0, 32);
   const now = nowIso();
   const journal = {

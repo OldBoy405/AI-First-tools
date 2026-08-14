@@ -6,23 +6,11 @@ import test from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { git, runCrctl, sha256, makeCodeApprovedFixture, originMasterCount } from './merge-fixture.mjs';
 import { archiveCr, resolveRepositories } from '../lib/workspace-transactions.mjs';
 
-const SCRIPTS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const WB_SCRIPTS = path.resolve(SCRIPTS, '..', '..', '..', '..', 'skills', 'writeback', 'scripts');
-const PRD_SDD = path.join(WB_SCRIPTS, 'writeback-prd-sdd.mjs');
-
-function runScript(script, cwd, args) {
-  const r = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8' });
-  const parse = (s) => { try { return JSON.parse(s); } catch { return null; } };
-  return { code: r.status, stdout: r.stdout, stderr: r.stderr, json: parse(r.stdout) };
-}
-
-/** merge + baseline writeback + advance writing-back → archive 前置就绪；txws 返回。 */
+/** merge + 原子 baseline writeback → archive 前置就绪；txws 返回。 */
 function makeWritebackFixture() {
   const f = makeCodeApprovedFixture();
   const { base, kb, cr } = f;
@@ -30,18 +18,10 @@ function makeWritebackFixture() {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.json.phase, 'complete', JSON.stringify(r.json || r.errJson));
   const txws = r.json.operationalWorkspace;
-  // baseline candidate + apply（merging 阶段）
-  const out = path.join(txws, '.cand-a');
-  fs.mkdirSync(out, { recursive: true });
-  const g = runScript(PRD_SDD, txws, ['--workspace', txws, '--cr', cr, '--spec', 'test-spec', '--version', '0.2', '--candidate-out', out]);
-  assert.equal(g.code, 0, g.stderr);
-  const rb = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--candidate', path.join(out, 'manifest.json'), '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+  const rb = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', '0.2', '--workspace', kb], { cwd: kb });
   assert.equal(rb.status, 0, rb.stderr);
-  // advance merging -> writing-back（txws）
-  const ra = runCrctl(['advance', cr, '--to', 'writing-back', '--trigger', 'writeback-prd-sdd', '--expect', 'merging', '--embedded', '--spec-id', 'test-spec'], { cwd: txws });
-  assert.equal(ra.status, 0, ra.stderr);
+  assert.equal(rb.json.status, 'writing-back');
   // traceability 落点存在性（archive 前置）；提交保持 txws clean（否则 archive cleanup 视为 dirty 零删除）
-  fs.rmSync(path.join(txws, '.cand-a'), { recursive: true, force: true }); // 清理 candidate 残留
   fs.mkdirSync(path.join(txws, 'specs', 'test-spec'), { recursive: true });
   fs.writeFileSync(path.join(txws, 'specs', 'test-spec', 'traceability.yml'), '# trace\nmilestones:\n');
   git(txws, ['add', 'specs/test-spec/traceability.yml']);
@@ -299,6 +279,7 @@ test('TASK-01 RED-6：outbox 失败 → exit 0 + EMIT_FAILED warning + authority
   const { base, kb, cr, txws } = makeWritebackFixture();
   try {
     const outDir = path.join(kb, '.crctl', 'outbox');
+    fs.rmSync(outDir, { recursive: true, force: true }); // baseline 已产生 status outbox；本例隔离 archive emitter
     fs.writeFileSync(outDir, 'conflict\n'); // outbox 目录被占位为普通文件 → emitOutboxEvent mkdirSync 失败
     const n0 = originMasterCount(base, 'kb');
     const r1 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
@@ -323,6 +304,7 @@ test('TASK-01 RED-7：预存确定性 dedup 文件 → 命中同名补记，数�
   const { base, kb, cr, txws } = makeWritebackFixture();
   try {
     const outDir = path.join(kb, '.crctl', 'outbox');
+    fs.rmSync(outDir, { recursive: true, force: true }); // baseline status outbox 不属于本 archive dedup 断言
     fs.writeFileSync(outDir, 'conflict\n');
     const r1 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
     assert.equal(r1.status, 0, r1.stderr);

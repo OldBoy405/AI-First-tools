@@ -13,6 +13,47 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { git, runCrctl, sha256, makeFixture, makeCodeApprovedFixture, originMasterCount } from './merge-fixture.mjs';
+import { prepareMergeTree, replaceBacklogEntry } from '../lib/workspace-transactions.mjs';
+
+test('CR-2026-038 TASK-03：backlog 只替换目标完整条目并逐字保留 trunk 其余内容', () => {
+  const trunk = 'schema: cr-backlog/v2\r\nchange-requests:\r\n  - id: CR-2026-001\r\n    title: trunk-before\r\n\r\n  # keep target separator\r\n  - id: CR-2026-038\r\n    title: old\r\n    unknown: trunk-old\r\n\r\n  # keep after target\r\n  - id: CR-2026-099\r\n    title: trunk-after\r\n';
+  const source = 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-2026-038\n    title: source\n    owners:\n      development:\n        id: Ray\n    latest-checkpoint:\n      tools: abc123\n    future-v2: keep\n';
+  const expected = 'schema: cr-backlog/v2\r\nchange-requests:\r\n  - id: CR-2026-001\r\n    title: trunk-before\r\n\r\n  # keep target separator\r\n  - id: CR-2026-038\r\n    title: source\r\n    owners:\r\n      development:\r\n        id: Ray\r\n    latest-checkpoint:\r\n      tools: abc123\r\n    future-v2: keep\r\n\r\n  # keep after target\r\n  - id: CR-2026-099\r\n    title: trunk-after\r\n';
+  assert.equal(replaceBacklogEntry(trunk, source, 'CR-2026-038'), expected);
+  assert.throws(() => replaceBacklogEntry(trunk, source.replace('CR-2026-038', 'CR-2026-777'), 'CR-2026-038'), (e) => e.code === 'MERGE_BACKLOG_ENTRY_MISSING');
+  assert.throws(() => replaceBacklogEntry(trunk + '  - id: CR-2026-038\r\n    title: duplicate\r\n', source, 'CR-2026-038'), (e) => e.code === 'MERGE_BACKLOG_ENTRY_DUPLICATE');
+});
+
+test('CR-2026-038 TASK-03：semantic tree 保留 trunk 并发条目且最终 parents 仍为 base + 原 source', () => {
+  const { base, kb } = makeFixture();
+  const cr = 'CR-2026-038';
+  try {
+    const backlog = path.join(kb, 'change-requests', '_backlog.yml');
+    fs.writeFileSync(backlog, `schema: cr-backlog/v2\nchange-requests:\n  - id: ${cr}\n    title: registered\n    owner: old\n`);
+    git(kb, ['add', 'change-requests/_backlog.yml']);
+    git(kb, ['commit', '-q', '-m', 'register target']);
+    git(kb, ['branch', 'source']);
+    git(kb, ['checkout', '-q', 'source']);
+    fs.writeFileSync(backlog, `schema: cr-backlog/v2\nchange-requests:\n  - id: ${cr}\n    title: source-updated\n    owners:\n      development:\n        id: Ray\n    future-v2: keep\n`);
+    git(kb, ['add', 'change-requests/_backlog.yml']);
+    git(kb, ['commit', '-q', '-m', 'source target update']);
+    const sourceSha = git(kb, ['rev-parse', 'HEAD']);
+    git(kb, ['checkout', '-q', 'master']);
+    fs.writeFileSync(backlog, `schema: cr-backlog/v2\nchange-requests:\n  - id: CR-2026-001\n    title: concurrent-before\n\n  - id: ${cr}\n    title: registered\n    owner: old\n\n  - id: CR-2026-099\n    title: concurrent-after\n`);
+    git(kb, ['add', 'change-requests/_backlog.yml']);
+    git(kb, ['commit', '-q', '-m', 'concurrent registrations']);
+    const baseSha = git(kb, ['rev-parse', 'HEAD']);
+    const prepared = prepareMergeTree({ repo: { id: 'kb', rootPath: kb }, baseSha, sourceSha, cr, tmpRoot: path.join(base, 'tmp'), knowledgeBase: true });
+    const final = git(kb, ['commit-tree', prepared.treeSha, '-p', baseSha, '-p', sourceSha, '-m', 'final semantic merge']);
+    assert.deepEqual(git(kb, ['rev-list', '--parents', '-n', '1', final]).split(' ').slice(1), [baseSha, sourceSha]);
+    const merged = git(kb, ['show', `${final}:change-requests/_backlog.yml`]);
+    assert.ok(merged.includes('CR-2026-001'));
+    assert.ok(merged.includes('CR-2026-099'));
+    assert.ok(merged.includes('title: source-updated'));
+    assert.ok(merged.includes('future-v2: keep'));
+    assert.ok(!merged.includes('owner: old'));
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
 
 test('TASK-07 AC-1/3：happy path 三仓 lease publish + detached txws 单 finalize commit，authority 切换', () => {
   const { base, kb, cr } = makeCodeApprovedFixture();
