@@ -94,7 +94,7 @@ test('TASK-02：journal-created 恢复冻结 transitionAt，业务参数漂移�
     const before = JSON.parse(fs.readFileSync(path.join(txDir, txId, 'journal.json'), 'utf8'));
     const result = await applyWriteback(ctx, input);
     const crMd = git(path.join(base, 'origin-kb.git'), ['show', `${result.commit}:change-requests/${cr}/cr.md`]);
-    assert.ok(crMd.includes(`updated-at: "${before.createdAt}"`));
+    assert.ok(crMd.includes(`updated: "${before.createdAt}"`)); // CR-2026-039 TASK-03：时间字段收敛为单一 updated
   } finally {
     delete process.env.CRCTL_FAULT_POINT;
     fs.rmSync(base, { recursive: true, force: true });

@@ -15,6 +15,8 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+// CR-2026-039 TASK-03：纯函数单测直接 import（与 archive-tx/checkpoint-tx 等测试同模式；不改变 CLI 公开面）
+import { crMdStatusText, refreshCrMdUpdated } from '../lib/workspace-transactions.mjs';
 
 const CRCTL = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
 // 真实 tools 包根（test → scripts → crctl → shared → skills → tools 共 5 层）：
@@ -1508,6 +1510,8 @@ test('owner-set：更新 owners.{role}.id + assigned-at（AC-3）', () => {
     const md = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'cr.md'), 'utf8');
     assert.ok(md.includes('id: Alice'), '新负责人同步写入 cr.md（双投影）');
     assert.ok(md.includes('reason: formal-handover'), 'owner-history 追加一条正式移交');
+    assert.ok(/^updated: "\d{4}-\d{2}-\d{2}T/m.test(md), 'owner-set 刷新单一 updated（CR-2026-039 TASK-03）');
+    assert.ok(!md.includes('updated-at'), '不得双字段共存');
     assert.ok(r.stdout.commit && r.stdout.commit.sha, '形成隔离 commit');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
@@ -2804,6 +2808,63 @@ test('CR-2026-039 TASK-02 AC-4: 删除全部 TASK → next suggest write-dev-tas
     assert.equal(pc.ok, false);
     assert.ok(pc.why.includes('subject 不完整'));
     assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-D1', 'approval.yml')), false);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-039 TASK-03：cr.md 时间字段统一为 updated（SDD §4.4；AC-1～AC-3） ──
+
+test('CR-2026-039 TASK-03 AC-1: refreshCrMdUpdated/crMdStatusText 纯函数——legacy updated-at 清除、updated 原位刷新/追加、无残留空行、CRLF 一致', () => {
+  const at = '2026-08-15T10:00:00+08:00';
+  // legacy updated-at → 单一 updated，无残留无空行
+  assert.equal(refreshCrMdUpdated('id: X\nupdated-at: "2026-01-01T00:00:00+08:00"\nstatus: drafting', at),
+    'id: X\nstatus: drafting\nupdated: "2026-08-15T10:00:00+08:00"');
+  // 已有 updated → 原位刷新
+  assert.equal(refreshCrMdUpdated(`id: X\nupdated: "2026-01-01T00:00:00+08:00"`, at), `id: X\nupdated: "${at}"`);
+  // 两者皆无 → 追加
+  assert.equal(refreshCrMdUpdated('id: X\nstatus: drafting', at), `id: X\nstatus: drafting\nupdated: "${at}"`);
+  // 双字段共存输入（损坏态）→ 收敛为单一 updated
+  assert.equal(refreshCrMdUpdated(`id: X\nupdated-at: "a"\nupdated: "b"`, at), `id: X\nupdated: "${at}"`);
+  // updated-at 在首行 → 删后不留前导空行
+  assert.equal(refreshCrMdUpdated(`updated-at: "a"\nid: X`, at), `id: X\nupdated: "${at}"`);
+  // crMdStatusText：status 替换 + 时间字段收敛
+  const legacy = '---\nid: X\nstatus: drafting\nupdated-at: "2026-01-01T00:00:00+08:00"\n---\nbody\n';
+  assert.equal(crMdStatusText(legacy, 'developing', { at }),
+    `---\nid: X\nstatus: developing\nupdated: "${at}"\n---\nbody\n`);
+  // CRLF 来源文本规范化后与 LF 结果一致
+  const crlf = legacy.replaceAll('\n', '\r\n');
+  assert.equal(crMdStatusText(crlf, 'developing', { at }),
+    `---\nid: X\nstatus: developing\nupdated: "${at}"\n---\nbody\n`);
+});
+
+test('CR-2026-039 TASK-03 AC-2: owner-set 后 cr.md updated 刷新为移交时间戳；legacy updated-at 被清除不共存', () => {
+  const ws = makeGitWorkspace();
+  try {
+    writeOwnerEntry(ws, 'CR-T1', 'drafting', { extraCrMd: ['updated-at: "2026-01-01T00:00:00+08:00"'] });
+    git(ws, ['add', '-A']);
+    git(ws, ['commit', '-m', '[cr] seed']);
+    const r = runCrctl(['owner-set', 'CR-T1', '--role', 'development', '--id', 'Alice', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    const md = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'cr.md'), 'utf8').replaceAll('\r\n', '\n');
+    assert.ok(!md.includes('updated-at'), 'legacy updated-at 被清除');
+    const m = /^updated: "([^"]+)"$/m.exec(md);
+    assert.ok(m, 'updated 存在');
+    const handoverAt = /to: Alice, at: "([^"]+)"/.exec(md)?.[1];
+    assert.equal(m[1], handoverAt, 'updated 与移交时间戳同源（handoverAt）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-039 TASK-03 AC-3: advance 产物 frontmatter 单一 updated（无双字段）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-reviewed');
+    writeEvidence(ws, 'CR-T1', 'plan.md', '# plan\n');
+    writeEvidence(ws, 'CR-T1', 'tasks/_index.yml', 'cr-id: CR-T1\ntasks: []\n');
+    writeEvidence(ws, 'CR-T1', 'tasks/TASK-01.md', '# TASK-01\n');
+    const r = runCrctl(['advance', 'CR-T1', '--to', 'task-breakdown', '--trigger', 'write-dev-tasks', '--expect', 'tech-design-reviewed', '--workspace', ws, '--no-commit']);
+    assert.equal(r.status, 0, r.rawStderr);
+    const md = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'cr.md'), 'utf8').replaceAll('\r\n', '\n');
+    assert.ok(/^updated: "\d{4}-\d{2}-\d{2}T/m.test(md), 'advance 写入单一 updated');
+    assert.ok(!md.includes('updated-at'), '无双字段');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 

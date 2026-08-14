@@ -25,7 +25,7 @@ import {
   deriveInstallRoot, TxError, resolveRepositories, registerCr, ensureWorkspace,
   assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
-  matchFrontmatter, crMdStatusText, mergeCr, mergeStatus, resolveOperationalWorkspace,
+  matchFrontmatter, crMdStatusText, refreshCrMdUpdated, mergeCr, mergeStatus, resolveOperationalWorkspace,
   applyWriteback, archiveCr, checkUpgrade, checkpointCr,
 } from './lib/workspace-transactions.mjs';
 import {
@@ -733,7 +733,7 @@ function updateCrMdStatus(ws, cr, newStatus) {
   return { updated: true, path: p };
 }
 
-// CR-2026-027 FR-8/TASK-03：cr.md 状态文本生成纯函数（status + updated-at 更新），供 approve 原子提交在内存生成候选文本。
+// CR-2026-027 FR-8/TASK-03（CR-2026-039 TASK-03 起时间字段收敛为单一 updated）：cr.md 状态文本生成纯函数（status + updated 更新），供 approve 原子提交在内存生成候选文本。
 /* ────────────────────────── 状态读取收敛（CR-2026-018 FR-2） ──────────────────────────
  * 状态权威源 = cr.md frontmatter；_backlog.yml 退化为注册索引（owners/merge-commits 等低频字段）。
  * 迁移期兼容读：cr.md 无 status 时回退 backlog 条目 status（deprecated since v0.2.0，计划 v0.3.0 移除）。
@@ -2282,7 +2282,8 @@ function editCrOwnerProjection(text, cr, role, newId, historyEntry, handoverAt) 
   }
   const { out } = replaceOwnerSlot(lines, role, newId, 2, handoverAt);
   const entryLine = `  - { role: ${historyEntry.role}, from: ${historyEntry.from || '""'}, to: ${historyEntry.to}, at: "${historyEntry.at}", reason: ${historyEntry.reason}${historyEntry.note ? `, note: ${yamlScalar(historyEntry.note)}` : ''} }`;
-  const body = appendOwnerHistory(out, entryLine).join('\n');
+  // CR-2026-039 TASK-03：移交同样刷新单一 updated（与移交时间一致）
+  const body = refreshCrMdUpdated(appendOwnerHistory(out, entryLine).join('\n'), handoverAt);
   return norm.replace(m.match, '---\n' + body + '\n---');
 }
 
