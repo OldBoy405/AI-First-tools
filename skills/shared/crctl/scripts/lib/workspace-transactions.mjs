@@ -1113,12 +1113,10 @@ export function mergeStatus(ctx, cr) {
     operationalWorkspace: latest.merge.operationalWorkspace || null,
   };
 }
-/* ────────────────────────── TASK-08：writeback-apply ──────────────────────────
- * candidate-only writeback 应用事务（SDD §4.4/§5.3）：只消费 generator 输出的 manifest.json，
- * 在 detached Transaction Workspace 校验（schema/allowlist/path/blob/before/inputDigest/snapshot）、
- * 应用（recoverable write-set）、精确 stage、commit + trailer、lease push + classify。
- * rebuild 语义：未发布 candidate 遇 origin trunk 前进 → txws reset 到新 origin 基线并返回
- * WRITEBACK_REMOTE_STALE（调用方在 txws 重跑 generator 后重试），不 rebase/cherry-pick。
+/* ────────────────────────── writeback-apply ──────────────────────────
+ * crctl 内部固定 generator/candidate；journal 前完成 manifest/path/hash/before/snapshot/gate preflight。
+ * baseline 文件与 writing-back 状态同 recoverable write-set/commit/lease push，origin confirmed 后补投影。
+ * 未发布遇 origin 前进 → txws reset + WRITEBACK_REMOTE_STALE；同一业务命令重跑，不 rebase/cherry-pick。
  */
 
 const WRITEBACK_STAGES = ['baseline', 'tasks', 'traceability'];
@@ -1552,161 +1550,9 @@ async function applyWritebackAtomic(ctx, input) {
   } finally { await lock.release(); }
 }
 
-/** writeback-apply 事务；TASK-04 前 candidate 入参仍走旧生产路径，无 candidate 只供新内部 seam。 */
+/** 公共 writeback 深原语：candidate/generator 路径全部内部化。 */
 export async function applyWriteback(ctx, input) {
-  const { cr, stage, candidate, specId } = input;
-  if (!candidate) return applyWritebackAtomic(ctx, input);
-  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) throw new TxError('WRITEBACK_CR_INVALID', `writeback-apply 需要合法 CR-ID，收到 ${cr}`, { cr });
-  if (!WRITEBACK_STAGES.includes(stage)) throw new TxError('WRITEBACK_STAGE_INVALID', `stage 非法: ${stage}`, { stage });
-  if (typeof specId !== 'string' || !specId) throw new TxError('WRITEBACK_SPEC_INVALID', 'writeback-apply 需要 --spec-id');
-  if (typeof candidate !== 'string' || !candidate) throw new TxError('WRITEBACK_CANDIDATE_INVALID', 'writeback-apply 需要 --candidate <manifest.json>');
-  const opWs = resolveOperationalWorkspace(ctx, cr);
-  if (opWs.source !== 'transaction-workspace') {
-    throw new TxError('WRITEBACK_STATE_MISMATCH', `writeback-apply 需要 finalize 后 authority（Transaction Workspace），当前 phase=${opWs.phase}（source=${opWs.source}）`, { cr, phase: opWs.phase });
-  }
-  const txws = opWs.path;
-  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
-  const recoverCommand = `crctl writeback-apply ${cr} --stage ${stage} --candidate ${JSON.stringify(candidate)} --spec-id ${JSON.stringify(specId)} --workspace ${JSON.stringify((input && input.workspace) || ctx.installRoot)}`;
-  const manifestText = fs.readFileSync(candidate, 'utf8').replaceAll('\r\n', '\n');
-  const manifestDigest = sha256(manifestText);
-  const lock = await acquireLock({ root: ctx.installRoot, scope: `writeback-${cr}-${stage}`, op: 'writeback', cr });
-  try {
-    const key = `${cr}-${stage}`;
-    let journal, journalPath;
-    ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'writeback', key, graphDigest: ctx.graphDigest, inputDigest: manifestDigest }));
-    const payload = journal.writeback || { cr, stage, phase: 'start', specId, committed: false, commit: null, baseSha: null, pushed: false, files: null };
-    journal.writeback = payload;
-    const wasComplete = payload.phase === 'complete';
-    let did = false;
-    const save = async (phase) => { payload.phase = phase; journal.phase = phase; await saveJournal({ path: journalPath, journal }); };
-    const assertGraph = () => {
-      if ((payload.committed || payload.pushed) && journal.graphDigest !== ctx.graphDigest) {
-        throw new TxError('GRAPH_CHANGED_DURING_TRANSACTION', 'writeback 事务出现副作用后 dir-graph 声明发生变化，拒绝继续（请先完成或清理既有事务）', { journalDigest: journal.graphDigest, currentDigest: ctx.graphDigest });
-      }
-    };
-    await recoverWriteSet({ txRoot: ctx.installRoot, txId: journal.txId });
-
-    // manifest 静态校验（schema/allowlist/path/blob/hash/inputDigest/generator/containment），零 txws 写入
-    const m = JSON.parse(manifestText);
-    validateWritebackManifest(m, { cr, stage, specId, candidate, txws });
-
-    // origin 前置：已发布 → confirmed 幂等 / history-rewritten 硬阻断；
-    // 未 commit 且 trunk 前进 → txws reset + STALE；已 commit 未 push → 走 push 循环续推
-    let originSha = null;
-    if (payload.pushed) {
-      gitMust(kb.rootPath, ['fetch', 'origin']);
-      originSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
-      const isAncestor = gitRun(kb.rootPath, ['merge-base', '--is-ancestor', payload.commit, originSha]).status === 0;
-      if (!isAncestor) {
-        throw new TxError('WRITEBACK_REMOTE_HISTORY_REWRITTEN', 'writeback 已发布 commit 在远端 trunk 历史中丢失，硬阻断（不猜测、不自动 force）', { cr, remoteSha: originSha, expectedBase: payload.baseSha });
-      }
-      // confirmed：幂等重放（不重复应用/commit/push）
-      if (payload.files) {
-        return { cr, txId: journal.txId, phase: 'complete', changed: false, commit: payload.commit, recoverCommand };
-      }
-    } else if (!payload.committed) {
-      gitMust(kb.rootPath, ['fetch', 'origin']);
-      originSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
-      const txHead = gitMust(txws, ['rev-parse', 'HEAD']);
-      if (originSha !== txHead) {
-        // 未发布 candidate 遇 origin 前进：txws reset 到新 origin 基线，
-        // 删除零副作用 journal（phase=init，无 write-set/commit），调用方重跑 generator 后重试
-        gitMust(txws, ['fetch', 'origin']);
-        gitMust(txws, ['reset', '--hard', originSha]);
-        gitMust(txws, ['checkout', '--detach', originSha]);
-        try { fs.rmSync(path.dirname(journalPath), { recursive: true, force: true }); } catch { /* journal 清理 best-effort */ }
-        throw new TxError('WRITEBACK_REMOTE_STALE', `origin trunk 在 candidate 生成后前进（${txHead.slice(0, 12)} -> ${originSha.slice(0, 12)}），txws 已重置到新基线，请重跑 generator 后重试`, { cr, originSha, txHead });
-      }
-    } else {
-      gitMust(kb.rootPath, ['fetch', 'origin']);
-      originSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
-    }
-
-    // before 校验（txws 现状，磁盘字节哈希；beforeSha256=null 要求文件不存在）。
-    // 幂等重入（committed=true）跳过：write-set 已应用，现状 = after。
-    if (!payload.committed) {
-      for (const f of m.files) {
-        assertNoSymlinkParents(txws, f.path);
-        const cur = readHashRaw(path.join(txws, f.path));
-        if (f.beforeSha256 == null) {
-          if (cur != null) throw new TxError('WRITEBACK_BEFORE_MISMATCH', `${f.path} 存在但 manifest 声明 before 缺失（禁 delete）`, { path: f.path });
-        } else if (cur !== f.beforeSha256) {
-          throw new TxError('WRITEBACK_BEFORE_MISMATCH', `${f.path} 当前内容与 beforeSha256 不符（基线漂移）`, { path: f.path, expected: f.beforeSha256, actual: cur });
-        }
-      }
-    }
-
-    // signed snapshot 存在性（TASK-06 签入 approval.yml#code.release-subjects）
-    const approvalText = fs.readFileSync(path.join(txws, 'change-requests', cr, 'approval.yml'), 'utf8');
-    const doc = parseYaml(approvalText.replaceAll('\r\n', '\n')) || {};
-    const snapshot = doc && doc.code && doc.code['release-subjects'];
-    if (!snapshot) throw new TxError('WRITEBACK_SNAPSHOT_MISSING', 'txws approval.yml#code.release-subjects 缺失，拒绝 writeback（TASK-06 snapshot 未签入）', { cr });
-    const snapshotCheck = await verifyReleaseSubjects(ctx, cr, snapshot);
-    if (!snapshotCheck.ok) {
-      throw new TxError('WRITEBACK_RELEASE_SUBJECT_DRIFT', `writeback 前 signed release-subjects 漂移（kind=${snapshotCheck.kind}）`, { cr, kind: snapshotCheck.kind, ...snapshotCheck.details });
-    }
-
-    // 应用：recoverable write-set（blob 内容复用静态校验阶段的 _blobText）
-    if (!payload.committed) {
-      assertGraph();
-      const entries = m.files.map((f) => ({
-        path: f.path,
-        beforeSha256: f.beforeSha256 == null ? null : f.beforeSha256,
-        afterSha256: f.afterSha256,
-        content: f._blobText,
-      }));
-      await applyWriteSet({ root: txws, txRoot: ctx.installRoot, txId: journal.txId, entries });
-      faultPoint('writeback-after-apply', { cr, stage });
-      // stage 精确 manifest paths + staged set 断言（多一少一都硬失败）
-      gitMust(txws, ['add', '--', ...m.files.map((f) => f.path)]);
-      const staged = gitMust(txws, ['diff', '--cached', '--name-only', '--diff-filter=ACMR']).split('\n').filter(Boolean);
-      const expect = m.files.map((f) => f.path).sort();
-      const got = [...staged].sort();
-      if (got.length !== expect.length || got.some((p, i) => p !== expect[i])) {
-        throw new TxError('WRITEBACK_STAGED_MISMATCH', `staged set 与 manifest paths 不精确相等（expect=${expect.length} got=${got.length}）`, { expect, got });
-      }
-      const msg = `writeback ${stage} ${cr}\n\nAI-First-Op: writeback\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Writeback-Stage: ${stage}\n`;
-      gitMust(txws, ['commit', '--no-gpg-sign', '--file=-'], { input: msg });
-      payload.commit = gitMust(txws, ['rev-parse', 'HEAD']);
-      payload.baseSha = originSha;
-      payload.files = m.files.map((f) => ({ path: f.path, beforeSha256: f.beforeSha256 == null ? null : f.beforeSha256, afterSha256: f.afterSha256 }));
-      payload.committed = true;
-      did = true;
-      await save('committed');
-      faultPoint('writeback-after-commit', { cr, stage });
-    }
-    // lease push + confirm（与 merge finalize 相同 classify 模式）
-    for (let attempt = 0; attempt < 3 && !payload.pushed; attempt++) {
-      assertGraph();
-      gitMust(kb.rootPath, ['fetch', 'origin']);
-      const remoteSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
-      const isAncestor = gitRun(kb.rootPath, ['merge-base', '--is-ancestor', payload.commit, remoteSha]).status === 0;
-      const cls = classifyRemoteCommit({ remoteSha, expectedBase: payload.baseSha, commitSha: payload.commit, commitIsRemoteAncestor: isAncestor, journalSaysPublished: payload.pushed });
-      if (cls === 'confirmed') { payload.pushed = true; did = true; await save('pushed'); break; }
-      if (cls === 'history-rewritten') {
-        throw new TxError('WRITEBACK_REMOTE_HISTORY_REWRITTEN', 'writeback commit 遇远端 trunk history rewrite，硬阻断（不猜测、不自动 force）', { cr, remoteSha, expectedBase: payload.baseSha });
-      }
-      if (cls === 'rebuild') {
-        // 他人推进 trunk：detached txws 从新 base 重建（内容不可由 crctl 重算，须重跑 generator）；
-        // 未发布 journal（pushed=false）清理，重跑新 candidate 开新事务
-        gitMust(txws, ['fetch', 'origin']);
-        gitMust(txws, ['reset', '--hard', remoteSha]);
-        gitMust(txws, ['checkout', '--detach', remoteSha]);
-        try { fs.rmSync(path.dirname(journalPath), { recursive: true, force: true }); } catch { /* journal 清理 best-effort */ }
-        throw new TxError('WRITEBACK_REMOTE_STALE', `writeback commit 后 origin trunk 前进，txws 已重置到新基线（${remoteSha.slice(0, 12)}），请重跑 generator 后重试`, { cr, originSha: remoteSha });
-      }
-      gitMust(txws, ['push', `--force-with-lease=${kb.trunk}:${payload.baseSha}`, 'origin', `HEAD:refs/heads/${kb.trunk}`]);
-      payload.pushed = true;
-      did = true;
-      await save('pushed');
-      faultPoint('writeback-after-push', { cr, stage });
-    }
-    if (!payload.pushed) throw new TxError('WRITEBACK_REMOTE_STALE', 'writeback push 连续 rebuild 超过上限，无法收敛', { cr });
-    await save('complete');
-    return { cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete, commit: payload.commit, recoverCommand };
-  } finally {
-    await lock.release();
-  }
+  return applyWritebackAtomic(ctx, input);
 }
 /* ────────────────────────── TASK-09：archive 与 cleanup-pending ──────────────────────────
  * 单一幂等归档入口（SDD §4.5/§5.4）：writing-back → detached txws 四账本（cr.md + _backlog.yml +

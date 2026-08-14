@@ -265,6 +265,19 @@ function auditLog(ws, record) {
   fs.appendFileSync(path.join(dir, 'audit.log'), JSON.stringify({ at: nowIso(), ...record }) + '\n');
 }
 
+function auditLogOnce(ws, record, dedupKey) {
+  const p = path.join(ws, '.crctl', 'audit.log');
+  if (fs.existsSync(p)) {
+    for (const line of fs.readFileSync(p, 'utf8').split(/\r?\n/).filter(Boolean)) {
+      let item;
+      try { item = JSON.parse(line); } catch { throw new Error(`audit.log 含非法 JSONL，拒绝追加 dedup 事实: ${p}`); }
+      if (item.dedup_key === dedupKey) return false;
+    }
+  }
+  auditLog(ws, { ...record, dedup_key: dedupKey });
+  return true;
+}
+
 /* ────────────────────────── outbox 事件（P1 同步协议，CR-2026-002 TASK-02） ──────────
  * crctl 只写本地文件，网络交给 daemon（零依赖/离线优先）。
  * advance 成功 → status 事件（approve 级联的 advance 附带证据摘要）；
@@ -2885,8 +2898,8 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl workspace cleanup <cr_id> --mode partial|archived   只删干净 worktree；dirty/unknown/未合并 ref 保留
   crctl merge <cr_id>                                可恢复跨仓 merge saga：prepare(commit-tree) → 逐仓 lease publish → 全部 confirmed 后 detached Transaction Workspace 单 finalize commit（status=merging + merge-commits.yml + merge-verification.md）→ lease push
   crctl merge status <cr_id>                        只读快照：journal phase + 每仓 intent/observation（零写入、零 fetch）
-  crctl writeback-apply <cr_id> --stage <s> --candidate <manifest.json> --spec-id <id>
-                                                    candidate-only writeback 应用：manifest 校验（schema/allowlist/path/blob/before/inputDigest/snapshot）→ txws 应用 → 精确 stage → commit+trailer → lease push（TASK-08）
+  crctl writeback-apply <cr_id> --stage <s> --spec-id <id> --target-version <ver>
+                                                    内部固定 generator/candidate + journal 前完整 preflight；baseline 与 writing-back 状态同 write-set/commit/push，origin-confirmed 后补 status/audit 投影
   crctl archive <cr_id> [--spec-id <id>]                          单一幂等归档：四账本同批 write-set + archive commit + lease push → cleanup（txws/CR worktree/本地 ref）；cleanup 失败返回 CR_ARCHIVE_CLEANUP_PENDING，重跑只续清理；rejected/withdrawn 未合并远端 ref 保留为 preservedRefs（TASK-09）
   crctl upgrade-check                                         临时只读预检（TASK-11）：origin 权威事实分类新协议激活风险（safe/requiresReapproval/blocksUpgrade/canActivate）；有 blocker 或事实不确定 exit 1，全程零写入；协议切换后随 CUSTOM-TODO-009 整体删除
   crctl report [--period <N>d]                   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
@@ -2957,7 +2970,7 @@ async function main() {
     case 'register': return cmdRegister(ws, flags);
     case 'workspace': return cmdWorkspace(ws, positional, flags);
     case 'merge': return cmdMerge(ws, positional, flags);
-    case 'writeback-apply': return cmdWritebackApply(ws, positional, flags);
+    case 'writeback-apply': return cmdWritebackApply(ws, positional, flags, gates);
     case 'archive': return cmdArchive(ws, positional, flags);
     case 'upgrade-check': return cmdUpgradeCheck(ws, flags);
     case 'report': return cmdReport(ws, gates, flags);
@@ -3017,17 +3030,37 @@ async function cmdArchive(ws, positional, flags) {
   auditLog(ws, { kind: 'archive', cr, txId: result.txId, phase: result.phase, status: result.status, changed: result.changed, actor: identity(ws) });
   ok({ op: 'archive', ...result });
 }
-async function cmdWritebackApply(ws, positional, flags) {
+async function cmdWritebackApply(ws, positional, flags, gates) {
   const cr = positional[0];
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'writeback-apply 需要 CR-ID');
   const stage = flags.stage;
-  const candidate = flags.candidate;
   const specId = flags['spec-id'];
+  const targetVersion = flags['target-version'];
   if (!['baseline', 'tasks', 'traceability'].includes(stage)) fail('BAD_ARGS', 'writeback-apply 需要 --stage baseline|tasks|traceability');
-  if (!candidate) fail('BAD_ARGS', 'writeback-apply 需要 --candidate <manifest.json>');
+  if (flags.candidate || flags['candidate-out'] || flags.generator || flags.manifest) fail('BAD_ARGS', 'writeback-apply 不接受 candidate/generator/manifest 路径；由 crctl 按 stage 内部固定');
   if (!specId) fail('BAD_ARGS', 'writeback-apply 需要 --spec-id <id>');
+  if (!targetVersion) fail('BAD_ARGS', 'writeback-apply 需要 --target-version <version>');
+  if (stage === 'traceability' && !flags['milestone-file']) fail('BAD_ARGS', 'traceability 需要 --milestone-file <workspace-relative-path>');
+  if (stage === 'tasks' && (flags['milestone-name'] != null || flags.brief != null || flags['milestone-file'] != null)) fail('BAD_ARGS', 'tasks 不接受 milestone 参数');
   const ctx = resolveRepositories(ws);
-  const result = await runTxAsync(applyWriteback(ctx, { cr, stage, candidate, specId, workspace: ws }));
-  auditLog(ws, { kind: 'writeback', cr, txId: result.txId, stage, phase: result.phase, changed: result.changed, actor: identity(ws) });
+  const result = await runTxAsync(applyWriteback(ctx, {
+    cr, stage, specId, targetVersion, workspace: ws,
+    milestoneName: flags['milestone-name'], brief: flags.brief, milestoneFile: flags['milestone-file'],
+    validateBaselineAdvance: ({ workspace, plannedExisting }) => preflightAdvance(workspace, cr, gates, {
+      to: 'writing-back', trigger: 'writeback-prd-sdd', expect: 'merging', specId, plannedExisting,
+    }),
+    emitStatusEvent: ({ from, to, trigger, commit, dedupName }) => {
+      const name = emitOutboxEvent(ws, {
+        event_kind: 'status', cr_id: cr, from_status: from, to_status: to, trigger,
+        commit_sha: commit, actor: identity(ws), dedup_name: dedupName,
+      });
+      if (!name) throw new Error('status outbox 写入失败');
+      return name;
+    },
+    emitAdvanceAudit: ({ from, to, trigger, commit, dedupKey }) => auditLogOnce(ws, {
+      kind: 'advance', cr, from, to, trigger, by: identity(ws), commit, result: 'success',
+    }, dedupKey),
+  }));
+  auditLog(ws, { kind: 'writeback', cr, txId: result.txId, stage, phase: result.phase, commit: result.commit, changed: result.changed, actor: identity(ws) });
   ok({ op: 'writeback-apply', ...result });
 }
