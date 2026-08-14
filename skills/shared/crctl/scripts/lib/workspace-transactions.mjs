@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { parseYaml } from './yaml-subset.mjs';
 import {
-  TxError, acquireLock, loadOrCreateJournal, saveJournal, applyWriteSet, recoverWriteSet, faultPoint, nowIso,
+  TxError, acquireLock, loadExistingJournal, loadOrCreateJournal, saveJournal, applyWriteSet, recoverWriteSet, faultPoint, nowIso,
 } from './durable-tx.mjs';
 export { TxError } from './durable-tx.mjs';
 
@@ -204,13 +204,13 @@ export function matchFrontmatter(text) {
 }
 
 /** cr.md 状态文本生成纯函数（status + updated-at 更新；自 crctl.mjs 原样提取）。 */
-export function crMdStatusText(text, newStatus) {
+export function crMdStatusText(text, newStatus, opts = {}) {
   const m = matchFrontmatter(text);
   if (!m) return null;
   let fm = m.body;
   if (/^status:\s*.*$/m.test(fm)) fm = fm.replace(/^status:\s*.*$/m, `status: ${newStatus}`);
   else fm = fm + `\nstatus: ${newStatus}`;
-  if (/^updated-at:\s*.*$/m.test(fm)) fm = fm.replace(/^updated-at:\s*.*$/m, `updated-at: "${nowIso()}"`);
+  if (/^updated-at:\s*.*$/m.test(fm)) fm = fm.replace(/^updated-at:\s*.*$/m, `updated-at: "${opts.at || nowIso()}"`);
   return text.replace(m.match, `---\n${fm}\n---`);
 }
 
@@ -1195,6 +1195,26 @@ function generatorError(result) {
   return new TxError(e?.code || 'WRITEBACK_GENERATOR_FAILED', e?.message || `固定 generator 失败（exit=${result.status}）: ${(result.stderr || result.stdout || '').trim()}`, e || {});
 }
 
+function readPreparedCandidate({ txws, candidate, cr, stage, specId, targetVersion, checkBefore = true }) {
+  let manifestText;
+  try { manifestText = fs.readFileSync(candidate.manifest, 'utf8').replaceAll('\r\n', '\n'); }
+  catch { throw new TxError('WRITEBACK_MANIFEST_MISSING', `固定 generator 未生成 manifest: ${candidate.manifest}`); }
+  let manifest;
+  try { manifest = JSON.parse(manifestText); }
+  catch { throw new TxError('WRITEBACK_MANIFEST_INVALID', `manifest JSON 非法: ${candidate.manifest}`); }
+  const validated = validateWritebackManifest(manifest, { cr, stage, specId, targetVersion, candidate: candidate.manifest, txws });
+  if (checkBefore) {
+    for (const f of validated.files) {
+      assertNoSymlinkParents(txws, f.path);
+      const current = readHashRaw(path.join(txws, ...f.path.split('/')));
+      if (current !== f.beforeSha256) {
+        throw new TxError('WRITEBACK_BEFORE_MISMATCH', `${f.path} 当前内容与 beforeSha256 不符`, { path: f.path, expected: f.beforeSha256, actual: current });
+      }
+    }
+  }
+  return { textLf: manifestText, digest: sha256(manifestText), ...validated };
+}
+
 /** 固定 generator → 单次 manifest/blob snapshot → before anchors；TASK-04 前不接公共 CLI。 */
 export function prepareWritebackCandidate(input) {
   const business = canonicalWritebackBusinessInput(input);
@@ -1226,26 +1246,9 @@ export function prepareWritebackCandidate(input) {
   try { output = JSON.parse(result.stdout || '{}'); } catch { throw new TxError('WRITEBACK_GENERATOR_OUTPUT_INVALID', '固定 generator stdout 非 JSON'); }
   if (output.noop === true) return { noop: true, reason: output.reason || null, business, candidate };
 
-  let manifestText;
-  try { manifestText = fs.readFileSync(candidate.manifest, 'utf8').replaceAll('\r\n', '\n'); }
-  catch { throw new TxError('WRITEBACK_MANIFEST_MISSING', `固定 generator 未生成 manifest: ${candidate.manifest}`); }
-  let manifest;
-  try { manifest = JSON.parse(manifestText); }
-  catch { throw new TxError('WRITEBACK_MANIFEST_INVALID', `manifest JSON 非法: ${candidate.manifest}`); }
-  const validated = validateWritebackManifest(manifest, {
-    cr, stage, specId, targetVersion: business.value.targetVersion,
-    candidate: candidate.manifest, txws,
-  });
-  for (const f of validated.files) {
-    assertNoSymlinkParents(txws, f.path);
-    const current = readHashRaw(path.join(txws, ...f.path.split('/')));
-    if (current !== f.beforeSha256) {
-      throw new TxError('WRITEBACK_BEFORE_MISMATCH', `${f.path} 当前内容与 beforeSha256 不符`, { path: f.path, expected: f.beforeSha256, actual: current });
-    }
-  }
   return {
     noop: false, business, candidate,
-    snapshot: { textLf: manifestText, digest: sha256(manifestText), ...validated },
+    snapshot: readPreparedCandidate({ txws, candidate, cr, stage, specId, targetVersion: business.value.targetVersion }),
   };
 }
 
@@ -1257,9 +1260,209 @@ const readHashRaw = (p) => {
   return sha256(buf.toString('utf8'));
 };
 
-/** writeback-apply 事务（TASK-08）。input: {cr, stage, candidate(manifest 路径), specId, workspace}。 */
+async function applyWritebackAtomic(ctx, input) {
+  const { cr, stage, specId } = input;
+  const opWs = resolveOperationalWorkspace(ctx, cr);
+  if (opWs.source !== 'transaction-workspace') {
+    throw new TxError('WRITEBACK_STATE_MISMATCH', `writeback-apply 需要 finalize 后 authority（Transaction Workspace），当前 phase=${opWs.phase}（source=${opWs.source}）`, { cr, phase: opWs.phase });
+  }
+  const txws = opWs.path;
+  const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
+  const key = `${cr}-${stage}`;
+  const business = canonicalWritebackBusinessInput(input);
+  const fixedCandidate = resolveWritebackCandidate(txws, cr, stage);
+  const found = loadExistingJournal({ root: ctx.installRoot, op: 'writeback', key });
+  let prepared;
+  if (found) {
+    if (found.journal.writeback?.businessInputDigest && found.journal.writeback.businessInputDigest !== business.digest) {
+      throw new TxError('TX_INPUT_CONFLICT', `writeback/${key} 既有事务与当前业务输入不一致`, { txId: found.journal.txId });
+    }
+    if (!fs.existsSync(fixedCandidate.manifest)) {
+      throw new TxError('WRITEBACK_CANDIDATE_RECOVERY_MISSING', `既有事务的固定 candidate 缺失: ${fixedCandidate.manifest}`, { cr, stage });
+    }
+    const snapshot = readPreparedCandidate({
+      txws, candidate: fixedCandidate, cr, stage, specId,
+      targetVersion: business.value.targetVersion, checkBefore: false,
+    });
+    const composite = sha256(JSON.stringify({ businessInputDigest: business.digest, manifestDigest: snapshot.digest }));
+    if (found.journal.inputDigest !== composite) {
+      throw new TxError('TX_INPUT_CONFLICT', `writeback/${key} 既有事务与当前业务输入/candidate 不一致`, { txId: found.journal.txId });
+    }
+    prepared = { noop: false, business, candidate: fixedCandidate, snapshot };
+  } else {
+    prepared = prepareWritebackCandidate({ ...input, txws });
+    if (prepared.noop) {
+      if (stage === 'baseline' && opWs.phase === 'merging') {
+        throw new TxError('WRITEBACK_ATOMIC_FACT_MISSING', 'baseline 已 noop 但状态仍为 merging，且无复合事务 journal 可证明原子事实');
+      }
+      return { cr, phase: 'complete', changed: false, commit: null, status: opWs.phase, files: [], warnings: [], reason: prepared.reason };
+    }
+  }
+  const { snapshot } = prepared;
+  const manifestDigest = snapshot.digest;
+  const inputDigest = sha256(JSON.stringify({ businessInputDigest: business.digest, manifestDigest }));
+  const recoverCommand = `crctl writeback-apply ${cr} --stage ${stage} --spec-id ${JSON.stringify(specId)} --target-version ${JSON.stringify(business.value.targetVersion)}`
+    + (business.value.milestoneName == null ? '' : ` --milestone-name ${JSON.stringify(business.value.milestoneName)}`)
+    + (business.value.brief == null ? '' : ` --brief ${JSON.stringify(business.value.brief)}`)
+    + (business.value.milestoneFile == null ? '' : ` --milestone-file ${JSON.stringify(business.value.milestoneFile)}`)
+    + ` --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`;
+
+  let advanceCandidate = null;
+  if (!found) {
+    const approvalText = fs.readFileSync(path.join(txws, 'change-requests', cr, 'approval.yml'), 'utf8');
+    const approval = parseYaml(approvalText.replaceAll('\r\n', '\n')) || {};
+    const releaseSubjects = approval?.code?.['release-subjects'];
+    if (!releaseSubjects) throw new TxError('WRITEBACK_SNAPSHOT_MISSING', 'txws approval.yml#code.release-subjects 缺失', { cr });
+    const snapshotCheck = await verifyReleaseSubjects(ctx, cr, releaseSubjects);
+    if (!snapshotCheck.ok) throw new TxError('WRITEBACK_RELEASE_SUBJECT_DRIFT', `writeback 前 signed release-subjects 漂移（kind=${snapshotCheck.kind}）`, { cr, kind: snapshotCheck.kind, ...snapshotCheck.details });
+    gitMust(kb.rootPath, ['fetch', 'origin']);
+    const originSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
+    const txHead = gitMust(txws, ['rev-parse', 'HEAD']);
+    if (originSha !== txHead) {
+      gitMust(txws, ['fetch', 'origin']);
+      gitMust(txws, ['reset', '--hard', originSha]);
+      gitMust(txws, ['checkout', '--detach', originSha]);
+      throw new TxError('WRITEBACK_REMOTE_STALE', `origin trunk 在 candidate 生成后前进（${txHead.slice(0, 12)} -> ${originSha.slice(0, 12)}），txws 已重置，请重试`, { cr, originSha, txHead });
+    }
+    if (stage === 'baseline') {
+      if (typeof input.validateBaselineAdvance !== 'function' || typeof input.emitStatusEvent !== 'function' || typeof input.emitAdvanceAudit !== 'function') {
+        throw new TxError('WRITEBACK_CALLBACK_MISSING', 'baseline writeback 缺 validateBaselineAdvance/emitStatusEvent/emitAdvanceAudit callback');
+      }
+      advanceCandidate = await input.validateBaselineAdvance({ workspace: txws, plannedExisting: snapshot.plannedExisting });
+    }
+  }
+
+  const lock = await acquireLock({ root: ctx.installRoot, scope: `writeback-${cr}-${stage}`, op: 'writeback', cr });
+  try {
+    let { journal, journalPath, created } = await loadOrCreateJournal({
+      root: ctx.installRoot, op: 'writeback', key, graphDigest: ctx.graphDigest, inputDigest,
+    });
+    const payload = journal.writeback || {
+      cr, stage, phase: 'start', specId, targetVersion: business.value.targetVersion,
+      businessInputDigest: business.digest, manifestDigest,
+      committed: false, commit: null, baseSha: null, pushed: false, files: null,
+      statusTransition: null, outboxEmitted: false, auditEmitted: false,
+    };
+    journal.writeback = payload;
+    const wasComplete = payload.phase === 'complete';
+    let did = false;
+    const warnings = [];
+    const save = async (phase) => {
+      payload.phase = phase; journal.phase = phase;
+      journal = await saveJournal({ path: journalPath, journal });
+    };
+    if (created) {
+      await save('start');
+      faultPoint('writeback-after-journal-create', { cr, stage });
+    }
+    if (payload.businessInputDigest !== business.digest || payload.manifestDigest !== manifestDigest) {
+      throw new TxError('TX_INPUT_CONFLICT', `writeback/${key} payload digest 漂移`, { txId: journal.txId });
+    }
+    await recoverWriteSet({ txRoot: ctx.installRoot, txId: journal.txId });
+
+    if (stage === 'baseline' && !payload.statusTransition) {
+      if (!advanceCandidate) {
+        if (typeof input.validateBaselineAdvance !== 'function') throw new TxError('WRITEBACK_CALLBACK_MISSING', 'baseline 恢复缺 validateBaselineAdvance callback');
+        advanceCandidate = await input.validateBaselineAdvance({ workspace: txws, plannedExisting: snapshot.plannedExisting });
+      }
+      const afterText = crMdStatusText(advanceCandidate.beforeText, 'writing-back', { at: journal.createdAt });
+      if (!afterText) throw new TxError('WRITEBACK_STATUS_INVALID', 'baseline cr.md 无合法 frontmatter');
+      payload.statusTransition = {
+        from: 'merging', to: 'writing-back', trigger: 'writeback-prd-sdd', path: advanceCandidate.path,
+        transitionAt: journal.createdAt, beforeSha256: advanceCandidate.beforeSha256,
+        afterSha256: sha256(afterText), afterText,
+      };
+      await save('status-prepared');
+    }
+
+    gitMust(kb.rootPath, ['fetch', 'origin']);
+    let originSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
+    if (payload.pushed) {
+      const confirmed = gitRun(kb.rootPath, ['merge-base', '--is-ancestor', payload.commit, originSha]).status === 0;
+      if (!confirmed) throw new TxError('WRITEBACK_REMOTE_HISTORY_REWRITTEN', 'writeback 已发布 commit 从 origin 历史消失', { cr, originSha });
+    }
+    if (!payload.committed) {
+      const txHead = gitMust(txws, ['rev-parse', 'HEAD']);
+      if (originSha !== txHead) {
+        gitMust(txws, ['reset', '--hard', originSha]);
+        gitMust(txws, ['checkout', '--detach', originSha]);
+        fs.rmSync(path.dirname(journalPath), { recursive: true, force: true });
+        throw new TxError('WRITEBACK_REMOTE_STALE', 'origin 在 commit 前前进，txws 已重置，请重试', { cr, originSha, txHead });
+      }
+      const entries = snapshot.files.map((f) => ({
+        path: f.path, beforeSha256: f.beforeSha256, afterSha256: f.afterSha256, content: f.blobText,
+      }));
+      if (payload.statusTransition) entries.push({
+        path: payload.statusTransition.path,
+        beforeSha256: payload.statusTransition.beforeSha256,
+        afterSha256: payload.statusTransition.afterSha256,
+        content: payload.statusTransition.afterText,
+      });
+      await applyWriteSet({ root: txws, txRoot: ctx.installRoot, txId: journal.txId, entries });
+      faultPoint('writeback-after-apply', { cr, stage });
+      gitMust(txws, ['add', '--', ...entries.map((e) => e.path)]);
+      const staged = gitMust(txws, ['diff', '--cached', '--name-only', '--diff-filter=ACMR']).split('\n').filter(Boolean).sort();
+      const expected = entries.map((e) => e.path).sort();
+      if (staged.length !== expected.length || staged.some((p, i) => p !== expected[i])) {
+        throw new TxError('WRITEBACK_STAGED_MISMATCH', 'staged set 与复合 write-set 不精确相等', { expected, staged });
+      }
+      const msg = `writeback ${stage} ${cr}\n\nAI-First-Op: writeback\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Writeback-Stage: ${stage}\n`;
+      gitMust(txws, ['commit', '--no-gpg-sign', '--file=-'], { input: msg });
+      payload.commit = gitMust(txws, ['rev-parse', 'HEAD']);
+      payload.baseSha = originSha;
+      payload.files = entries.map(({ path: p, beforeSha256, afterSha256 }) => ({ path: p, beforeSha256, afterSha256 }));
+      payload.committed = true; did = true;
+      await save('committed');
+      faultPoint('writeback-after-commit', { cr, stage });
+    }
+    if (!payload.pushed) {
+      gitMust(kb.rootPath, ['fetch', 'origin']);
+      originSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
+      const confirmed = gitRun(kb.rootPath, ['merge-base', '--is-ancestor', payload.commit, originSha]).status === 0;
+      if (!confirmed && originSha !== payload.baseSha) throw new TxError('WRITEBACK_REMOTE_STALE', 'origin 在 commit 后前进，拒绝覆盖', { cr, originSha });
+      if (!confirmed) gitMust(txws, ['push', `--force-with-lease=${kb.trunk}:${payload.baseSha}`, 'origin', `HEAD:refs/heads/${kb.trunk}`]);
+      gitMust(kb.rootPath, ['fetch', 'origin']);
+      originSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
+      if (gitRun(kb.rootPath, ['merge-base', '--is-ancestor', payload.commit, originSha]).status !== 0) {
+        throw new TxError('WRITEBACK_REMOTE_STALE', 'push 后 origin 未确认 writeback commit', { cr, originSha });
+      }
+      payload.pushed = true; did = true;
+      await save('pushed');
+      faultPoint('writeback-after-push', { cr, stage });
+    }
+
+    if (stage === 'baseline') {
+      const tr = payload.statusTransition;
+      if (!payload.outboxEmitted) {
+        try {
+          if (typeof input.emitStatusEvent !== 'function') throw new Error('emitStatusEvent callback missing');
+          await input.emitStatusEvent({ cr, from: tr.from, to: tr.to, trigger: tr.trigger, commit: payload.commit, dedupName: `status-${cr}-${payload.commit}.json` });
+          faultPoint('writeback-after-status-outbox', { cr, stage });
+          payload.outboxEmitted = true; await save('pushed');
+        } catch (e) { if (e instanceof TxError && e.code === 'FAULT_INJECTED') throw e; warnings.push({ code: 'EMIT_FAILED', projection: 'status', message: e.message }); }
+      }
+      if (!payload.auditEmitted) {
+        try {
+          if (typeof input.emitAdvanceAudit !== 'function') throw new Error('emitAdvanceAudit callback missing');
+          await input.emitAdvanceAudit({ cr, from: tr.from, to: tr.to, trigger: tr.trigger, commit: payload.commit, dedupKey: `advance:${cr}:${payload.commit}` });
+          faultPoint('writeback-after-advance-audit', { cr, stage });
+          payload.auditEmitted = true; await save('pushed');
+        } catch (e) { if (e instanceof TxError && e.code === 'FAULT_INJECTED') throw e; warnings.push({ code: 'EMIT_FAILED', projection: 'audit', message: e.message }); }
+      }
+    }
+    await save('complete');
+    return {
+      cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete,
+      commit: payload.commit, status: payload.statusTransition?.to || opWs.phase,
+      files: (payload.files || []).map((f) => f.path), warnings, recoverCommand,
+    };
+  } finally { await lock.release(); }
+}
+
+/** writeback-apply 事务；TASK-04 前 candidate 入参仍走旧生产路径，无 candidate 只供新内部 seam。 */
 export async function applyWriteback(ctx, input) {
   const { cr, stage, candidate, specId } = input;
+  if (!candidate) return applyWritebackAtomic(ctx, input);
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) throw new TxError('WRITEBACK_CR_INVALID', `writeback-apply 需要合法 CR-ID，收到 ${cr}`, { cr });
   if (!WRITEBACK_STAGES.includes(stage)) throw new TxError('WRITEBACK_STAGE_INVALID', `stage 非法: ${stage}`, { stage });
   if (typeof specId !== 'string' || !specId) throw new TxError('WRITEBACK_SPEC_INVALID', 'writeback-apply 需要 --spec-id');
