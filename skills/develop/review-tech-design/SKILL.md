@@ -71,9 +71,9 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 `crctl review-record` 已同批写入 annotation + review-loop + traceability（三账本原子），成功即表示写入完成，**不再重新读取 traceability 核对**。按返回结果处理：
 
 - 按 `files[]` 组织 git 提交（提交本次实际写入的文件）；
-- 按 `route` 分流：`pass` → 保持 `tech-design-review-pending` 允许进入 `human_approval`；`repair` → 输出 `repair-target`/`repair-instructions`；
+- 按 `route` 分流：`pass` → 保持 `tech-design-review-pending` 允许进入 `human_approval`；`repair` → 输出 `repair-target`；
 - 最后调用 `crctl next {cr_id}` 确认下一步（next 由 crctl 唯一计算）。
-- 有 blocker → 调用 `crctl advance --to tech-designing --trigger "review-tech-design:block -> write-tech-design" --expect tech-design-review-pending`，输出 `repair-target=write-tech-design`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到 SDD 修订节点；不得进入 `human_approval`
+- 有 blocker → 调用 `crctl advance --to tech-designing --trigger "review-tech-design:block -> write-tech-design" --expect tech-design-review-pending`，输出 `repair-target=write-tech-design`，pipeline 自动带 `review_feedback` 回到 SDD 修订节点；不得进入 `human_approval`
 
 ### Step 5 — 输出摘要
 
