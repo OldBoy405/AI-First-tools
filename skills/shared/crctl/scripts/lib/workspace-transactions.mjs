@@ -185,7 +185,7 @@ export function resolveOperationalWorkspace(ctx, cr) {
  * 事务内全部 Git 副作用只经 gitMust 发生；refspec/lease 由各业务处理器显式给出，
  * 不接受调用方任意 refspec（SDD §8.1）。 */
 export function gitRun(cwd, args, opts = {}) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', shell: false, input: opts.input });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', shell: false, input: opts.input, env: opts.env ? { ...process.env, ...opts.env } : process.env });
   return { status: r.status == null ? -1 : r.status, stdout: (r.stdout || '').trim(), stderr: (r.stderr || '').trim() };
 }
 
@@ -753,6 +753,52 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
  *   status=merging + merge-commits.yml + merge-verification.md，lease push 后 origin confirmed。
  */
 
+function backlogLines(raw) {
+  const out = [];
+  const re = /([^\r\n]*)(\r\n|\n|$)/g;
+  let m;
+  while ((m = re.exec(raw)) && (m[0] || m.index < raw.length)) {
+    out.push({ text: m[1], eol: m[2], start: m.index, end: m.index + m[0].length });
+    if (!m[2]) break;
+  }
+  return out;
+}
+
+function locateBacklogEntry(raw, cr, side) {
+  const lines = backlogLines(raw);
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].text.match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
+    if (m && m[2] === cr) hits.push({ index: i, indent: m[1].length });
+  }
+  if (hits.length === 0) throw new TxError('MERGE_BACKLOG_ENTRY_MISSING', `${side} _backlog.yml 缺少目标条目 ${cr}`, { side, cr });
+  if (hits.length > 1) throw new TxError('MERGE_BACKLOG_ENTRY_DUPLICATE', `${side} _backlog.yml 目标条目 ${cr} 重复`, { side, cr, count: hits.length });
+  const hit = hits[0];
+  let next = lines.length;
+  for (let i = hit.index + 1; i < lines.length; i++) {
+    const m = lines[i].text.match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
+    if (m && m[1].length <= hit.indent) { next = i; break; }
+  }
+  let end = next < lines.length ? lines[next].start : raw.length;
+  for (let i = next - 1; i > hit.index; i--) {
+    const t = lines[i].text;
+    const indent = (t.match(/^[ \t]*/) || [''])[0].length;
+    if (t.trim() === '' || (indent <= hit.indent && t.trimStart().startsWith('#'))) end = lines[i].start;
+    else break;
+  }
+  if (end <= lines[hit.index].start) throw new TxError('MERGE_BACKLOG_STRUCTURE_INVALID', `${side} _backlog.yml 无法确定 ${cr} 条目边界`, { side, cr });
+  return { start: lines[hit.index].start, end };
+}
+
+/** 以 trunk 原文为基底，只用 source 的目标 CR 完整块替换；非目标字节不变。 */
+export function replaceBacklogEntry(trunkRaw, sourceRaw, cr) {
+  const trunk = locateBacklogEntry(trunkRaw, cr, 'trunk');
+  const source = locateBacklogEntry(sourceRaw, cr, 'source');
+  const targetEol = trunkRaw.slice(trunk.start, trunk.end).includes('\r\n') ? '\r\n' : '\n';
+  const sourceBlock = sourceRaw.slice(source.start, source.end).replaceAll('\r\n', '\n').replaceAll('\n', targetEol);
+  return trunkRaw.slice(0, trunk.start) + sourceBlock + trunkRaw.slice(trunk.end);
+}
+
 function renderMergeCommits(repos, snapshot, txId, mergedAt) {
   const lines = ['schema: merge-commits/v1', `tx-id: ${txId}`, `merged-at: "${mergedAt}"`, 'repositories:'];
   for (const r of repos) {
@@ -767,6 +813,49 @@ function renderMergeVerification(repos, snapshot) {
   for (const r of repos) lines.push(`  - ${r.repo}: base=${r.baseSha.slice(0, 12)} source=${r.sourceSha.slice(0, 12)} merge=${r.mergeSha.slice(0, 12)}`);
   lines.push(`- artifacts-digest: ${snapshot.artifacts.digest}`);
   return lines.join('\n') + '\n';
+}
+
+export function gitReadBlobRaw(repoPath, treeish, relPath) {
+  assertManifestPathSafe(relPath, 'MERGE_BACKLOG_STRUCTURE_INVALID');
+  const r = spawnSync('git', ['cat-file', 'blob', `${treeish}:${relPath}`], { cwd: repoPath, encoding: null, shell: false });
+  if (r.status !== 0) {
+    throw new TxError('MERGE_BACKLOG_ENTRY_MISSING', `Git tree ${treeish.slice(0, 12)} 缺少 ${relPath}`, { treeish, path: relPath, stderr: String(r.stderr || '').trim() });
+  }
+  return r.stdout;
+}
+
+/** initial/rebuild 共用的无 ref 副作用 merge tree 计算。 */
+export function prepareMergeTree({ repo, baseSha, sourceSha, cr, tmpRoot, knowledgeBase = false }) {
+  if (!knowledgeBase) {
+    const mt = gitRun(repo.rootPath, ['merge-tree', '--write-tree', baseSha, sourceSha]);
+    if (mt.status !== 0) throw new TxError('MERGE_PREPARE_CONFLICT', `${repo.id} merge prepare 冲突`, { repo: repo.id, base: baseSha, source: sourceSha, detail: (mt.stdout || mt.stderr).slice(0, 300) });
+    return { treeSha: mt.stdout.trim(), baseSha, sourceSha };
+  }
+  const backlog = 'change-requests/_backlog.yml';
+  const trunkRaw = gitReadBlobRaw(repo.rootPath, baseSha, backlog).toString('utf8');
+  const sourceRaw = gitReadBlobRaw(repo.rootPath, sourceSha, backlog).toString('utf8');
+  const merged = replaceBacklogEntry(trunkRaw, sourceRaw, cr);
+  const ls = gitMust(repo.rootPath, ['ls-tree', sourceSha, '--', backlog]);
+  const mode = /^(\d+)\s+blob\s+[0-9a-f]+\t/.exec(ls)?.[1];
+  if (!mode) throw new TxError('MERGE_BACKLOG_STRUCTURE_INVALID', `source ${backlog} 不是普通 blob`, { sourceSha });
+  fs.mkdirSync(tmpRoot, { recursive: true });
+  const dir = fs.mkdtempSync(path.join(tmpRoot, 'merge-index-'));
+  const env = { GIT_INDEX_FILE: path.join(dir, 'index') };
+  try {
+    const trunkBlob = gitMust(repo.rootPath, ['hash-object', '-w', '--stdin'], { input: trunkRaw });
+    const mergedBlob = gitMust(repo.rootPath, ['hash-object', '-w', '--stdin'], { input: merged });
+    // 先把 synthetic source 的 backlog 中和为 trunk blob，让 Git 只处理其他文件的真实冲突。
+    gitMust(repo.rootPath, ['read-tree', sourceSha], { env });
+    gitMust(repo.rootPath, ['update-index', '--cacheinfo', mode, trunkBlob, backlog], { env });
+    const syntheticTree = gitMust(repo.rootPath, ['write-tree'], { env });
+    const synthetic = gitMust(repo.rootPath, ['commit-tree', syntheticTree, '-p', sourceSha, '-F', '-'], { input: `synthetic backlog ${cr}\n` });
+    const mt = gitRun(repo.rootPath, ['merge-tree', '--write-tree', baseSha, synthetic]);
+    if (mt.status !== 0) throw new TxError('MERGE_PREPARE_CONFLICT', `${repo.id} merge prepare 冲突`, { repo: repo.id, base: baseSha, source: sourceSha, detail: (mt.stdout || mt.stderr).slice(0, 300) });
+    // 再把已成功合并的 tree 中 backlog 精确替换为语义合并结果。
+    gitMust(repo.rootPath, ['read-tree', mt.stdout.trim()], { env });
+    gitMust(repo.rootPath, ['update-index', '--cacheinfo', mode, mergedBlob, backlog], { env });
+    return { treeSha: gitMust(repo.rootPath, ['write-tree'], { env }), baseSha, sourceSha };
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 
 function buildMergeSideEffects(payload) {
@@ -849,11 +938,12 @@ export async function mergeCr(ctx, input) {
       // 已发布/已确认的仓不再重做 prepare：candidate 与 baseSha 保持（发布后 base 不得漂移）
       if (prev && (prev.pushed || prev.confirmed)) continue;
       if (prev && prev.baseSha === baseSha && prev.sourceSha === src.stdout && prev.mergeSha) continue;
-      const mt = gitRun(repo.rootPath, ['merge-tree', '--write-tree', baseSha, src.stdout]);
-      if (mt.status !== 0) {
-        throw new TxError('MERGE_PREPARE_CONFLICT', `${repo.id} merge prepare 冲突（base ${baseSha.slice(0, 12)} × source ${src.stdout.slice(0, 12)}），零远端副作用`, { repo: repo.id, base: baseSha, source: src.stdout, detail: (mt.stdout || mt.stderr).slice(0, 300) });
-      }
-      const tree = mt.stdout.trim();
+      const prepared = prepareMergeTree({
+        repo, baseSha, sourceSha: src.stdout, cr,
+        tmpRoot: path.join(ctx.installRoot, '.crctl', 'tmp'),
+        knowledgeBase: repo.id === ctx.knowledgeBaseRepoId,
+      });
+      const tree = prepared.treeSha;
       const msg = `merge ${cr}: ${repo.id}\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${baseSha}\nAI-First-Merge-Source: ${src.stdout}\n`;
       const mergeSha = gitMust(repo.rootPath, ['commit-tree', tree, '-p', baseSha, '-p', src.stdout, '-F', '-'], { input: msg });
       const rec = prev || { repo: repo.id, baseSha, sourceSha: src.stdout, mergeSha, pushed: false, confirmed: false };
@@ -888,11 +978,14 @@ export async function mergeCr(ctx, input) {
         if (cls === 'rebuild') {
           const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
           const src = gitMust(repo.rootPath, ['rev-parse', '--verify', sourceRef]);
-          const mt = gitRun(repo.rootPath, ['merge-tree', '--write-tree', remoteSha, src]);
-          if (mt.status !== 0) throw new TxError('MERGE_PREPARE_CONFLICT', `${repo.id} rebuild prepare 冲突（base ${remoteSha.slice(0, 12)} × source ${src.slice(0, 12)}）`, { repo: repo.id, base: remoteSha, source: src });
+          const prepared = prepareMergeTree({
+            repo, baseSha: remoteSha, sourceSha: src, cr,
+            tmpRoot: path.join(ctx.installRoot, '.crctl', 'tmp'),
+            knowledgeBase: repo.id === ctx.knowledgeBaseRepoId,
+          });
           const msg = `merge ${cr}: ${repo.id} (rebuild)\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${remoteSha}\nAI-First-Merge-Source: ${src}\n`;
           rec.baseSha = remoteSha;
-          rec.mergeSha = gitMust(repo.rootPath, ['commit-tree', mt.stdout.trim(), '-p', remoteSha, '-p', src, '-F', '-'], { input: msg });
+          rec.mergeSha = gitMust(repo.rootPath, ['commit-tree', prepared.treeSha, '-p', remoteSha, '-p', src, '-F', '-'], { input: msg });
           rec.pushed = false;
           did = true;
           await save(`rebuild-${repo.id}`);
