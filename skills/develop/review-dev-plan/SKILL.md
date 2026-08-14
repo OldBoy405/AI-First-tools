@@ -77,7 +77,7 @@ suggestions: []
 
 按 annotation 顶层 `repair-target`（或 review-record 输出的 route）分流：
 
-- **PASS**（verdict=pass 且 blockers=[]）：保持 `task-breakdown`，输出摘要，进入现有 push-progress → human_approval → approve-dev-start。
+- **PASS**（verdict=pass 且 blockers=[]）：保持 `task-breakdown`，输出摘要，进入现有 push-progress → human_approval → approve-dev-start。**证据绑定（CR-2026-039）**：PASS 落盘时 crctl 将 plan.md + 全部 `TASK-*.md` 的 composite digest 写入 annotation `subject-sha256`；此后 plan/TASK 正文任何修订都会使旧 PASS 失效——`crctl next` 改建议重审/重建（按缺失类型路由 review-dev-plan/write-dev-plan/write-dev-tasks），`approve-dev-start`（含 grant）硬失败零写入；重跑一次 review-dev-plan 即刷新证据。
 - **NORMAL**（repair-target=write-dev-plan，缺省）：调用 `crctl advance --to tech-design-reviewed --trigger "review-dev-plan:block -> write-dev-plan" --expect task-breakdown --embedded` 完成回退（CR-2026-030 FR-8：权威完整 trigger），pipeline 按 write-dev-plan → write-dev-tasks → review-dev-plan 重放（≤3 轮）。
 - **UPSTREAM**（repair-target=write-tech-design）：调用 `crctl advance --to tech-design-review-pending --trigger review-dev-plan:upstream-design-blocker --expect task-breakdown --embedded` 回退到 `tech-design-review-pending`，停止自动重放，输出结构化业务结果 `UPSTREAM_DESIGN_BLOCKER`（含 route=upstream、verdict=block、review feedback 与回退状态），由人工走既有技术设计修订、重新评审与审批流程。本节点不得修改或覆盖 `review-annotations/sdd.yml`（US-5）。
 
