@@ -1314,9 +1314,13 @@ export function prepareWritebackCandidate(input) {
   if (!WRITEBACK_STAGES.includes(stage)) throw new TxError('WRITEBACK_STAGE_INVALID', `stage 非法: ${stage}`, { stage });
   if (typeof specId !== 'string' || !specId) throw new TxError('WRITEBACK_SPEC_INVALID', 'writeback 需要 specId');
   if (typeof business.value.targetVersion !== 'string' || !business.value.targetVersion) throw new TxError('WRITEBACK_VERSION_INVALID', 'writeback 需要 targetVersion');
-  if (stage === 'traceability' && !business.value.milestoneFile) throw new TxError('WRITEBACK_MILESTONE_PATH_INVALID', 'traceability 需要 milestoneFile');
+  if (stage === 'baseline' && business.value.milestoneFile != null) throw new TxError('WRITEBACK_STAGE_ARGS_INVALID', 'baseline 不接受 milestoneFile');
   if (stage === 'tasks' && (business.value.milestoneName != null || business.value.brief != null || business.value.milestoneFile != null)) {
     throw new TxError('WRITEBACK_STAGE_ARGS_INVALID', 'tasks 不接受 milestone 参数');
+  }
+  if (stage === 'traceability' && !business.value.milestoneFile) throw new TxError('WRITEBACK_MILESTONE_PATH_INVALID', 'traceability 需要 milestoneFile');
+  if (stage === 'traceability' && (business.value.milestoneName != null || business.value.brief != null)) {
+    throw new TxError('WRITEBACK_STAGE_ARGS_INVALID', 'traceability 不接受 milestoneName/brief');
   }
 
   const txws = fs.realpathSync(input.txws);
@@ -1442,6 +1446,13 @@ async function applyWritebackAtomic(ctx, input) {
       payload.phase = phase; journal.phase = phase;
       journal = await saveJournal({ path: journalPath, journal });
     };
+    const assertGraph = () => {
+      if ((payload.committed || payload.pushed) && journal.graphDigest !== ctx.graphDigest) {
+        throw new TxError('GRAPH_CHANGED_DURING_TRANSACTION', 'writeback 事务出现 commit/push 后 dir-graph 声明发生变化，拒绝继续', {
+          journalDigest: journal.graphDigest, currentDigest: ctx.graphDigest,
+        });
+      }
+    };
     if (created) {
       await save('start');
       faultPoint('writeback-after-journal-create', { cr, stage });
@@ -1449,6 +1460,7 @@ async function applyWritebackAtomic(ctx, input) {
     if (payload.businessInputDigest !== business.digest || payload.manifestDigest !== manifestDigest) {
       throw new TxError('TX_INPUT_CONFLICT', `writeback/${key} payload digest 漂移`, { txId: journal.txId });
     }
+    assertGraph();
     await recoverWriteSet({ txRoot: ctx.installRoot, txId: journal.txId });
 
     if (stage === 'baseline' && !payload.statusTransition) {
@@ -1507,10 +1519,16 @@ async function applyWritebackAtomic(ctx, input) {
       faultPoint('writeback-after-commit', { cr, stage });
     }
     if (!payload.pushed) {
+      assertGraph();
       gitMust(kb.rootPath, ['fetch', 'origin']);
       originSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
       const confirmed = gitRun(kb.rootPath, ['merge-base', '--is-ancestor', payload.commit, originSha]).status === 0;
-      if (!confirmed && originSha !== payload.baseSha) throw new TxError('WRITEBACK_REMOTE_STALE', 'origin 在 commit 后前进，拒绝覆盖', { cr, originSha });
+      if (!confirmed && originSha !== payload.baseSha) {
+        gitMust(txws, ['reset', '--hard', originSha]);
+        gitMust(txws, ['checkout', '--detach', originSha]);
+        fs.rmSync(path.dirname(journalPath), { recursive: true, force: true });
+        throw new TxError('WRITEBACK_REMOTE_STALE', 'origin 在未发布 commit 后前进，txws 已重置且旧 journal 已清除，请同业务命令重试', { cr, originSha });
+      }
       if (!confirmed) gitMust(txws, ['push', `--force-with-lease=${kb.trunk}:${payload.baseSha}`, 'origin', `HEAD:refs/heads/${kb.trunk}`]);
       gitMust(kb.rootPath, ['fetch', 'origin']);
       originSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);

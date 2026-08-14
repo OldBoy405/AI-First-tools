@@ -3033,6 +3033,9 @@ async function cmdArchive(ws, positional, flags) {
 async function cmdWritebackApply(ws, positional, flags, gates) {
   const cr = positional[0];
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'writeback-apply 需要 CR-ID');
+  const allowedFlags = new Set(['cmdList', 'workspace', 'stage', 'spec-id', 'target-version', 'milestone-name', 'brief', 'milestone-file']);
+  const unknownFlags = Object.keys(flags).filter((key) => !allowedFlags.has(key));
+  if (unknownFlags.length) fail('BAD_ARGS', `writeback-apply 不接受参数: ${unknownFlags.map((x) => `--${x}`).join(', ')}`);
   const stage = flags.stage;
   const specId = flags['spec-id'];
   const targetVersion = flags['target-version'];
@@ -3040,8 +3043,10 @@ async function cmdWritebackApply(ws, positional, flags, gates) {
   if (flags.candidate || flags['candidate-out'] || flags.generator || flags.manifest) fail('BAD_ARGS', 'writeback-apply 不接受 candidate/generator/manifest 路径；由 crctl 按 stage 内部固定');
   if (!specId) fail('BAD_ARGS', 'writeback-apply 需要 --spec-id <id>');
   if (!targetVersion) fail('BAD_ARGS', 'writeback-apply 需要 --target-version <version>');
-  if (stage === 'traceability' && !flags['milestone-file']) fail('BAD_ARGS', 'traceability 需要 --milestone-file <workspace-relative-path>');
+  if (stage === 'baseline' && flags['milestone-file'] != null) fail('BAD_ARGS', 'baseline 不接受 --milestone-file');
   if (stage === 'tasks' && (flags['milestone-name'] != null || flags.brief != null || flags['milestone-file'] != null)) fail('BAD_ARGS', 'tasks 不接受 milestone 参数');
+  if (stage === 'traceability' && !flags['milestone-file']) fail('BAD_ARGS', 'traceability 需要 --milestone-file <workspace-relative-path>');
+  if (stage === 'traceability' && (flags['milestone-name'] != null || flags.brief != null)) fail('BAD_ARGS', 'traceability 不接受 --milestone-name/--brief');
   const ctx = resolveRepositories(ws);
   const result = await runTxAsync(applyWriteback(ctx, {
     cr, stage, specId, targetVersion, workspace: ws,

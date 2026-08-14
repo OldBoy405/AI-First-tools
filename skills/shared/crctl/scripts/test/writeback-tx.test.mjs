@@ -121,12 +121,22 @@ test('TASK-02：投影失败不反转 Git，重放只补缺项', async () => {
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
-test('TASK-04：公共 CLI 只收业务输入，baseline 同 commit 且幂等；旧 candidate 参数拒绝', () => {
+test('TASK-04：公共 CLI 只收业务输入，baseline 同 commit 且幂等；旧/错 stage 参数拒绝', () => {
   const { base, kb, cr } = makeMergedFixture();
   try {
-    const bad = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--candidate', 'x/manifest.json', '--spec-id', 'test-spec', '--target-version', '0.2', '--workspace', kb], { cwd: kb });
-    assert.notEqual(bad.status, 0);
-    assert.equal(bad.errJson.error.code, 'BAD_ARGS');
+    const rejected = [
+      ['--candidate', 'x/manifest.json'],
+      ['--candidate=x/manifest.json'],
+      ['--milestone-file', 'milestone.yml'],
+    ];
+    for (const extra of rejected) {
+      const bad = runCrctl(['writeback-apply', cr, '--stage', 'baseline', ...extra, '--spec-id', 'test-spec', '--target-version', '0.2', '--workspace', kb], { cwd: kb });
+      assert.notEqual(bad.status, 0, `应拒绝 ${extra.join(' ')}`);
+      assert.equal(bad.errJson.error.code, 'BAD_ARGS');
+    }
+    const traceBad = runCrctl(['writeback-apply', cr, '--stage', 'traceability', '--milestone-file', 'milestone.yml', '--milestone-name', 'ignored', '--spec-id', 'test-spec', '--target-version', '0.2', '--workspace', kb], { cwd: kb });
+    assert.notEqual(traceBad.status, 0);
+    assert.equal(traceBad.errJson.error.code, 'BAD_ARGS');
     const args = ['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', '0.2', '--workspace', kb];
     const first = runCrctl(args, { cwd: kb });
     assert.equal(first.status, 0, first.stderr);
@@ -155,6 +165,44 @@ test('TASK-04：writeback-after-commit fault 经同一业务命令续跑不重�
     const log = git(path.join(base, 'origin-kb.git'), ['log', '--format=%s']);
     assert.equal((log.match(/^writeback baseline/g) || []).length, 1);
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('review repair：commit 后 origin 前进先清除未发布事务，再以同一业务命令重建', () => {
+  const { base, kb, cr } = makeMergedFixture();
+  try {
+    const args = ['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', '0.2', '--workspace', kb];
+    const faulted = runCrctl(args, { cwd: kb, env: { CRCTL_FAULT_POINT: 'writeback-after-commit' } });
+    assert.equal(faulted.errJson.error.code, 'FAULT_INJECTED');
+    git(kb, ['fetch', 'origin']);
+    git(kb, ['reset', '--hard', 'origin/master']);
+    fs.writeFileSync(path.join(kb, 'concurrent.txt'), 'concurrent\n');
+    git(kb, ['add', 'concurrent.txt']);
+    git(kb, ['commit', '-q', '-m', 'concurrent trunk']);
+    git(kb, ['push', '-q', 'origin', 'HEAD:refs/heads/master']);
+    const stale = runCrctl(args, { cwd: kb });
+    assert.notEqual(stale.status, 0);
+    assert.equal(stale.errJson.error.code, 'WRITEBACK_REMOTE_STALE');
+    const recovered = runCrctl(args, { cwd: kb });
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.ok(git(path.join(base, 'origin-kb.git'), ['show', `${recovered.json.commit}:concurrent.txt`]).includes('concurrent'));
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('review repair：commit 后 graphDigest 漂移硬阻断旧事务', async () => {
+  const { base, kb, cr, txws } = makeMergedFixture();
+  try {
+    const observed = { status: [], audit: [] };
+    const input = { cr, stage: 'baseline', specId: 'test-spec', targetVersion: '0.2', workspace: kb, ...atomicCallbacks(txws, cr, observed) };
+    process.env.CRCTL_FAULT_POINT = 'writeback-after-commit';
+    await assert.rejects(() => applyWriteback(resolveRepositories(kb), input), (e) => e.code === 'FAULT_INJECTED');
+    delete process.env.CRCTL_FAULT_POINT;
+    const graphPath = path.join(kb, 'dir-graph.yaml');
+    fs.writeFileSync(graphPath, fs.readFileSync(graphPath, 'utf8').replace('    trunk: master', '    trunk: main'));
+    await assert.rejects(() => applyWriteback(resolveRepositories(kb), input), (e) => e.code === 'GRAPH_CHANGED_DURING_TRANSACTION');
+  } finally {
+    delete process.env.CRCTL_FAULT_POINT;
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 });
 
 test('TASK-04：traceability 公共业务参数全链路', () => {
