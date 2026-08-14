@@ -37,18 +37,6 @@
       "required": false,
       "placeholder": "留空则在评审前暂停由人工选择",
       "description": "指定执行 review-code 的模型/runner；留空时节点「选择代码评审 LLM」会暂停等待人工选择"
-    },
-    {
-      "key": "suggestion_policy",
-      "label": "改进建议处置策略",
-      "type": "select",
-      "options": [
-        "strict",
-        "lenient"
-      ],
-      "required": false,
-      "default": "strict",
-      "description": "strict=不升格，所有非阻塞改进建议一律进 suggestions，评审只判 CR 本身的 pass/block（保守交付，默认）；lenient=按三条判据把本 CR 内该修的升格进 blockers，走 reviewLoop 在本 CR 内解决（清技术债场景）"
     }
   ],
   "nodes": [
@@ -267,10 +255,19 @@
       "timeoutMinutes": 30
     },
     {
+      "id": "00000000-0000-0000-0015-000000000015",
+      "kind": "skill",
+      "label": "代码评审 PASS 后审批前 checkpoint",
+      "ref": "push-progress",
+      "prompt": "执行 push-progress：cr_id={{inputs.cr_id}}，message=代码评审通过后审批前 checkpoint。\n\n在节点输出中记录 batchId、repositories、phase；phase 非 complete 时中止，不得进入人工审批。",
+      "onFail": "abort",
+      "timeoutMinutes": 15
+    },
+    {
       "id": "00000000-0000-0000-0015-000000000010",
       "kind": "human_approval",
       "label": "代码审查通过",
-      "approvalPrompt": "代码自动评审已完成，且 review-annotations/code.yml 必须满足 verdict=pass、blockers=[]，test-report.md 必须满足 status=pass 后才可进入本节点；当前应为 code-reviewing。请审查人决定：\n\n✅ 通过：勾选此 Todo，下一节点 approve-code 会记录审批并推进到 code-approved\n❌ 驳回：在评审批注中补充 reject_reason，开发者修复后重新执行 /coding 中的代码编写与 review-code 节点",
+      "approvalPrompt": "代码自动评审已完成，且 review-annotations/code.yml 必须满足 verdict=pass、blockers=[]，test-report.md 必须满足 status=pass 后才可进入本节点；当前应为 code-reviewing，且评审后 checkpoint phase=complete。请审查人决定：\n\n✅ 通过：勾选此 Todo，下一节点 approve-code 会记录审批并推进到 code-approved\n❌ 驳回：在评审批注中补充 reject_reason，开发者修复后重新执行 /coding 中的代码编写与 review-code 节点",
       "onFail": "abort",
       "timeoutMinutes": 4320
     },

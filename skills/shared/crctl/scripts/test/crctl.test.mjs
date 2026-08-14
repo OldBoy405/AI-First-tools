@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, realpathSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, realpathSync, appendFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -1138,7 +1138,7 @@ test('CR-2026-037 Prompt 采纳：Skill/Pipeline 调 task init 且不指导直�
   assert.match(pipelineText, /crctl task init/);
   assert.match(pipelineText, /不得手写索引/);
   assert.doesNotMatch(pipelineText, /同时生成 tasks\/_index\.yml/);
-  assert.equal(pipeline.nodes.length, 14);
+  assert.equal(pipeline.nodes.length, 15); // CR-2026-039 TASK-04：新增评审后审批前 checkpoint 节点（…0015）
 });
 
 test('task done：正常路径 pending→done + done-at + audit 记录（AC-1）', () => {
@@ -3667,7 +3667,8 @@ function makeStageWorkspace(stage) {
     ev('plan.md', '# plan\n');
     ev('tasks/_index.yml', 'tasks:\n  - id: CR-G1-TASK-01\n');
     ev('tasks/TASK-01.md', '# TASK-01\n');
-    ev('review-annotations/dev-plan.yml', 'verdict: pass\nblockers: []\n');
+    // CR-2026-039 TASK-02/03：freshness 需 digest（fixture 一致携 subject-sha256）
+    ev('review-annotations/dev-plan.yml', `verdict: pass\nblockers: []\nsubject-sha256: ${expectDevPlanDigest(ws, cr)}\n`);
     ev('sdd.md', '# sdd\n');
     ev('review-annotations/sdd.yml', 'verdict: pass\nblockers: []\n');
     writeApprovalYml(ws, cr, 'tech-design', {
@@ -4149,6 +4150,38 @@ test('TASK-06 ⑥: TTY approve code 路径同样重核并复制 release-subjects
     assert.equal(r2.stderr.error.code, 'APPROVAL_REQUIRES_HUMAN');
     assert.equal(readFileSync(path.join(ws, 'change-requests', 'CR-D1', 'approval.yml'), 'utf8'), before, '非 TTY 重放零写入');
   } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-039 TASK-04 AC-5: KB 白名单后继提交 approve-code 仍可通过；非白名单路径 → post-review-path-drift 零写入', () => {
+  const { ws, privateKey } = makeCodeStageWorkspace();
+  try {
+    runCodeReviewAndAdvance(ws);
+    const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+    const g = (args) => { const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
+    // 白名单后继：仅 cr.md + review-annotations/ 变化（crctl 自维护路径）→ 放行
+    appendFileSync(path.join(wt, 'change-requests', 'CR-D1', 'cr.md'), '\n# checkpoint note\n');
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', 'review-annotations', 'note.yml'), 'note: post-review\n');
+    g(['add', '-A']); g(['commit', '-q', '-m', 'kb whitelist successor']);
+    let gp = makeCodeGrant(ws, privateKey);
+    let r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 0, `白名单后继应放行: ${r.rawStderr}`);
+    assert.equal(r.stdout.to, 'code-approved');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+  // 非白名单路径 → post-review-path-drift 拒绝且零写入（独立 fixture）
+  const { ws: ws2, privateKey: pk2 } = makeCodeStageWorkspace();
+  try {
+    runCodeReviewAndAdvance(ws2);
+    const wt = path.join(ws2, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+    const g = (args) => { const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', 'notes.txt'), 'non-whitelisted\n');
+    g(['add', '-A']); g(['commit', '-q', '-m', 'kb non-whitelist change']);
+    const gp = makeCodeGrant(ws2, pk2);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws2]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'RELEASE_SUBJECT_DRIFT');
+    assert.equal(r.stderr.error.reason, 'post-review-path-drift');
+    assert.equal(existsSync(path.join(ws2, 'change-requests', 'CR-D1', 'approval.yml')), false, 'approval.yml 零写入');
+  } finally { rmSync(ws2, { recursive: true, force: true }); }
 });
 
 test('TASK-06 ⑤: release-drift 单一回退转换 code-approved -> developing 合法；状态机口径 28 声明/50 展开（AC-3）', () => {
