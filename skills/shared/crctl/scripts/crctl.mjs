@@ -548,7 +548,15 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
     } else if (check.type === 'passCondition') {
       const stageCfg = gates.approvalStages[check.stage];
       const r = evaluatePassCondition(ws, cr, stageCfg, gates, opts.evidence);
-      out.checks.push({ type: check.type, stage: check.stage, ok: r.pass, detail: r.results, pipelineSource: r.source });
+      let passOk = r.pass;
+      let passWhy = null;
+      if (r.pass && check.stage === 'dev-start') {
+        // CR-2026-039 TASK-02：dev-plan PASS 证据 freshness（复用 gate 失败通道，不新增错误码/gates.json）
+        const dp = readEvidenceDoc(ws, cr, 'change-requests/{cr}/review-annotations/dev-plan.yml', opts.evidence);
+        const fr = devPlanFreshness(ws, cr, dp.exists ? dp.data : null);
+        if (!fr.fresh) { passOk = false; passWhy = fr.why; }
+      }
+      out.checks.push({ type: check.type, stage: check.stage, ok: passOk, why: passWhy, detail: r.results, pipelineSource: r.source });
     } else if (check.type === 'approval') {
       const doc = readEvidenceDoc(ws, cr, 'change-requests/{cr}/approval.yml', opts.evidence);
       const section = doc.exists ? doc.data?.[check.section] : null;
@@ -1823,6 +1831,17 @@ function devPlanCompositeDigest(ws, cr) {
   return { ok: true, digest: sha256(JSON.stringify(entries)) };
 }
 
+// CR-2026-039 TASK-02（SDD §4.3）：dev-plan PASS 证据 freshness 唯一判定（cmdNext 与 runGateChecks 两消费点共用）。
+// legacy 无 digest → review-dev-plan；subject 不完整 → 透传 helper repairTarget；digest 漂移 → review-dev-plan。
+function devPlanFreshness(ws, cr, annData) {
+  const recSha = annData && typeof annData === 'object' ? annData['subject-sha256'] : null;
+  if (recSha == null) return { fresh: false, repairTarget: 'review-dev-plan', why: 'dev-plan annotation 无 subject-sha256（legacy 或畸形），无法判 freshness，重审刷新证据' };
+  const cur = devPlanCompositeDigest(ws, cr);
+  if (!cur.ok) return { fresh: false, repairTarget: cur.repairTarget, why: `dev-plan subject 不完整：${cur.why}` };
+  if (cur.digest !== recSha) return { fresh: false, repairTarget: 'review-dev-plan', why: `dev-plan digest 漂移（annotation 记录 ${String(recSha).slice(0, 16)}…，当前重算 ${cur.digest.slice(0, 16)}…；plan/TASK 在评审后被改动），重审刷新证据` };
+  return { fresh: true };
+}
+
 async function cmdReviewRecord(ws, cr, gates, flags) {
   const stage = flags.stage;
   const fileName = REVIEW_STAGE_FILES[stage];
@@ -2691,6 +2710,9 @@ function cmdNext(ws, cr, gates, flags) {
         return suggest('review-dev-plan', dp.exists ? 'dev-plan.yml 畸形（缺 verdict/blockers），重跑评审' : '缺少 dev-plan.yml 评审记录，先跑 review-dev-plan');
       }
       if (dp.data.verdict === 'pass' && dp.data.blockers.length === 0) {
+        // CR-2026-039 TASK-02：PASS 后先判 freshness；漂移/legacy/不完整 → 按 repairTarget 可执行路由
+        const fr = devPlanFreshness(ws, cr, dp.data);
+        if (!fr.fresh) return suggest(fr.repairTarget, fr.why);
         return suggest('crctl approve --stage dev-start', '开发计划评审 pass 且无 blocker，等待开发启动人工确认', true);
       }
       const route = resolveDevPlanRoute(dp.data);

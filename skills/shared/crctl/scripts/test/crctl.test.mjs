@@ -2294,8 +2294,9 @@ test('CR-2026-027 FR-16：next task-breakdown 路由 —— 无/畸形 dev-plan 
     writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', 'cr-id: CR-T1\nverdict: maybe\n');
     r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
     assert.equal(r.stdout.next, 'review-dev-plan');
-    // PASS → approve dev-start
-    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', 'cr-id: CR-T1\nreviewer: "r"\nreviewed-at: "2026-08-10T00:00:00+08:00"\nverdict: pass\nblockers: []\n');
+    // PASS → approve dev-start（CR-2026-039 TASK-02 起：fresh 轨需携 subject-sha256）
+    writeEvidence(ws, 'CR-T1', 'tasks/TASK-01.md', '# TASK-01\n');
+    writeEvidence(ws, 'CR-T1', 'review-annotations/dev-plan.yml', `cr-id: CR-T1\nreviewer: "r"\nreviewed-at: "2026-08-10T00:00:00+08:00"\nverdict: pass\nblockers: []\nsubject-sha256: ${expectDevPlanDigest(ws, 'CR-T1')}\n`);
     r = runCrctl(['next', 'CR-T1', '--workspace', ws]);
     assert.equal(r.stdout.next, 'crctl approve --stage dev-start');
     assert.equal(r.stdout.humanApproval, true);
@@ -2493,10 +2494,11 @@ function makeDevStartWorkspace() {
   const g = (args) => { const r = spawnSync('git', args, { cwd: ws, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
   g(['init', '-b', 'master']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 'tester']);
   writeCrEntry(ws, 'CR-D1', 'task-breakdown');
-  writeEvidence(ws, 'CR-D1', 'review-annotations/dev-plan.yml', 'cr-id: CR-D1\nreview-type: dev-plan\nverdict: pass\nblockers: []\ndimensions:\n  sdd-to-plan: ok\n');
   writeEvidence(ws, 'CR-D1', 'plan.md', '# plan\n');
   writeEvidence(ws, 'CR-D1', 'tasks/_index.yml', 'tasks:\n  - id: CR-D1-TASK-01\n');
   writeEvidence(ws, 'CR-D1', 'tasks/TASK-01.md', '# TASK-01\n');
+  // CR-2026-039 TASK-02：PASS annotation 携 subject-sha256（fresh 轨夹具；legacy 无 digest 由 CR-2026-039 用例专验）
+  writeEvidence(ws, 'CR-D1', 'review-annotations/dev-plan.yml', `cr-id: CR-D1\nreview-type: dev-plan\nverdict: pass\nblockers: []\ndimensions:\n  sdd-to-plan: ok\nsubject-sha256: ${expectDevPlanDigest(ws, 'CR-D1')}\n`);
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
   mkdirSync(path.join(ws, '.crctl', 'keys'), { recursive: true });
   writeFileSync(path.join(ws, '.crctl', 'keys', 'approval-test.pub'), publicKey.export({ type: 'spki', format: 'pem' }));
@@ -2729,6 +2731,79 @@ test('CR-2026-039 TASK-01 AC-4: 内容拼接边界不同（不同 TASK 集合划
     r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
     assert.equal(r.status, 0, r.rawStderr);
     assert.notEqual(readAnnotationDigest(ws, 'CR-T1'), dA, '不同集合划分不产生相同 digest');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-039 TASK-02：next 与 developing 门禁双消费点 digest freshness（SDD §4.3；AC-1～AC-4） ──
+
+test('CR-2026-039 TASK-02 AC-1: PASS+fresh → next suggest approve dev-start；approve --grant 放行到 developing', () => {
+  const { ws, privateKey } = makeDevStartWorkspace();
+  try {
+    const n = runCrctl(['next', 'CR-D1', '--workspace', ws]);
+    assert.equal(n.stdout.next, 'crctl approve --stage dev-start');
+    assert.equal(n.stdout.humanApproval, true);
+    const gp = makeDevStartGrant(ws, privateKey);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'dev-start', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.to, 'developing');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-039 TASK-02 AC-2: PASS+drift（plan/TASK 改后）→ next suggest review-dev-plan；approve 硬失败且零写入', () => {
+  const { ws, privateKey } = makeDevStartWorkspace();
+  try {
+    // 评审后改 plan.md → digest 漂移
+    writeFileSync(path.join(ws, 'change-requests', 'CR-D1', 'plan.md'), '# plan drifted\n');
+    const n = runCrctl(['next', 'CR-D1', '--workspace', ws]);
+    assert.equal(n.stdout.next, 'review-dev-plan');
+    assert.ok(n.stdout.why.includes('digest 漂移'), 'next why 含 digest 漂移说明');
+    // 按漂移后证据重签发 grant：验签通过但 developing 门禁 freshness 拦截
+    const gp = makeDevStartGrant(ws, privateKey);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'dev-start', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'GATE_BLOCKED');
+    const pc = r.stderr.error.gate.checks.find((c) => c.type === 'passCondition');
+    assert.equal(pc.ok, false);
+    assert.ok(pc.why.includes('digest 漂移'), 'gateBlockers 含 digest 不一致说明');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-D1', 'approval.yml')), false, 'approval.yml 零写入');
+    const crMd = readFileSync(path.join(ws, 'change-requests', 'CR-D1', 'cr.md'), 'utf8');
+    assert.ok(crMd.includes('status: task-breakdown'), 'cr.md 零写入（状态不变）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-039 TASK-02 AC-3: legacy 无 subject-sha256 的 PASS → next suggest review-dev-plan；approve 硬失败', () => {
+  const { ws, privateKey } = makeDevStartWorkspace();
+  try {
+    writeEvidence(ws, 'CR-D1', 'review-annotations/dev-plan.yml', 'cr-id: CR-D1\nreview-type: dev-plan\nverdict: pass\nblockers: []\ndimensions:\n  sdd-to-plan: ok\n');
+    const n = runCrctl(['next', 'CR-D1', '--workspace', ws]);
+    assert.equal(n.stdout.next, 'review-dev-plan');
+    assert.ok(n.stdout.why.includes('subject-sha256'), 'next why 说明 legacy 无 digest');
+    const gp = makeDevStartGrant(ws, privateKey);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'dev-start', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'GATE_BLOCKED');
+    const pc = r.stderr.error.gate.checks.find((c) => c.type === 'passCondition');
+    assert.equal(pc.ok, false);
+    assert.ok(pc.why.includes('subject-sha256'));
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-D1', 'approval.yml')), false);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-039 TASK-02 AC-4: 删除全部 TASK → next suggest write-dev-tasks（结构化路由）；approve 硬失败且 why 含 subject 不完整', () => {
+  const { ws, privateKey } = makeDevStartWorkspace();
+  try {
+    rmSync(path.join(ws, 'change-requests', 'CR-D1', 'tasks', 'TASK-01.md'));
+    const n = runCrctl(['next', 'CR-D1', '--workspace', ws]);
+    assert.equal(n.stdout.next, 'write-dev-tasks');
+    assert.ok(n.stdout.why.includes('集合为空'), 'next why 透传 subject 不完整原因');
+    const gp = makeDevStartGrant(ws, privateKey);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'dev-start', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'GATE_BLOCKED');
+    const pc = r.stderr.error.gate.checks.find((c) => c.type === 'passCondition');
+    assert.equal(pc.ok, false);
+    assert.ok(pc.why.includes('subject 不完整'));
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-D1', 'approval.yml')), false);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -3543,10 +3618,12 @@ function makeStageWorkspace(stage) {
     ev('plan.md', '# plan\n');
     ev('tasks/_index.yml', 'tasks:\n  - id: CR-G1-TASK-01\n');
     ev('tasks/TASK-01.md', '# TASK-01\n');
-    ev('review-annotations/dev-plan.yml', 'verdict: pass\nblockers: []\n');
+    // CR-2026-039 TASK-02：reject 回退 developing 同样过 passCondition(dev-start) 门禁，freshness 需 digest
+    const devPlanAnn = `verdict: pass\nblockers: []\nsubject-sha256: ${expectDevPlanDigest(ws, cr)}\n`;
+    ev('review-annotations/dev-plan.yml', devPlanAnn);
     writeApprovalYml(ws, cr, 'development-start', {
       approver: 'alice', 'approved-at': '2026-08-10T10:00:00+08:00', via: 'crctl-approve',
-      'evidence-digest': canonicalDigestOf(['# plan\n', 'verdict: pass\nblockers: []\n']), 'target-status': 'developing',
+      'evidence-digest': canonicalDigestOf(['# plan\n', devPlanAnn]), 'target-status': 'developing',
     });
     ev('review-annotations/code.yml', 'verdict: pass\nblockers: []\n');
     ev('test-report.md', '# report\n');
