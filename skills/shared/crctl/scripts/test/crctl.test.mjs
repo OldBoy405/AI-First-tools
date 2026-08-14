@@ -2371,10 +2371,27 @@ ${blockers}${extra}dimensions:
 `);
 }
 
+// CR-2026-039 TASK-01：review-record --stage dev-plan 需要 plan.md + 非空 TASK 集（composite digest subject）。
+function seedDevPlanSubjects(ws, cr, opts = {}) {
+  writeEvidence(ws, cr, 'plan.md', opts.plan ?? '# plan\n');
+  writeEvidence(ws, cr, 'tasks/TASK-01.md', opts.task01 ?? '# TASK-01\n');
+  if (opts.task02 != null) writeEvidence(ws, cr, 'tasks/TASK-02.md', opts.task02);
+}
+
+/** CR-2026-039 TASK-01：与实现同构的独立 digest 重算（测试侧不复用 crctl 内部函数）。 */
+function expectDevPlanDigest(ws, cr) {
+  const lf = (t) => t.replaceAll('\r\n', '\n');
+  const entries = [{ path: `change-requests/${cr}/plan.md`, content: lf(readFileSync(path.join(ws, 'change-requests', cr, 'plan.md'), 'utf8')) }];
+  const names = readdirSync(path.join(ws, 'change-requests', cr, 'tasks')).filter((f) => /^TASK-.*\.md$/.test(f)).sort();
+  for (const f of names) entries.push({ path: `change-requests/${cr}/tasks/${f}`, content: lf(readFileSync(path.join(ws, 'change-requests', cr, 'tasks', f), 'utf8')) });
+  return crypto.createHash('sha256').update(JSON.stringify(entries), 'utf8').digest('hex');
+}
+
 test('CR-2026-026 ①: review-record --stage dev-plan 在 task-breakdown 落盘三账本 + pass 轨省略 repair-target（suggestion-1）', () => {
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    seedDevPlanSubjects(ws, 'CR-T1');
     const payload = writeDevPlanPayload(ws, 'CR-T1', 'pass');
     const r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
     assert.equal(r.status, 0, r.rawStderr);
@@ -2411,6 +2428,7 @@ test('CR-2026-026 ③: UPSTREAM 路由（repair-target=write-tech-design）跳�
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    seedDevPlanSubjects(ws, 'CR-T1');
     // 先跑一轮普通 block（attempt 1）
     writeDevPlanPayload(ws, 'CR-T1', 'block');
     let r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
@@ -2436,6 +2454,7 @@ test('CR-2026-026 ④: NORMAL/PASS 路由走既有 bump：attempt 递增', () =>
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    seedDevPlanSubjects(ws, 'CR-T1');
     writeDevPlanPayload(ws, 'CR-T1', 'block');
     let r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
     assert.equal(r.stdout.attempt.current, 1);
@@ -2453,6 +2472,7 @@ test('CR-2026-026 ⑤: 并存优先——repair-target=write-tech-design 且普�
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    seedDevPlanSubjects(ws, 'CR-T1');
     writeDevPlanPayload(ws, 'CR-T1', 'block', 'repair-target: write-tech-design\nblockers:\n  - "普通 plan 覆盖缺失"\n');
     const r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
     assert.equal(r.status, 0, r.rawStderr);
@@ -2574,6 +2594,7 @@ test('CR-2026-026 ⑨: 三轮普通 BLOCK 后第 4 轮 --bump-attempt → LOOP_E
   const ws = makeWorkspace();
   try {
     writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    seedDevPlanSubjects(ws, 'CR-T1');
     for (let i = 1; i <= 3; i++) {
       writeDevPlanPayload(ws, 'CR-T1', 'block');
       const r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
@@ -2584,6 +2605,130 @@ test('CR-2026-026 ⑨: 三轮普通 BLOCK 后第 4 轮 --bump-attempt → LOOP_E
     const r4 = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
     assert.equal(r4.status, 1);
     assert.equal(r4.stderr.error.code, 'LOOP_EXHAUSTED');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+// ── CR-2026-039 TASK-01：dev-plan composite digest（SDD §4.1/§4.2；AC-1～AC-4） ──
+
+function readAnnotationDigest(ws, cr) {
+  const ann = readFileSync(path.join(ws, 'change-requests', cr, 'review-annotations', 'dev-plan.yml'), 'utf8').replaceAll('\r\n', '\n');
+  return /^subject-sha256: ([0-9a-f]{64})$/m.exec(ann)?.[1] ?? null;
+}
+
+test('CR-2026-039 TASK-01 AC-1: pass 轨与 block 轨 annotation 均含 subject-sha256 且与独立重算相等', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    seedDevPlanSubjects(ws, 'CR-T1', { task02: '# TASK-02\n' });
+    writeDevPlanPayload(ws, 'CR-T1', 'block');
+    let r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(readAnnotationDigest(ws, 'CR-T1'), expectDevPlanDigest(ws, 'CR-T1'), 'block 轨 digest 与独立重算相等');
+    writeDevPlanPayload(ws, 'CR-T1', 'pass');
+    r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(readAnnotationDigest(ws, 'CR-T1'), expectDevPlanDigest(ws, 'CR-T1'), 'pass 轨 digest 与独立重算相等');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-039 TASK-01 AC-2: plan/TASK 内容或集合变化改 digest；仅改 _index.yml 不变；LF 与 CRLF 同 digest', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    seedDevPlanSubjects(ws, 'CR-T1', { task02: '# TASK-02\n' });
+    writeEvidence(ws, 'CR-T1', 'tasks/_index.yml', 'tasks: []\n');
+    const record = (verdict, bump) => {
+      writeDevPlanPayload(ws, 'CR-T1', verdict);
+      const r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', ...(bump ? ['--bump-attempt'] : []), '--workspace', ws]);
+      assert.equal(r.status, 0, r.rawStderr);
+      return readAnnotationDigest(ws, 'CR-T1');
+    };
+    const d0 = record('pass', true);
+    // 改 plan.md → digest 变
+    writeEvidence(ws, 'CR-T1', 'plan.md', '# plan v2\n');
+    const d1 = record('pass');
+    assert.notEqual(d1, d0, 'plan.md 修订改变 digest');
+    // 改任一 TASK → digest 变
+    writeEvidence(ws, 'CR-T1', 'tasks/TASK-01.md', '# TASK-01 v2\n');
+    const d2 = record('pass');
+    assert.notEqual(d2, d1, 'TASK 内容修订改变 digest');
+    // 增 TASK → digest 变；删 TASK → digest 变
+    writeEvidence(ws, 'CR-T1', 'tasks/TASK-03.md', '# TASK-03\n');
+    const d3 = record('pass');
+    assert.notEqual(d3, d2, '增 TASK 改变 digest');
+    rmSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks', 'TASK-03.md'));
+    const d4 = record('pass');
+    assert.equal(d4, d2, '删回原集合恢复原 digest（集合决定）');
+    // 仅改 tasks/_index.yml → digest 不变
+    writeEvidence(ws, 'CR-T1', 'tasks/_index.yml', 'tasks:\n  - id: CR-T1-TASK-01\n');
+    const d5 = record('pass');
+    assert.equal(d5, d4, '_index.yml 不进 digest');
+    // CRLF 检出 → 同 digest
+    const crlf = (rel) => writeFileSync(path.join(ws, 'change-requests', 'CR-T1', ...rel.split('/')), readFileSync(path.join(ws, 'change-requests', 'CR-T1', ...rel.split('/')), 'utf8').replaceAll('\n', '\r\n'));
+    crlf('plan.md'); crlf('tasks/TASK-01.md'); crlf('tasks/TASK-02.md');
+    const d6 = record('pass');
+    assert.equal(d6, d5, 'CRLF 规范化后 digest 不变（纪律 #1）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-039 TASK-01 AC-3: plan.md 缺失与 TASK 集为空 → SUBJECT_NOT_FOUND + repairTarget 且零账本写入', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    const annP = path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'dev-plan.yml');
+    const traceP = path.join(ws, 'change-requests', 'CR-T1', 'traceability.yml');
+    const loopP = path.join(ws, 'change-requests', 'CR-T1', 'review-loop.yml');
+    // plan.md 缺失 → repairTarget=write-dev-plan
+    writeEvidence(ws, 'CR-T1', 'tasks/TASK-01.md', '# TASK-01\n');
+    writeDevPlanPayload(ws, 'CR-T1', 'pass');
+    let r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'SUBJECT_NOT_FOUND');
+    assert.ok(r.stderr.error.message.includes('plan.md 缺失'), 'why 含 plan.md 缺失');
+    assert.equal(r.stderr.error.repairTarget, 'write-dev-plan');
+    assert.equal(existsSync(annP), false, 'annotation 零写入');
+    assert.equal(existsSync(traceP), false, 'traceability 零写入');
+    assert.equal(existsSync(loopP), false, 'review-loop 零写入');
+    // TASK 集为空 → repairTarget=write-dev-tasks
+    writeEvidence(ws, 'CR-T1', 'plan.md', '# plan\n');
+    rmSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks', 'TASK-01.md'));
+    writeDevPlanPayload(ws, 'CR-T1', 'pass');
+    r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'SUBJECT_NOT_FOUND');
+    assert.ok(r.stderr.error.message.includes('集合为空'), 'why 含集合为空');
+    assert.equal(r.stderr.error.repairTarget, 'write-dev-tasks');
+    assert.equal(existsSync(annP), false, 'annotation 零写入');
+    assert.equal(existsSync(traceP), false, 'traceability 零写入');
+    assert.equal(existsSync(loopP), false, 'review-loop 零写入');
+    // tasks/ 目录缺失 → repairTarget=write-dev-tasks
+    rmSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks'), { recursive: true, force: true });
+    writeDevPlanPayload(ws, 'CR-T1', 'pass');
+    r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'SUBJECT_NOT_FOUND');
+    assert.ok(r.stderr.error.message.includes('tasks/ 缺失'));
+    assert.equal(r.stderr.error.repairTarget, 'write-dev-tasks');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-039 TASK-01 AC-4: 内容拼接边界不同（不同 TASK 集合划分）不产生相同 digest', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'task-breakdown');
+    // 集合 A：两个 TASK 内容分别为 'ab' 与 'cd'
+    seedDevPlanSubjects(ws, 'CR-T1', { task01: 'ab', task02: 'cd' });
+    writeDevPlanPayload(ws, 'CR-T1', 'pass');
+    let r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    const dA = readAnnotationDigest(ws, 'CR-T1');
+    // 集合 B：单 TASK 内容为 'abcd'（拼接歧义向量）
+    rmSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks', 'TASK-02.md'));
+    writeEvidence(ws, 'CR-T1', 'tasks/TASK-01.md', 'abcd');
+    writeDevPlanPayload(ws, 'CR-T1', 'pass');
+    r = runCrctl(['review-record', 'CR-T1', '--stage', 'dev-plan', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.notEqual(readAnnotationDigest(ws, 'CR-T1'), dA, '不同集合划分不产生相同 digest');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 

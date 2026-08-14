@@ -1802,6 +1802,27 @@ function upsertReviewsStage(traceNorm, cr, stage, blockText) {
   return [...lines.slice(0, re), ...blockLines, ...lines.slice(re)].join('\n');
 }
 
+// CR-2026-039 TASK-01（SDD §4.1）：dev-plan composite digest 唯一权威定义。
+// entries = plan.md 首项 + tasks/ 下全部 TASK-*.md（workspace-relative POSIX path 字符串升序，plan.md 自然居首），
+// 每项 { path, content }（键序固定），content 为 CRLF→LF 规范化全文（纪律 #1）；JSON.stringify 无空白后 UTF-8 sha256。
+// 任一预期缺失返回带 repairTarget 的结构化失败（不跳过、不降级为空集合）；权限/I/O 异常继续抛出，不宽泛 catch。
+function devPlanCompositeDigest(ws, cr) {
+  const planRel = `change-requests/${cr}/plan.md`;
+  const planRaw = readFileChecked(path.join(ws, planRel));
+  if (planRaw == null) return { ok: false, repairTarget: 'write-dev-plan', why: 'plan.md 缺失' };
+  const tasksDir = path.join(ws, 'change-requests', cr, 'tasks');
+  if (!fs.existsSync(tasksDir)) return { ok: false, repairTarget: 'write-dev-tasks', why: 'tasks/ 缺失' };
+  const names = fs.readdirSync(tasksDir).filter((f) => /^TASK-.*\.md$/.test(f)).sort();
+  if (names.length === 0) return { ok: false, repairTarget: 'write-dev-tasks', why: 'TASK-*.md 集合为空' };
+  const entries = [{ path: planRel, content: planRaw.replaceAll('\r\n', '\n') }];
+  for (const f of names) {
+    const taskRaw = readFileChecked(path.join(tasksDir, f));
+    if (taskRaw == null) return { ok: false, repairTarget: 'write-dev-tasks', why: `TASK 文件缺失: ${f}` };
+    entries.push({ path: `change-requests/${cr}/tasks/${f}`, content: taskRaw.replaceAll('\r\n', '\n') });
+  }
+  return { ok: true, digest: sha256(JSON.stringify(entries)) };
+}
+
 async function cmdReviewRecord(ws, cr, gates, flags) {
   const stage = flags.stage;
   const fileName = REVIEW_STAGE_FILES[stage];
@@ -1953,6 +1974,13 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
     if (sddRaw == null) fail('SUBJECT_NOT_FOUND', `tech-design review-record 需要 ${sddPath} 存在（写入 subject-sha256）`);
     lines.push(`subject-file: change-requests/${cr}/sdd.md`);
     lines.push(`subject-sha256: ${sha256(sddRaw.replaceAll('\r\n', '\n'))}`);
+  }
+  if (stage === 'dev-plan') {
+    // CR-2026-039 TASK-01（SDD §4.2）：plan.md + 全部 TASK-*.md composite digest；pass/block 两轨同写；
+    // 失败统一 SUBJECT_NOT_FOUND（在任何账本写入之前，零写入）；供 TASK-02 next/gate freshness 消费。
+    const subject = devPlanCompositeDigest(ws, cr);
+    if (!subject.ok) fail('SUBJECT_NOT_FOUND', subject.why, { repairTarget: subject.repairTarget });
+    lines.push(`subject-sha256: ${subject.digest}`);
   }
   if (stage === 'code') {
     // TASK-06（SDD §3.4）：机器注入逐仓 source SHA 与受控 artifact digest；approve-code 重核后原样签入
