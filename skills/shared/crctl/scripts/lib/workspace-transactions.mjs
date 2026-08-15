@@ -111,15 +111,18 @@ export function resolveRepositories(workspace) {
     throw new TxError('REPO_GRAPH_INVALID', `repositories 必须恰好含 1 个 active knowledge-base role 仓，实际 ${kb.length}`);
   }
   const graphDigest = sha256(JSON.stringify(repositories.map((r) => ({ id: r.id, role: r.role, path: r.path, trunk: r.trunk, bucket: r.bucket }))));
-  // CR worktree 反解：workspace 位于 {InstWS}/.rayai-worktrees/{bucket}/requirement/{CR-*} 内时给出 cr/branch
+  // CR worktree 反解：用文件身份抵抗 Windows 8.3 short path / long path 别名。
   let cr = null;
   let branch = null;
   const wsReal = (() => { try { return fs.realpathSync(path.resolve(workspace)); } catch { return path.resolve(workspace); } })();
-  for (const r of repositories) {
-    const prefix = r.worktreePath + path.sep;
-    if (!wsReal.startsWith(prefix)) continue;
-    const seg = wsReal.slice(prefix.length).split(path.sep)[0];
-    if (CR_DIR_RE.test(seg)) { cr = seg; branch = `requirement/${seg}`; break; }
+  const candidateCr = path.basename(wsReal);
+  if (CR_DIR_RE.test(candidateCr)) {
+    for (const r of repositories) {
+      if (!sameFileIdentity(wsReal, path.join(r.worktreePath, candidateCr))) continue;
+      cr = candidateCr;
+      branch = `requirement/${candidateCr}`;
+      break;
+    }
   }
   return { installRoot, repositories, graphDigest, knowledgeBaseRepoId: kb[0].id, inactiveRepoIds, cr, branch };
 }
