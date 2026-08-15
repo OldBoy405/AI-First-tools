@@ -25,7 +25,7 @@ import {
   deriveInstallRoot, TxError, resolveRepositories, registerCr, ensureWorkspace,
   assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
-  matchFrontmatter, crMdStatusText, mergeCr, mergeStatus, resolveOperationalWorkspace,
+  matchFrontmatter, crMdStatusText, refreshCrMdUpdated, mergeCr, mergeStatus, resolveOperationalWorkspace,
   applyWriteback, archiveCr, checkUpgrade, checkpointCr,
 } from './lib/workspace-transactions.mjs';
 import {
@@ -548,7 +548,15 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
     } else if (check.type === 'passCondition') {
       const stageCfg = gates.approvalStages[check.stage];
       const r = evaluatePassCondition(ws, cr, stageCfg, gates, opts.evidence);
-      out.checks.push({ type: check.type, stage: check.stage, ok: r.pass, detail: r.results, pipelineSource: r.source });
+      let passOk = r.pass;
+      let passWhy = null;
+      if (r.pass && check.stage === 'dev-start') {
+        // CR-2026-039 TASK-02：dev-plan PASS 证据 freshness（复用 gate 失败通道，不新增错误码/gates.json）
+        const dp = readEvidenceDoc(ws, cr, 'change-requests/{cr}/review-annotations/dev-plan.yml', opts.evidence);
+        const fr = devPlanFreshness(ws, cr, dp.exists ? dp.data : null);
+        if (!fr.fresh) { passOk = false; passWhy = fr.why; }
+      }
+      out.checks.push({ type: check.type, stage: check.stage, ok: passOk, why: passWhy, detail: r.results, pipelineSource: r.source });
     } else if (check.type === 'approval') {
       const doc = readEvidenceDoc(ws, cr, 'change-requests/{cr}/approval.yml', opts.evidence);
       const section = doc.exists ? doc.data?.[check.section] : null;
@@ -725,7 +733,7 @@ function updateCrMdStatus(ws, cr, newStatus) {
   return { updated: true, path: p };
 }
 
-// CR-2026-027 FR-8/TASK-03：cr.md 状态文本生成纯函数（status + updated-at 更新），供 approve 原子提交在内存生成候选文本。
+// CR-2026-027 FR-8/TASK-03（CR-2026-039 TASK-03 起时间字段收敛为单一 updated）：cr.md 状态文本生成纯函数（status + updated 更新），供 approve 原子提交在内存生成候选文本。
 /* ────────────────────────── 状态读取收敛（CR-2026-018 FR-2） ──────────────────────────
  * 状态权威源 = cr.md frontmatter；_backlog.yml 退化为注册索引（owners/merge-commits 等低频字段）。
  * 迁移期兼容读：cr.md 无 status 时回退 backlog 条目 status（deprecated since v0.2.0，计划 v0.3.0 移除）。
@@ -1802,6 +1810,38 @@ function upsertReviewsStage(traceNorm, cr, stage, blockText) {
   return [...lines.slice(0, re), ...blockLines, ...lines.slice(re)].join('\n');
 }
 
+// CR-2026-039 TASK-01（SDD §4.1）：dev-plan composite digest 唯一权威定义。
+// entries = plan.md 首项 + tasks/ 下全部 TASK-*.md（workspace-relative POSIX path 字符串升序，plan.md 自然居首），
+// 每项 { path, content }（键序固定），content 为 CRLF→LF 规范化全文（纪律 #1）；JSON.stringify 无空白后 UTF-8 sha256。
+// 任一预期缺失返回带 repairTarget 的结构化失败（不跳过、不降级为空集合）；权限/I/O 异常继续抛出，不宽泛 catch。
+function devPlanCompositeDigest(ws, cr) {
+  const planRel = `change-requests/${cr}/plan.md`;
+  const planRaw = readFileChecked(path.join(ws, planRel));
+  if (planRaw == null) return { ok: false, repairTarget: 'write-dev-plan', why: 'plan.md 缺失' };
+  const tasksDir = path.join(ws, 'change-requests', cr, 'tasks');
+  if (!fs.existsSync(tasksDir)) return { ok: false, repairTarget: 'write-dev-tasks', why: 'tasks/ 缺失' };
+  const names = fs.readdirSync(tasksDir).filter((f) => /^TASK-.*\.md$/.test(f)).sort();
+  if (names.length === 0) return { ok: false, repairTarget: 'write-dev-tasks', why: 'TASK-*.md 集合为空' };
+  const entries = [{ path: planRel, content: planRaw.replaceAll('\r\n', '\n') }];
+  for (const f of names) {
+    const taskRaw = readFileChecked(path.join(tasksDir, f));
+    if (taskRaw == null) return { ok: false, repairTarget: 'write-dev-tasks', why: `TASK 文件缺失: ${f}` };
+    entries.push({ path: `change-requests/${cr}/tasks/${f}`, content: taskRaw.replaceAll('\r\n', '\n') });
+  }
+  return { ok: true, digest: sha256(JSON.stringify(entries)) };
+}
+
+// CR-2026-039 TASK-02（SDD §4.3）：dev-plan PASS 证据 freshness 唯一判定（cmdNext 与 runGateChecks 两消费点共用）。
+// legacy 无 digest → review-dev-plan；subject 不完整 → 透传 helper repairTarget；digest 漂移 → review-dev-plan。
+function devPlanFreshness(ws, cr, annData) {
+  const recSha = annData && typeof annData === 'object' ? annData['subject-sha256'] : null;
+  if (recSha == null) return { fresh: false, repairTarget: 'review-dev-plan', why: 'dev-plan annotation 无 subject-sha256（legacy 或畸形），无法判 freshness，重审刷新证据' };
+  const cur = devPlanCompositeDigest(ws, cr);
+  if (!cur.ok) return { fresh: false, repairTarget: cur.repairTarget, why: `dev-plan subject 不完整：${cur.why}` };
+  if (cur.digest !== recSha) return { fresh: false, repairTarget: 'review-dev-plan', why: `dev-plan digest 漂移（annotation 记录 ${String(recSha).slice(0, 16)}…，当前重算 ${cur.digest.slice(0, 16)}…；plan/TASK 在评审后被改动），重审刷新证据` };
+  return { fresh: true };
+}
+
 async function cmdReviewRecord(ws, cr, gates, flags) {
   const stage = flags.stage;
   const fileName = REVIEW_STAGE_FILES[stage];
@@ -1953,6 +1993,13 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
     if (sddRaw == null) fail('SUBJECT_NOT_FOUND', `tech-design review-record 需要 ${sddPath} 存在（写入 subject-sha256）`);
     lines.push(`subject-file: change-requests/${cr}/sdd.md`);
     lines.push(`subject-sha256: ${sha256(sddRaw.replaceAll('\r\n', '\n'))}`);
+  }
+  if (stage === 'dev-plan') {
+    // CR-2026-039 TASK-01（SDD §4.2）：plan.md + 全部 TASK-*.md composite digest；pass/block 两轨同写；
+    // 失败统一 SUBJECT_NOT_FOUND（在任何账本写入之前，零写入）；供 TASK-02 next/gate freshness 消费。
+    const subject = devPlanCompositeDigest(ws, cr);
+    if (!subject.ok) fail('SUBJECT_NOT_FOUND', subject.why, { repairTarget: subject.repairTarget });
+    lines.push(`subject-sha256: ${subject.digest}`);
   }
   if (stage === 'code') {
     // TASK-06（SDD §3.4）：机器注入逐仓 source SHA 与受控 artifact digest；approve-code 重核后原样签入
@@ -2235,7 +2282,8 @@ function editCrOwnerProjection(text, cr, role, newId, historyEntry, handoverAt) 
   }
   const { out } = replaceOwnerSlot(lines, role, newId, 2, handoverAt);
   const entryLine = `  - { role: ${historyEntry.role}, from: ${historyEntry.from || '""'}, to: ${historyEntry.to}, at: "${historyEntry.at}", reason: ${historyEntry.reason}${historyEntry.note ? `, note: ${yamlScalar(historyEntry.note)}` : ''} }`;
-  const body = appendOwnerHistory(out, entryLine).join('\n');
+  // CR-2026-039 TASK-03：移交同样刷新单一 updated（与移交时间一致）
+  const body = refreshCrMdUpdated(appendOwnerHistory(out, entryLine).join('\n'), handoverAt);
   return norm.replace(m.match, '---\n' + body + '\n---');
 }
 
@@ -2663,6 +2711,9 @@ function cmdNext(ws, cr, gates, flags) {
         return suggest('review-dev-plan', dp.exists ? 'dev-plan.yml 畸形（缺 verdict/blockers），重跑评审' : '缺少 dev-plan.yml 评审记录，先跑 review-dev-plan');
       }
       if (dp.data.verdict === 'pass' && dp.data.blockers.length === 0) {
+        // CR-2026-039 TASK-02：PASS 后先判 freshness；漂移/legacy/不完整 → 按 repairTarget 可执行路由
+        const fr = devPlanFreshness(ws, cr, dp.data);
+        if (!fr.fresh) return suggest(fr.repairTarget, fr.why);
         return suggest('crctl approve --stage dev-start', '开发计划评审 pass 且无 blocker，等待开发启动人工确认', true);
       }
       const route = resolveDevPlanRoute(dp.data);

@@ -25,7 +25,7 @@ description: 读取 change-requests/{CR-ID}/prd.md，在同目录编写 sdd.md �
 |------|------|------|------|
 | `cr_id` | string | ✅ | 目标 CR-ID |
 | `tech_context` | string | ❌ | 额外技术背景（架构决策/已知约束） |
-| `review_feedback` | object | ❌ | 来自 review-tech-design 的 blockers、repair-instructions；存在时进入自修复模式 |
+| `review_feedback` | object | ❌ | 来自 review-tech-design 的 blockers；存在时进入自修复模式 |
 | `self_repair_attempt` | number | ❌ | 当前自动修复轮次，由 pipeline reviewLoop 注入 |
 
 ---
@@ -55,10 +55,10 @@ description: 读取 change-requests/{CR-ID}/prd.md，在同目录编写 sdd.md �
 若存在 `review_feedback`，或 status=`tech-designing` 且上一轮 `review-annotations/sdd.yml verdict=block`，先进入自修复模式：
 
 <!-- lint-prompts:ignore --> 描述性：回修读取评审记录
-1. 读取上一轮 `review-annotations/sdd.yml` 与 `review_feedback.blockers`；若 `review_feedback` 缺失，则从 `sdd.yml` 的 blockers、repair-target、repair-instructions 组装修复输入。
-2. 按 `repair-instructions` 修订同一份 `sdd.md`，重点补齐 PRD↔SDD 映射、接口契约、数据模型、风险与测试设计。
+1. 读取上一轮 `review-annotations/sdd.yml` 与 `review_feedback.blockers`；若 `review_feedback` 缺失，则从 `sdd.yml` 的 blockers、repair-target 组装修复输入。
+2. 按 blockers 内的可执行修复说明修订同一份 `sdd.md`，重点补齐 PRD↔SDD 映射、接口契约、数据模型、风险与测试设计。
 3. 不重写已确认的整体方案，除非 blocker 明确要求替换。
-4. 输出 `self_repair_attempt`、fixed-blockers 与仍需人工关注的残余风险，供下一轮 `review-tech-design` 校验。
+4. 输出 `self_repair_attempt` 与仍需人工关注的残余风险，供下一轮 `review-tech-design` 校验。
 
 ```yaml
 ---

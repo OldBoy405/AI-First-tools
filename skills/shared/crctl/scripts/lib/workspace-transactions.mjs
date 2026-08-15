@@ -203,15 +203,28 @@ export function matchFrontmatter(text) {
   return m ? { match: m[0], body: m[1] } : null;
 }
 
-/** cr.md 状态文本生成纯函数（status + updated-at 更新；自 crctl.mjs 原样提取）。 */
+/** cr.md frontmatter 时间字段统一刷新（CR-2026-039 TASK-03，SDD §4.4）：
+ * 先删既有 updated-at: 行（legacy），再对 updated: 行原位刷新（不存在则追加）；任何情况下不得双字段共存。
+ * reader 契约：“最后受控修改时间”按 `updated ?? updated-at` 读取（当前无消费点，不新增无调用方 helper）。
+ * 入参为 LF 规范化的 frontmatter body（不含 --- 围栏）；`at` 缺省 nowIso()；返回新 body。 */
+export function refreshCrMdUpdated(fm, at) {
+  const withoutLegacy = fm.replace(/^updated-at:[ \t]*[^\r\n]*(?:\n|$)/gm, '');
+  const body = withoutLegacy.replace(/\n{2,}/g, '\n').replace(/^\n+|\n+$/g, '');
+  const ts = `updated: "${at || nowIso()}"`;
+  const updatedLine = /^updated:[ \t]*[^\r\n]*$/m;
+  return updatedLine.test(body) ? body.replace(updatedLine, ts) : body ? `${body}\n${ts}` : ts;
+}
+
+/** cr.md 状态文本生成纯函数（status + updated 更新；CR-2026-039 TASK-03 起时间字段收敛为单一 updated）。 */
 export function crMdStatusText(text, newStatus, opts = {}) {
-  const m = matchFrontmatter(text);
+  const norm = text.replaceAll('\r\n', '\n'); // 纪律 #1：CRLF 来源先规范化，输出行尾确定
+  const m = matchFrontmatter(norm);
   if (!m) return null;
   let fm = m.body;
   if (/^status:\s*.*$/m.test(fm)) fm = fm.replace(/^status:\s*.*$/m, `status: ${newStatus}`);
   else fm = fm + `\nstatus: ${newStatus}`;
-  if (/^updated-at:\s*.*$/m.test(fm)) fm = fm.replace(/^updated-at:\s*.*$/m, `updated-at: "${opts.at || nowIso()}"`);
-  return text.replace(m.match, `---\n${fm}\n---`);
+  fm = refreshCrMdUpdated(fm, opts.at);
+  return norm.replace(m.match, `---\n${fm}\n---`);
 }
 
 /* ────────────────────────── CR-ID 分配（原 crctl.mjs 同名函数迁入，TASK-05） ────────────────────────── */

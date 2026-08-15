@@ -22,7 +22,7 @@ description: 在同一 CR workspace 内按 prd/sdd/tasks 执行代码编写，�
 |------|------|------|------|
 | `cr_id` | string | yes | 目标 CR-ID |
 | `runtime` | string | no | 默认 `openwork-opencode`，不可用时 fallback 到第一个可用外部 CLI |
-| `review_feedback` | object | no | 来自 write-test-report 或 review-code 的 blockers、repair-instructions；存在时进入自修复模式 |
+| `review_feedback` | object | no | 来自 write-test-report 或 review-code 的 blockers；存在时进入自修复模式 |
 | `self_repair_attempt` | number | no | 当前自动修复轮次，由 pipeline reviewLoop 注入 |
 
 ---
@@ -73,7 +73,7 @@ description: 在同一 CR workspace 内按 prd/sdd/tasks 执行代码编写，�
 - 执行前读取 `tasks/_index.yml` 的 `depends-on` 拓扑排序：前置 TASK 未 done 不得开始本 TASK，并在节点输出注明被阻塞 TASK 与等待的前置项。依赖顺序由 `crctl task done` 机械强制（CR-2026-025 FR-6）。并发边界：同一 repo worktree 内会修改同一文件的多个 TASK 必须串行；跨 repo 的 TASK 因 worktree 隔离可并发；回修模式默认串行（已装 `dispatching-parallel-agents` 时同层无依赖 TASK 可并发派发，并发只影响耗时不影响产出）。
 - 按 `coding-discipline` §1（极简阶梯）选方案、§2（2-5 分钟步骤粒度）拆步骤执行 TASK：优先使用目标运行时已安装的 external `subagent-driven-development`；不支持子 agent 时使用 external `executing-plans`；两者均未提供时，按 `coding-discipline` §2 的粒度自行拆解串行执行，并在节点输出中注明降级。
 - 实现只写 repo map 指定的 codeRoot。
-- 若存在 `review_feedback`，进入自修复模式：按 `coding-discipline` §3 先定位根因（同一根因下所有失败点一次修完，节点输出含 root-cause 字段）、bug 修复回归先验红再验绿；读取 blockers、repair-instructions、repair-target 与上一轮 `test-report.md` / `review-annotations/code.yml`，只修复被指出的问题，避免无关重构，并输出 fixed-blockers。<!-- lint-prompts:ignore --> 描述性：仅读取评审证据（写走 review-record）
+- 若存在 `review_feedback`，进入自修复模式：按 `coding-discipline` §3 先定位根因（同一根因下所有失败点一次修完，节点输出含 root-cause 字段）、bug 修复回归先验红再验绿；读取 blockers、repair-target 与上一轮 `test-report.md` / `review-annotations/code.yml`，只修复被指出的问题（blocker 字符串内含可执行修复说明），避免无关重构。<!-- lint-prompts:ignore --> 描述性：仅读取评审证据（写走 review-record）
 
 ### Step 4 - Verify
 
@@ -93,7 +93,7 @@ description: 在同一 CR workspace 内按 prd/sdd/tasks 执行代码编写，�
 - run/session id
 - 验证命令与结果
 - 未完成项或失败原因
-- 自修复模式下的 review_feedback 摘要、self_repair_attempt 与 fixed-blockers
+- 自修复模式下的 review_feedback 摘要与 self_repair_attempt
 
 ---
 
