@@ -322,6 +322,7 @@ function validateMilestoneEvidence({ traceText, cr, specId, editRoot }) {
   if (cnt !== 1) fail('EVIDENCE_DUPLICATE', `- cr: ${cr} 段出现 ${cnt} 次（期望 1）`, { cr, specId, cnt });
 
   const ev = parseEvidence(seg.text);
+  if (ev?.error) fail(ev.error.code, ev.error.message, { cr, specId });
   if (!ev || !ev.test || !ev.approval || !ev.merge || !ev.reviews) fail('EVIDENCE_MISSING', `milestone 段缺少 evidence 块或七项不齐`, { cr, specId });
   for (const stage of REVIEW_STAGES) {
     if (!ev.reviews[stage]) fail('EVIDENCE_MISSING', `evidence 缺 reviews.${stage}`, { cr, specId });
@@ -369,13 +370,22 @@ function verifyItem(key, item, field, expectVal, cr, editRoot) {
 // 从 milestone 段文本解析 evidence 块（flow map 行级解析，仅结构固定字段，零依赖）。
 function parseEvidence(segText) {
   const lines = segText.split('\n');
+  const evidenceLines = lines.filter((line) => /^\s*evidence:\s*$/.test(line));
+  if (evidenceLines.length !== 1) {
+    return { error: { code: 'EVIDENCE_DUPLICATE', message: `evidence 块出现 ${evidenceLines.length} 次（期望 1）` } };
+  }
   let start = -1;
   for (let i = 0; i < lines.length; i++) {
     if (/^\s*evidence:\s*$/.test(lines[i])) { start = i; break; }
   }
-  if (start === -1) return null;
   const evIndent = (lines[start].match(/^ */) || [''])[0].length;
   const out = { reviews: {} };
+  const seen = new Set();
+  const duplicate = (key) => {
+    if (seen.has(key)) return { error: { code: 'EVIDENCE_DUPLICATE', message: `evidence.${key} 重复` } };
+    seen.add(key);
+    return null;
+  };
   for (let i = start + 1; i < lines.length; i++) {
     const l = lines[i];
     if (l.trim() === '' || /^\s*#/.test(l)) continue;
@@ -383,13 +393,33 @@ function parseEvidence(segText) {
     if (li <= evIndent) break;
     const t = l.trim();
     let m = t.match(/^test:\s*(\{.*\})$/);
-    if (m) { out.test = parseFlowMap(m[1]); continue; }
+    if (m) {
+      const d = duplicate('test');
+      if (d) return d;
+      out.test = parseFlowMap(m[1]);
+      continue;
+    }
     m = t.match(/^(requirement|tech-design|dev-plan|code):\s*(\{.*\})$/);
-    if (m) { out.reviews[m[1]] = parseFlowMap(m[2]); continue; }
+    if (m) {
+      const key = `reviews.${m[1]}`;
+      const d = duplicate(key);
+      if (d) return d;
+      out.reviews[m[1]] = parseFlowMap(m[2]);
+      continue;
+    }
     m = t.match(/^approval:\s*(\{.*\})$/);
-    if (m) { out.approval = parseFlowMap(m[1]); continue; }
+    if (m) {
+      const d = duplicate('approval');
+      if (d) return d;
+      out.approval = parseFlowMap(m[1]);
+      continue;
+    }
     m = t.match(/^merge:\s*(\{.*\})$/);
-    if (m) { out.merge = parseFlowMap(m[1]); continue; }
+    if (m) {
+      const d = duplicate('merge');
+      if (d) return d;
+      out.merge = parseFlowMap(m[1]);
+    }
   }
   if (!out.test || !out.approval || !out.merge || REVIEW_STAGES.some((s) => !out.reviews[s])) return null;
   return out;

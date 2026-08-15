@@ -347,6 +347,17 @@ test('traceability: --validate-evidence 复用唯一 validator（ok + path 互�
   const v4 = run(TRACE, ws, ['--validate-evidence', '--workspace', ws, '--cr', 'CR-2099-003', '--spec', 'test-spec']);
   assert.notEqual(v4.code, 0);
   assert.ok(v4.stderr.includes('EVIDENCE_DRIFT') || v4.stderr.includes('EVIDENCE_STATE'));
+  // duplicate evidence key/block → EVIDENCE_DUPLICATE
+  const duplicateKey = base.replace(/(\n      test: \{[^\n]+\})/, '$1$1');
+  fs.writeFileSync(path.join(ws, 'specs', 'test-spec', 'traceability.yml'), duplicateKey);
+  const v5 = run(TRACE, ws, ['--validate-evidence', '--workspace', ws, '--cr', 'CR-2099-003', '--spec', 'test-spec']);
+  assert.notEqual(v5.code, 0);
+  assert.ok(v5.stderr.includes('EVIDENCE_DUPLICATE'));
+  const duplicateBlock = base + '\n    evidence:\n';
+  fs.writeFileSync(path.join(ws, 'specs', 'test-spec', 'traceability.yml'), duplicateBlock);
+  const v6 = run(TRACE, ws, ['--validate-evidence', '--workspace', ws, '--cr', 'CR-2099-003', '--spec', 'test-spec']);
+  assert.notEqual(v6.code, 0);
+  assert.ok(v6.stderr.includes('EVIDENCE_DUPLICATE'));
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
