@@ -1952,6 +1952,31 @@ const readHashRaw = (p) => {
   return sha256(buf.toString('utf8'));
 };
 
+/* ── archive 证据门适配（CR-2026-041 FR-04）────────────────────────────────────────
+ * 不复制证据校验算法：复用固定 generator writeback-traceability.mjs 的唯一 validator，
+ * 通过其内部 --validate-evidence 模式只读调用（spawnSync shell:false，零 candidate/状态/文件写入）。
+ * crctl 只负责调用时序、错误映射与事务；不新增共享模块、registry 或 crctl 子命令。 */
+const EVIDENCE_TO_ARCHIVE = {
+  EVIDENCE_MISSING: 'ARCHIVE_EVIDENCE_MISSING',
+  EVIDENCE_DUPLICATE: 'ARCHIVE_EVIDENCE_DUPLICATE',
+  EVIDENCE_PATH_INVALID: 'ARCHIVE_EVIDENCE_PATH_INVALID',
+  EVIDENCE_DRIFT: 'ARCHIVE_EVIDENCE_DRIFT',
+  EVIDENCE_STATE: 'ARCHIVE_EVIDENCE_STATE',
+  EVIDENCE_INVALID: 'ARCHIVE_EVIDENCE_MISSING',
+};
+
+function runFixedEvidenceValidator({ editRoot, cr, specId }) {
+  const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'writeback', 'scripts', WRITEBACK_GENERATORS.traceability);
+  const args = [script, '--validate-evidence', '--workspace', editRoot, '--cr', cr, '--spec', specId];
+  const result = spawnSync(process.execPath, args, { cwd: editRoot, encoding: 'utf8', shell: false });
+  if (result.status === 0) return { ok: true };
+  let parsed = null;
+  try { parsed = JSON.parse(result.stderr || ''); } catch { /* generator 非结构化崩溃 */ }
+  const e = parsed && parsed.error;
+  const code = EVIDENCE_TO_ARCHIVE[e?.code] || 'ARCHIVE_EVIDENCE_STATE';
+  throw new TxError(code, e?.message || `证据校验失败（exit=${result.status}）: ${(result.stderr || result.stdout || '').trim()}`, { cr, specId, evidenceCode: e?.code ?? null });
+}
+
 async function applyWritebackAtomic(ctx, input) {
   const { cr, stage, specId } = input;
   const opWs = resolveOperationalWorkspace(ctx, cr);
@@ -2342,6 +2367,20 @@ export async function archiveCr(ctx, input) {
   const recoverCommand = `crctl archive ${cr}${specId ? ` --spec-id ${JSON.stringify(specId)}` : ''} --workspace ${JSON.stringify((input && input.workspace) || ctx.installRoot)}`;
   const lock = await acquireLock({ root: ctx.installRoot, scope: `archive-${cr}`, op: 'archive', cr });
   try {
+    // pre-authority 证据门（CR-2026-041 FR-04）：只读分流，journal 创建前校验，失败零 journal/authority 写入。
+    // 先 loadExistingJournal（只读）判 needsEvidence；已 commit/push 或 cleanup-pending/complete 的恢复路径跳过。
+    const existing = loadExistingJournal({ root: ctx.installRoot, op: 'archive', cr, key: cr, inputDigest: sha256(cr + '|' + (specId || '')) });
+    const p0 = existing?.journal?.archive;
+    const needsEvidence = !existing
+      || !(p0 && (p0.committed || p0.pushed || p0.phase === 'cleanup-pending' || p0.phase === 'complete'));
+    if (needsEvidence) {
+      const opWs0 = resolveOperationalWorkspace(ctx, cr); // 只读
+      if (opWs0.phase === 'writing-back') {
+        if (!specId) throw new TxError('ARCHIVE_SPEC_REQUIRED', 'archive writing-back 路径需要 --spec-id（writeback-spec-id 入账）', { cr });
+        runFixedEvidenceValidator({ editRoot: opWs0.path, cr, specId });
+      }
+      // rejected/withdrawn：无 writing-back milestone，跳过证据门
+    }
     let journal, journalPath;
     ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'archive', key: cr, graphDigest: ctx.graphDigest, inputDigest: sha256(cr + '|' + (specId || '')) }));
     const payload = journal.archive || { cr, phase: 'start', status: null, committed: false, commit: null, baseSha: null, pushed: false, cleanupDone: null, preservedRefs: [], remaining: [] };

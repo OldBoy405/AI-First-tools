@@ -10,7 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { git, runCrctl, sha256, makeCodeApprovedFixture, originMasterCount } from './merge-fixture.mjs';
 import { archiveCr, resolveRepositories } from '../lib/workspace-transactions.mjs';
 
-/** merge + 原子 baseline writeback → archive 前置就绪；txws 返回。 */
+/** merge + 原子 baseline writeback → archive 前置就绪；txws 返回。补齐证据文件 + 写含 evidence 块的 traceability（CR-2026-041 证据门前置）。 */
 function makeWritebackFixture() {
   const f = makeCodeApprovedFixture();
   const { base, kb, cr } = f;
@@ -21,12 +21,47 @@ function makeWritebackFixture() {
   const rb = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', '0.2', '--workspace', kb], { cwd: kb });
   assert.equal(rb.status, 0, rb.stderr);
   assert.equal(rb.json.status, 'writing-back');
-  // traceability 落点存在性（archive 前置）；提交保持 txws clean（否则 archive cleanup 视为 dirty 零删除）
-  fs.mkdirSync(path.join(txws, 'specs', 'test-spec'), { recursive: true });
-  fs.writeFileSync(path.join(txws, 'specs', 'test-spec', 'traceability.yml'), '# trace\nmilestones:\n');
-  git(txws, ['add', 'specs/test-spec/traceability.yml']);
+  // 补齐证据文件 + 写含 evidence 块的 traceability（archive 证据门前置）；提交保持 txws clean
+  writeEvidenceTrace(txws, cr);
+  git(txws, ['add', '-A']);
   git(txws, ['commit', '-q', '-m', 'traceability fixture']);
   return { base, kb, cr, txws };
+}
+
+/** 在 txws 补齐 7 份 canonical 证据文件并写含 evidence 块的 traceability.yml（CR-2026-041）。 */
+function writeEvidenceTrace(txws, cr) {
+  const crDir = path.join(txws, 'change-requests', cr);
+  const shaOf = (p) => sha256(fs.readFileSync(p, 'utf8').replaceAll('\r\n', '\n'));
+  // makeCodeApprovedFixture 只有 dev-plan/code 两份 review + development-start/code 两段 approval，补齐剩余
+  fs.writeFileSync(path.join(crDir, 'review-annotations', 'requirement.yml'), `cr-id: ${cr}\nreview-type: requirement\nverdict: pass\n`);
+  fs.writeFileSync(path.join(crDir, 'review-annotations', 'sdd.yml'), `cr-id: ${cr}\nreview-type: tech-design\nverdict: pass\n`);
+  fs.writeFileSync(path.join(crDir, 'approval.yml'), `requirement:\n  via: crctl-approve\ntech-design:\n  via: crctl-approve\n` + fs.readFileSync(path.join(crDir, 'approval.yml'), 'utf8'));
+  // 七项 evidence path
+  const rel = (k) => `change-requests/${cr}/${k}`;
+  const testPath = rel('test-report.md');
+  const rReq = rel('review-annotations/requirement.yml');
+  const rSdd = rel('review-annotations/sdd.yml');
+  const rDp = rel('review-annotations/dev-plan.yml');
+  const rCode = rel('review-annotations/code.yml');
+  const apPath = rel('approval.yml');
+  const mcPath = rel('merge-commits.yml');
+  const L = [
+    '# trace', 'spec-id: test-spec', `cr-ref: ${cr}`, `cr-history: [${cr}]`, 'target-version: "0.2"',
+    'baseline-since: "0.2"', 'generated-at: "2026-08-15T00:00:00+08:00"', '', 'milestones:',
+    `  - cr: ${cr}`, '    milestone: M0', '    target-version: "0.2"', '    merge-commits:',
+    '      - repo: kb', '        trunk: master', '        sha: x', '    frs:', '      - fr: FR-1',
+    '    evidence:',
+    `      test: { status: pass, path: ${testPath}, sha256: ${shaOf(path.join(crDir, 'test-report.md'))} }`,
+    '      reviews:',
+    `        requirement: { verdict: pass, path: ${rReq}, sha256: ${shaOf(path.join(crDir, 'review-annotations', 'requirement.yml'))} }`,
+    `        tech-design: { verdict: pass, path: ${rSdd}, sha256: ${shaOf(path.join(crDir, 'review-annotations', 'sdd.yml'))} }`,
+    `        dev-plan: { verdict: pass, path: ${rDp}, sha256: ${shaOf(path.join(crDir, 'review-annotations', 'dev-plan.yml'))} }`,
+    `        code: { verdict: pass, path: ${rCode}, sha256: ${shaOf(path.join(crDir, 'review-annotations', 'code.yml'))} }`,
+    `      approval: { status: approved, path: ${apPath}, sha256: ${shaOf(path.join(crDir, 'approval.yml'))} }`,
+    `      merge: { status: merged, path: ${mcPath}, sha256: ${shaOf(path.join(crDir, 'merge-commits.yml'))} }`,
+  ];
+  fs.mkdirSync(path.join(txws, 'specs', 'test-spec'), { recursive: true });
+  fs.writeFileSync(path.join(txws, 'specs', 'test-spec', 'traceability.yml'), L.join('\n') + '\n');
 }
 
 test('TASK-09 AC-1：happy path — 四账本同批 + trailer + cleanup 全清 + 幂等重放', () => {
@@ -400,5 +435,44 @@ test('TASK-01 RED-10：remote rebuild — 返回 commit 与事件 commit_sha 均
     assert.equal(files.length, 1, '全程只产生一个 archive 事件');
     const ev = JSON.parse(fs.readFileSync(path.join(kb, '.crctl', 'outbox', files[0]), 'utf8'));
     assert.equal(ev.commit_sha, head, '事件只用最终 confirmed SHA，旧 SHA 不得出现');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+/* ───────────── CR-2026-041 归档证据门 ───────────── */
+
+test('CR-2026-041 证据门：evidence digest 漂移 → ARCHIVE_EVIDENCE_DRIFT 硬失败且零 journal/authority', () => {
+  const { base, kb, cr, txws } = makeWritebackFixture();
+  try {
+    const tp = path.join(txws, 'specs', 'test-spec', 'traceability.yml');
+    const t = fs.readFileSync(tp, 'utf8');
+    fs.writeFileSync(tp, t.replace(/sha256: [0-9a-f]{64}/, 'sha256: ' + '0'.repeat(64)));
+    git(txws, ['add', 'specs/test-spec/traceability.yml']);
+    git(txws, ['commit', '-q', '-m', 'drift']);
+    const n0 = originMasterCount(base, 'kb');
+    const journalDir = path.join(kb, '.crctl', 'transactions', 'archive', cr);
+    fs.rmSync(journalDir, { recursive: true, force: true });
+    const r = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.notEqual(r.status, 0, '证据漂移必须失败');
+    assert.ok(/ARCHIVE_EVIDENCE_DRIFT|ARCHIVE_EVIDENCE/.test(r.stderr), '错误码应为 ARCHIVE_EVIDENCE_*：' + r.stderr);
+    assert.equal(originMasterCount(base, 'kb'), n0, '证据门失败零 authority 写入');
+    assert.equal(fs.existsSync(journalDir), false, '证据门失败零 journal 创建');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-041 证据门：证据缺失 → ARCHIVE_EVIDENCE 硬失败且零 journal', () => {
+  const { base, kb, cr, txws } = makeWritebackFixture();
+  try {
+    // 删除一份 review 证据源文件（traceability evidence 块仍引用，重读失败 → 缺失）
+    fs.rmSync(path.join(txws, 'change-requests', cr, 'review-annotations', 'requirement.yml'));
+    git(txws, ['add', '-A']);
+    git(txws, ['commit', '-q', '-m', 'drop evidence']);
+    const n0 = originMasterCount(base, 'kb');
+    const journalDir = path.join(kb, '.crctl', 'transactions', 'archive', cr);
+    fs.rmSync(journalDir, { recursive: true, force: true });
+    const r = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.notEqual(r.status, 0, '证据缺失必须失败');
+    assert.ok(/ARCHIVE_EVIDENCE/.test(r.stderr), '错误码应为 ARCHIVE_EVIDENCE_*：' + r.stderr);
+    assert.equal(originMasterCount(base, 'kb'), n0, '证据门失败零 authority 写入');
+    assert.equal(fs.existsSync(journalDir), false, '证据门失败零 journal 创建');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

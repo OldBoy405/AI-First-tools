@@ -25,7 +25,6 @@ phase0 中的质量门以 CR 生命周期为核心，不再使用旧式 `feature
 | 技术设计评审 | `tech-design-review-pending` | `review-tech-design` | `review-annotations/sdd.yml` |
 | 代码评审 | `developing` | `review-code` | `review-annotations/code.yml` |
 | 横向对齐 / drift 检查 | 任意 | `review-alignment` | `traceability.yml#drift` |
-| 变更影响分析 | 任意 | `change-impact-analysis` | `traceability.yml#change-log` |
 
 ## 输入模式
 
@@ -57,5 +56,4 @@ phase0 中的质量门以 CR 生命周期为核心，不再使用旧式 `feature
 - `review-tech-design`
 - `review-code`
 - `review-alignment`
-- `change-impact-analysis`
 - `tools/skills/reviewer-panel.yaml`

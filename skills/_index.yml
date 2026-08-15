@@ -245,11 +245,6 @@ skills:
     brief: "跨节点对齐校验：检测 PRD↔SDD↔TASK↔代码↔RELEASE drift"
     status: active
 
-  - id: change-impact-analysis
-    path: ./review/change-impact-analysis/SKILL.md
-    brief: "变更影响分析：上游变更时自动标记下游 perspective 为 stale"
-    status: active
-
   # ─── 跨领域通用（shared）──────────────────────────────────────────────
 
   - id: validate-doc
@@ -288,11 +283,6 @@ skills:
   - id: cr-archive
     path: ./cr/cr-archive/SKILL.md
     brief: "归档新四阶段 CR：writing-back→archived，或归档 rejected/withdrawn 终止态"
-    status: active
-
-  - id: feedback-writeback
-    path: ./cr/feedback-writeback/SKILL.md
-    brief: "将 CR 实施结论写回 spec traceability.yml 和 docs/tech-notes（闭环可追溯）"
     status: active
 
   - id: cr-inbox

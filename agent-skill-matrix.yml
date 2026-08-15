@@ -132,7 +132,6 @@ actors:
     kind: agent
     owns:
       - review-alignment
-      - change-impact-analysis
     can-call:
       - review-planning-report
       - review-requirement
@@ -211,7 +210,6 @@ actors:
       - cr-review-record
       - inbox-emit
       - cr-archive
-      - feedback-writeback
       - cr-inbox
       - cr-query
       - cr-show

@@ -20,6 +20,15 @@ function makeMergedFixture() {
   return { base, kb, cr, txws: r.json.operationalWorkspace };
 }
 
+/** CR-2026-041：补齐 traceability generator 需要的 7 份证据（makeCodeApprovedFixture 仅含 dev-plan/code + development-start/code）。 */
+function addEvidenceFiles(txws, cr) {
+  const crDir = path.join(txws, 'change-requests', cr);
+  fs.mkdirSync(path.join(crDir, 'review-annotations'), { recursive: true });
+  fs.writeFileSync(path.join(crDir, 'review-annotations', 'requirement.yml'), `cr-id: ${cr}\nreview-type: requirement\nverdict: pass\n`);
+  fs.writeFileSync(path.join(crDir, 'review-annotations', 'sdd.yml'), `cr-id: ${cr}\nreview-type: tech-design\nverdict: pass\n`);
+  fs.writeFileSync(path.join(crDir, 'approval.yml'), `requirement:\n  via: crctl-approve\ntech-design:\n  via: crctl-approve\n` + fs.readFileSync(path.join(crDir, 'approval.yml'), 'utf8'));
+}
+
 function atomicCallbacks(txws, cr, observed) {
   return {
     validateBaselineAdvance: ({ workspace, plannedExisting }) => {
@@ -210,11 +219,13 @@ test('TASK-04：traceability 公共业务参数全链路', () => {
   try {
     const baseline = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', '0.2', '--workspace', kb], { cwd: kb });
     assert.equal(baseline.status, 0, baseline.stderr);
+    addEvidenceFiles(txws, cr);
     const milestone = path.join(txws, 'milestone.yml');
-    fs.writeFileSync(milestone, `cr: ${cr}\nmilestone: M1\ntarget-version: "0.2"\nstatus: writing-back\nfr-chain:\n  - fr: FR-1\n    title: 原子回写\n    tasks: [${cr}-TASK-01]\n`);
+    fs.writeFileSync(milestone, `cr: ${cr}\nmilestone: M1\ntarget-version: "0.2"\nfr-chain:\n  - fr: FR-1\n    title: 原子回写\n    tasks: [${cr}-TASK-01]\n`);
     const trace = runCrctl(['writeback-apply', cr, '--stage', 'traceability', '--spec-id', 'test-spec', '--target-version', '0.2', '--milestone-file', 'milestone.yml', '--workspace', kb], { cwd: kb });
     assert.equal(trace.status, 0, trace.stderr);
     const head = git(path.join(base, 'origin-kb.git'), ['rev-parse', 'master']);
     assert.ok(git(path.join(base, 'origin-kb.git'), ['show', `${head}:specs/test-spec/traceability.yml`]).includes(`- cr: ${cr}`));
+    assert.ok(git(path.join(base, 'origin-kb.git'), ['show', `${head}:specs/test-spec/traceability.yml`]).includes('evidence:'));
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

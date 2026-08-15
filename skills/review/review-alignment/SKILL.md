@@ -57,7 +57,6 @@ readonly: true
 | AL-04 代码→writeback 同步 | `_backlog.yml.merge-commits[]` 中每个 active repo 均出现在 `traceability.yml.code.repos[]` |
 | AL-05 requirements 指纹 | PRD.md 中 RQ/FR 条目的文本指纹未变更（检测需求文本改写但未重审） |
 | AL-06 contracts 同步 | `contracts/` 下文件 mtime ≤ `traceability.reviews.sdd.contracts-completeness.at` |
-| AL-07 无 stale 残留 | `traceability.requirements[].reviews.*.{perspective}.result != stale`（由 change-impact-analysis 置位） |
 
 ## 对齐矩阵（写入 traceability.yml）
 
@@ -109,6 +108,5 @@ summary:
 
 | 关系对象 | 说明 |
 |---|---|
-| `change-impact-analysis` | 写方：上游变更时置 stale；本 Skill 读取 stale 标记汇总 drift |
 | `review-*` | 互补：review-* 审单节点内部质量，本 Skill 审跨节点时间差 |
 | `feature-writeback.pipeline` | 消费方：合并或回写前后调用 |

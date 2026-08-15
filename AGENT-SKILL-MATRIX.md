@@ -26,9 +26,9 @@
 | `dev-agent` | `write-tech-design`, `review-tech-design`, `approve-tech-design`, `write-dev-plan`, `write-dev-tasks`, `review-dev-plan`, `approve-dev-start`, `implement-code`, `write-test-report`, `review-code`, `approve-code`, `coding-discipline` |
 | `spec-agent` | `spec-show`, `spec-query`, `spec-dashboard` |
 | `delivery-agent` | `writeback-tasks` |
-| `quality-reviewer-agent` | `review-alignment`, `change-impact-analysis` |
+| `quality-reviewer-agent` | `review-alignment` |
 | `competitive-analyst-agent` | `fetch-competitor-updates`, `write-competitive-report`, `report-to-planning-suggestion` |
-| `system-orchestrator` | `merge-feature-branch`, `writeback-prd-sdd`, `writeback-traceability`, `push-progress`, `pull-progress`, `resume-from-remote`, `list-remote-checkpoints`, `handover-cr`, `validate-doc`, `engineering-docs`, `controlled-shell`, `crctl`, `cr-review-record`, `inbox-emit`, `cr-archive`, `feedback-writeback`, `cr-inbox`, `cr-query`, `cr-show`, `cr-dashboard` |
+| `system-orchestrator` | `merge-feature-branch`, `writeback-prd-sdd`, `writeback-traceability`, `push-progress`, `pull-progress`, `resume-from-remote`, `list-remote-checkpoints`, `handover-cr`, `validate-doc`, `engineering-docs`, `controlled-shell`, `crctl`, `cr-review-record`, `inbox-emit`, `cr-archive`, `cr-inbox`, `cr-query`, `cr-show`, `cr-dashboard` |
 
 ## Pipeline Owner
 

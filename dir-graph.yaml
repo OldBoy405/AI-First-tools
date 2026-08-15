@@ -292,11 +292,6 @@ agent_hints:
         - "change-request-track.state_machine"
         - "target_workspace_contract.repository_resolution"
         - "target_workspace_contract.required_roots"
-    change-impact-analysis:
-      read:
-        - "change-request-track.state_machine"
-        - "target_workspace_contract.repository_resolution"
-        - "target_workspace_contract.required_roots"
 
 validation:
   required_before_delivery:
