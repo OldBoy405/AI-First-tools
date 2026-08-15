@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { parseYaml, matchEntryBlock } from './lib/yaml-subset.mjs';
 import {
   deriveInstallRoot, TxError, resolveRepositories, registerCr, ensureWorkspace,
+  classifyWorkspaceFreshness,
   assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
   matchFrontmatter, crMdStatusText, refreshCrMdUpdated, mergeCr, mergeStatus, resolveOperationalWorkspace,
@@ -2778,14 +2779,38 @@ async function cmdRegister(ws, flags) {
   ok({ op: 'register', ...result, outbox, warnings });
 }
 
+/* CR-2026-043 TASK-01/02：freshness/sync 不走 runTxAsync 全局错误路径（其失败直接 fail，
+ * 审计不可达），而是局部 try/catch：成功 non-fresh 业务阻断与 TxError 均先写 audit 再输出。 */
+function workspaceFreshnessAuditFail(ws, cr, e) {
+  auditLog(ws, { kind: 'workspace-freshness', cr, actor: identity(ws), error: e.code, extra: e.extra || {} });
+  fail(e.code, e.message, e.extra);
+}
+
 async function cmdWorkspace(ws, positional, flags) {
   const sub = positional[0];
   const cr = positional[1];
-  if (!['inspect', 'ensure', 'cleanup'].includes(sub)) fail('BAD_ARGS', 'workspace 支持 inspect|ensure|cleanup <CR-ID> [--mode <m>]');
+  if (!['inspect', 'ensure', 'cleanup', 'freshness'].includes(sub)) fail('BAD_ARGS', 'workspace 支持 inspect|ensure|cleanup|freshness <CR-ID> [--mode <m>]');
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'workspace 需要 CR-ID');
   if (sub === 'ensure' && flags.mode !== 'resume') fail('BAD_ARGS', 'workspace ensure 需要 --mode resume');
   if (sub === 'cleanup' && !['partial', 'archived'].includes(flags.mode)) fail('BAD_ARGS', 'workspace cleanup 需要 --mode partial|archived');
   const ctx = resolveRepositories(ws);
+  if (sub === 'freshness') {
+    const extra = Object.keys(flags).filter((k) => k !== 'workspace' && k !== 'cmdList');
+    if (extra.length) fail('BAD_ARGS', `workspace freshness 不接受额外参数: ${extra.map((x) => `--${x}`).join(', ')}`);
+    try {
+      const result = classifyWorkspaceFreshness(ctx, cr);
+      if (!result.allFresh) {
+        auditLog(ws, {
+          kind: 'workspace-freshness', cr, actor: identity(ws),
+          blocked: result.repositories.filter((r) => r.freshness !== 'fresh').map((r) => ({ repo: r.repo, freshness: r.freshness, reason: r.reason || null })),
+        });
+      }
+      return ok({ op: 'workspace-freshness', ...result });
+    } catch (e) {
+      if (e instanceof TxError) workspaceFreshnessAuditFail(ws, cr, e);
+      throw e;
+    }
+  }
   const mode = sub === 'inspect' ? 'inspect' : sub === 'ensure' ? 'resume' : flags.mode;
   const result = await runTxAsync(ensureWorkspace(ctx, { cr, mode }));
   ok({ op: `workspace-${sub}`, cr, mode, ...result });
@@ -2853,6 +2878,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl workspace inspect <cr_id>                  各 active repo workspace 事实分类（只读）
   crctl workspace ensure  <cr_id> --mode resume    只补齐可证明缺失的 workspace 资源（零删除）
   crctl workspace cleanup <cr_id> --mode partial|archived   只删干净 worktree；dirty/unknown/未合并 ref 保留
+  crctl workspace freshness <cr_id>              各仓 CR 分支对 trunk 的新鲜度只读分类（fresh/behind-clean/diverged/unknown）
   crctl merge <cr_id>                                可恢复跨仓 merge saga：prepare(commit-tree) → 逐仓 lease publish → 全部 confirmed 后 detached Transaction Workspace 单 finalize commit（status=merging + merge-commits.yml + merge-verification.md）→ lease push
   crctl merge status <cr_id>                        只读快照：journal phase + 每仓 intent/observation（零写入、零 fetch）
   crctl writeback-apply <cr_id> --stage <s> --spec-id <id> --target-version <ver>

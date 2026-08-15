@@ -727,6 +727,82 @@ export async function ensureWorkspace(ctx, input) {
   return { txId: null, resources, changed };
 }
 
+/* ────────────────────────── workspace freshness 分类（CR-2026-043 TASK-01，SDD §4.1） ──────────────────────────
+ * 第二层只读分类：基础分类（classifyRepoWorkspace）回答“资源存在/健康”，
+ * freshness 回答“CR 分支 HEAD 与 fetch 后 origin/{trunk} 的祖先关系”。
+ * 零写入（fetch 只更新 remote-tracking 元数据）；禁止时间戳/log 计数等启发式。 */
+
+/** ancestry 判定：merge-base --is-ancestor 退出码 0=祖先，1=非祖先（Git 唯一正常否定），
+ * 其余退出码是技术失败——不得降级为 diverged/unknown（PRD FR-01.5）。 */
+export function isAncestorOrThrow(wtPath, a, b) {
+  const r = gitRun(wtPath, ['merge-base', '--is-ancestor', a, b]);
+  if (r.status === 0) return true;
+  if (r.status === 1) return false;
+  throw new TxError('TX_GIT_FAILED', `merge-base --is-ancestor 退出码异常（exit=${r.status}，非 0/1）: ${r.stderr || r.stdout}`, { cwd: wtPath, args: ['merge-base', '--is-ancestor', a, b], status: r.status, stderr: r.stderr });
+}
+
+/**
+ * 只读业务检查（FR-01/FR-02）：对每个 active repo 逐仓分类。
+ * - fresh：HEAD==trunk 或 trunk 是 HEAD 祖先（ahead-only 是正常开发态）；
+ * - behind-clean：HEAD 是 trunk 祖先（canFastForward 机械投影）；
+ * - diverged：互不为祖先（人工处理，无自动 merge/rebase）；
+ * - unknown：基础分类非 healthy 或检查期间变 dirty（reason 透传，不猜测）。
+ * fetch 失败或 origin/{trunk} 不可确认 → WORKSPACE_TRUNK_UNAVAILABLE 硬失败。
+ */
+export function classifyWorkspaceFreshness(ctx, cr) {
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) throw new TxError('WORKSPACE_CR_INVALID', `CR-ID 非法: ${cr}`);
+  const repositories = [];
+  let blocked = false;
+  let anyBehind = false;
+  for (const repo of ctx.repositories) {
+    const info = classifyRepoWorkspace(ctx, repo, cr);
+    const fact = {
+      repo: repo.id, trunkRef: repo.trunk, trunkSha: null, branch: info.branch,
+      headSha: null, worktreePath: info.worktreePath,
+      workspaceClassification: info.classification,
+      freshness: 'unknown', dirty: info.dirty, canFastForward: false,
+    };
+    if (info.classification !== 'healthy') {
+      fact.reason = info.classification;
+      blocked = true;
+      repositories.push(fact);
+      continue;
+    }
+    fact.headSha = gitMust(info.worktreePath, ['rev-parse', 'HEAD']);
+    const st = gitRun(info.worktreePath, ['status', '--porcelain']);
+    if (st.stdout !== '') {
+      fact.dirty = true;
+      fact.reason = 'dirty-during-check';
+      blocked = true;
+      repositories.push(fact);
+      continue;
+    }
+    let trunkSha;
+    try {
+      gitMust(repo.rootPath, ['fetch', 'origin']);
+      trunkSha = gitMust(repo.rootPath, ['rev-parse', `refs/remotes/origin/${repo.trunk}`]);
+    } catch (e) {
+      throw new TxError('WORKSPACE_TRUNK_UNAVAILABLE', `${repo.id}: fetch 或 origin/${repo.trunk} 不可确认（${e.message}）`, { repo: repo.id, trunk: repo.trunk });
+    }
+    fact.trunkSha = trunkSha;
+    if (fact.headSha === trunkSha) {
+      fact.freshness = 'fresh';
+    } else if (isAncestorOrThrow(info.worktreePath, trunkSha, fact.headSha)) {
+      fact.freshness = 'fresh'; // ahead-only
+    } else if (isAncestorOrThrow(info.worktreePath, fact.headSha, trunkSha)) {
+      fact.freshness = 'behind-clean';
+      fact.canFastForward = true;
+      anyBehind = true;
+    } else {
+      fact.freshness = 'diverged';
+      blocked = true;
+    }
+    repositories.push(fact);
+  }
+  const allFresh = repositories.every((r) => r.freshness === 'fresh');
+  return { cr, repositories, allFresh, syncable: allFresh ? false : !blocked && anyBehind };
+}
+
 /* ────────────────────────── Signed release snapshot（TASK-06，SDD §3.4） ──────────────────────────
  * 受控 artifact 集合 = PRD、SDD、dev plan、TASK 文件与 task index（knowledge-base 仓内）。
  * buildReleaseSubjects 由 review-record --stage code 机器注入 review-annotations/code.yml，
