@@ -54,7 +54,7 @@ pipeline-templates:
     name: 代码编写
     scope: product-dev
     trigger: coding
-    nodes: 13
+    nodes: 17  # CR-2026-043：修正既有漂移（索引原为 13，实际 JSON 早已 15 节点），本 CR 新增 2 个 gate 后为 17
     status: active
     brief: >-
       代码编写流水线：根据已评审 SDD 生成 plan.md → 拆分 TASK
