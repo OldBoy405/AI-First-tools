@@ -6,7 +6,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { git, runCrctl, makeFixture } from './merge-fixture.mjs';
-import { TxError, resolveRepositories, classifyWorkspaceFreshness, isAncestorOrThrow } from '../lib/workspace-transactions.mjs';
+import { TxError, resolveRepositories, classifyWorkspaceFreshness, isAncestorOrThrow, syncWorkspaceToTrunk } from '../lib/workspace-transactions.mjs';
+import { acquireLock } from '../lib/durable-tx.mjs';
 
 const CR = 'CR-2026-043';
 
@@ -233,5 +234,192 @@ test('TASK-01 CLI：额外 flag → BAD_ARGS（AC-2）', () => {
     const r = runCrctl(['workspace', 'freshness', CR, '--mode', 'resume', '--workspace', f.kb], { cwd: f.kb });
     assert.equal(r.status, 1);
     assert.equal(r.errJson.error.code, 'BAD_ARGS');
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── TASK-02：syncWorkspaceToTrunk 事务 ────────────────────────── */
+
+const sync = (kb) => syncWorkspaceToTrunk(resolveRepositories(kb), { cr: CR });
+
+function journals(kb, cr) {
+  const base = path.join(kb, '.crctl', 'transactions', 'workspace', cr);
+  if (!fs.existsSync(base)) return [];
+  return fs.readdirSync(base).sort().map((txId) => JSON.parse(fs.readFileSync(path.join(base, txId, 'journal.json'), 'utf8').replaceAll('\r\n', '\n')));
+}
+
+const headOf = (kb, repo) => git(wtPath(kb, repo, CR), ['rev-parse', 'HEAD']);
+
+test('TASK-02：behind-clean ff-only 成功，afterSha==捕获 trunk SHA，journal complete（AC-1）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    const newTrunk = advanceTrunk(f.base, 'tools', 's1');
+    const r = await sync(f.kb);
+    assert.equal(r.phase, 'complete');
+    assert.equal(r.changed, true);
+    assert.ok(r.txId);
+    const rec = r.repositories.find((x) => x.repo === 'tools');
+    assert.equal(rec.action, 'fast-forwarded');
+    assert.equal(rec.afterSha, newTrunk);
+    assert.equal(headOf(f.kb, 'tools'), newTrunk, 'worktree HEAD 已前移');
+    assert.equal(r.repositories.find((x) => x.repo === 'kb').action, 'unchanged');
+    const js = journals(f.kb, CR);
+    assert.equal(js.length, 1);
+    assert.equal(js[0].phase, 'complete');
+    assert.match(r.recoverCommand, /workspace sync/);
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-02：全 fresh no-op → changed=false、txId=null、零 journal（AC-1/AC-2）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    const r = await sync(f.kb);
+    assert.equal(r.changed, false);
+    assert.equal(r.txId, null);
+    assert.equal(journals(f.kb, CR).length, 0, '全 fresh 不创建空 journal');
+    assert.ok(r.repositories.every((x) => x.action === 'unchanged'));
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-02：dirty/diverged/unknown 阻断 → 零写入零 journal（AC-2）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    fs.writeFileSync(path.join(wtPath(f.kb, 'tools', CR), 'uncommitted.txt'), 'dirty\n');
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'WORKSPACE_SYNC_BLOCKED');
+    assert.equal(journals(f.kb, CR).length, 0);
+    fs.rmSync(path.join(wtPath(f.kb, 'tools', CR), 'uncommitted.txt'));
+    advanceBranch(f.kb, 'tools', 'dv');
+    advanceTrunk(f.base, 'tools', 'dv');
+    const before = headOf(f.kb, 'tools');
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'WORKSPACE_FRESHNESS_DIVERGED');
+    assert.equal(headOf(f.kb, 'tools'), before, 'diverged 零写入');
+    assert.equal(journals(f.kb, CR).length, 0, '阻断不创建 journal');
+    // branch-only（unknown）：删 worktree 目录
+    fs.rmSync(wtPath(f.kb, 'multica', CR), { recursive: true, force: true });
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'WORKSPACE_SYNC_BLOCKED');
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-02：ws-sync-after-repo 故障注入后续跑只使用 journal 原始 intent（AC-2）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    const kbTarget = advanceTrunk(f.base, 'kb', 'f1');
+    const toolsTarget = advanceTrunk(f.base, 'tools', 'f1');
+    process.env.CRCTL_FAULT_POINT = 'ws-sync-after-repo';
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'FAULT_INJECTED');
+    delete process.env.CRCTL_FAULT_POINT;
+    const mid = journals(f.kb, CR);
+    assert.equal(mid.length, 1);
+    assert.equal(mid[0].phase, 'syncing', '第一仓已落盘');
+    const intentBefore = JSON.stringify(mid[0].workspace.repos.map((r) => [r.repo, r.beforeSha, r.targetTrunkSha]));
+    const r = await sync(f.kb);
+    assert.equal(r.phase, 'complete');
+    const after = journals(f.kb, CR);
+    assert.equal(after.length, 1, '续跑复用同一事务，不新建');
+    assert.equal(JSON.stringify(after[0].workspace.repos.map((r) => [r.repo, r.beforeSha, r.targetTrunkSha])), intentBefore, '原始 intent 未被重算');
+    assert.equal(headOf(f.kb, 'kb'), kbTarget);
+    assert.equal(headOf(f.kb, 'tools'), toolsTarget);
+    assert.ok(r.repositories.every((x) => ['fast-forwarded', 'unchanged'].includes(x.action)));
+  } finally { delete process.env.CRCTL_FAULT_POINT; fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-02：latest complete 后 trunk 再前进 → 新事务（createAfterComplete），旧 journal 保留（AC-2）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceTrunk(f.base, 'tools', 'n1');
+    const first = await sync(f.kb);
+    const second = advanceTrunk(f.base, 'tools', 'n2');
+    const r = await sync(f.kb);
+    assert.equal(r.changed, true);
+    assert.notEqual(r.txId, first.txId);
+    assert.equal(headOf(f.kb, 'tools'), second);
+    const js = journals(f.kb, CR);
+    assert.equal(js.length, 2, '旧 complete journal 不删除');
+    assert.ok(js.every((j) => j.phase === 'complete'));
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-02：外部回退到旧 beforeSha → WORKSPACE_FRESHNESS_CHANGED（不复用旧 complete）（AC-2）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    const beforeSha = headOf(f.kb, 'kb');
+    advanceTrunk(f.base, 'kb', 'rb');
+    await sync(f.kb);
+    git(wtPath(f.kb, 'kb', CR), ['reset', '--hard', '-q', beforeSha]); // 测试专用：模拟外部回退
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'WORKSPACE_FRESHNESS_CHANGED');
+    assert.equal(headOf(f.kb, 'kb'), beforeSha, '阻断零写入');
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-02：在途事务期间 trunk 漂移 → 恢复时 WORKSPACE_FRESHNESS_CHANGED（AC-2）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceTrunk(f.base, 'kb', 'dr1');
+    process.env.CRCTL_FAULT_POINT = 'ws-sync-after-preflight';
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'FAULT_INJECTED');
+    delete process.env.CRCTL_FAULT_POINT;
+    advanceTrunk(f.base, 'kb', 'dr2'); // trunk 在 preflight 后前进
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'WORKSPACE_FRESHNESS_CHANGED');
+    assert.ok(journals(f.kb, CR).every((j) => j.phase !== 'complete'));
+  } finally { delete process.env.CRCTL_FAULT_POINT; fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-02：在途事务期间 HEAD 漂移（分支新增提交）→ WORKSPACE_FRESHNESS_CHANGED（AC-2）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceTrunk(f.base, 'kb', 'hd1');
+    process.env.CRCTL_FAULT_POINT = 'ws-sync-after-preflight';
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'FAULT_INJECTED');
+    delete process.env.CRCTL_FAULT_POINT;
+    advanceBranch(f.kb, 'kb', 'hd2');
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'WORKSPACE_FRESHNESS_CHANGED');
+  } finally { delete process.env.CRCTL_FAULT_POINT; fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-02：并发锁 → TX_LOCK_HELD（AC-2）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceTrunk(f.base, 'tools', 'lk');
+    const lock = await acquireLock({ root: f.kb, scope: `workspace-sync-${CR}`, op: 'workspace', cr: CR });
+    try {
+      const r = runCrctl(['workspace', 'sync', CR, '--workspace', f.kb], { cwd: f.kb });
+      assert.notEqual(r.status, 0);
+      assert.equal(r.errJson.error.code, 'TX_LOCK_HELD');
+    } finally { await lock.release(); }
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-02：重跑幂等不重复提交（AC-2）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceTrunk(f.base, 'tools', 'idem');
+    const first = await sync(f.kb);
+    assert.equal(first.changed, true);
+    const headAfter = headOf(f.kb, 'tools');
+    const second = await sync(f.kb);
+    assert.equal(second.changed, false);
+    assert.equal(second.txId, null);
+    assert.equal(headOf(f.kb, 'tools'), headAfter, 'HEAD 不再移动');
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-02 CLI：成功与失败均在输出前写 workspace-sync audit（AC-3）', () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceTrunk(f.base, 'tools', 'au1');
+    const good = runCrctl(['workspace', 'sync', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(good.status, 0, good.stderr);
+    let audits = readAudit(f.kb).filter((a) => a.kind === 'workspace-sync');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].changed, true);
+    assert.equal(audits[0].repos.find((r) => r.repo === 'tools').action, 'fast-forwarded');
+    // 失败路径：dirty 阻断
+    fs.writeFileSync(path.join(wtPath(f.kb, 'tools', CR), 'uncommitted.txt'), 'dirty\n');
+    advanceTrunk(f.base, 'tools', 'au2'); // 制造 behind-clean 使 syncable，但 dirty 阻断
+    const bad = runCrctl(['workspace', 'sync', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.notEqual(bad.status, 0);
+    assert.equal(bad.errJson.error.code, 'WORKSPACE_SYNC_BLOCKED');
+    audits = readAudit(f.kb).filter((a) => a.kind === 'workspace-sync');
+    assert.equal(audits.length, 2);
+    assert.equal(audits[1].error, 'WORKSPACE_SYNC_BLOCKED');
   } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
 });

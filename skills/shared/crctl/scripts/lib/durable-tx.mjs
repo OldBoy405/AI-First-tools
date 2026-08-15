@@ -49,6 +49,8 @@ export const FAULT_POINTS = [
   'checkpoint-after-confirm',        // 每仓精确 confirmed 落盘后、下一仓前（CR-2026-033）
   'checkpoint-after-metadata-commit',// KB metadata commit 落盘后、lease push 前（CR-2026-033）
   'checkpoint-after-metadata-push',  // KB metadata lease push 落盘后、精确确认前（CR-2026-033）
+  'ws-sync-after-preflight',         // sync preflight journal 落盘后、逐仓写入前（CR-2026-043）
+  'ws-sync-after-repo',              // 每仓 ff-only 落盘后、下一仓前（CR-2026-043）
 ];
 export function faultPoint(point, context) {
   if (process.env.CRCTL_FAULT_POINT === point) {
