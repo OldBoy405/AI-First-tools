@@ -549,7 +549,6 @@ flowchart TD
 | 测试证据门 | `write-test-report` | TASK 验收条件、实现验证输出 | `test-report.md`、traceability 测试段 |
 | 代码质量门 | `review-code` | 真实 diff、changed files、TASK、SDD、`test-report.md` | `review-annotations/code.yml`、status=`code-reviewing` |
 | 横向对齐 | `review-alignment` | PRD、SDD、TASK、代码证据、traceability | drift 记录 |
-| 影响分析 | `change-impact-analysis` | 上游变更与下游证据 | stale 标记 |
 
 每个质量门都必须具备自动自修复回路。代码评审必须读取实际代码 diff、changed files、验证输出与 `test-report.md`；仅有 diff stat、commit log 或口头测试结论不足以通过质量门。
 

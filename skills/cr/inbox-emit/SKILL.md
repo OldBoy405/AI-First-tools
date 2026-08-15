@@ -28,14 +28,12 @@ Pipeline 所有关键节点的 inbox 写入**单一入口**：
 - `approve-code` 完成 → `event=code-approved`
 - `cr-review-record` 拒绝或撤回 → `event=rejected` / `event=withdrawn`
 - `cr-archive` 完成 → `event=archived`
-- `feedback-writeback` 完成 → `event=feedback-writeback-done`
 - `handover-cr` 移交 → `event=owner-handover`（CR 负责人移交）
 - `cr-sla-watchdog.pipeline` → `event=overdue`
 
 ## 下游消费方
 
 - `owner-handover`：由 `handover-cr` 作为触发方（新 owner 接手通知）
-- `feedback-writeback-done`：由 `feedback-writeback` 作为触发方
 
 ## 读取契约（启动序）
 
@@ -48,7 +46,7 @@ Pipeline 所有关键节点的 inbox 写入**单一入口**：
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `cr-id` | 是 | 例 `CR-2026-001` |
-| `event` | 是 | `requirement-reviewing` \| `requirement-approved` \| `tech-design-review-pending` \| `tech-design-reviewed` \| `developing` \| `code-reviewing` \| `code-approved` \| `rejected` \| `withdrawn` \| `archived` \| `feedback-writeback-done` \| `owner-handover` \| `overdue` |
+| `event` | 是 | `requirement-reviewing` \| `requirement-approved` \| `tech-design-review-pending` \| `tech-design-reviewed` \| `developing` \| `code-reviewing` \| `code-approved` \| `rejected` \| `withdrawn` \| `archived` \| `owner-handover` \| `overdue` |
 | `to` | 是 | 收件人列表，例 `["umasuo", "reviewer-2"]`；取值来源：CR `owners.*.id` 或 feedback 发起人（调用方负责传入，不得留空——通知链断裂的根因） |
 | `payload` | 否 | 附加 JSON 信息，例 `{ "decision": "approve", "notes": "..." }` |
 

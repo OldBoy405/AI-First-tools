@@ -38,12 +38,12 @@ The permission matrix is consumed by the platform orchestrator and by [`crctl`](
 |-------|-------|-------------------|
 | **spec-agent** | Baseline spec queries | `spec-show`, `spec-query`, `spec-dashboard` |
 | **delivery-agent** | Task writeback | `writeback-tasks` |
-| **quality-reviewer-agent** | Cross-cutting quality gates | `review-alignment`, `change-impact-analysis` |
+| **quality-reviewer-agent** | Cross-cutting quality gates | `review-alignment` |
 | **knowledge-agent** | Cross-feature documentation | (thin — reuses shared skills) |
 
 ### System Orchestrator
 
-The **system-orchestrator** is not a deployable agent but a runtime component that owns cross-cutting infrastructure skills: `merge-feature-branch`, `writeback-prd-sdd`, `writeback-traceability`, `push-progress`, `pull-progress`, `resume-from-remote`, `list-remote-checkpoints`, `handover-cr`, `validate-doc`, `engineering-docs`, `controlled-shell`, `crctl`, `cr-review-record`, `cr-status-set`, `inbox-emit`, `cr-archive`, `feedback-writeback`, `cr-inbox`, `cr-query`, `cr-show`, `cr-dashboard`.
+The **system-orchestrator** is not a deployable agent but a runtime component that owns cross-cutting infrastructure skills: `merge-feature-branch`, `writeback-prd-sdd`, `writeback-traceability`, `push-progress`, `pull-progress`, `resume-from-remote`, `list-remote-checkpoints`, `handover-cr`, `validate-doc`, `engineering-docs`, `controlled-shell`, `crctl`, `cr-review-record`, `cr-status-set`, `inbox-emit`, `cr-archive`, `cr-inbox`, `cr-query`, `cr-show`, `cr-dashboard`.
 
 ## Pipeline Owners
 

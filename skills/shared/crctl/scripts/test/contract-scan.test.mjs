@@ -14,7 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 
 const ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
@@ -95,4 +95,35 @@ test('AC-1 补充：三个 Pipeline JSON 可解析（prompt 修订未破坏 JSON
     const p = JSON.parse(readFileSync(path.join(ROOT, ...rel.split('/')), 'utf8'));
     assert.ok(Array.isArray(p.nodes) && p.nodes.length > 0, `${rel} 节点非空`);
   }
+});
+
+/* ─────────── CR-2026-041 FR-06/FR-07：退役静态扫描 ─────────── */
+
+const RETIRED = ['change-impact-analysis', 'feedback-writeback', 'feedback-writeback-done'];
+const ACTIVE_PATHS = [
+  'skills/_index.yml',
+  'agent-skill-matrix.yml',
+  'AGENT-SKILL-MATRIX.md',
+  'agents/_index.yml',
+  'agents/quality-reviewer-agent.md',
+  'README.md',
+  'docs/QODER-使用指南.md',
+  'openwiki/architecture/agent-skill-matrix.md',
+  'dir-graph.yaml',
+  'skills/review/review-alignment/SKILL.md',
+  'skills/cr/inbox-emit/SKILL.md',
+];
+
+test('CR-2026-041 FR-06/07：active 路径零退役 Skill 引用', () => {
+  for (const rel of ACTIVE_PATHS) {
+    const text = readFileSync(path.join(ROOT, ...rel.split('/')), 'utf8').replaceAll('\r\n', '\n');
+    for (const w of RETIRED) {
+      assert.ok(!text.includes(w), `${rel} 不得含 "${w}"`);
+    }
+  }
+});
+
+test('CR-2026-041 FR-06/07：退役 Skill 目录已删除（历史快照除外）', () => {
+  assert.ok(!existsSync(path.join(ROOT, 'skills', 'review', 'change-impact-analysis', 'SKILL.md')), 'change-impact-analysis SKILL 已删除');
+  assert.ok(!existsSync(path.join(ROOT, 'skills', 'cr', 'feedback-writeback', 'SKILL.md')), 'feedback-writeback SKILL 已删除');
 });
