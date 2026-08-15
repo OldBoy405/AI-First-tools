@@ -402,6 +402,74 @@ test('TASK-02：重跑幂等不重复提交（AC-2）', async () => {
   } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
 });
 
+/* ────────────────────────── TASK-05：双 gate 集成场景（真实 Git fixture，CLI 端到端） ──────────────────────────
+ * replay 节点序列断言在 pipeline-structure.test.mjs（契约层）；此处验证 gate 决策链的事实演化。 */
+
+test('TASK-05 集成：implement gate——behind-clean → sync → 重核 allFresh → 允许进入实施（AC-2）', () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceTrunk(f.base, 'tools', 'ig1');
+    const fr1 = runCrctl(['workspace', 'freshness', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(fr1.status, 0, fr1.stderr);
+    assert.equal(fr1.json.syncable, true, 'gate 拦截到可同步事实');
+    const sy = runCrctl(['workspace', 'sync', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(sy.status, 0, sy.stderr);
+    assert.equal(sy.json.changed, true);
+    const fr2 = runCrctl(['workspace', 'freshness', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(fr2.status, 0);
+    assert.equal(fr2.json.allFresh, true, '同步后重核全 fresh，可进入 implement-code');
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-05 集成：implement gate——diverged → abort 且零写入（AC-2）', () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceBranch(f.kb, 'tools', 'ig2');
+    advanceTrunk(f.base, 'tools', 'ig2');
+    const before = headOf(f.kb, 'tools');
+    const fr = runCrctl(['workspace', 'freshness', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(fr.status, 0);
+    assert.equal(fr.json.syncable, false, 'diverged 不可同步，gate 应 abort');
+    const sy = runCrctl(['workspace', 'sync', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.notEqual(sy.status, 0);
+    assert.equal(sy.errJson.error.code, 'WORKSPACE_FRESHNESS_DIVERGED');
+    assert.equal(headOf(f.kb, 'tools'), before, '零自动写入');
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-05 集成：review gate 可同步轨——分支无独有提交且 trunk 前进 → sync 后重核 allFresh（AC-2）', () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceTrunk(f.base, 'multica', 'rg1');
+    const fr = runCrctl(['workspace', 'freshness', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(fr.status, 0);
+    assert.equal(fr.json.syncable, true);
+    const sy = runCrctl(['workspace', 'sync', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(sy.status, 0, sy.stderr);
+    const fr2 = runCrctl(['workspace', 'freshness', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(fr2.json.allFresh, true, '同步后可按 replayNodes 重建证据再评审');
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('TASK-05 集成：review gate 人工轨——实施后独有提交 + trunk 前进 → diverged/manual 零自动写入；人工恢复后重入（AC-2）', () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceBranch(f.kb, 'tools', 'rg2');          // 实施期 CR 独有提交
+    const newTrunk = advanceTrunk(f.base, 'tools', 'rg2'); // trunk 前进 → diverged
+    const before = headOf(f.kb, 'tools');
+    const fr = runCrctl(['workspace', 'freshness', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(fr.json.repositories.find((r) => r.repo === 'tools').freshness, 'diverged');
+    const sy = runCrctl(['workspace', 'sync', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(sy.errJson.error.code, 'WORKSPACE_FRESHNESS_DIVERGED');
+    assert.equal(headOf(f.kb, 'tools'), before, '无自动 merge/rebase/盲目重试');
+    // 人工处理：把分支事实恢复为可比较状态（此处模拟人工重基底）后重入 gate
+    git(wtPath(f.kb, 'tools', CR), ['reset', '--hard', '-q', newTrunk]);
+    const fr2 = runCrctl(['workspace', 'freshness', CR, '--workspace', f.kb], { cwd: f.kb });
+    assert.equal(fr2.status, 0);
+    assert.equal(fr2.json.repositories.find((r) => r.repo === 'tools').freshness, 'fresh', '人工恢复后重新可比较');
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
 test('TASK-02 CLI：成功与失败均在输出前写 workspace-sync audit（AC-3）', () => {
   const f = makeFreshnessFixture();
   try {
