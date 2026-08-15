@@ -6,14 +6,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, symlinkSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import {
   parseTestPlan, canonicalCommandSubject, parseAnalysisMarker, renderTestMachineReport,
-  renderTestsTraceability, renderLoopText, resolveRepositories, TxError,
+  renderTestsTraceability, renderLoopText, resolveRepositories, testCr, TxError,
 } from '../lib/workspace-transactions.mjs';
+import { acquireLock } from '../lib/durable-tx.mjs';
 
 const CRCTL = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
 const PACKAGE_ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
@@ -66,7 +67,7 @@ test('parseTestPlan：未知 repo → TEST_REPO_NOT_FOUND；absolute cwd → TES
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
-test('canonicalCommandSubject：digest 稳定、修改命令后变化、CRLF 无关', () => {
+test('canonicalCommandSubject：digest 稳定、修改命令后变化', () => {
   const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'tools', cwd: '.', executable: 'node', args: ['--test', 'x'], timeoutSeconds: 30 }] };
   const a = canonicalCommandSubject(plan);
   const b = canonicalCommandSubject(JSON.parse(JSON.stringify(plan)));
@@ -86,6 +87,8 @@ test('parseAnalysisMarker：缺失 / 重复 / 合法唯一 literal', () => {
   // 兼容旧带说明前缀
   const legacy = '<!-- crctl:analysis-below 旧说明 -->\n\n旧分析\n';
   assert.equal(parseAnalysisMarker(legacy).analysisSuffix, '\n\n旧分析\n');
+  const crlfAnalysis = '<!-- crctl:analysis-below -->\r\n\r\nline 1\r\nline 2\n';
+  assert.equal(parseAnalysisMarker(crlfAnalysis).analysisSuffix, '\r\n\r\nline 1\r\nline 2\n');
 });
 
 test('renderTestMachineReport：frontmatter 字段与 kebab-case 结果字段', () => {
@@ -105,7 +108,7 @@ test('renderTestMachineReport：frontmatter 字段与 kebab-case 结果字段', 
   assert.ok(!out.includes('<!-- crctl:analysis-below'), 'machine zone 不含 marker（marker 由 testCr 拼接）');
 });
 
-test('renderTestsTraceability：新增 / 替换 / cr-id 不匹配', () => {
+test('renderTestsTraceability：新增 / 替换 / 非法 tests 形状 / cr-id 不匹配', () => {
   const input = { cr: 'CR-T1', reportRel: 'change-requests/CR-T1/test-report.md', status: 'pass', tester: 'Ray', ownerAssignedAt: '2026-08-04T12:00:00+08:00', generatedAt: '2026-08-15T12:00:00+08:00', commandDigest: 'd', reviewLoop: 'write-test-report' };
   const fresh = renderTestsTraceability(null, input);
   assert.match(fresh, /^cr-id: CR-T1\ntests:\n/);
@@ -114,6 +117,8 @@ test('renderTestsTraceability：新增 / 替换 / cr-id 不匹配', () => {
   assert.match(added, /cr-id: CR-T1\n/);
   assert.match(added, /^tests:/m);
   assert.match(added, /reviews:/);
+  expectTxError(() => renderTestsTraceability('cr-id: CR-T1\ntests: stale\n', input), 'TRACE_SHAPE');
+  expectTxError(() => renderTestsTraceability('cr-id: CR-T1\ntests:\n  report: wrong.md\n', input), 'TRACE_SHAPE');
   expectTxError(() => renderTestsTraceability('cr-id: OTHER\n', input), 'TRACE_SHAPE');
 });
 
@@ -256,4 +261,201 @@ test('端到端：executable 启动失败 → TEST_EXECUTABLE_INVALID 零 author
     assert.equal(r.stderr.error.code, 'TEST_EXECUTABLE_INVALID');
     assert.ok(!existsSync(path.join(crWs, 'change-requests', 'CR-TEST-1', 'test-report.md')), '技术失败零 authority');
   } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('端到端：LF/CRLF plan 语义相同 → command digest 相同且不重复 attempt', () => {
+  const { base, crWs } = makeTestCrFixture();
+  try {
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'process.exit(0)'], timeoutSeconds: 30 }] };
+    const planPath = writePlan(crWs, plan);
+    const first = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    writeFileSync(planPath, JSON.stringify(plan, null, 2).replaceAll('\n', '\r\n'));
+    const second = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    assert.equal(second.code, 0);
+    assert.equal(second.stdout.commandDigest, first.stdout.commandDigest);
+    assert.equal(second.stdout.changed, false);
+    assert.equal(second.stdout.attempt, 1);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('端到端：timeout 是业务 block，剩余命令继续执行', () => {
+  const { base, crWs } = makeTestCrFixture();
+  try {
+    const plan = { schema: 'cr-test-plan/v1', commands: [
+      { repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'setTimeout(() => {}, 5000)'], timeoutSeconds: 1 },
+      { repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'console.log("after-timeout")'], timeoutSeconds: 30 },
+    ] };
+    const r = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(crWs, plan), '--workspace', crWs]);
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout.status, 'block');
+    assert.equal(r.stdout.commands[0].timedOut, true);
+    assert.equal(r.stdout.commands[1].exitCode, 0);
+    assert.match(readFileSync(path.join(crWs, 'change-requests', 'CR-TEST-1', 'test-evidence', 'cmd-02.log'), 'utf8'), /after-timeout/);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('端到端：新 attempt 逐字保留 marker 后分析；失败前不删除 complete journal', () => {
+  const { base, crWs } = makeTestCrFixture();
+  try {
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'process.exit(0)'], timeoutSeconds: 30 }] };
+    const planPath = writePlan(crWs, plan);
+    const first = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    assert.equal(first.stdout.attempt, 1);
+    const reportPath = path.join(crWs, 'change-requests', 'CR-TEST-1', 'test-report.md');
+    const original = readFileSync(reportPath, 'utf8');
+    const analysis = '\n\n## 人工分析\nline 1\r\nline 2\n';
+    writeFileSync(reportPath, original + analysis);
+    const changed = { ...plan, commands: [{ ...plan.commands[0], args: ['-e', 'console.log("changed")'] }] };
+    writeFileSync(planPath, JSON.stringify(changed));
+    const second = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    assert.equal(second.code, 0);
+    assert.equal(second.stdout.attempt, 2);
+    assert.ok(readFileSync(reportPath, 'utf8').endsWith(analysis), '分析区字节原样保留');
+
+    const validSecond = readFileSync(reportPath, 'utf8');
+    writeFileSync(reportPath, validSecond.replace('<!-- crctl:analysis-below -->', '<!-- marker removed -->'));
+    writeFileSync(planPath, JSON.stringify({ ...plan, commands: [{ ...plan.commands[0], args: ['-e', 'console.log("third")'] }] }));
+    const failed = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    assert.equal(failed.code, 1);
+    assert.equal(failed.stderr.error.code, 'TEST_MARKER_INVALID');
+    writeFileSync(reportPath, validSecond);
+    writeFileSync(planPath, JSON.stringify(changed));
+    const replay = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    assert.equal(replay.stdout.changed, false, '失败的新 attempt 不得删除上一 complete journal');
+    assert.equal(replay.stdout.attempt, 2);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('端到端：参与仓 HEAD 改变后同一 plan 生成新 attempt', () => {
+  const { base, crWs } = makeTestCrFixture();
+  try {
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'process.exit(0)'], timeoutSeconds: 30 }] };
+    const planPath = writePlan(crWs, plan);
+    const first = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    assert.equal(first.stdout.attempt, 1);
+    writeFileSync(path.join(crWs, 'source-change.txt'), 'changed\n');
+    spawnSync('git', ['add', 'source-change.txt'], { cwd: crWs, encoding: 'utf8', shell: false });
+    const commit = spawnSync('git', ['commit', '-q', '-m', 'source change'], { cwd: crWs, encoding: 'utf8', shell: false });
+    assert.equal(commit.status, 0, commit.stderr);
+    const second = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    assert.equal(second.code, 0);
+    assert.equal(second.stdout.changed, true);
+    assert.equal(second.stdout.attempt, 2);
+    const journals = path.join(crWs, '.crctl', 'transactions', 'test', 'CR-TEST-1');
+    assert.equal(readdirSync(journals).length, 2, '新 attempt 完成后仍保留旧 complete journal');
+    const replay = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    assert.equal(replay.stdout.changed, false);
+    assert.equal(replay.stdout.attempt, 2);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('端到端：plan 只能位于 workspace/.crctl/tmp，拒绝 traversal/authority/symlink escape', () => {
+  const { base, crWs } = makeTestCrFixture();
+  try {
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'process.exit(0)'], timeoutSeconds: 30 }] };
+    const outsideDir = path.join(base, 'outside');
+    mkdirSync(outsideDir);
+    const outside = path.join(outsideDir, 'plan.json');
+    writeFileSync(outside, JSON.stringify(plan));
+    const authority = path.join(crWs, 'change-requests', 'CR-TEST-1', 'plan.json');
+    writeFileSync(authority, JSON.stringify(plan));
+    for (const candidate of [outside, authority, path.join(crWs, '.crctl', 'tmp', '..', '..', 'change-requests', 'CR-TEST-1', 'plan.json')]) {
+      const r = runCrctl(['test', 'CR-TEST-1', '--plan', candidate, '--workspace', crWs]);
+      assert.equal(r.code, 1);
+      assert.equal(r.stderr.error.code, 'TEST_PLAN_PATH_INVALID');
+    }
+    const link = path.join(crWs, '.crctl', 'tmp', 'outside-link');
+    mkdirSync(path.dirname(link), { recursive: true });
+    symlinkSync(outsideDir, link, process.platform === 'win32' ? 'junction' : 'dir');
+    const linked = runCrctl(['test', 'CR-TEST-1', '--plan', path.join(link, 'plan.json'), '--workspace', crWs]);
+    assert.equal(linked.code, 1);
+    assert.equal(linked.stderr.error.code, 'TEST_PLAN_PATH_INVALID');
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('端到端：cwd 拒绝 .. 段并将等价路径 canonicalize', () => {
+  const { base, crWs } = makeTestCrFixture();
+  try {
+    mkdirSync(path.join(crWs, 'subdir'));
+    const bad = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: 'subdir/..', executable: 'node', args: ['-e', 'process.exit(0)'], timeoutSeconds: 30 }] };
+    const rejected = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(crWs, bad), '--workspace', crWs]);
+    assert.equal(rejected.code, 1);
+    assert.equal(rejected.stderr.error.code, 'TEST_CWD_ESCAPE');
+    const good = { ...bad, commands: [{ ...bad.commands[0], cwd: 'subdir/.' }] };
+    const accepted = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(crWs, good), '--workspace', crWs]);
+    assert.equal(accepted.code, 0);
+    assert.equal(accepted.stdout.commands[0].cwd, 'subdir');
+
+    const outside = path.join(base, 'outside-cwd');
+    mkdirSync(outside);
+    const link = path.join(crWs, 'outside-link');
+    symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir');
+    const escaped = { ...bad, commands: [{ ...bad.commands[0], cwd: 'outside-link' }] };
+    const symlinkEscape = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(crWs, escaped), '--workspace', crWs]);
+    assert.equal(symlinkEscape.code, 1);
+    assert.equal(symlinkEscape.stderr.error.code, 'TEST_CWD_ESCAPE');
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('端到端：test scope lock 被持有时保守阻断且零 authority', async () => {
+  const { base, crWs } = makeTestCrFixture();
+  const lock = await acquireLock({ root: crWs, scope: 'test-CR-TEST-1', op: 'test', cr: 'CR-TEST-1' });
+  try {
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'process.exit(0)'], timeoutSeconds: 30 }] };
+    const r = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(crWs, plan), '--workspace', crWs]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stderr.error.code, 'TX_LOCK_HELD');
+    assert.ok(!existsSync(path.join(crWs, 'change-requests', 'CR-TEST-1', 'test-report.md')));
+  } finally {
+    await lock.release();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('端到端：非法 test journal 硬失败，不被 complete 幂等路径静默跳过', () => {
+  const { base, crWs } = makeTestCrFixture();
+  try {
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'process.exit(0)'], timeoutSeconds: 30 }] };
+    const planPath = writePlan(crWs, plan);
+    const first = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    assert.equal(first.code, 0);
+    const reportPath = path.join(crWs, 'change-requests', 'CR-TEST-1', 'test-report.md');
+    const before = readFileSync(reportPath, 'utf8');
+    const badDir = path.join(crWs, '.crctl', 'transactions', 'test', 'CR-TEST-1', 'bad-journal');
+    mkdirSync(badDir);
+    writeFileSync(path.join(badDir, 'journal.json'), '{bad');
+    const replay = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    assert.equal(replay.code, 1);
+    assert.equal(replay.stderr.error.code, 'TX_JOURNAL_INVALID');
+    assert.equal(readFileSync(reportPath, 'utf8'), before);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('端到端：非法 review-loop 与 pipeline 配置硬失败且不执行命令', async () => {
+  const first = makeTestCrFixture();
+  try {
+    const sentinel = path.join(first.crWs, 'sentinel.txt');
+    writeFileSync(path.join(first.crWs, 'change-requests', 'CR-TEST-1', 'review-loop.yml'), 'loops: stale\n');
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'ran')`], timeoutSeconds: 30 }] };
+    const r = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(first.crWs, plan), '--workspace', first.crWs]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stderr.error.code, 'TEST_REVIEW_LOOP_INVALID');
+    assert.ok(!existsSync(sentinel));
+  } finally { rmSync(first.base, { recursive: true, force: true }); }
+
+  const second = makeTestCrFixture();
+  try {
+    const badTools = path.join(second.base, 'bad-tools');
+    mkdirSync(path.join(badTools, 'pipeline-templates'), { recursive: true });
+    writeFileSync(path.join(badTools, 'pipeline-templates', 'code-implementation.pipeline.json'), '{bad');
+    const graph = readFileSync(path.join(second.ws, 'dir-graph.yaml'), 'utf8');
+    writeFileSync(path.join(second.ws, 'dir-graph.yaml'), graph.replace(JSON.stringify(PACKAGE_ROOT), JSON.stringify(badTools)));
+    const sentinel = path.join(second.crWs, 'sentinel.txt');
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'ran')`], timeoutSeconds: 30 }] };
+    const planPath = writePlan(second.crWs, plan);
+    const ctx = resolveRepositories(second.crWs);
+    await assert.rejects(() => testCr(ctx, { cr: 'CR-TEST-1', workspace: second.crWs, planPath }),
+      (e) => e instanceof TxError && e.code === 'TEST_CONFIG_INVALID');
+    assert.ok(!existsSync(sentinel));
+  } finally { rmSync(second.base, { recursive: true, force: true }); }
 });

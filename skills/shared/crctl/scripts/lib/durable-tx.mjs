@@ -198,7 +198,7 @@ function assertEnvelope(j, p) {
  * 无则新建空 envelope（六个 payload 均 null，业务首个 save 前必须置位 op 对应 payload）。
  * 任一已存在 journal 非法 → 硬失败（不静默跳过）。
  */
-export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inputDigest }) {
+export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inputDigest, createAfterComplete = false }) {
   if (!OPS.includes(op)) throw new TxError('TX_JOURNAL_INVALID', `op 非法: ${op}`, { op });
   const crOrKey = cr || key;
   if (!crOrKey) throw new TxError('TX_JOURNAL_INVALID', 'loadOrCreateJournal 需要 cr 或 key');
@@ -219,9 +219,14 @@ export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inpu
   }
   if (latest) {
     if (inputDigest != null && latest.inputDigest != null && latest.inputDigest !== inputDigest) {
-      throw new TxError('TX_INPUT_CONFLICT', `${op}/${crOrKey} 已有在途事务且 inputDigest 不一致（旧=${latest.inputDigest} 新=${inputDigest}）`, { txId: latest.txId });
+      if (createAfterComplete && latest.phase === 'complete') {
+        latest = null;
+        latestPath = null;
+      } else {
+        throw new TxError('TX_INPUT_CONFLICT', `${op}/${crOrKey} 已有在途事务且 inputDigest 不一致（旧=${latest.inputDigest} 新=${inputDigest}）`, { txId: latest.txId });
+      }
     }
-    return { journal: latest, journalPath: latestPath, created: false };
+    if (latest) return { journal: latest, journalPath: latestPath, created: false };
   }
   const txId = crypto.randomUUID().replaceAll('-', '').slice(0, 32);
   const now = nowIso();
