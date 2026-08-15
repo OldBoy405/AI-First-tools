@@ -83,7 +83,9 @@ export function resolveRepositories(workspace) {
     }
     const declPath = typeof r.path === 'string' ? r.path.trim() : '';
     if (!declPath) throw new TxError('REPO_GRAPH_INVALID', `repo ${id}: 缺少 path`);
-    if (path.isAbsolute(declPath)) throw new TxError('REPO_GRAPH_INVALID', `repo ${id}: path 必须是相对声明路径，收到 absolute: ${declPath}`);
+    if (path.isAbsolute(declPath) || path.win32.isAbsolute(declPath) || path.posix.isAbsolute(declPath)) {
+      throw new TxError('REPO_GRAPH_INVALID', `repo ${id}: path 必须是相对声明路径，收到 absolute: ${declPath}`);
+    }
     const trunk = typeof r.trunk === 'string' ? r.trunk.trim() : '';
     if (!trunk) throw new TxError('REPO_GRAPH_INVALID', `repo ${id}: 缺少 trunk`);
     const canonical = path.resolve(installRoot, declPath);
@@ -1863,6 +1865,20 @@ function readReviewLoopData(ws, cr) {
   return { data, loops: data.loops };
 }
 
+function readCanonicalTestStatus(ws, cr) {
+  const p = path.join(ws, 'change-requests', cr, 'test-report.md');
+  if (!fs.existsSync(p)) return null;
+  let fm;
+  try {
+    const frontmatter = matchFrontmatter(fs.readFileSync(p, 'utf8'));
+    fm = frontmatter && parseYaml(frontmatter.body.replaceAll('\r\n', '\n'));
+  } catch (e) { throw new TxError('TEST_REPORT_INVALID', `test-report.md 机器区无法解析: ${e.message}`, { path: p }); }
+  if (!fm || fm['generated-by'] !== 'crctl-test' || !['pass', 'block'].includes(fm.status)) {
+    throw new TxError('TEST_REPORT_INVALID', 'test-report.md 缺少合法 crctl-test status', { path: p });
+  }
+  return fm.status;
+}
+
 /** 查找 test journal；非法记录硬失败，优先恢复 incomplete，其次匹配当前 inputDigest。 */
 function latestTestJournal(ws, cr, inputDigest) {
   const base = path.join(ws, '.crctl', 'transactions', 'test', cr);
@@ -2146,7 +2162,7 @@ export async function testCr(ctx, { cr, workspace, planPath }) {
   const { digest: commandDigest } = canonicalCommandSubject(plan);
   const maxAttempts = resolveTestMaxAttempts(ctx);
   const preLoop = readReviewLoopData(workspace, cr).loops[TEST_LOOP_REF];
-  if ((preLoop && preLoop['current-attempt']) >= maxAttempts) {
+  if ((preLoop && preLoop['current-attempt']) >= maxAttempts && readCanonicalTestStatus(workspace, cr) !== 'pass') {
     throw new TxError('TEST_LOOP_EXHAUSTED', `${TEST_LOOP_REF} 已达 maxAttempts=${maxAttempts}，不得继续自修复`);
   }
 
@@ -2169,10 +2185,8 @@ export async function testCr(ctx, { cr, workspace, planPath }) {
     lock = await acquireLock({ root: workspace, scope: `test-${cr}`, op: 'test', cr });
     const loopData = readReviewLoopData(workspace, cr);
     const prevLoop = loopData.loops[TEST_LOOP_REF] || { 'current-cycle': 1, 'current-attempt': 0, attempts: [] };
-    const currentAttempt = prevLoop['current-attempt'] || 0;
-    if (currentAttempt >= maxAttempts) {
-      throw new TxError('TEST_LOOP_EXHAUSTED', `${TEST_LOOP_REF} 已达 maxAttempts=${maxAttempts}，不得继续自修复`);
-    }
+    let currentAttempt = prevLoop['current-attempt'] || 0;
+    let cycle = prevLoop['current-cycle'] || 1;
 
     // complete 匹配当前输入时幂等返回；incomplete 有 write-set 时只恢复，不重复 attempt。
     const existing = latestTestJournal(workspace, cr, inputDigest);
@@ -2200,6 +2214,13 @@ export async function testCr(ctx, { cr, workspace, planPath }) {
         return buildTestResponse({ cr, status: jt.status, commandDigest: jt.commandDigest, attempt: jt.attempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: false });
       }
     }
+    if (currentAttempt >= maxAttempts) {
+      if (readCanonicalTestStatus(workspace, cr) !== 'pass') {
+        throw new TxError('TEST_LOOP_EXHAUSTED', `${TEST_LOOP_REF} 已达 maxAttempts=${maxAttempts}，不得继续自修复`);
+      }
+      cycle += 1;
+      currentAttempt = 0;
+    }
 
     // 计算全部 after 文本和 raw-byte CAS 锚点后再创建/复用 journal。
     const generatedAt = nowIso();
@@ -2216,7 +2237,6 @@ export async function testCr(ctx, { cr, workspace, planPath }) {
     const traceAfter = renderTestsTraceability(existingTrace, { cr, reportRel, status: overall, tester, ownerAssignedAt, generatedAt, commandDigest, reviewLoop: TEST_LOOP_REF });
 
     const nextAttempt = currentAttempt + 1;
-    const cycle = prevLoop['current-cycle'] || 1;
     const by = resolveIdentity(workspace);
     const nextLoop = { 'current-cycle': cycle, 'current-attempt': nextAttempt, attempts: [...prevLoop.attempts, { attempt: nextAttempt, at: generatedAt, by, cycle }] };
     const loopAfter = renderLoopText({ ...loopData.loops, [TEST_LOOP_REF]: nextLoop });

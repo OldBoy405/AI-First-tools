@@ -271,7 +271,8 @@ function findTxDir(root, txId) {
 
 function validateEntry(root, e) {
   if (!e || typeof e !== 'object' || typeof e.path !== 'string' || !e.path) throw new TxError('TX_WRITESET_INVALID', 'write-set entry 缺 path');
-  if (path.isAbsolute(e.path) || e.path.split('/').some((seg) => seg === '..' || seg === '')) {
+  if (path.isAbsolute(e.path) || path.win32.isAbsolute(e.path) || path.posix.isAbsolute(e.path)
+    || e.path.split('/').some((seg) => seg === '..' || seg === '')) {
     throw new TxError('TX_WRITESET_INVALID', `write-set path 非法（absolute/.. /空段）: ${e.path}`);
   }
   if (typeof e.afterSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(e.afterSha256)) throw new TxError('TX_WRITESET_INVALID', `entry ${e.path}: afterSha256 非法`);

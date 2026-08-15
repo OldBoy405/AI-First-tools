@@ -346,6 +346,19 @@ test('端到端：参与仓 HEAD 改变后同一 plan 生成新 attempt', () => 
     const replay = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
     assert.equal(replay.stdout.changed, false);
     assert.equal(replay.stdout.attempt, 2);
+
+    writeFileSync(path.join(crWs, 'source-change.txt'), 'changed-again\n');
+    spawnSync('git', ['add', 'source-change.txt'], { cwd: crWs, encoding: 'utf8', shell: false });
+    assert.equal(spawnSync('git', ['commit', '-q', '-m', 'source change 2'], { cwd: crWs, encoding: 'utf8', shell: false }).status, 0);
+    assert.equal(runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]).stdout.attempt, 3);
+    writeFileSync(path.join(crWs, 'source-change.txt'), 'changed-cycle-2\n');
+    spawnSync('git', ['add', 'source-change.txt'], { cwd: crWs, encoding: 'utf8', shell: false });
+    assert.equal(spawnSync('git', ['commit', '-q', '-m', 'source change cycle 2'], { cwd: crWs, encoding: 'utf8', shell: false }).status, 0);
+    const nextCycle = runCrctl(['test', 'CR-TEST-1', '--plan', planPath, '--workspace', crWs]);
+    assert.equal(nextCycle.code, 0);
+    assert.equal(nextCycle.stdout.attempt, 1, 'PASS 后 source 变化开启下一 review cycle');
+    const loop = readFileSync(path.join(crWs, 'change-requests', 'CR-TEST-1', 'review-loop.yml'), 'utf8');
+    assert.match(loop, /write-test-report:\n    current-cycle: 2\n    current-attempt: 1/);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
@@ -410,6 +423,26 @@ test('端到端：test scope lock 被持有时保守阻断且零 authority', asy
     await lock.release();
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test('端到端：BLOCK 到 maxAttempts 后硬停止且不执行新命令', () => {
+  const { base, crWs } = makeTestCrFixture();
+  try {
+    const crDir = path.join(crWs, 'change-requests', 'CR-TEST-1');
+    writeFileSync(path.join(crDir, 'test-report.md'), '---\ncr: CR-TEST-1\nstatus: block\ngenerated-by: crctl-test\n---\n\n<!-- crctl:analysis-below -->\n');
+    writeFileSync(path.join(crDir, 'review-loop.yml'), renderLoopText({
+      'write-test-report': {
+        'current-cycle': 1, 'current-attempt': 3,
+        attempts: [1, 2, 3].map((attempt) => ({ attempt, at: `2026-08-15T12:0${attempt}:00+08:00`, by: 'Ray', cycle: 1 })),
+      },
+    }));
+    const sentinel = path.join(crWs, 'sentinel.txt');
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(sentinel)}, 'ran')`], timeoutSeconds: 30 }] };
+    const r = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(crWs, plan), '--workspace', crWs]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stderr.error.code, 'TEST_LOOP_EXHAUSTED');
+    assert.ok(!existsSync(sentinel));
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
 test('端到端：非法 test journal 硬失败，不被 complete 幂等路径静默跳过', () => {

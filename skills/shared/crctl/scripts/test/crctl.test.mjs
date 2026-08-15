@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, realpathSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, realpathSync, chmodSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -3354,7 +3354,9 @@ test('CR-2026-030 TASK-01：owner-set commit 失败 → OWNER_COMMIT_FAILED/chan
     git(ws, ['add', '-A']);
     git(ws, ['commit', '-m', '[cr] seed']);
     mkdirSync(path.join(ws, '.githooks'), { recursive: true });
-    writeFileSync(path.join(ws, '.githooks', 'pre-commit'), '#!/bin/sh\nexit 1\n');
+    const hook = path.join(ws, '.githooks', 'pre-commit');
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n');
+    chmodSync(hook, 0o755);
     git(ws, ['config', 'core.hooksPath', '.githooks']);
     const md0 = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'cr.md'), 'utf8');
     const bl0 = readFileSync(path.join(ws, 'change-requests', '_backlog.yml'), 'utf8');
@@ -3380,7 +3382,9 @@ test('CR-2026-030 TASK-01：owner-set 恢复失败 → OWNER_COMMIT_ROLLBACK_FAI
     git(ws, ['add', '-A']);
     git(ws, ['commit', '-m', '[cr] seed']);
     mkdirSync(path.join(ws, '.githooks'), { recursive: true });
-    writeFileSync(path.join(ws, '.githooks', 'pre-commit'), '#!/bin/sh\nexit 1\n');
+    const hook = path.join(ws, '.githooks', 'pre-commit');
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n');
+    chmodSync(hook, 0o755);
     git(ws, ['config', 'core.hooksPath', '.githooks']);
     // lock-owner/journal/blob/manifest/apply 共 10 次 rename；第 11 次是 rollback 首次恢复
     const prelude = [
@@ -3610,7 +3614,9 @@ test('review repair：approve commit 失败由 ledger transaction 回滚，修�
   const { ws, privateKey } = makeStageWorkspace('requirement');
   try {
     mkdirSync(path.join(ws, '.githooks'), { recursive: true });
-    writeFileSync(path.join(ws, '.githooks', 'pre-commit'), '#!/bin/sh\nexit 1\n');
+    const hook = path.join(ws, '.githooks', 'pre-commit');
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n');
+    chmodSync(hook, 0o755);
     git(ws, ['config', 'core.hooksPath', '.githooks']);
     const gp = makeStageGrant(ws, privateKey, 'requirement');
     const r1 = runCrctl(['approve', 'CR-G1', '--stage', 'requirement', '--grant', gp, '--workspace', ws]);
