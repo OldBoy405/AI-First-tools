@@ -320,6 +320,14 @@ export const WORKSPACE_CLASSIFICATIONS = ['missing', 'healthy', 'branch-only', '
 
 export function branchForCr(cr) { return `requirement/${cr}`; }
 
+function sameFileIdentity(a, b) {
+  try {
+    const left = fs.statSync(a);
+    const right = fs.statSync(b);
+    return left.dev === right.dev && left.ino === right.ino;
+  } catch { return false; }
+}
+
 /** 单仓 workspace 事实分类：只读，零写入。 */
 export function classifyRepoWorkspace(ctx, repo, cr) {
   const branch = branchForCr(cr);
@@ -335,8 +343,7 @@ export function classifyRepoWorkspace(ctx, repo, cr) {
   const list = gitRun(repo.rootPath, ['worktree', 'list', '--porcelain']);
   const registered = list.status === 0 && list.stdout.split(/\r?\n/).some((l) => {
     if (!l.startsWith('worktree ')) return false;
-    const p = l.slice('worktree '.length);
-    try { return fs.realpathSync(p) === real; } catch { return p === wtPath; }
+    return sameFileIdentity(l.slice('worktree '.length), real);
   });
   if (!registered) { info.classification = 'path-unregistered'; return info; }
   info.dirty = gitRun(wtPath, ['status', '--porcelain']).stdout !== '';
