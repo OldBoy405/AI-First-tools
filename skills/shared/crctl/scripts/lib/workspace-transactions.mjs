@@ -2111,6 +2111,8 @@ export async function testCr(ctx, { cr, workspace, planPath }) {
         const jt = existing.journal.test || {};
         return buildTestResponse({ cr, status: jt.status || overall, commandDigest: jt.commandDigest || commandDigest, attempt: jt.attempt || 1, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: false });
       }
+      // complete 但 inputDigest 不同：代码/命令变更，删除旧 complete journal，走新 attempt
+      fs.rmSync(existing.txDir, { recursive: true, force: true });
     } else {
       await recoverWriteSet({ txRoot: workspace, txId: existing.journal.txId });
       existing.journal.test.phase = 'complete';
@@ -2140,7 +2142,7 @@ export async function testCr(ctx, { cr, workspace, planPath }) {
   const nextLoop = { 'current-cycle': cycle, 'current-attempt': nextAttempt, attempts: [...(prevLoop.attempts || []), { attempt: nextAttempt, at: generatedAt, by, cycle }] };
   const loopAfter = renderLoopText({ ...loopData.loops, [TEST_LOOP_REF]: nextLoop });
 
-  const normHash = (t) => (t == null ? null : sha256(t.replaceAll('\r\n', '\n')));
+  const normHash = (t) => (t == null ? null : sha256(t));
   const loopAbs = path.join(workspace, loopRel);
   let loopBeforeText = null;
   try { loopBeforeText = fs.readFileSync(loopAbs, 'utf8'); } catch { loopBeforeText = null; }
@@ -2157,7 +2159,7 @@ export async function testCr(ctx, { cr, workspace, planPath }) {
     try { logContent = fs.readFileSync(logAbs, 'utf8'); } catch { /* keep empty */ }
     const logDestAbs = path.join(workspace, logRel);
     let logBefore = null;
-    try { logBefore = sha256(fs.readFileSync(logDestAbs, 'utf8').replaceAll('\r\n', '\n')); } catch { logBefore = null; }
+    try { logBefore = sha256(fs.readFileSync(logDestAbs, 'utf8')); } catch { logBefore = null; }
     entries.push({ path: logRel, beforeSha256: logBefore, afterSha256: sha256(logContent), content: logContent });
   }
 
