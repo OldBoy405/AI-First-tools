@@ -93,7 +93,7 @@ function readJsonChecked(p, code, label) {
 /* ────────────────────────── 目录锁（SDD §3.2） ────────────────────────── */
 
 const LOCK_SCOPE_RE = /^[A-Za-z0-9:_-]+$/;
-const OPS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger'];
+const OPS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger', 'test'];
 
 /** PID 存活探针：同 hostname 下 process.kill(pid, 0)——无错/EPERM 视为存活，ESRCH 视为不存在。
  * 导出 _setPidProbe 仅为测试 seam（EPERM/ESRCH/PID reuse 矩阵），生产路径不得替换。 */
@@ -168,7 +168,7 @@ export async function acquireLock({ root, scope, op, cr }) {
 
 /* ────────────────────────── journal envelope（SDD §3.1） ────────────────────────── */
 
-const PAYLOAD_KEYS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger'];
+const PAYLOAD_KEYS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger', 'test'];
 
 const CR_OR_KEY_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -231,7 +231,7 @@ export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inpu
     inputDigest: inputDigest == null ? null : inputDigest,
     sideEffects: [], commit: null, lastError: null,
     createdAt: now, updatedAt: now,
-    register: null, workspace: null, merge: null, writeback: null, archive: null, ledger: null,
+    register: null, workspace: null, merge: null, writeback: null, archive: null, ledger: null, test: null,
   };
   const journalPath = path.join(base, txId, 'journal.json');
   durableWriteFile(journalPath, JSON.stringify(journal, null, 2));

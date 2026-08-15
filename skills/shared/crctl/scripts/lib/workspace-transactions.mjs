@@ -1762,3 +1762,420 @@ export function checkUpgrade(ctx) {
   }
   return { safe, requiresReapproval, blocksUpgrade, canActivate: blocksUpgrade.length === 0 };
 }
+
+/* ────────────────────────── 结构化测试闭环（testCr，CR-2026-040） ──────────────────────────
+ * 单一深接口：crctl.mjs cmdTest 薄接线调用 testCr；本模块承担 plan 校验、shell:false 执行、
+ * 机器报告/traceability tests/review-loop 的原子写集编排。运行阶段不建 journal、不持锁、
+ * 不写 authority；记录阶段复用 durable-tx journal/write-set 一次发布，技术失败与业务 block 分流。
+ */
+
+const TEST_PLAN_SCHEMA = 'cr-test-plan/v1';
+const TEST_MARKER = '<!-- crctl:analysis-below -->';
+const TEST_LOOP_REF = 'write-test-report';
+const TEST_PLAN_FIELDS = ['repo', 'cwd', 'executable', 'args', 'timeoutSeconds'];
+
+/** review-loop.yml 全量渲染纯函数（自 crctl.mjs 原样下沉，crctl re-import 共用，禁止两处复刻）。 */
+export function renderLoopText(loopsMap) {
+  const lines = ['# 由 crctl attempt 维护，请勿手工编辑', 'loops:'];
+  for (const [k, v] of Object.entries(loopsMap)) {
+    lines.push(`  ${k}:`);
+    lines.push(`    current-cycle: ${v['current-cycle'] || 1}`);
+    lines.push(`    current-attempt: ${v['current-attempt']}`);
+    lines.push('    attempts:');
+    for (const a of v.attempts) {
+      const c = a && a.cycle ? `, cycle: ${a.cycle}` : '';
+      lines.push(`      - { attempt: ${a.attempt}, at: "${a.at}", by: "${a.by}"${c} }`);
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+function resolveIdentity(ws) {
+  const cfgPath = path.join(ws, '.crctl', 'config.json');
+  try {
+    const j = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    if (j && j.identity) return String(j.identity);
+  } catch { /* fallthrough */ }
+  const r = spawnSync('git', ['config', '--get', 'user.name'], { cwd: ws, encoding: 'utf8', shell: false });
+  const name = (r.stdout || '').trim();
+  return name || 'unknown';
+}
+
+/** write-test-report.reviewLoop.maxAttempts 唯一读取点（从 code-implementation pipeline 解析，缺省 3）。 */
+function resolveTestMaxAttempts(ctx) {
+  const installRoot = ctx.installRoot;
+  let toolsRoot = null;
+  try {
+    const cfg = parseYaml(fs.readFileSync(path.join(installRoot, 'dir-graph.yaml'), 'utf8').replaceAll('\r\n', '\n'));
+    const v = cfg && cfg.workspace && cfg.workspace.tools_package_path;
+    if (typeof v === 'string' && v.trim()) {
+      toolsRoot = fs.realpathSync(path.isAbsolute(v) ? v : path.resolve(installRoot, v));
+    }
+  } catch { /* fallthrough to default */ }
+  if (toolsRoot) {
+    try {
+      const p = path.join(toolsRoot, 'pipeline-templates', 'code-implementation.pipeline.json');
+      const doc = JSON.parse(fs.readFileSync(p, 'utf8'));
+      const node = (doc.nodes || []).find((n) => n.ref === TEST_LOOP_REF && n.reviewLoop);
+      if (node && node.reviewLoop && Number.isInteger(node.reviewLoop.maxAttempts) && node.reviewLoop.maxAttempts > 0) {
+        return node.reviewLoop.maxAttempts;
+      }
+    } catch { /* fallthrough */ }
+  }
+  return 3;
+}
+
+function readCrMdFrontmatterTest(ws, cr) {
+  const p = path.join(ws, 'change-requests', cr, 'cr.md');
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch { return null; }
+  const m = matchFrontmatter(text.replaceAll('\r\n', '\n'));
+  if (!m) return null;
+  return parseYaml(m.body);
+}
+
+function readReviewLoopData(ws, cr) {
+  const p = path.join(ws, 'change-requests', cr, 'review-loop.yml');
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch { text = null; }
+  const data = text ? (parseYaml(text.replaceAll('\r\n', '\n')) || {}) : {};
+  const loops = (data && data.loops && typeof data.loops === 'object') ? data.loops : {};
+  return { data, loops };
+}
+
+/** 查找 {ws}/.crctl/transactions/test/{cr}/ 下最新 test journal（按 updatedAt，平手取 txId 大者）。 */
+function latestTestJournal(ws, cr) {
+  const base = path.join(ws, '.crctl', 'transactions', 'test', cr);
+  if (!fs.existsSync(base)) return null;
+  let latest = null;
+  for (const txId of fs.readdirSync(base).sort()) {
+    const journalPath = path.join(base, txId, 'journal.json');
+    if (!fs.existsSync(journalPath)) continue;
+    let j;
+    try { j = JSON.parse(fs.readFileSync(journalPath, 'utf8').replaceAll('\r\n', '\n')); } catch { continue; }
+    if (!j || j.op !== 'test') continue;
+    if (!latest || Date.parse(j.updatedAt) > Date.parse(latest.journal.updatedAt)
+      || (j.updatedAt === latest.journal.updatedAt && j.txId > latest.journal.txId)) {
+      latest = { journal: j, journalPath, txDir: path.dirname(journalPath) };
+    }
+  }
+  return latest;
+}
+
+function auditLogTest(ws, record) {
+  const dir = path.join(ws, '.crctl');
+  fs.mkdirSync(dir, { recursive: true });
+  const gi = path.join(dir, '.gitignore');
+  if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n');
+  fs.appendFileSync(path.join(dir, 'audit.log'), JSON.stringify({ at: nowIso(), ...record }) + '\n');
+}
+
+/* ────────────────────────── 纯函数（测试 seam，不成为公共命令） ────────────────────────── */
+
+/** cr-test-plan/v1 解析与校验（schema/字段白名单/repo/cwd containment/branch，失败零 authority 变化）。 */
+export function parseTestPlan(raw, ctx, cr) {
+  const norm = String(raw).replaceAll('\r\n', '\n');
+  let doc;
+  try { doc = JSON.parse(norm); } catch { throw new TxError('TEST_PLAN_SCHEMA_INVALID', 'test plan JSON 非法'); }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new TxError('TEST_PLAN_SCHEMA_INVALID', 'plan 顶层必须是对象');
+  if (doc.schema !== TEST_PLAN_SCHEMA) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `schema 必须是 ${TEST_PLAN_SCHEMA}`);
+  if (!Array.isArray(doc.commands) || doc.commands.length === 0) throw new TxError('TEST_PLAN_SCHEMA_INVALID', 'commands 必须是非空数组');
+  const commands = doc.commands.map((cmd, i) => {
+    const where = `commands[${i}]`;
+    if (!cmd || typeof cmd !== 'object' || Array.isArray(cmd)) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where} 必须是对象`);
+    for (const k of Object.keys(cmd)) {
+      if (!TEST_PLAN_FIELDS.includes(k)) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where} 含禁止字段: ${k}`);
+    }
+    if (typeof cmd.repo !== 'string' || !cmd.repo.trim()) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where}.repo 必须是非空字符串`);
+    let repo;
+    try { repo = getRepository(ctx, cmd.repo); }
+    catch (e) {
+      if (e instanceof TxError && e.code === 'REPO_INACTIVE') throw new TxError('TEST_REPO_INACTIVE', e.message, e.extra);
+      throw new TxError('TEST_REPO_NOT_FOUND', e.message, e.extra);
+    }
+    const cwdRaw = cmd.cwd == null ? '.' : cmd.cwd;
+    if (typeof cwdRaw !== 'string' || cwdRaw === '') throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where}.cwd 必须是非空字符串`);
+    if (path.isAbsolute(cwdRaw)) throw new TxError('TEST_CWD_ESCAPE', `${where}.cwd 不能是绝对路径: ${cwdRaw}`);
+    if (typeof cmd.executable !== 'string' || !cmd.executable.trim()) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where}.executable 必须是非空字符串`);
+    if (!Array.isArray(cmd.args) || cmd.args.some((a) => typeof a !== 'string')) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where}.args 必须是字符串数组`);
+    if (!Number.isInteger(cmd.timeoutSeconds) || cmd.timeoutSeconds <= 0) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where}.timeoutSeconds 必须是正整数`);
+    const wt = path.join(repo.worktreePath, cr);
+    if (!fs.existsSync(wt)) throw new TxError('TEST_WORKTREE_MISSING', `repo ${cmd.repo} 的 requirement/${cr} worktree 不存在: ${wt}`, { repo: cmd.repo, worktree: wt });
+    const br = gitRun(wt, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    if (br.status !== 0 || br.stdout !== `requirement/${cr}`) {
+      throw new TxError('TEST_WORKTREE_BRANCH', `repo ${cmd.repo} worktree 分支必须是 requirement/${cr}`, { repo: cmd.repo, branch: br.stdout });
+    }
+    const absoluteCwd = path.resolve(wt, cwdRaw);
+    let realWt;
+    let realCwd;
+    try { realWt = fs.realpathSync(wt); } catch { throw new TxError('TEST_WORKTREE_MISSING', `repo ${cmd.repo} worktree realpath 失败: ${wt}`, { repo: cmd.repo }); }
+    try { realCwd = fs.realpathSync(absoluteCwd); } catch { throw new TxError('TEST_CWD_ESCAPE', `${where}.cwd 不存在: ${absoluteCwd}`, { repo: cmd.repo }); }
+    if (realCwd !== realWt && !realCwd.startsWith(realWt + path.sep)) {
+      throw new TxError('TEST_CWD_ESCAPE', `${where}.cwd 越出 worktree: ${cwdRaw}`, { repo: cmd.repo, cwd: cwdRaw });
+    }
+    const cwdRel = cwdRaw === '.' ? '.' : cwdRaw.split(path.sep).join('/');
+    return { repo: cmd.repo, cwd: cwdRel, absoluteCwd: realCwd, executable: cmd.executable, args: [...cmd.args], timeoutSeconds: cmd.timeoutSeconds };
+  });
+  return { schema: TEST_PLAN_SCHEMA, commands };
+}
+
+/** 命令集合 canonical subject + sha256（固定键序/数组顺序，不绑定临时路径/时间/owner/stdout）。 */
+export function canonicalCommandSubject(plan) {
+  const subject = {
+    schema: TEST_PLAN_SCHEMA,
+    commands: plan.commands.map(({ repo, cwd, executable, args, timeoutSeconds }) => ({
+      repo, cwd: cwd || '.', executable, args, timeoutSeconds,
+    })),
+  };
+  return { subject, digest: sha256(JSON.stringify(subject)) };
+}
+
+/** shell:false 执行计划，日志落临时目录；已启动 non-zero/timeout 记业务 block 并继续，启动失败技术中止。 */
+export function runTestPlan(plan, ctx, cr) {
+  const tempRoot = path.join(crWorktreePath(ctx, cr), '.crctl', 'tmp', 'test', cr, `${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
+  fs.mkdirSync(tempRoot, { recursive: true });
+  const results = [];
+  let overall = 'pass';
+  for (let i = 0; i < plan.commands.length; i++) {
+    const cmd = plan.commands[i];
+    const r = spawnSync(cmd.executable, cmd.args, {
+      cwd: cmd.absoluteCwd, encoding: 'utf8', shell: false, timeout: cmd.timeoutSeconds * 1000,
+    });
+    const errCode = r.error ? r.error.code : null;
+    const timedOut = errCode === 'ETIMEDOUT';
+    const started = errCode == null || timedOut;
+    const logRel = `change-requests/${cr}/test-evidence/cmd-${String(i + 1).padStart(2, '0')}.log`;
+    const logAbs = path.join(tempRoot, `cmd-${String(i + 1).padStart(2, '0')}.log`);
+    fs.writeFileSync(logAbs, [
+      `$ ${cmd.executable} ${cmd.args.join(' ')}`,
+      `(exit=${r.status == null ? 'null' : r.status})`,
+      '--- stdout ---',
+      r.stdout || '',
+      '--- stderr ---',
+      r.stderr || '',
+    ].join('\n'), 'utf8');
+    const result = {
+      repo: cmd.repo,
+      cwd: cmd.cwd,
+      executable: cmd.executable,
+      args: cmd.args,
+      timeoutSeconds: cmd.timeoutSeconds,
+      exitCode: r.status == null ? null : r.status,
+      signal: r.signal || null,
+      timedOut,
+      started,
+      log: logRel,
+    };
+    results.push(result);
+    if (!started) {
+      throw new TxError('TEST_EXECUTABLE_INVALID', `executable 启动失败: ${cmd.executable}${errCode ? ` (${errCode})` : ''}`, { repo: cmd.repo, executable: cmd.executable, errCode, index: i });
+    }
+    if (r.status !== 0 || timedOut) overall = 'block';
+  }
+  return { results, tempLogs: tempRoot, overall };
+}
+
+/** marker 分区：唯一 canonical literal（兼容旧带说明前缀），缺失/重复/未闭合硬失败，返回 marker 后内容。 */
+export function parseAnalysisMarker(existingReport) {
+  if (existingReport == null) return { analysisSuffix: '' };
+  const norm = existingReport.replaceAll('\r\n', '\n');
+  const prefix = '<!-- crctl:analysis-below';
+  const positions = [];
+  let idx = norm.indexOf(prefix);
+  while (idx !== -1) {
+    const end = norm.indexOf('-->', idx);
+    if (end === -1) throw new TxError('TEST_MARKER_INVALID', 'marker 未闭合（缺少 -->）');
+    positions.push({ start: idx, end: end + 3 });
+    idx = norm.indexOf(prefix, end);
+  }
+  if (positions.length !== 1) throw new TxError('TEST_MARKER_INVALID', `marker 必须恰好出现 1 次，实际 ${positions.length} 次`);
+  return { analysisSuffix: norm.slice(positions[0].end) };
+}
+
+/** test-report.md 机器区渲染（frontmatter + 标题，不含 marker；marker 由 testCr 拼接）。 */
+export function renderTestMachineReport(input) {
+  const lines = [
+    '---',
+    `cr: ${input.cr}`,
+    `status: ${input.status}`,
+    `tester: ${yamlScalarLib(input.tester)}`,
+    'generated-by: crctl-test',
+    `generated-at: "${input.generatedAt}"`,
+    `command-digest: ${input.commandDigest}`,
+    'commands:',
+  ];
+  for (const c of input.commands) {
+    lines.push(`  - repo: ${c.repo}`);
+    lines.push(`    cwd: ${yamlScalarLib(c.cwd)}`);
+    lines.push(`    executable: ${yamlScalarLib(c.executable)}`);
+    lines.push(`    args: [${c.args.map((a) => yamlScalarLib(a)).join(', ')}]`);
+    lines.push(`    timeout-seconds: ${c.timeoutSeconds}`);
+    lines.push(`    exit-code: ${c.exitCode == null ? 'null' : c.exitCode}`);
+    lines.push(`    signal: ${c.signal == null ? 'null' : yamlScalarLib(c.signal)}`);
+    lines.push(`    timed-out: ${c.timedOut}`);
+    lines.push(`    started: ${c.started}`);
+    lines.push(`    log: ${yamlScalarLib(c.log)}`);
+  }
+  lines.push('---', '', `# 测试报告 · ${input.cr}`);
+  return lines.join('\n') + '\n\n';
+}
+
+function renderTestsBlock(input) {
+  return [
+    'tests:',
+    `  report: ${yamlScalarLib(input.reportRel)}`,
+    `  status: ${input.status}`,
+    `  tester: ${yamlScalarLib(input.tester)}`,
+    `  owner-assigned-at: "${input.ownerAssignedAt}"`,
+    `  generated-at: "${input.generatedAt}"`,
+    `  command-digest: ${input.commandDigest}`,
+    `  review-loop: ${input.reviewLoop}`,
+  ].join('\n');
+}
+
+/** traceability.yml tests 段行级定点编辑（保留其他顶层段；重复 tests: 硬失败，缺失时追加）。 */
+export function renderTestsTraceability(existing, input) {
+  const block = renderTestsBlock(input);
+  if (existing == null) return `cr-id: ${input.cr}\n${block}\n`;
+  const norm = existing.replaceAll('\r\n', '\n');
+  const crId = norm.match(/^cr-id:\s*["']?([^"'\s]+)["']?/m);
+  if (!crId || crId[1] !== input.cr) throw new TxError('TRACE_SHAPE', `traceability.yml cr-id 与 ${input.cr} 不一致，拒绝写 tests 投影`);
+  const lines = norm.split('\n');
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) if (/^tests:\s*$/.test(lines[i])) hits.push(i);
+  if (hits.length > 1) throw new TxError('TRACE_SHAPE', 'traceability.yml 出现重复顶层 tests: 段，拒绝编辑');
+  const blockLines = block.split('\n');
+  if (hits.length === 1) {
+    const ti = hits[0];
+    let te = lines.length;
+    for (let i = ti + 1; i < lines.length; i++) { if (/^\S/.test(lines[i])) { te = i; break; } }
+    const out = [...lines.slice(0, ti), ...blockLines, ...lines.slice(te)].join('\n');
+    return out + (norm.endsWith('\n') ? '\n' : '');
+  }
+  return (norm.endsWith('\n') ? norm : norm + '\n') + block + '\n';
+}
+
+function buildTestResponse({ cr, status, commandDigest, attempt, results, report, traceability, reviewLoop, changed }) {
+  return {
+    op: 'test', cr, status, commandDigest, attempt,
+    commands: results,
+    report, traceability, reviewLoop,
+    changed,
+    recoverCommand: `node {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs test ${cr} --plan <plan> --workspace <worktree>`,
+  };
+}
+
+/** 结构化测试业务处理器（SDD §3.2 唯一入口）：校验→执行→原子发布机器证据/tests/review-loop。 */
+export async function testCr(ctx, { cr, workspace, planPath }) {
+  const fm = readCrMdFrontmatterTest(workspace, cr);
+  if (!fm) throw new TxError('CR_MD_MISSING', `${cr} 的 cr.md 缺失或 frontmatter 非法`);
+  if (fm.status !== 'developing') throw new TxError('TEST_STATE_INVALID', `${cr} 当前 status=${fm.status}，结构化测试仅在 developing 执行`);
+  const testOwner = fm.owners && fm.owners.test;
+  if (!testOwner || typeof testOwner !== 'object' || !testOwner.id || !testOwner['assigned-at']) {
+    throw new TxError('TEST_OWNER_MISSING', `${cr} 的 cr.md 缺少 owners.test.id 或 owners.test.assigned-at`);
+  }
+  if (!planPath) throw new TxError('TEST_PLAN_NOT_FOUND', '缺少 --plan 参数');
+  const planAbs = path.isAbsolute(planPath) ? planPath : path.resolve(workspace, planPath);
+  let raw;
+  try { raw = fs.readFileSync(planAbs, 'utf8'); } catch { throw new TxError('TEST_PLAN_NOT_FOUND', `test plan 不存在: ${planAbs}`); }
+
+  const plan = parseTestPlan(raw, ctx, cr);
+  const { digest: commandDigest } = canonicalCommandSubject(plan);
+
+  const maxAttempts = resolveTestMaxAttempts(ctx);
+  const loopData = readReviewLoopData(workspace, cr);
+  const prevLoop = loopData.loops[TEST_LOOP_REF] || { 'current-cycle': 1, 'current-attempt': 0, attempts: [] };
+  const currentAttempt = prevLoop['current-attempt'] || 0;
+  if (currentAttempt >= maxAttempts) {
+    throw new TxError('TEST_LOOP_EXHAUSTED', `${TEST_LOOP_REF} 已达 maxAttempts=${maxAttempts}，不得继续自修复`);
+  }
+
+  // 运行阶段：不建 journal、不持锁、不写 authority；启动失败技术中止，non-zero/timeout 记业务 block 并继续
+  const { results, tempLogs, overall } = runTestPlan(plan, ctx, cr);
+
+  const tester = String(testOwner.id);
+  const ownerAssignedAt = String(testOwner['assigned-at']);
+  const generatedAt = nowIso();
+  const resultMetadata = JSON.stringify(results.map((r) => ({ repo: r.repo, cwd: r.cwd, executable: r.executable, args: r.args, exitCode: r.exitCode, signal: r.signal, timedOut: r.timedOut, started: r.started })));
+  const inputDigest = sha256(commandDigest + resultMetadata + tester + ownerAssignedAt);
+
+  const reportRel = `change-requests/${cr}/test-report.md`;
+  const traceRel = `change-requests/${cr}/traceability.yml`;
+  const loopRel = `change-requests/${cr}/review-loop.yml`;
+
+  // 幂等重放：complete + 相同 inputDigest → changed=false；incomplete → 恢复上次 write-set；complete + 不同 inputDigest → 新 attempt
+  const existing = latestTestJournal(workspace, cr);
+  if (existing) {
+    if (existing.journal.phase === 'complete') {
+      if (existing.journal.inputDigest === inputDigest) {
+        const jt = existing.journal.test || {};
+        return buildTestResponse({ cr, status: jt.status || overall, commandDigest: jt.commandDigest || commandDigest, attempt: jt.attempt || 1, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: false });
+      }
+    } else {
+      await recoverWriteSet({ txRoot: workspace, txId: existing.journal.txId });
+      existing.journal.test.phase = 'complete';
+      existing.journal.phase = 'complete';
+      await saveJournal({ path: existing.journalPath, journal: existing.journal });
+      const jt = existing.journal.test || {};
+      return buildTestResponse({ cr, status: jt.status || overall, commandDigest: jt.commandDigest || commandDigest, attempt: jt.attempt || 1, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: true });
+    }
+  }
+
+  // 计算四处 after 文本（任何 authority 写入之前）
+  const reportAbs = path.join(workspace, reportRel);
+  let existingReport = null;
+  try { existingReport = fs.readFileSync(reportAbs, 'utf8'); } catch { existingReport = null; }
+  const { analysisSuffix } = parseAnalysisMarker(existingReport);
+  const machine = renderTestMachineReport({ cr, status: overall, tester, generatedAt, commandDigest, commands: results });
+  const reportAfter = machine + TEST_MARKER + analysisSuffix;
+
+  const traceAbs = path.join(workspace, traceRel);
+  let existingTrace = null;
+  try { existingTrace = fs.readFileSync(traceAbs, 'utf8'); } catch { existingTrace = null; }
+  const traceAfter = renderTestsTraceability(existingTrace, { cr, reportRel, status: overall, tester, ownerAssignedAt, generatedAt, commandDigest, reviewLoop: TEST_LOOP_REF });
+
+  const nextAttempt = currentAttempt + 1;
+  const cycle = prevLoop['current-cycle'] || 1;
+  const by = resolveIdentity(workspace);
+  const nextLoop = { 'current-cycle': cycle, 'current-attempt': nextAttempt, attempts: [...(prevLoop.attempts || []), { attempt: nextAttempt, at: generatedAt, by, cycle }] };
+  const loopAfter = renderLoopText({ ...loopData.loops, [TEST_LOOP_REF]: nextLoop });
+
+  const normHash = (t) => (t == null ? null : sha256(t.replaceAll('\r\n', '\n')));
+  const loopAbs = path.join(workspace, loopRel);
+  let loopBeforeText = null;
+  try { loopBeforeText = fs.readFileSync(loopAbs, 'utf8'); } catch { loopBeforeText = null; }
+
+  const entries = [
+    { path: reportRel, beforeSha256: normHash(existingReport), afterSha256: sha256(reportAfter), content: reportAfter },
+    { path: traceRel, beforeSha256: normHash(existingTrace), afterSha256: sha256(traceAfter), content: traceAfter },
+    { path: loopRel, beforeSha256: normHash(loopBeforeText), afterSha256: sha256(loopAfter), content: loopAfter },
+  ];
+  for (let i = 0; i < results.length; i++) {
+    const logRel = `change-requests/${cr}/test-evidence/cmd-${String(i + 1).padStart(2, '0')}.log`;
+    const logAbs = path.join(tempLogs, `cmd-${String(i + 1).padStart(2, '0')}.log`);
+    let logContent = '';
+    try { logContent = fs.readFileSync(logAbs, 'utf8'); } catch { /* keep empty */ }
+    const logDestAbs = path.join(workspace, logRel);
+    let logBefore = null;
+    try { logBefore = sha256(fs.readFileSync(logDestAbs, 'utf8').replaceAll('\r\n', '\n')); } catch { logBefore = null; }
+    entries.push({ path: logRel, beforeSha256: logBefore, afterSha256: sha256(logContent), content: logContent });
+  }
+
+  // 记录阶段：journal + recoverable write-set 一次原子发布
+  const { journal, journalPath } = await loadOrCreateJournal({ root: workspace, op: 'test', cr, graphDigest: ctx.graphDigest, inputDigest });
+  journal.test = { targetRoot: path.resolve(workspace), commandDigest, attempt: nextAttempt, status: overall, entries: entries.map((e) => e.path) };
+  journal.phase = 'prepared';
+  let saved = await saveJournal({ path: journalPath, journal });
+  await applyWriteSet({ root: workspace, txRoot: workspace, txId: saved.txId, entries });
+  saved.test.phase = 'written';
+  saved.phase = 'written';
+  saved = await saveJournal({ path: journalPath, journal: saved });
+
+  auditLogTest(workspace, { kind: 'test', cr, status: overall, attempt: nextAttempt, digest: commandDigest });
+  saved.test.phase = 'complete';
+  saved.phase = 'complete';
+  await saveJournal({ path: journalPath, journal: saved });
+  try { fs.rmSync(tempLogs, { recursive: true, force: true }); } catch { /* 幂等清理 */ }
+
+  return buildTestResponse({ cr, status: overall, commandDigest, attempt: nextAttempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: true });
+}

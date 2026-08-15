@@ -131,3 +131,60 @@ test('review repair：ledger rename 间隙中断后，下次同命令先整组�
     assert.ok(existsSync(path.join(crDir, 'review-loop.yml')));
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
+
+/* ── CR-2026-040 TASK-05：test 记录阶段故障矩阵 ─────────────────────────── */
+
+function makeTestCrFixture() {
+  const base = mkdtempSync(path.join(os.tmpdir(), 'crctl-fault-test-'));
+  const ws = path.join(base, 'ws');
+  mkdirSync(path.join(ws, 'change-requests'), { recursive: true });
+  writeFileSync(path.join(ws, 'dir-graph.yaml'),
+    'workspace:\n  tools_package_path: ' + JSON.stringify(PACKAGE_ROOT) + '\nrepositories:\n' +
+    '  - id: ai-first-platform-docs\n    path: "."\n    trunk: master\n    role: knowledge-base\n');
+  const sh = (args, cwd) => spawnSync('git', args, { cwd, encoding: 'utf8', shell: false });
+  sh(['init', '-q', '-b', 'master'], ws);
+  sh(['config', 'user.email', 'test@aifirst.dev'], ws);
+  sh(['config', 'user.name', 'Test'], ws);
+  sh(['commit', '-q', '--allow-empty', '-m', 'init'], ws);
+  const crWs = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-T1');
+  sh(['worktree', 'add', '-q', '-b', 'requirement/CR-T1', crWs], ws);
+  const crDir = path.join(crWs, 'change-requests', 'CR-T1');
+  mkdirSync(crDir, { recursive: true });
+  const owners = ['requirement', 'development', 'test']
+    .flatMap((k) => [`  ${k}:`, `    id: Ray`, `    assigned-at: "2026-08-04T12:00:00+08:00"`]);
+  writeFileSync(path.join(crDir, 'cr.md'), ['---', 'id: CR-T1', 'status: developing', 'owners:', ...owners, '---', ''].join('\n'));
+  const tmp = path.join(crWs, '.crctl', 'tmp');
+  mkdirSync(tmp, { recursive: true });
+  const planPath = path.join(tmp, 'test-plan.json');
+  writeFileSync(planPath, JSON.stringify({ schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'process.exit(0)'], timeoutSeconds: 30 }] }));
+  return { base, ws, crWs, planPath };
+}
+
+test('fault harness：test 记录阶段 tx-apply-between-rename 中断后恢复，attempt 不重复', async () => {
+  const { base, crWs, planPath } = makeTestCrFixture();
+  try {
+    const r1 = await runCrctl(['test', 'CR-T1', '--plan', planPath, '--workspace', crWs],
+      { env: { [FAULT_ENV]: 'tx-apply-between-rename' }, expectExit: 1 });
+    assert.equal(r1.stderr.error.code, 'FAULT_INJECTED');
+    // 恢复：去掉 fault point，重跑完整 plan
+    const r2 = await runCrctl(['test', 'CR-T1', '--plan', planPath, '--workspace', crWs], { expectExit: 0 });
+    assert.equal(r2.stdout.attempt, 1, '恢复后 attempt 不重复');
+    const crDir = path.join(crWs, 'change-requests', 'CR-T1');
+    assert.ok(existsSync(path.join(crDir, 'test-report.md')), '恢复后 authority 完整');
+    assert.ok(existsSync(path.join(crDir, 'traceability.yml')));
+    assert.ok(existsSync(path.join(crDir, 'review-loop.yml')));
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('fault harness：test 记录阶段 tx-apply-before-complete 中断后恢复并标 complete', async () => {
+  const { base, crWs, planPath } = makeTestCrFixture();
+  try {
+    const r1 = await runCrctl(['test', 'CR-T1', '--plan', planPath, '--workspace', crWs],
+      { env: { [FAULT_ENV]: 'tx-apply-before-complete' }, expectExit: 1 });
+    assert.equal(r1.stderr.error.code, 'FAULT_INJECTED');
+    const r2 = await runCrctl(['test', 'CR-T1', '--plan', planPath, '--workspace', crWs], { expectExit: 0 });
+    assert.equal(r2.stdout.attempt, 1, 'complete 标记前中断恢复后 attempt 不重复');
+    const r3 = await runCrctl(['test', 'CR-T1', '--plan', planPath, '--workspace', crWs], { expectExit: 0 });
+    assert.equal(r3.stdout.changed, false, '恢复标 complete 后重放幂等 changed=false');
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
