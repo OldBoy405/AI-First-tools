@@ -43,15 +43,13 @@ crctl git diff --unified=80 {merge-base}...HEAD --cwd <worktree>
 crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 ```
 
-对 `implement-code` 节点输出中的验证命令**无条件重新执行**（不以证据缺失为前提）：implement-code 自报结果仅作参考对照，不一致时以本轮重新执行结果为准并在 blockers 注明差异。「测试通过」必须是本轮重新执行的完整命令输出（0 failures），"看起来通过"或"之前跑过"不构成证据；验证命令缺失时要求补齐后再继续：
+验证证据**只读** `change-requests/{cr_id}/test-report.md` 的机器区（`generated-by: crctl-test`）、`traceability.yml#tests` 与 `test-evidence/cmd-NN.log`，**不得重新执行 lint/test/build**（测试执行已收敛为 `crctl test --plan` 单一入口，评审只做只读取证）。以下任一项均形成 blocker 并回到 implement-code：
+- `test-report.md` 缺失，或 marker 之前机器区非 `crctl` 生成（`TEST_EVIDENCE_MISSING`）；
+- `test-report.md` `status` 非 `pass`（业务失败不得进入评审）；
+- `traceability.yml#tests` 与 `test-report.md` 的 `status`/`command-digest` 不一致（`TEST_EVIDENCE_DRIFT`）；
+- 任一被 `test-report.md` 引用的 `test-evidence/cmd-NN.log` 缺失。
 
-```bash
-pnpm lint
-pnpm test
-pnpm build
-```
-
-Go 服务或其他仓库使用对应仓库的 lint/test/build 命令。若某项不适用，必须在 review 输出中写明原因。目标运行时已装 `verification-before-completion` 时可用其 Gate Function/Common Failures 表作执行细则参考，未装按本节最低要求执行——本条不得弱化为"可选加速"。
+"看起来通过"、"之前跑过"或 implement-code 自报结果均不构成评审证据；证据不可信就 blocker，回到既有闭环，而非在评审阶段自行重跑验证命令。
 
 ### Step 2 — 读取设计文档
 

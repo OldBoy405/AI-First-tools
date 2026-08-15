@@ -101,7 +101,7 @@ function readJsonChecked(p, code, label) {
 /* ────────────────────────── 目录锁（SDD §3.2） ────────────────────────── */
 
 const LOCK_SCOPE_RE = /^[A-Za-z0-9:_-]+$/;
-const OPS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger', 'checkpoint'];
+const OPS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger', 'checkpoint', 'test'];
 
 /** PID 存活探针：同 hostname 下 process.kill(pid, 0)——无错/EPERM 视为存活，ESRCH 视为不存在。
  * 导出 _setPidProbe 仅为测试 seam（EPERM/ESRCH/PID reuse 矩阵），生产路径不得替换。 */
@@ -176,7 +176,7 @@ export async function acquireLock({ root, scope, op, cr }) {
 
 /* ────────────────────────── journal envelope（SDD §3.1） ────────────────────────── */
 
-const PAYLOAD_KEYS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger', 'checkpoint'];
+const PAYLOAD_KEYS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger', 'checkpoint', 'test'];
 
 const CR_OR_KEY_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
@@ -206,7 +206,7 @@ function assertEnvelope(j, p) {
  * 无则新建空 envelope（六个 payload 均 null，业务首个 save 前必须置位 op 对应 payload）。
  * 任一已存在 journal 非法 → 硬失败（不静默跳过）。
  */
-export function loadExistingJournal({ root, op, cr, key, inputDigest }) {
+export function loadExistingJournal({ root, op, cr, key, inputDigest, createAfterComplete = false }) {
   if (!OPS.includes(op)) throw new TxError('TX_JOURNAL_INVALID', `op 非法: ${op}`, { op });
   const crOrKey = cr || key;
   if (!crOrKey) throw new TxError('TX_JOURNAL_INVALID', 'loadExistingJournal 需要 cr 或 key');
@@ -227,15 +227,18 @@ export function loadExistingJournal({ root, op, cr, key, inputDigest }) {
   }
   if (!latest) return null;
   if (inputDigest != null && latest.inputDigest != null && latest.inputDigest !== inputDigest) {
+    // createAfterComplete（CR-2026-040）：旧 complete journal 保留（幂等事实不删），仅允许同 key 新建新事务；
+    // 新事务完成后由业务侧清理旧 complete 事实。其余情况保持 TX_INPUT_CONFLICT 硬失败。
+    if (createAfterComplete && latest.phase === 'complete') return null;
     throw new TxError('TX_INPUT_CONFLICT', `${op}/${crOrKey} 已有在途事务且 inputDigest 不一致（旧=${latest.inputDigest} 新=${inputDigest}）`, { txId: latest.txId });
   }
   return { journal: latest, journalPath: latestPath, created: false };
 }
 
-export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inputDigest }) {
+export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inputDigest, createAfterComplete = false }) {
   const crOrKey = cr || key;
   const base = journalDir(root, op, crOrKey);
-  const existing = loadExistingJournal({ root, op, cr, key, inputDigest });
+  const existing = loadExistingJournal({ root, op, cr, key, inputDigest, createAfterComplete });
   if (existing) return existing;
   const txId = crypto.randomUUID().replaceAll('-', '').slice(0, 32);
   const now = nowIso();
@@ -245,7 +248,7 @@ export async function loadOrCreateJournal({ root, op, cr, key, graphDigest, inpu
     inputDigest: inputDigest == null ? null : inputDigest,
     sideEffects: [], commit: null, lastError: null,
     createdAt: now, updatedAt: now,
-    register: null, workspace: null, merge: null, writeback: null, archive: null, ledger: null, checkpoint: null,
+    register: null, workspace: null, merge: null, writeback: null, archive: null, ledger: null, checkpoint: null, test: null,
   };
   const journalPath = path.join(base, txId, 'journal.json');
   durableWriteFile(journalPath, JSON.stringify(journal, null, 2));
@@ -280,7 +283,8 @@ function findTxDir(root, txId) {
 
 function validateEntry(root, e) {
   if (!e || typeof e !== 'object' || typeof e.path !== 'string' || !e.path) throw new TxError('TX_WRITESET_INVALID', 'write-set entry 缺 path');
-  if (path.isAbsolute(e.path) || e.path.split('/').some((seg) => seg === '..' || seg === '')) {
+  if (path.isAbsolute(e.path) || path.win32.isAbsolute(e.path) || path.posix.isAbsolute(e.path)
+    || e.path.split('/').some((seg) => seg === '..' || seg === '')) {
     throw new TxError('TX_WRITESET_INVALID', `write-set path 非法（absolute/.. /空段）: ${e.path}`);
   }
   if (typeof e.afterSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(e.afterSha256)) throw new TxError('TX_WRITESET_INVALID', `entry ${e.path}: afterSha256 非法`);

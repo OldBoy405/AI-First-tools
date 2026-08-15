@@ -83,7 +83,9 @@ export function resolveRepositories(workspace) {
     }
     const declPath = typeof r.path === 'string' ? r.path.trim() : '';
     if (!declPath) throw new TxError('REPO_GRAPH_INVALID', `repo ${id}: 缺少 path`);
-    if (path.isAbsolute(declPath)) throw new TxError('REPO_GRAPH_INVALID', `repo ${id}: path 必须是相对声明路径，收到 absolute: ${declPath}`);
+    if (path.isAbsolute(declPath) || path.win32.isAbsolute(declPath) || path.posix.isAbsolute(declPath)) {
+      throw new TxError('REPO_GRAPH_INVALID', `repo ${id}: path 必须是相对声明路径，收到 absolute: ${declPath}`);
+    }
     const trunk = typeof r.trunk === 'string' ? r.trunk.trim() : '';
     if (!trunk) throw new TxError('REPO_GRAPH_INVALID', `repo ${id}: 缺少 trunk`);
     const canonical = path.resolve(installRoot, declPath);
@@ -109,15 +111,18 @@ export function resolveRepositories(workspace) {
     throw new TxError('REPO_GRAPH_INVALID', `repositories 必须恰好含 1 个 active knowledge-base role 仓，实际 ${kb.length}`);
   }
   const graphDigest = sha256(JSON.stringify(repositories.map((r) => ({ id: r.id, role: r.role, path: r.path, trunk: r.trunk, bucket: r.bucket }))));
-  // CR worktree 反解：workspace 位于 {InstWS}/.rayai-worktrees/{bucket}/requirement/{CR-*} 内时给出 cr/branch
+  // CR worktree 反解：用文件身份抵抗 Windows 8.3 short path / long path 别名。
   let cr = null;
   let branch = null;
   const wsReal = (() => { try { return fs.realpathSync(path.resolve(workspace)); } catch { return path.resolve(workspace); } })();
-  for (const r of repositories) {
-    const prefix = r.worktreePath + path.sep;
-    if (!wsReal.startsWith(prefix)) continue;
-    const seg = wsReal.slice(prefix.length).split(path.sep)[0];
-    if (CR_DIR_RE.test(seg)) { cr = seg; branch = `requirement/${seg}`; break; }
+  const candidateCr = path.basename(wsReal);
+  if (CR_DIR_RE.test(candidateCr)) {
+    for (const r of repositories) {
+      if (!sameFileIdentity(wsReal, path.join(r.worktreePath, candidateCr))) continue;
+      cr = candidateCr;
+      branch = `requirement/${candidateCr}`;
+      break;
+    }
   }
   return { installRoot, repositories, graphDigest, knowledgeBaseRepoId: kb[0].id, inactiveRepoIds, cr, branch };
 }
@@ -453,6 +458,14 @@ export const WORKSPACE_CLASSIFICATIONS = ['missing', 'healthy', 'branch-only', '
 
 export function branchForCr(cr) { return `requirement/${cr}`; }
 
+function sameFileIdentity(a, b) {
+  try {
+    const left = fs.statSync(a);
+    const right = fs.statSync(b);
+    return left.dev === right.dev && left.ino === right.ino;
+  } catch { return false; }
+}
+
 /** 单仓 workspace 事实分类：只读，零写入。 */
 export function classifyRepoWorkspace(ctx, repo, cr) {
   const branch = branchForCr(cr);
@@ -468,8 +481,7 @@ export function classifyRepoWorkspace(ctx, repo, cr) {
   const list = gitRun(repo.rootPath, ['worktree', 'list', '--porcelain']);
   const registered = list.status === 0 && list.stdout.split(/\r?\n/).some((l) => {
     if (!l.startsWith('worktree ')) return false;
-    const p = l.slice('worktree '.length);
-    try { return fs.realpathSync(p) === real; } catch { return p === wtPath; }
+    return sameFileIdentity(l.slice('worktree '.length), real);
   });
   if (!registered) { info.classification = 'path-unregistered'; return info; }
   info.dirty = gitRun(wtPath, ['status', '--porcelain']).stdout !== '';
@@ -2613,4 +2625,522 @@ export function checkUpgrade(ctx) {
     blocksUpgrade.push({ cr, status, why: 'unknown-status', detail: '非预期 status，保守阻断' });
   }
   return { safe, requiresReapproval, blocksUpgrade, canActivate: blocksUpgrade.length === 0 };
+}
+
+/* ────────────────────────── 结构化测试闭环（testCr，CR-2026-040） ──────────────────────────
+ * 单一深接口：crctl.mjs cmdTest 薄接线调用 testCr；本模块承担 plan 校验、shell:false 执行、
+ * 机器报告/traceability tests/review-loop 的原子写集编排。运行阶段不建 journal、不持锁、
+ * 不写 authority；记录阶段复用 durable-tx journal/write-set 一次发布，技术失败与业务 block 分流。
+ */
+
+const TEST_PLAN_SCHEMA = 'cr-test-plan/v1';
+const TEST_MARKER = '<!-- crctl:analysis-below -->';
+const TEST_LOOP_REF = 'write-test-report';
+const TEST_PLAN_FIELDS = ['repo', 'cwd', 'executable', 'args', 'timeoutSeconds'];
+
+/** review-loop.yml 全量渲染纯函数（自 crctl.mjs 原样下沉，crctl re-import 共用，禁止两处复刻）。 */
+export function renderLoopText(loopsMap) {
+  const lines = ['# 由 crctl attempt 维护，请勿手工编辑', 'loops:'];
+  for (const [k, v] of Object.entries(loopsMap)) {
+    lines.push(`  ${k}:`);
+    lines.push(`    current-cycle: ${v['current-cycle'] || 1}`);
+    lines.push(`    current-attempt: ${v['current-attempt']}`);
+    lines.push('    attempts:');
+    for (const a of v.attempts) {
+      const c = a && a.cycle ? `, cycle: ${a.cycle}` : '';
+      lines.push(`      - { attempt: ${a.attempt}, at: "${a.at}", by: "${a.by}"${c} }`);
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+function resolveIdentity(ws) {
+  const cfgPath = path.join(ws, '.crctl', 'config.json');
+  try {
+    const j = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    if (j && j.identity) return String(j.identity);
+  } catch { /* fallthrough */ }
+  const r = spawnSync('git', ['config', '--get', 'user.name'], { cwd: ws, encoding: 'utf8', shell: false });
+  const name = (r.stdout || '').trim();
+  return name || 'unknown';
+}
+
+/** write-test-report.reviewLoop.maxAttempts 唯一读取点；事实源缺失或非法时硬失败。 */
+function resolveTestMaxAttempts(ctx) {
+  const graphPath = path.join(ctx.installRoot, 'dir-graph.yaml');
+  let cfg;
+  try { cfg = parseYaml(fs.readFileSync(graphPath, 'utf8').replaceAll('\r\n', '\n')); }
+  catch (e) { throw new TxError('TEST_CONFIG_INVALID', `dir-graph.yaml 无法解析: ${e.message}`, { path: graphPath }); }
+  const declared = cfg && cfg.workspace && cfg.workspace.tools_package_path;
+  if (typeof declared !== 'string' || !declared.trim()) {
+    throw new TxError('TEST_CONFIG_INVALID', 'dir-graph.yaml#workspace.tools_package_path 缺失或非法', { path: graphPath });
+  }
+  let toolsRoot;
+  try { toolsRoot = fs.realpathSync(path.isAbsolute(declared) ? declared : path.resolve(ctx.installRoot, declared)); }
+  catch (e) { throw new TxError('TEST_CONFIG_INVALID', `Tools Root 不存在: ${declared}`, { path: declared, why: e.message }); }
+  const pipelinePath = path.join(toolsRoot, 'pipeline-templates', 'code-implementation.pipeline.json');
+  let doc;
+  try { doc = JSON.parse(fs.readFileSync(pipelinePath, 'utf8').replaceAll('\r\n', '\n')); }
+  catch (e) { throw new TxError('TEST_CONFIG_INVALID', `code-implementation pipeline 无法解析: ${e.message}`, { path: pipelinePath }); }
+  const nodes = doc && doc.nodes;
+  const matches = Array.isArray(nodes) ? nodes.filter((n) => n && n.ref === TEST_LOOP_REF && n.reviewLoop) : [];
+  if (matches.length !== 1 || !Number.isInteger(matches[0].reviewLoop.maxAttempts) || matches[0].reviewLoop.maxAttempts <= 0) {
+    throw new TxError('TEST_CONFIG_INVALID', `${TEST_LOOP_REF}.reviewLoop.maxAttempts 缺失、重复或非法`, { path: pipelinePath });
+  }
+  return matches[0].reviewLoop.maxAttempts;
+}
+
+function readCrMdFrontmatterTest(ws, cr) {
+  const p = path.join(ws, 'change-requests', cr, 'cr.md');
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch { return null; }
+  const m = matchFrontmatter(text.replaceAll('\r\n', '\n'));
+  if (!m) return null;
+  return parseYaml(m.body);
+}
+
+function readReviewLoopData(ws, cr) {
+  const p = path.join(ws, 'change-requests', cr, 'review-loop.yml');
+  if (!fs.existsSync(p)) return { data: {}, loops: {} };
+  let data;
+  try { data = parseYaml(fs.readFileSync(p, 'utf8').replaceAll('\r\n', '\n')); }
+  catch (e) { throw new TxError('TEST_REVIEW_LOOP_INVALID', `review-loop.yml 无法解析: ${e.message}`, { path: p }); }
+  if (!data || typeof data !== 'object' || Array.isArray(data)
+    || !data.loops || typeof data.loops !== 'object' || Array.isArray(data.loops)) {
+    throw new TxError('TEST_REVIEW_LOOP_INVALID', 'review-loop.yml#loops 必须是映射', { path: p });
+  }
+  for (const [key, loop] of Object.entries(data.loops)) {
+    if (!loop || typeof loop !== 'object' || Array.isArray(loop)
+      || !Number.isInteger(loop['current-cycle']) || loop['current-cycle'] <= 0
+      || !Number.isInteger(loop['current-attempt']) || loop['current-attempt'] < 0
+      || !Array.isArray(loop.attempts)) {
+      throw new TxError('TEST_REVIEW_LOOP_INVALID', `review-loop.yml#loops.${key} 形状非法`, { path: p, loop: key });
+    }
+    for (const attempt of loop.attempts) {
+      if (!attempt || typeof attempt !== 'object' || Array.isArray(attempt)
+        || !Number.isInteger(attempt.attempt) || attempt.attempt <= 0
+        || typeof attempt.at !== 'string' || typeof attempt.by !== 'string') {
+        throw new TxError('TEST_REVIEW_LOOP_INVALID', `review-loop.yml#loops.${key}.attempts 条目非法`, { path: p, loop: key });
+      }
+    }
+  }
+  return { data, loops: data.loops };
+}
+
+function readCanonicalTestStatus(ws, cr) {
+  const p = path.join(ws, 'change-requests', cr, 'test-report.md');
+  if (!fs.existsSync(p)) return null;
+  let fm;
+  try {
+    const frontmatter = matchFrontmatter(fs.readFileSync(p, 'utf8'));
+    fm = frontmatter && parseYaml(frontmatter.body.replaceAll('\r\n', '\n'));
+  } catch (e) { throw new TxError('TEST_REPORT_INVALID', `test-report.md 机器区无法解析: ${e.message}`, { path: p }); }
+  if (!fm || fm['generated-by'] !== 'crctl-test' || !['pass', 'block'].includes(fm.status)) {
+    throw new TxError('TEST_REPORT_INVALID', 'test-report.md 缺少合法 crctl-test status', { path: p });
+  }
+  return fm.status;
+}
+
+/** 查找 test journal；非法记录硬失败，优先恢复 incomplete，其次匹配当前 inputDigest。 */
+function latestTestJournal(ws, cr, inputDigest) {
+  const base = path.join(ws, '.crctl', 'transactions', 'test', cr);
+  if (!fs.existsSync(base)) return null;
+  const all = [];
+  for (const txId of fs.readdirSync(base).sort()) {
+    const journalPath = path.join(base, txId, 'journal.json');
+    if (!fs.existsSync(journalPath)) throw new TxError('TX_JOURNAL_INVALID', `test journal 缺 journal.json: ${path.dirname(journalPath)}`, { path: journalPath });
+    let j;
+    try { j = JSON.parse(fs.readFileSync(journalPath, 'utf8').replaceAll('\r\n', '\n')); }
+    catch { throw new TxError('TX_JOURNAL_INVALID', `test journal JSON 非法: ${journalPath}`, { path: journalPath }); }
+    const updated = Date.parse(j && j.updatedAt);
+    if (!j || j.v !== 1 || j.op !== 'test' || j.cr !== cr || j.txId !== txId
+      || typeof j.phase !== 'string' || !Number.isFinite(updated)
+      || typeof j.inputDigest !== 'string'
+      || (j.phase !== 'init' && (!j.test || typeof j.test !== 'object' || Array.isArray(j.test)))) {
+      throw new TxError('TX_JOURNAL_INVALID', `test journal envelope/payload 非法: ${journalPath}`, { path: journalPath });
+    }
+    all.push({ journal: j, journalPath, txDir: path.dirname(journalPath), updated });
+  }
+  const newer = (a, b) => b.updated - a.updated || b.journal.txId.localeCompare(a.journal.txId);
+  const incomplete = all.filter((x) => x.journal.phase !== 'complete').sort(newer);
+  if (incomplete.length > 1) throw new TxError('TX_JOURNAL_INVALID', `${cr} 存在多个 incomplete test journal`, { count: incomplete.length });
+  if (incomplete.length === 1) return incomplete[0];
+  const matching = all.filter((x) => x.journal.inputDigest === inputDigest).sort(newer);
+  return matching[0] || all.sort(newer)[0] || null;
+}
+
+function auditLogTest(ws, record) {
+  const dir = path.join(ws, '.crctl');
+  fs.mkdirSync(dir, { recursive: true });
+  const gi = path.join(dir, '.gitignore');
+  if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n');
+  fs.appendFileSync(path.join(dir, 'audit.log'), JSON.stringify({ at: nowIso(), ...record }) + '\n');
+}
+
+/* ────────────────────────── 纯函数（测试 seam，不成为公共命令） ────────────────────────── */
+
+/** cr-test-plan/v1 解析与校验（schema/字段白名单/repo/cwd containment/branch，失败零 authority 变化）。 */
+export function parseTestPlan(raw, ctx, cr) {
+  const norm = String(raw).replaceAll('\r\n', '\n');
+  let doc;
+  try { doc = JSON.parse(norm); } catch { throw new TxError('TEST_PLAN_SCHEMA_INVALID', 'test plan JSON 非法'); }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new TxError('TEST_PLAN_SCHEMA_INVALID', 'plan 顶层必须是对象');
+  if (doc.schema !== TEST_PLAN_SCHEMA) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `schema 必须是 ${TEST_PLAN_SCHEMA}`);
+  if (!Array.isArray(doc.commands) || doc.commands.length === 0) throw new TxError('TEST_PLAN_SCHEMA_INVALID', 'commands 必须是非空数组');
+  const commands = doc.commands.map((cmd, i) => {
+    const where = `commands[${i}]`;
+    if (!cmd || typeof cmd !== 'object' || Array.isArray(cmd)) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where} 必须是对象`);
+    for (const k of Object.keys(cmd)) {
+      if (!TEST_PLAN_FIELDS.includes(k)) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where} 含禁止字段: ${k}`);
+    }
+    if (typeof cmd.repo !== 'string' || !cmd.repo.trim()) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where}.repo 必须是非空字符串`);
+    let repo;
+    try { repo = getRepository(ctx, cmd.repo); }
+    catch (e) {
+      if (e instanceof TxError && e.code === 'REPO_INACTIVE') throw new TxError('TEST_REPO_INACTIVE', e.message, e.extra);
+      throw new TxError('TEST_REPO_NOT_FOUND', e.message, e.extra);
+    }
+    const cwdRaw = cmd.cwd == null ? '.' : cmd.cwd;
+    if (typeof cwdRaw !== 'string' || cwdRaw === '') throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where}.cwd 必须是非空字符串`);
+    if (path.isAbsolute(cwdRaw) || path.win32.isAbsolute(cwdRaw) || path.posix.isAbsolute(cwdRaw)
+      || cwdRaw.split(/[\\/]+/).includes('..')) {
+      throw new TxError('TEST_CWD_ESCAPE', `${where}.cwd 不能是绝对路径或包含 .. 段: ${cwdRaw}`);
+    }
+    if (typeof cmd.executable !== 'string' || !cmd.executable.trim()) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where}.executable 必须是非空字符串`);
+    if (!Array.isArray(cmd.args) || cmd.args.some((a) => typeof a !== 'string')) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where}.args 必须是字符串数组`);
+    if (!Number.isInteger(cmd.timeoutSeconds) || cmd.timeoutSeconds <= 0) throw new TxError('TEST_PLAN_SCHEMA_INVALID', `${where}.timeoutSeconds 必须是正整数`);
+    const wt = path.join(repo.worktreePath, cr);
+    if (!fs.existsSync(wt)) throw new TxError('TEST_WORKTREE_MISSING', `repo ${cmd.repo} 的 requirement/${cr} worktree 不存在: ${wt}`, { repo: cmd.repo, worktree: wt });
+    const br = gitRun(wt, ['rev-parse', '--abbrev-ref', 'HEAD']);
+    if (br.status !== 0 || br.stdout !== `requirement/${cr}`) {
+      throw new TxError('TEST_WORKTREE_BRANCH', `repo ${cmd.repo} worktree 分支必须是 requirement/${cr}`, { repo: cmd.repo, branch: br.stdout });
+    }
+    const absoluteCwd = path.resolve(wt, cwdRaw);
+    let realWt;
+    let realCwd;
+    try { realWt = fs.realpathSync(wt); } catch { throw new TxError('TEST_WORKTREE_MISSING', `repo ${cmd.repo} worktree realpath 失败: ${wt}`, { repo: cmd.repo }); }
+    try { realCwd = fs.realpathSync(absoluteCwd); } catch { throw new TxError('TEST_CWD_ESCAPE', `${where}.cwd 不存在: ${absoluteCwd}`, { repo: cmd.repo }); }
+    if (realCwd !== realWt && !realCwd.startsWith(realWt + path.sep)) {
+      throw new TxError('TEST_CWD_ESCAPE', `${where}.cwd 越出 worktree: ${cwdRaw}`, { repo: cmd.repo, cwd: cwdRaw });
+    }
+    const relativeCwd = path.relative(realWt, realCwd);
+    const cwdRel = relativeCwd ? relativeCwd.split(path.sep).join('/') : '.';
+    return { repo: cmd.repo, cwd: cwdRel, absoluteCwd: realCwd, executable: cmd.executable, args: [...cmd.args], timeoutSeconds: cmd.timeoutSeconds };
+  });
+  return { schema: TEST_PLAN_SCHEMA, commands };
+}
+
+/** 命令集合 canonical subject + sha256（固定键序/数组顺序，不绑定临时路径/时间/owner/stdout）。 */
+export function canonicalCommandSubject(plan) {
+  const subject = {
+    schema: TEST_PLAN_SCHEMA,
+    commands: plan.commands.map(({ repo, cwd, executable, args, timeoutSeconds }) => ({
+      repo, cwd: cwd || '.', executable, args, timeoutSeconds,
+    })),
+  };
+  return { subject, digest: sha256(JSON.stringify(subject)) };
+}
+
+/** shell:false 执行计划，日志落临时目录；已启动 non-zero/timeout 记业务 block 并继续，启动失败技术中止。 */
+export function runTestPlan(plan, ctx, cr) {
+  const tempRoot = path.join(crWorktreePath(ctx, cr), '.crctl', 'tmp', 'test', cr, `${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
+  fs.mkdirSync(tempRoot, { recursive: true });
+  const results = [];
+  const resultFacts = [];
+  let overall = 'pass';
+  for (let i = 0; i < plan.commands.length; i++) {
+    const cmd = plan.commands[i];
+    const source = gitRun(cmd.absoluteCwd, ['rev-parse', 'HEAD']);
+    if (source.status !== 0 || !/^[0-9a-f]{40,64}$/.test(source.stdout)) {
+      throw new TxError('TEST_SOURCE_REVISION_INVALID', `repo ${cmd.repo} 无法解析测试源 HEAD`, { repo: cmd.repo, stderr: source.stderr });
+    }
+    const r = spawnSync(cmd.executable, cmd.args, {
+      cwd: cmd.absoluteCwd, encoding: 'utf8', shell: false, timeout: cmd.timeoutSeconds * 1000,
+    });
+    const errCode = r.error ? r.error.code : null;
+    const timedOut = errCode === 'ETIMEDOUT';
+    const started = errCode == null || timedOut;
+    const logRel = `change-requests/${cr}/test-evidence/cmd-${String(i + 1).padStart(2, '0')}.log`;
+    const logAbs = path.join(tempRoot, `cmd-${String(i + 1).padStart(2, '0')}.log`);
+    const logContent = [
+      `$ ${cmd.executable} ${cmd.args.join(' ')}`,
+      `(exit=${r.status == null ? 'null' : r.status})`,
+      '--- stdout ---',
+      r.stdout || '',
+      '--- stderr ---',
+      r.stderr || '',
+    ].join('\n');
+    fs.writeFileSync(logAbs, logContent, 'utf8');
+    const result = {
+      repo: cmd.repo,
+      cwd: cmd.cwd,
+      executable: cmd.executable,
+      args: cmd.args,
+      timeoutSeconds: cmd.timeoutSeconds,
+      exitCode: r.status == null ? null : r.status,
+      signal: r.signal || null,
+      timedOut,
+      started,
+      log: logRel,
+    };
+    results.push(result);
+    resultFacts.push({ sourceRevision: source.stdout, logSha256: sha256(logContent) });
+    if (!started) {
+      throw new TxError('TEST_EXECUTABLE_INVALID', `executable 启动失败: ${cmd.executable}${errCode ? ` (${errCode})` : ''}`, { repo: cmd.repo, executable: cmd.executable, errCode, index: i });
+    }
+    if (r.status !== 0 || timedOut) overall = 'block';
+  }
+  return { results, resultFacts, tempLogs: tempRoot, overall };
+}
+
+/** marker 分区：唯一 canonical literal（兼容旧带说明前缀），缺失/重复/未闭合硬失败，返回 marker 后内容。 */
+export function parseAnalysisMarker(existingReport) {
+  if (existingReport == null) return { analysisSuffix: '' };
+  const text = String(existingReport);
+  const prefix = '<!-- crctl:analysis-below';
+  const positions = [];
+  let idx = text.indexOf(prefix);
+  while (idx !== -1) {
+    const end = text.indexOf('-->', idx);
+    if (end === -1) throw new TxError('TEST_MARKER_INVALID', 'marker 未闭合（缺少 -->）');
+    positions.push({ start: idx, end: end + 3 });
+    idx = text.indexOf(prefix, end);
+  }
+  if (positions.length !== 1) throw new TxError('TEST_MARKER_INVALID', `marker 必须恰好出现 1 次，实际 ${positions.length} 次`);
+  return { analysisSuffix: text.slice(positions[0].end) };
+}
+
+/** test-report.md 机器区渲染（frontmatter + 标题，不含 marker；marker 由 testCr 拼接）。 */
+export function renderTestMachineReport(input) {
+  const lines = [
+    '---',
+    `cr: ${input.cr}`,
+    `status: ${input.status}`,
+    `tester: ${yamlScalarLib(input.tester)}`,
+    'generated-by: crctl-test',
+    `generated-at: "${input.generatedAt}"`,
+    `command-digest: ${input.commandDigest}`,
+    'commands:',
+  ];
+  for (const c of input.commands) {
+    lines.push(`  - repo: ${c.repo}`);
+    lines.push(`    cwd: ${yamlScalarLib(c.cwd)}`);
+    lines.push(`    executable: ${yamlScalarLib(c.executable)}`);
+    lines.push(`    args: [${c.args.map((a) => yamlScalarLib(a)).join(', ')}]`);
+    lines.push(`    timeout-seconds: ${c.timeoutSeconds}`);
+    lines.push(`    exit-code: ${c.exitCode == null ? 'null' : c.exitCode}`);
+    lines.push(`    signal: ${c.signal == null ? 'null' : yamlScalarLib(c.signal)}`);
+    lines.push(`    timed-out: ${c.timedOut}`);
+    lines.push(`    started: ${c.started}`);
+    lines.push(`    log: ${yamlScalarLib(c.log)}`);
+  }
+  lines.push('---', '', `# 测试报告 · ${input.cr}`);
+  return lines.join('\n') + '\n\n';
+}
+
+function renderTestsBlock(input) {
+  return [
+    'tests:',
+    `  report: ${yamlScalarLib(input.reportRel)}`,
+    `  status: ${input.status}`,
+    `  tester: ${yamlScalarLib(input.tester)}`,
+    `  owner-assigned-at: "${input.ownerAssignedAt}"`,
+    `  generated-at: "${input.generatedAt}"`,
+    `  command-digest: ${input.commandDigest}`,
+    `  review-loop: ${input.reviewLoop}`,
+  ].join('\n');
+}
+
+/** traceability.yml tests 段行级定点编辑（保留其他顶层段；重复 tests: 硬失败，缺失时追加）。 */
+export function renderTestsTraceability(existing, input) {
+  const block = renderTestsBlock(input);
+  if (existing == null) return `cr-id: ${input.cr}\n${block}\n`;
+  const norm = existing.replaceAll('\r\n', '\n');
+  let doc;
+  try { doc = parseYaml(norm); }
+  catch (e) { throw new TxError('TRACE_SHAPE', `traceability.yml 无法解析: ${e.message}`); }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc) || doc['cr-id'] !== input.cr) {
+    throw new TxError('TRACE_SHAPE', `traceability.yml cr-id 与 ${input.cr} 不一致，拒绝写 tests 投影`);
+  }
+  const lines = norm.split('\n');
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) if (/^tests\s*:/.test(lines[i])) hits.push(i);
+  if (hits.length > 1) throw new TxError('TRACE_SHAPE', 'traceability.yml 出现重复顶层 tests: 段，拒绝编辑');
+  if (hits.length === 1) {
+    const tests = doc.tests;
+    const required = ['report', 'status', 'tester', 'owner-assigned-at', 'generated-at', 'command-digest', 'review-loop'];
+    if (!tests || typeof tests !== 'object' || Array.isArray(tests)
+      || tests.report !== input.reportRel || required.some((key) => tests[key] == null)
+      || !['pass', 'block'].includes(tests.status)) {
+      throw new TxError('TRACE_SHAPE', 'traceability.yml#tests 不是可证明的既有机器投影，拒绝覆盖');
+    }
+  }
+  const blockLines = block.split('\n');
+  if (hits.length === 1) {
+    const ti = hits[0];
+    let te = lines.length;
+    for (let i = ti + 1; i < lines.length; i++) { if (/^\S/.test(lines[i])) { te = i; break; } }
+    const out = [...lines.slice(0, ti), ...blockLines, ...lines.slice(te)].join('\n');
+    return out + (norm.endsWith('\n') ? '\n' : '');
+  }
+  return (norm.endsWith('\n') ? norm : norm + '\n') + block + '\n';
+}
+
+function buildTestResponse({ cr, status, commandDigest, attempt, results, report, traceability, reviewLoop, changed }) {
+  return {
+    op: 'test', cr, status, commandDigest, attempt,
+    commands: results,
+    report, traceability, reviewLoop,
+    changed,
+    recoverCommand: `node {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs test ${cr} --plan <plan> --workspace <worktree>`,
+  };
+}
+
+/** 结构化测试业务处理器（SDD §3.2 唯一入口）：校验→执行→原子发布机器证据/tests/review-loop。 */
+export async function testCr(ctx, { cr, workspace, planPath }) {
+  const fm = readCrMdFrontmatterTest(workspace, cr);
+  if (!fm) throw new TxError('CR_MD_MISSING', `${cr} 的 cr.md 缺失或 frontmatter 非法`);
+  if (fm.status !== 'developing') throw new TxError('TEST_STATE_INVALID', `${cr} 当前 status=${fm.status}，结构化测试仅在 developing 执行`);
+  const testOwner = fm.owners && fm.owners.test;
+  if (!testOwner || typeof testOwner !== 'object' || !testOwner.id || !testOwner['assigned-at']) {
+    throw new TxError('TEST_OWNER_MISSING', `${cr} 的 cr.md 缺少 owners.test.id 或 owners.test.assigned-at`);
+  }
+  if (!planPath) throw new TxError('TEST_PLAN_NOT_FOUND', '缺少 --plan 参数');
+  const planCandidate = path.isAbsolute(planPath) ? planPath : path.resolve(workspace, planPath);
+  let planAbs;
+  let raw;
+  try {
+    planAbs = fs.realpathSync(planCandidate);
+    raw = fs.readFileSync(planAbs, 'utf8');
+  } catch { throw new TxError('TEST_PLAN_NOT_FOUND', `test plan 不存在: ${planCandidate}`); }
+  let tempRoot;
+  try { tempRoot = fs.realpathSync(path.join(workspace, '.crctl', 'tmp')); }
+  catch { throw new TxError('TEST_PLAN_PATH_INVALID', 'workspace/.crctl/tmp 不存在，test plan 必须位于非 authority 临时目录'); }
+  if (planAbs !== tempRoot && !planAbs.startsWith(tempRoot + path.sep)) {
+    throw new TxError('TEST_PLAN_PATH_INVALID', `test plan 越出 workspace/.crctl/tmp: ${planCandidate}`, { path: planCandidate, realpath: planAbs });
+  }
+
+  const plan = parseTestPlan(raw, ctx, cr);
+  const { digest: commandDigest } = canonicalCommandSubject(plan);
+  const maxAttempts = resolveTestMaxAttempts(ctx);
+  const preLoop = readReviewLoopData(workspace, cr).loops[TEST_LOOP_REF];
+  if ((preLoop && preLoop['current-attempt']) >= maxAttempts && readCanonicalTestStatus(workspace, cr) !== 'pass') {
+    throw new TxError('TEST_LOOP_EXHAUSTED', `${TEST_LOOP_REF} 已达 maxAttempts=${maxAttempts}，不得继续自修复`);
+  }
+
+  // 运行阶段：不建 journal、不持锁、不写 authority；记录阶段在锁内重读 attempt/CAS 事实。
+  const { results, resultFacts, tempLogs, overall } = runTestPlan(plan, ctx, cr);
+  const tester = String(testOwner.id);
+  const ownerAssignedAt = String(testOwner['assigned-at']);
+  const resultMetadata = JSON.stringify(results.map((r, i) => ({
+    repo: r.repo, cwd: r.cwd, executable: r.executable, args: r.args,
+    exitCode: r.exitCode, signal: r.signal, timedOut: r.timedOut, started: r.started,
+    sourceRevision: resultFacts[i].sourceRevision, logSha256: resultFacts[i].logSha256,
+  })));
+  const inputDigest = sha256(commandDigest + resultMetadata + tester + ownerAssignedAt);
+  const reportRel = `change-requests/${cr}/test-report.md`;
+  const traceRel = `change-requests/${cr}/traceability.yml`;
+  const loopRel = `change-requests/${cr}/review-loop.yml`;
+
+  let lock = null;
+  try {
+    lock = await acquireLock({ root: workspace, scope: `test-${cr}`, op: 'test', cr });
+    const loopData = readReviewLoopData(workspace, cr);
+    const prevLoop = loopData.loops[TEST_LOOP_REF] || { 'current-cycle': 1, 'current-attempt': 0, attempts: [] };
+    let currentAttempt = prevLoop['current-attempt'] || 0;
+    let cycle = prevLoop['current-cycle'] || 1;
+
+    // complete 匹配当前输入时幂等返回；incomplete 有 write-set 时只恢复，不重复 attempt。
+    const existing = latestTestJournal(workspace, cr, inputDigest);
+    if (existing && existing.journal.phase === 'complete' && existing.journal.inputDigest === inputDigest) {
+      const jt = existing.journal.test;
+      return buildTestResponse({ cr, status: jt.status, commandDigest: jt.commandDigest, attempt: jt.attempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: false });
+    }
+    if (existing && existing.journal.phase !== 'complete') {
+      if (existing.journal.inputDigest !== inputDigest) {
+        throw new TxError('TX_INPUT_CONFLICT', `test/${cr} 已有在途事务且 inputDigest 不一致`, { txId: existing.journal.txId });
+      }
+      const manifest = path.join(existing.txDir, 'write-set.json');
+      const jt = existing.journal.test;
+      if (fs.existsSync(manifest)) {
+        await recoverWriteSet({ txRoot: workspace, txId: existing.journal.txId });
+        jt.phase = 'complete';
+        existing.journal.phase = 'complete';
+        await saveJournal({ path: existing.journalPath, journal: existing.journal });
+        return buildTestResponse({ cr, status: jt.status, commandDigest: jt.commandDigest, attempt: jt.attempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: true });
+      }
+      if (jt && currentAttempt === jt.attempt) {
+        jt.phase = 'complete';
+        existing.journal.phase = 'complete';
+        await saveJournal({ path: existing.journalPath, journal: existing.journal });
+        return buildTestResponse({ cr, status: jt.status, commandDigest: jt.commandDigest, attempt: jt.attempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: false });
+      }
+    }
+    if (currentAttempt >= maxAttempts) {
+      if (readCanonicalTestStatus(workspace, cr) !== 'pass') {
+        throw new TxError('TEST_LOOP_EXHAUSTED', `${TEST_LOOP_REF} 已达 maxAttempts=${maxAttempts}，不得继续自修复`);
+      }
+      cycle += 1;
+      currentAttempt = 0;
+    }
+
+    // 计算全部 after 文本和 raw-byte CAS 锚点后再创建/复用 journal。
+    const generatedAt = nowIso();
+    const reportAbs = path.join(workspace, reportRel);
+    let existingReport = null;
+    try { existingReport = fs.readFileSync(reportAbs, 'utf8'); } catch { existingReport = null; }
+    const { analysisSuffix } = parseAnalysisMarker(existingReport);
+    const machine = renderTestMachineReport({ cr, status: overall, tester, generatedAt, commandDigest, commands: results });
+    const reportAfter = machine + TEST_MARKER + analysisSuffix;
+
+    const traceAbs = path.join(workspace, traceRel);
+    let existingTrace = null;
+    try { existingTrace = fs.readFileSync(traceAbs, 'utf8'); } catch { existingTrace = null; }
+    const traceAfter = renderTestsTraceability(existingTrace, { cr, reportRel, status: overall, tester, ownerAssignedAt, generatedAt, commandDigest, reviewLoop: TEST_LOOP_REF });
+
+    const nextAttempt = currentAttempt + 1;
+    const by = resolveIdentity(workspace);
+    const nextLoop = { 'current-cycle': cycle, 'current-attempt': nextAttempt, attempts: [...prevLoop.attempts, { attempt: nextAttempt, at: generatedAt, by, cycle }] };
+    const loopAfter = renderLoopText({ ...loopData.loops, [TEST_LOOP_REF]: nextLoop });
+
+    const loopAbs = path.join(workspace, loopRel);
+    let loopBeforeText = null;
+    try { loopBeforeText = fs.readFileSync(loopAbs, 'utf8'); } catch { loopBeforeText = null; }
+    const rawHash = (text) => (text == null ? null : sha256(text));
+    const entries = [
+      { path: reportRel, beforeSha256: rawHash(existingReport), afterSha256: sha256(reportAfter), content: reportAfter },
+      { path: traceRel, beforeSha256: rawHash(existingTrace), afterSha256: sha256(traceAfter), content: traceAfter },
+      { path: loopRel, beforeSha256: rawHash(loopBeforeText), afterSha256: sha256(loopAfter), content: loopAfter },
+    ];
+    for (let i = 0; i < results.length; i++) {
+      const logRel = `change-requests/${cr}/test-evidence/cmd-${String(i + 1).padStart(2, '0')}.log`;
+      const logAbs = path.join(tempLogs, `cmd-${String(i + 1).padStart(2, '0')}.log`);
+      let logContent;
+      try { logContent = fs.readFileSync(logAbs, 'utf8'); }
+      catch { throw new TxError('TEST_LOG_MISSING', `临时测试日志缺失: ${logAbs}`, { path: logAbs }); }
+      const logDestAbs = path.join(workspace, logRel);
+      let logBefore = null;
+      try { logBefore = sha256(fs.readFileSync(logDestAbs, 'utf8')); } catch { logBefore = null; }
+      entries.push({ path: logRel, beforeSha256: logBefore, afterSha256: sha256(logContent), content: logContent });
+    }
+
+    const { journal, journalPath } = await loadOrCreateJournal({
+      root: workspace, op: 'test', cr, graphDigest: ctx.graphDigest, inputDigest, createAfterComplete: true,
+    });
+    journal.test = { targetRoot: path.resolve(workspace), commandDigest, attempt: nextAttempt, status: overall, entries: entries.map((e) => e.path) };
+    journal.phase = 'prepared';
+    let saved = await saveJournal({ path: journalPath, journal });
+    await applyWriteSet({ root: workspace, txRoot: workspace, txId: saved.txId, entries });
+    saved.test.phase = 'written';
+    saved.phase = 'written';
+    saved = await saveJournal({ path: journalPath, journal: saved });
+
+    auditLogTest(workspace, { kind: 'test', cr, status: overall, attempt: nextAttempt, digest: commandDigest });
+    saved.test.phase = 'complete';
+    saved.phase = 'complete';
+    await saveJournal({ path: journalPath, journal: saved });
+    return buildTestResponse({ cr, status: overall, commandDigest, attempt: nextAttempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: true });
+  } finally {
+    try { fs.rmSync(tempLogs, { recursive: true, force: true }); } finally { if (lock) await lock.release(); }
+  }
 }

@@ -26,7 +26,7 @@ import {
   assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
   matchFrontmatter, crMdStatusText, refreshCrMdUpdated, mergeCr, mergeStatus, resolveOperationalWorkspace,
-  applyWriteback, archiveCr, checkUpgrade, checkpointCr,
+  applyWriteback, archiveCr, checkUpgrade, checkpointCr, renderLoopText, testCr,
 } from './lib/workspace-transactions.mjs';
 import {
   FAULT_POINTS, faultPoint, nowIso,
@@ -824,23 +824,6 @@ function readAttempts(ws, cr, loopRef, gates) {
   const cycleAttempts = attempts.filter((a) => (a && a.cycle || 1) === cycle);
   const current = cycleAttempts.length;
   return { current, max, attempts, cycle, cycleAttempts, exhausted: current >= max, data: data || {} };
-}
-
-/** review-loop.yml 全量渲染纯函数（CR-2026-025 I-1 拆分：bumpAttempt 与 review-record 共用同一渲染，
- * 使 review-record 能“先算后写”并入 durable ledger transaction，消除半状态，B-16）。 */
-function renderLoopText(loopsMap) {
-  const lines = ['# 由 crctl attempt 维护，请勿手工编辑', 'loops:'];
-  for (const [k, v] of Object.entries(loopsMap)) {
-    lines.push(`  ${k}:`);
-    lines.push(`    current-cycle: ${v['current-cycle'] || 1}`);
-    lines.push(`    current-attempt: ${v['current-attempt']}`);
-    lines.push('    attempts:');
-    for (const a of v.attempts) {
-      const c = a && a.cycle ? `, cycle: ${a.cycle}` : '';
-      lines.push(`      - { attempt: ${a.attempt}, at: "${a.at}", by: "${a.by}"${c} }`);
-    }
-  }
-  return lines.join('\n') + '\n';
 }
 
 function bumpAttempt(ws, cr, loopRef, gates) {
@@ -2589,55 +2572,14 @@ function appendSupplementalReview(text, entry) {
   return lines.join('\n');
 }
 
-function cmdTest(ws, cr, gates, flags) {
-  const cmds = flags.cmdList || [];
-  if (cmds.length === 0) fail('BAD_ARGS', 'test 需要至少一个 --cmd "<command>"');
-  const cwd = flags.cwd ? path.resolve(flags.cwd) : ws;
-  const evidenceDir = path.join(crDir(ws, cr), 'test-evidence');
-  fs.mkdirSync(evidenceDir, { recursive: true });
-  const runs = [];
-  for (let i = 0; i < cmds.length; i++) {
-    const c = cmds[i];
-    const r = spawnSync(c, { cwd, encoding: 'utf8', shell: true, timeout: (flags.timeout ? Number(flags.timeout) : 600) * 1000 });
-    const logPath = path.join(evidenceDir, `cmd-${String(i + 1).padStart(2, '0')}.log`);
-    fs.writeFileSync(logPath, `$ ${c}\n(exit=${r.status})\n--- stdout ---\n${r.stdout || ''}\n--- stderr ---\n${r.stderr || ''}`, 'utf8');
-    runs.push({ command: c, exit: r.status, log: path.relative(ws, logPath) });
-    auditLog(ws, { kind: 'test', cr, command: c, exit: r.status });
+async function cmdTest(ws, cr, gates, flags) {
+  if (!flags.plan) fail('BAD_ARGS', 'test 需要 --plan <temp-json>（--cmd/--cwd/--timeout 已移除，改用结构化 cr-test-plan/v1）');
+  if (flags.cmd || flags.cwd || flags.timeout || (flags.cmdList && flags.cmdList.length)) {
+    fail('BAD_ARGS', 'test 不再接受 --cmd/--cwd/--timeout，仅接受 --plan');
   }
-  const allPass = runs.every((r) => r.exit === 0);
-  const reportPath = path.join(crDir(ws, cr), 'test-report.md');
-  const md = readCrMdFrontmatter(ws, cr);
-  const tester = md?.owners?.test?.id ? String(md.owners.test.id) : identity(ws);
-  const lines = [
-    '---',
-    `cr: ${cr}`,
-    `status: ${allPass ? 'pass' : 'block'}`,
-    `tester: "${tester}"`,
-    `generated-by: crctl-test`,
-    `generated-at: "${nowIso()}"`,
-    'commands:',
-    ...runs.map((r) => `  - { command: "${r.command.replaceAll('"', '\\"')}", exit: ${r.exit}, log: "${r.log.replaceAll('\\', '/')}" }`),
-    '---',
-    '',
-    `# 测试报告 · ${cr}`,
-    '',
-    `> status 与 commands 段由 crctl test 依据真实退出码生成，模型不得改写。`,
-    `> 原始输出见 ${path.relative(ws, evidenceDir).replaceAll('\\', '/')}/。`,
-    '',
-    '## 命令与结果',
-    '',
-    '| # | 命令 | 退出码 | 日志 |',
-    '|---|------|--------|------|',
-    ...runs.map((r, i) => `| ${i + 1} | \`${r.command}\` | ${r.exit} | ${r.log.replaceAll('\\', '/')} |`),
-    '',
-    '## 分析（由测试负责人 / 模型补充）',
-    '',
-    '<!-- crctl:analysis-below 此标记以下允许人工/模型补充 TASK 覆盖、未覆盖风险等分析内容 -->',
-    '',
-  ];
-  fs.writeFileSync(reportPath, lines.join('\n'), 'utf8');
-  ok({ report: reportPath, status: allPass ? 'pass' : 'block', tester, runs });
-  if (!allPass) process.exit(1);
+  const ctx = resolveRepositories(ws);
+  const result = await runTxAsync(testCr(ctx, { cr, workspace: ws, planPath: flags.plan }));
+  ok(result);
 }
 
 function cmdNext(ws, cr, gates, flags) {
@@ -2918,8 +2860,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl archive <cr_id> [--spec-id <id>]                          单一幂等归档：四账本同批 write-set + archive commit + lease push → cleanup（txws/CR worktree/本地 ref）；cleanup 失败返回 CR_ARCHIVE_CLEANUP_PENDING，重跑只续清理；rejected/withdrawn 未合并远端 ref 保留为 preservedRefs（TASK-09）
   crctl upgrade-check                                         临时只读预检（TASK-11）：origin 权威事实分类新协议激活风险（safe/requiresReapproval/blocksUpgrade/canActivate）；有 blocker 或事实不确定 exit 1，全程零写入；协议切换后随 CUSTOM-TODO-009 整体删除
   crctl report [--period <N>d]                   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
-  crctl test    <cr_id> --cmd "<c>" [--cmd ...]  代执行验证命令，生成 test-report.md 骨架
-                        [--cwd <p>] [--timeout <sec>]
+  crctl test    <cr_id> --plan <temp-json>      结构化测试闭环：读 cr-test-plan/v1，shell:false 执行，原子发布机器证据/traceability tests/review-loop
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
   crctl git     <sub> [args...] [--cwd <p>]      controlled-shell 白名单执行（只读/安全面；写路径一律走深原语）
   crctl task init <cr_id>                       从 TASK-NN.md 确定性创建/刷新 tasks/_index.yml（开发启动前，CAS+审计）

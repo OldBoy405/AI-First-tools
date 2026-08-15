@@ -47,7 +47,7 @@ jobs:
           git config --global user.email "ci@aifirst.dev"
           git config --global user.name "CI"
 
-      - name: Lint prompts (contract: prompt 与 crctl 无漂移)
+      - name: "Lint prompts (contract: prompt 与 crctl 无漂移)"
         shell: bash
         run: node skills/shared/crctl/scripts/lint-prompts.mjs --mode enforce
 

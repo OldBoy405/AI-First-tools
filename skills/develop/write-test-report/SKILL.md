@@ -44,40 +44,35 @@ description: 汇总 implement-code 的验证命令、TASK 验收条件与测试�
 
 若某项验证不适用，必须写明原因；不得空白通过。
 
-### Step 3 — 生成 test-report.md（frontmatter 交 crctl test，D3）
+### Step 3 — 生成 test-report.md（机器区交 crctl test，D3）
 
-1. 运行 `crctl test {cr_id} --cmd "<验证命令1>" [--cmd "<验证命令2>" ...] [--cwd <path>] --workspace <worktree>`：
-   - crctl 按**真实退出码**生成 `test-report.md` 的 frontmatter（status 字段取值 pass|block、commands 数组、tester、generated-by: crctl-test）。
-   - **模型不得改写 frontmatter 的 status/commands 段**（`generated-by: crctl-test` 即防改写标记）。
-2. 模型只在 `<!-- crctl:analysis-below -->` 标记**以下**补充分析段：
+1. 生成临时 `cr-test-plan/v1` 计划到 `.crctl/tmp/test-plan.json`（非 authority 临时目录，不入 Git）：
+
+   ```json
+   {
+     "schema": "cr-test-plan/v1",
+     "commands": [
+       { "repo": "<dir-graph active repo id>", "cwd": ".", "executable": "node", "args": ["--test", "skills/shared/crctl/scripts/test/crctl.test.mjs"], "timeoutSeconds": 600 }
+     ]
+   }
+   ```
+
+   - `repo` 必须来自 `dir-graph.yaml#repositories` active 项；`cwd` 必须是该 repo 的 `requirement/{CR-ID}` worktree 内相对路径；`executable` 必须可直接 spawn（如 `node`，不用 `.cmd`/shell 内建）。
+   - 计划不得包含 shell 字符串、`command` 字段、env、pipe、redirect、`continueOnError`、absolute cwd、status/owner/attempt/日志路径/traceability payload。
+
+2. 运行**一次** `crctl test {cr_id} --plan .crctl/tmp/test-plan.json --workspace <worktree>`：
+   - crctl 以 `spawnSync(executable, args, {shell:false})` 执行，按真实退出码生成 `test-report.md` 机器区（frontmatter status/commands + command-digest + marker），并原子更新 `traceability.yml#tests` 与 `review-loop.yml`（write-test-report）。
+   - **模型不得改写 marker 之前的机器区**（`generated-by: crctl-test` 即防改写标记）；`--cmd`/`--cwd`/`--timeout` 已移除。
+
+3. 模型只在 `<!-- crctl:analysis-below -->` 标记**以下**补充分析段：
    - 测试摘要（对应 TASK 验收条件）
    - 验证命令与结果解读
    - TASK 验收覆盖矩阵
    - 新增/修改测试文件
    - 未覆盖风险（含"不适用"说明，不得空白通过）
    - 下一步建议
-3. 若全部命令 exit 0，crctl 生成 `status: pass`；任一失败为 `status: block`，pipeline 必须把失败命令与未覆盖 TASK 作为 `review_feedback` 回传 `implement-code` 自修复；`status=pass` 前不得进入 `review-code` 或人工审批。
 
-### Step 4 — 更新 traceability.yml
-
-在 `change-requests/{cr_id}/traceability.yml` 中写入测试证据段（review-loop 轮次记账统一走 `crctl attempt --loop write-test-report`）：
-
-```yaml
-tests:
-  report: change-requests/{cr_id}/test-report.md
-  status: pass | block
-  owner: {tester}
-  owner-assigned-at: {cr.md owners.test.assigned-at}
-  generated-at: {timestamp}
-  repair-target: implement-code
-  commands:
-    - name: lint
-      result: pass | fail | not-applicable
-    - name: test
-      result: pass | fail | not-applicable
-    - name: build
-      result: pass | fail | not-applicable
-```
+4. `status=block` 是业务结果（已启动命令 non-zero/timeout 仍执行完剩余命令并发布完整证据）；pipeline 必须把失败命令与未覆盖 TASK 作为 `review_feedback` 回传 `implement-code` 自修复，`status=pass` 前不得进入 `review-code` 或人工审批。schema/路径/executable/事务等**技术错误**由 crctl 非零退出，保持上一轮 canonical 证据不变，本 Skill 不手写 `traceability.yml`、`review-loop.yml` 或机器区。
 
 ### Step 5 — 输出摘要
 

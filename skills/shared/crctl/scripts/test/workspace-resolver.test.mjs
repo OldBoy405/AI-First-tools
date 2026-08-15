@@ -78,7 +78,10 @@ test('TASK-03：workspace 位于 CR worktree 内时以主 checkout 为 InstWS �
     fs.mkdirSync(path.dirname(crWs), { recursive: true });
     sh(['worktree', 'add', '-q', '-b', 'requirement/CR-2026-999', crWs], ws);
     const ctx = resolveRepositories(crWs);
-    assert.equal(ctx.installRoot, fs.realpathSync(ws), 'InstWS = 主 checkout，不是 linked worktree');
+    const installStat = fs.statSync(ctx.installRoot);
+    const mainStat = fs.statSync(ws);
+    assert.equal(installStat.dev, mainStat.dev, 'InstWS 与主 checkout 位于同一文件系统');
+    assert.equal(installStat.ino, mainStat.ino, 'InstWS = 主 checkout，不是 linked worktree');
     assert.equal(ctx.cr, 'CR-2026-999');
     assert.equal(ctx.branch, 'requirement/CR-2026-999');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
