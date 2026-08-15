@@ -2824,6 +2824,8 @@ test('CR-2026-039 TASK-03 AC-1: refreshCrMdUpdated/crMdStatusText 纯函数—�
   assert.equal(refreshCrMdUpdated('id: X\nstatus: drafting', at), `id: X\nstatus: drafting\nupdated: "${at}"`);
   // 双字段共存输入（损坏态）→ 收敛为单一 updated
   assert.equal(refreshCrMdUpdated(`id: X\nupdated-at: "a"\nupdated: "b"`, at), `id: X\nupdated: "${at}"`);
+  // 重复 legacy 字段和删除后空行 → 全部收敛
+  assert.equal(refreshCrMdUpdated(`id: X\nupdated-at: "a"\n\nupdated-at: "b"\n\nstatus: drafting`, at), `id: X\nstatus: drafting\nupdated: "${at}"`);
   // updated-at 在首行 → 删后不留前导空行
   assert.equal(refreshCrMdUpdated(`updated-at: "a"\nid: X`, at), `id: X\nupdated: "${at}"`);
   // crMdStatusText：status 替换 + 时间字段收敛

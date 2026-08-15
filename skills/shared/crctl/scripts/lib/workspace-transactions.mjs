@@ -208,11 +208,11 @@ export function matchFrontmatter(text) {
  * reader 契约：“最后受控修改时间”按 `updated ?? updated-at` 读取（当前无消费点，不新增无调用方 helper）。
  * 入参为 LF 规范化的 frontmatter body（不含 --- 围栏）；`at` 缺省 nowIso()；返回新 body。 */
 export function refreshCrMdUpdated(fm, at) {
-  let body = fm.replace(/^updated-at:\s*.*$(\r?\n)?/m, '');
+  const withoutLegacy = fm.replace(/^updated-at:[ \t]*[^\r\n]*(?:\n|$)/gm, '');
+  const body = withoutLegacy.replace(/\n{2,}/g, '\n').replace(/^\n+|\n+$/g, '');
   const ts = `updated: "${at || nowIso()}"`;
-  // 追加前去掉行删产生的尾随换行，避免 body 尾 + 追加换行叠加出空行
-  body = /^updated:\s*.*$/m.test(body) ? body.replace(/^updated:\s*.*$/m, ts) : body.replace(/\n$/, '') + `\n${ts}`;
-  return body.replace(/\n{3,}/g, '\n\n');
+  const updatedLine = /^updated:[ \t]*[^\r\n]*$/m;
+  return updatedLine.test(body) ? body.replace(updatedLine, ts) : body ? `${body}\n${ts}` : ts;
 }
 
 /** cr.md 状态文本生成纯函数（status + updated 更新；CR-2026-039 TASK-03 起时间字段收敛为单一 updated）。 */
