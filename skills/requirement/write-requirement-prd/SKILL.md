@@ -24,7 +24,7 @@ description: 在 requirement/CR-* worktree 内编写 PRD 需求文档，落盘�
 |------|------|------|------|
 | `cr_id` | string | ✅ | 目标 CR-ID（如 CR-2026-003） |
 | `source` | string | ❌ | 规划报告路径或其他输入来源，用于内容提炼 |
-| `review_feedback` | object | ❌ | 来自 review-requirement 的 blockers、repair-instructions；存在时进入自修复模式 |
+| `review_feedback` | object | ❌ | 来自 review-requirement 的 blockers；存在时进入自修复模式 |
 | `self_repair_attempt` | number | ❌ | 当前自动修复轮次，由 pipeline reviewLoop 注入 |
 
 ---
@@ -42,16 +42,16 @@ description: 在 requirement/CR-* worktree 内编写 PRD 需求文档，落盘�
 - `summary` 中已确认的边界（注册阶段拍板或审批确认的范围/排除项）与当前上下文无冲突时优先原样采纳进 PRD 范围与 AC，不以换措辞方式重新定义已拍板事项
 - 若 `source` 指向规划报告路径，读取报告中对应功能的规划建议
 - 读取 `change-requests/_config.yml` 获取 PRD 模板约定
-- 若存在 `review_feedback`，读取上一轮 `review-annotations/requirement.yml` 中的 blockers、repair-instructions 与 reviewer 摘要
+- 若存在 `review_feedback`，读取上一轮 `review-annotations/requirement.yml` 中的 blockers 与 reviewer 摘要
 
 ### Step 3 — 生成 PRD
 
 若存在 `review_feedback`，先进入自修复模式：
 
-1. 逐条处理 `review_feedback.blockers`，按 `repair-instructions` 修订同一份 `prd.md`。
+1. 逐条处理 `review_feedback.blockers`（blocker 字符串内含可执行修复说明），修订同一份 `prd.md`。
 2. 保持已确认的 title、target-version、owner 和需求范围不被无关改写。
 3. 对每条修复增加可核查证据，例如新增/修改的 FR、AC、NFR 或范围说明。
-4. 输出 fixed-blockers，供下一轮 `review-requirement` 校验。
+4. 修订完成后重新提交，由下一轮 `review-requirement` 校验。
 
 PRD 结构遵循 engineering-docs 规范：
 

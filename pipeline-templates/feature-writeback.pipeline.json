@@ -1,7 +1,7 @@
 {
   "id": "feature-writeback",
   "name": "需求回写",
-  "description": "回写期主流水线：代码审批通过后以深原语 crctl merge 完成跨仓合并，随后在 merge 返回的 operational workspace 上以 candidate-only generator + crctl writeback-apply 回写 specs/ 与 delivery/，最后 crctl archive 归档。全部写操作（Git、账本、commit/push）由深原语独占；Skill 只做调用与结果分类。",
+  "description": "回写期主流水线：代码审批通过后以 crctl merge 完成跨仓合并，随后三个 Skill 仅传业务输入并各调用一次 crctl writeback-apply；固定 generator、candidate、manifest、状态、Git 与恢复算法全部由深原语拥有，最后 crctl archive 归档。",
   "triggerCommand": "writeback",
   "scope": "product-dev",
   "isDefault": false,
@@ -46,7 +46,7 @@
       "kind": "skill",
       "label": "回写 PRD / SDD 到 specs/",
       "ref": "writeback-prd-sdd",
-      "prompt": "执行 writeback-prd-sdd（在 merge 返回的 operational_workspace 上）：\n- cr_id: {{inputs.cr_id}}, spec_id: {{inputs.spec_id}}, target_version: {{inputs.target_version}}\n- operational_workspace: {上一节点返回}\n\n动作：\n1. 调用 candidate-only generator：node {TOOLS_ROOT}/skills/writeback/scripts/writeback-prd-sdd.mjs --workspace {operational_workspace} --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --candidate-out {candidate_dir}（输出 manifestPath；specs/ 是跨 CR 累积基线，只做末尾追加里程碑节 + frontmatter 行级更新，禁止全量覆盖）\n2. 一次调用深原语：`crctl writeback-apply {{inputs.cr_id}} --stage baseline --candidate {manifestPath} --spec-id {{inputs.spec_id}} --workspace {knowledge-base 主 checkout}`（manifest 全矩阵校验 → txws 精确 stage → commit+trailer → lease push）\n3. 推进状态：`crctl advance {{inputs.cr_id}} --to writing-back --trigger writeback-prd-sdd --expect merging --embedded --spec-id {{inputs.spec_id}} --workspace {operational_workspace}`\n4. 结果分类：WRITEBACK_REMOTE_STALE → 重跑 generator 后重试；WRITEBACK_MANIFEST_* → 核对 candidate 后重生成；其余按错误信息处理\n\n在 node-2.md 输出变更文件清单与 writeback-apply 返回 txId。",
+      "prompt": "执行 writeback-prd-sdd：传递 cr_id={{inputs.cr_id}}、spec_id={{inputs.spec_id}}、target_version={{inputs.target_version}}。Skill 只调用一次 `crctl writeback-apply {{inputs.cr_id}} --stage baseline --spec-id {{inputs.spec_id}} --target-version {{inputs.target_version}} --workspace {knowledge-base installation workspace}`。crctl 内部固定 generator/candidate，完成 journal 前 preflight，并把 baseline 与 merging→writing-back 状态放入同一 write-set/commit/push；禁止 Pipeline 传内部路径、另跑 generator、独立 advance 或展开 Git/journal 算法。WRITEBACK_REMOTE_STALE 同一业务命令重跑；history rewrite 硬阻断。在 node-2.md 输出 txId、commit、status、files、warnings。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },
@@ -55,7 +55,7 @@
       "kind": "skill",
       "label": "回写 TASK 到 delivery/",
       "ref": "writeback-tasks",
-      "prompt": "执行 writeback-tasks（在 operational_workspace 上）：\n- cr_id: {{inputs.cr_id}}, spec_id: {{inputs.spec_id}}, target_version: {{inputs.target_version}}\n- operational_workspace: {上一节点返回}\n\n动作：\n1. 调用 candidate-only generator：node {TOOLS_ROOT}/skills/writeback/scripts/writeback-tasks.mjs --workspace {operational_workspace} --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --candidate-out {candidate_dir}（输出 manifestPath；目标命名 TASK-{{inputs.target_version}}-{{inputs.cr_id}}-{NN}-{slug}；幂等判据为 delivery/task/*.md frontmatter 的 id 集合）\n2. 一次调用深原语：`crctl writeback-apply {{inputs.cr_id}} --stage tasks --candidate {manifestPath} --spec-id {{inputs.spec_id}} --workspace {knowledge-base 主 checkout}`\n3. 结果分类同 writeback-prd-sdd\n\n在 node-3.md 输出生成的 TASK 文件清单与 txId。",
+      "prompt": "执行 writeback-tasks：传递 cr_id={{inputs.cr_id}}、spec_id={{inputs.spec_id}}、target_version={{inputs.target_version}}。Skill 只调用一次 `crctl writeback-apply {{inputs.cr_id}} --stage tasks --spec-id {{inputs.spec_id}} --target-version {{inputs.target_version}} --workspace {knowledge-base installation workspace}`；固定 generator/candidate 和 Git 事务由 crctl 内部拥有。禁止 Pipeline 传内部路径或展开算法。输出 txId、commit、files、warnings。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -64,7 +64,7 @@
       "kind": "skill",
       "label": "回写追溯链",
       "ref": "writeback-traceability",
-      "prompt": "执行 writeback-traceability（在 operational_workspace 上）：\n- cr_id: {{inputs.cr_id}}, spec_id: {{inputs.spec_id}}, target_version: {{inputs.target_version}}\n- operational_workspace: {上一节点返回}\n\n动作：\n1. 按证据源起草 milestone-file（fr-chain 的 title/sdd/code/evidence 为编辑性内容）；merge-commits 由 generator 从 change-requests/{{inputs.cr_id}}/merge-commits.yml 提取注入（模型不得手工誊抄，缺失 MERGE_COMMITS_MISSING 硬失败）\n2. 调用 candidate-only generator：node {TOOLS_ROOT}/skills/writeback/scripts/writeback-traceability.mjs --workspace {operational_workspace} --cr {{inputs.cr_id}} --spec {{inputs.spec_id}} --version {{inputs.target_version}} --milestone-file <path> --candidate-out {candidate_dir}（既有 milestones 段不得出现在 candidate 差异中）\n3. 一次调用深原语：`crctl writeback-apply {{inputs.cr_id}} --stage traceability --candidate {manifestPath} --spec-id {{inputs.spec_id}} --workspace {knowledge-base 主 checkout}`\n\n在 node-4.md 输出链路条目数与未对齐项。",
+      "prompt": "执行 writeback-traceability：按证据源在 operational workspace 起草 milestone-file（merge-commits 由固定 generator 从 change-requests/{{inputs.cr_id}}/merge-commits.yml 注入，不手工誊抄），然后 Skill 只调用一次 `crctl writeback-apply {{inputs.cr_id}} --stage traceability --spec-id {{inputs.spec_id}} --target-version {{inputs.target_version}} --milestone-file {workspace-relative-path} --workspace {knowledge-base installation workspace}`。禁止传 candidate/generator/manifest 路径或展开 Git 事务。输出 txId、commit、files、warnings 与未对齐项。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },

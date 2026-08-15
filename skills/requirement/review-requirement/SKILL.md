@@ -68,13 +68,13 @@ description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审�
 `crctl review-record` 已同批写入 annotation + review-loop + traceability（三账本原子），成功即表示写入完成，**不再重新读取 traceability 核对**。按返回结果处理：
 
 - 按 `files[]` 组织 git 提交（提交本次实际写入的文件）；
-- 按 `route` 分流：`pass` → 进入 Step 5；`repair` → 输出 `repair-target`/`repair-instructions` 并路由回修；
+- 按 `route` 分流：`pass` → 进入 Step 5；`repair` → 输出 `repair-target` 并路由回修；
 - 最后调用 `crctl next {cr_id}` 确认下一步（next 由 crctl 唯一计算）。
 
 ### Step 5 — 更新 CR status
 
 - 若评审通过（无 blocker）：调用 `crctl advance --to requirement-reviewing --trigger review-requirement` 将 status 推进到 `requirement-reviewing`，允许进入 `human_approval`（省略 `--expect`：状态机声明 `drafting→requirement-reviewing` 与 `requirement-reviewing→requirement-reviewing` 两条合法转换，单值写死会误拒合法自环；省略后 `findTransition` 仍拦非法转换）
-- 若有 blocker：保持或回退到 `drafting`，输出 `repair-target=write-requirement-prd`、`repair-instructions` 与 blocker 列表，pipeline 自动带 `review_feedback` 回到 PRD 修复节点；不得进入 `human_approval`
+- 若有 blocker：保持或回退到 `drafting`，输出 `repair-target=write-requirement-prd` 与 blocker 列表（每条 blocker 内含可执行修复说明），pipeline 自动带 `review_feedback` 回到 PRD 修复节点；不得进入 `human_approval`
 
 ### Step 6 — 输出摘要
 

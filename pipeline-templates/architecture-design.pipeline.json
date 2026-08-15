@@ -37,7 +37,7 @@
       "kind": "skill",
       "label": "编写架构设计",
       "ref": "write-tech-design",
-      "prompt": "<!-- lint-prompts:ignore --> 回修说明：只读上一轮评审记录并修订 sdd.md\n读取 CR worktree 中 change-requests/{{inputs.cr_id}}/prd.md，结合技术背景「{{inputs.tech_context}}」在同目录写 sdd.md：\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n- 架构概览（模块/边界/依赖）\n- 数据模型\n- 接口契约（API / IPC / 事件）\n- 关键算法与流程\n- 技术选型与替代方案\n- 每个 FR-* 映射到技术实现条目\n- 安全与性能考量\n\n状态要求：初次生成要求 CR status=requirement-approved；<!-- lint-prompts:ignore --> 回修说明：只读上一轮评审记录并修订\n若来自 reviewLoop 回修，允许 status=tech-designing，并只读 review_feedback 或上一轮评审记录（review-annotations/sdd.yml，经 crctl validate 校验）作为修复输入。回修时必须逐条消费 review_feedback.blockers 与 repair-instructions，修订同一 sdd.md，并在 node-1.md 输出 self_repair_attempt 与 fixed-blockers 清单。要求：只写 CR worktree 中的 change-requests/{{inputs.cr_id}}/sdd.md，不写 specs/。在 node-1.md 输出 SDD 关键章节摘要、FR 覆盖率和实际写入路径。",
+      "prompt": "<!-- lint-prompts:ignore --> 回修说明：只读上一轮评审记录并修订 sdd.md\n读取 CR worktree 中 change-requests/{{inputs.cr_id}}/prd.md，结合技术背景「{{inputs.tech_context}}」在同目录写 sdd.md：\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n- 架构概览（模块/边界/依赖）\n- 数据模型\n- 接口契约（API / IPC / 事件）\n- 关键算法与流程\n- 技术选型与替代方案\n- 每个 FR-* 映射到技术实现条目\n- 安全与性能考量\n\n状态要求：初次生成要求 CR status=requirement-approved；<!-- lint-prompts:ignore --> 回修说明：只读上一轮评审记录并修订\n若来自 reviewLoop 回修，允许 status=tech-designing，并只读 review_feedback 或上一轮评审记录（review-annotations/sdd.yml，经 crctl validate 校验）作为修复输入。回修时必须逐条消费 review_feedback.blockers（blocker 字符串内含可执行修复说明），修订同一 sdd.md，并在 node-1.md 输出 self_repair_attempt。要求：只写 CR worktree 中的 change-requests/{{inputs.cr_id}}/sdd.md，不写 specs/。在 node-1.md 输出 SDD 关键章节摘要、FR 覆盖率和实际写入路径。",
       "onFail": "abort",
       "timeoutMinutes": 25
     },
@@ -46,7 +46,7 @@
       "kind": "skill",
       "label": "架构设计评审",
       "ref": "review-tech-design",
-      "prompt": "对 CR worktree 中 change-requests/{{inputs.cr_id}}/sdd.md 执行评审：\n① PRD↔SDD 对齐度（每个 FR 都有对应技术方案）\n② 架构合理性与可扩展性\n③ 性能、安全、兼容性风险\n④ 接口契约完整性\n⑤ 可测试性\n\n评审判断写入 .crctl/tmp/review-tech-design.yml（非受控临时路径），经 `crctl review-record --stage tech-design --from .crctl/tmp/review-tech-design.yml --bump-attempt` 落盘 review-annotations/sdd.yml（review-loop 记账由 --bump-attempt 级联，模型不得手写轮次记账）。在 node-2.md 输出 verdict、blockers、repair-target、repair-instructions、current-attempt 轮次 与评审摘要。若 verdict=block 或 blockers 非空，pipeline 不得进入 human_approval；必须把 review_feedback 传回 write-tech-design 自动修订，并重新执行本评审，直至 verdict=pass 且 blockers 为空，或达到 reviewLoop.maxAttempts 后停止。",
+      "prompt": "对 CR worktree 中 change-requests/{{inputs.cr_id}}/sdd.md 执行评审：\n① PRD↔SDD 对齐度（每个 FR 都有对应技术方案）\n② 架构合理性与可扩展性\n③ 性能、安全、兼容性风险\n④ 接口契约完整性\n⑤ 可测试性\n\n评审判断写入 .crctl/tmp/review-tech-design.yml（非受控临时路径），经 `crctl review-record --stage tech-design --from .crctl/tmp/review-tech-design.yml --bump-attempt` 落盘 review-annotations/sdd.yml（review-loop 记账由 --bump-attempt 级联，模型不得手写轮次记账）。在 node-2.md 输出 verdict、blockers（每条内含可执行修复说明）、repair-target、current-attempt 轮次 与评审摘要。若 verdict=block 或 blockers 非空，pipeline 不得进入 human_approval；必须把 review_feedback 传回 write-tech-design 自动修订，并重新执行本评审，直至 verdict=pass 且 blockers 为空，或达到 reviewLoop.maxAttempts 后停止。",
       "reviewLoop": {
         "repairNodeId": "00000000-0000-0000-0016-000000000001",
         "repairRef": "write-tech-design",
@@ -92,7 +92,7 @@
       "kind": "skill",
       "label": "推送架构设计到远端",
       "ref": "push-progress",
-      "prompt": "若 {{inputs.auto_push_after_sdd}}=false 则在 node-5.md 输出 SKIPPED 并 return。\n否则执行 push-progress：\n- 经 `crctl git add/commit` 提交架构设计相关证据（sdd.md、评审记录、审批记录、traceability）\n- commit message 使用 `wip: {{inputs.cr_id}} architecture design approved`\n- 按 dir-graph active repos 推送 requirement/{{inputs.cr_id}} 到 origin\n- 经 `crctl checkpoint-add` 更新 _backlog 的 remote-ref/last-push/checkpoints（S3）\n\n在 node-5.md 输出各 repo 推送结果、远端分支和提交 SHA。",
+      "prompt": "若 {{inputs.auto_push_after_sdd}}=false 则在 node-5.md 输出 SKIPPED 并 return。\n否则执行 push-progress：cr_id={{inputs.cr_id}}，message=架构设计已审批。\n\n在 node-5.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
       "onFail": "skip",
       "timeoutMinutes": 10
     }

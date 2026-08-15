@@ -72,14 +72,7 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 | **测试证据可信度** | `test-report.md` 是否覆盖 TASK 验收条件，是否说明未覆盖风险 |
 | **前端质量** | 仅 diff 触及 `*.tsx`、`*.vue`、`*.css`、`*.html` 时触发，检查三项：① a11y 对比度达 WCAG AA（破 AA 升 blocker）；② 组件 loading/empty/error 状态完整覆盖；③ 构建体积在预算内。②③ 未达为 minor |
 
-**改进建议处置策略**（策略参数由 pipeline 触发参数注入，缺省 strict）：
-
-- **strict（默认）**：非阻塞发现一律进 `suggestions`；verdict 只判 CR 本身的 pass/block。
-- **lenient**：非阻塞发现同时满足三条判据且通过轮次闸才升格进 `blockers`（同轮多条成批写入）：
-  ① 改动不超出本 CR 已触碰的文件（不扩大 diff）；② 有明确的"改成什么"（能写进 repair-instructions，不是"优化一下"）；③ 不需要产品/架构决策（纯实现层）；
-  ④ **轮次闸**：仅首轮评审（attempt=1）允许升格；第 2 轮起一律按 suggestions 处理——防升格消耗 maxAttempts 耗尽轮次、停在 developing 无法进入审批。
-- **留痕**：dimensions 记录 `suggestion-policy: {strict|lenient}`（canonical，跨 CR 可比）。
-- **语义**：blockers=本 CR 内要处理的（不论轻重）；suggestions=本 CR 内不处理的。
+**改进建议处置**：非阻塞发现一律进 `suggestions`，verdict 只判 CR 本身的 pass/block；语义：blockers=本 CR 内要处理的（不论轻重），suggestions=本 CR 内不处理的。
 
 ### Step 4 — 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
 
@@ -87,7 +80,7 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
    ```yaml
    verdict: pass | block
    blockers: []          # block 时列出 blocker（字符串列表）
-   dimensions: {评审维度: 结论, suggestion-policy: strict|lenient, ...}   # 该 stage 门禁要求的维度齐全；suggestion-policy 为本轮策略留痕（canonical）
+   dimensions: {评审维度: 结论, ...}   # 该 stage 门禁要求的维度齐全
    suggestions: []       # 可选
    ```
 2. 运行 `crctl review-record {cr_id} --stage code --bump-attempt --workspace <worktree>`（`--from` 缺省即 `.crctl/tmp/review-code.yml`，无需显式指定），crctl 自动完成**确定性部分**：
@@ -103,10 +96,10 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 `crctl review-record` 已同批写入 annotation + review-loop + traceability（三账本原子），成功即表示写入完成，**不再重新读取 traceability 核对**。按返回结果处理：
 
 - 按 `files[]` 组织 git 提交（提交本次实际写入的文件）；
-- 按 `route` 分流：`pass` → 进入 Step 6；`repair` → 输出 `repair-target`/`repair-instructions` 并路由回修；
+- 按 `route` 分流：`pass` → 进入 Step 6；`repair` → 输出 `repair-target` 并路由回修；
 - 最后调用 `crctl next {cr_id}` 确认下一步（next 由 crctl 唯一计算）。
 - verdict=pass 且 blockers 为空且 `test-report.status=pass` → 调用 `crctl advance --to code-reviewing --trigger review-code --expect developing`，允许进入 `human_approval`
-- verdict=block、blockers 非空或 `test-report.status=block` → 调用 `crctl advance --to developing --trigger "review-code:block -> implement-code" --expect developing`，输出 `repair-target=implement-code`、`repair-instructions`，pipeline 自动带 `review_feedback` 回到代码实现节点；不得进入 `human_approval`
+- verdict=block、blockers 非空或 `test-report.status=block` → 调用 `crctl advance --to developing --trigger "review-code:block -> implement-code" --expect developing`，输出 `repair-target=implement-code`，pipeline 自动带 `review_feedback` 回到代码实现节点；不得进入 `human_approval`
 
 ### Step 6 — 输出摘要
 

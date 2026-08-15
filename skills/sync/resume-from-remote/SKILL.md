@@ -16,7 +16,7 @@ description: 在新电脑或本地 worktree 缺失时，通过 crctl workspace e
 
 ## 执行
 
-1. 读取 workspace `dir-graph.yaml#repositories`，确认目标 CR 的 active repo 远端 checkpoint 已由上一节点 `list-remote-checkpoints` 验证；独立调用时先执行该只读 Skill。
+1. 读取 workspace `dir-graph.yaml#repositories`，确认目标 CR 的 active repo 远端 checkpoint 已由上一节点 `list-remote-checkpoints` 验证为 metadata-confirmed 完整批次（只消费单一 `latest-checkpoint`，不读旧 `checkpoints[]`）；独立调用时先执行该只读 Skill。
 2. 只调用一次深原语：
 
 ```text

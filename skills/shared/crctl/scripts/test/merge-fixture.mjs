@@ -154,8 +154,13 @@ export function makeCodeApprovedFixture() {
   fs.mkdirSync(path.join(kbCr, 'review-annotations'), { recursive: true });
   fs.writeFileSync(path.join(kbCr, 'traceability.yml'), `cr-id: ${cr}\nreviews:\n  code:\n    review-loop:\n      current-attempt: 1\n`);
   fs.writeFileSync(path.join(kbCr, 'review-loop.yml'), 'schema: review-loop/v1\ncode:\n  current-attempt: 1\n');
+  // CR-2026-039 TASK-02：PASS annotation 携 subject-sha256（developing 门禁 freshness 需要；release-drift 回退同样过该门禁）
+  const devPlanDigest = sha256(JSON.stringify([
+    { path: `change-requests/${cr}/plan.md`, content: fs.readFileSync(path.join(kbWt, 'change-requests', cr, 'plan.md'), 'utf8').replaceAll('\r\n', '\n') },
+    { path: `change-requests/${cr}/tasks/TASK-01.md`, content: fs.readFileSync(path.join(kbWt, 'change-requests', cr, 'tasks', 'TASK-01.md'), 'utf8').replaceAll('\r\n', '\n') },
+  ]));
   fs.writeFileSync(path.join(kbCr, 'review-annotations', 'dev-plan.yml'),
-    'cr-id: ' + cr + '\nreview-type: dev-plan\nverdict: pass\nblockers: []\ndimensions:\n  sdd-to-plan: ok\n');
+    'cr-id: ' + cr + '\nreview-type: dev-plan\nverdict: pass\nblockers: []\ndimensions:\n  sdd-to-plan: ok\nsubject-sha256: ' + devPlanDigest + '\n');
   fs.writeFileSync(path.join(kbCr, 'review-annotations', 'code.yml'),
     'verdict: pass\nblockers: []\ndimensions:\n  spec-conformance: ok\nsuggestions: []\n' + rsLines.join('\n') + '\n');
   const digestOf = (texts) => sha256(texts.map((t) => sha256(t.replaceAll('\r\n', '\n'))).join(''));

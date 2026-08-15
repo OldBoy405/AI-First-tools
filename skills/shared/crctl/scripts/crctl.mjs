@@ -20,13 +20,13 @@ import readline from 'node:readline';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 // CR-2026-031 TASK-03：YAML 子集解析器与 workspace 基础设施同源共享（lib/ 下，禁止在 crctl.mjs 复刻）。
-import { parseYaml } from './lib/yaml-subset.mjs';
+import { parseYaml, matchEntryBlock } from './lib/yaml-subset.mjs';
 import {
   deriveInstallRoot, TxError, resolveRepositories, registerCr, ensureWorkspace,
   assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
-  matchFrontmatter, crMdStatusText, mergeCr, mergeStatus, resolveOperationalWorkspace,
-  applyWriteback, archiveCr, checkUpgrade, renderLoopText, testCr,
+  matchFrontmatter, crMdStatusText, refreshCrMdUpdated, mergeCr, mergeStatus, resolveOperationalWorkspace,
+  applyWriteback, archiveCr, checkUpgrade, checkpointCr, renderLoopText, testCr,
 } from './lib/workspace-transactions.mjs';
 import {
   FAULT_POINTS, faultPoint, nowIso,
@@ -263,6 +263,19 @@ function auditLog(ws, record) {
   const gi = path.join(dir, '.gitignore');
   if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n');
   fs.appendFileSync(path.join(dir, 'audit.log'), JSON.stringify({ at: nowIso(), ...record }) + '\n');
+}
+
+function auditLogOnce(ws, record, dedupKey) {
+  const p = path.join(ws, '.crctl', 'audit.log');
+  if (fs.existsSync(p)) {
+    for (const line of fs.readFileSync(p, 'utf8').split(/\r?\n/).filter(Boolean)) {
+      let item;
+      try { item = JSON.parse(line); } catch { throw new Error(`audit.log 含非法 JSONL，拒绝追加 dedup 事实: ${p}`); }
+      if (item.dedup_key === dedupKey) return false;
+    }
+  }
+  auditLog(ws, { ...record, dedup_key: dedupKey });
+  return true;
 }
 
 /* ────────────────────────── outbox 事件（P1 同步协议，CR-2026-002 TASK-02） ──────────
@@ -502,6 +515,19 @@ function checkDeliveryIndexComplete(ws, cr) {
 }
 
 function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
+  const plannedExisting = opts.plannedExisting;
+  if (plannedExisting != null) {
+    if (!(plannedExisting instanceof Set)) fail('GATE_PLANNED_PATH_INVALID', 'plannedExisting 必须是 Set<string>');
+    for (const rel of plannedExisting) {
+      if (typeof rel !== 'string' || !rel || path.isAbsolute(rel) || rel.includes('\\')
+        || rel.split('/').some((seg) => !seg || seg === '.' || seg === '..')) {
+        fail('GATE_PLANNED_PATH_INVALID', `plannedExisting 含非法 workspace-relative POSIX path: ${rel}`);
+      }
+      const resolved = path.resolve(ws, ...rel.split('/'));
+      const root = path.resolve(ws) + path.sep;
+      if (!resolved.startsWith(root)) fail('GATE_PLANNED_PATH_INVALID', `plannedExisting 越出 workspace: ${rel}`);
+    }
+  }
   const checks = gates.statusGates[targetStatus];
   const out = { target: targetStatus, checks: [], pass: true };
   if (!checks) { out.note = `gates.json 未对状态 ${targetStatus} 声明门禁（默认放行，仅校验状态机转换）`; return out; }
@@ -511,7 +537,8 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
       if (check.path.includes('{spec}') && !opts.specId) {
         out.checks.push({ type: check.type, path: check.path, ok: false, why: '需要 --spec-id 参数才能校验 specs 落点' });
       } else {
-        const exists = fs.existsSync(p);
+        const rel = path.relative(ws, p).split(path.sep).join('/');
+        const exists = fs.existsSync(p) || (plannedExisting instanceof Set && plannedExisting.has(rel));
         out.checks.push({ type: check.type, path: p, ok: exists, why: exists ? null : '文件不存在' });
       }
     } else if (check.type === 'globNonEmpty') {
@@ -521,7 +548,15 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
     } else if (check.type === 'passCondition') {
       const stageCfg = gates.approvalStages[check.stage];
       const r = evaluatePassCondition(ws, cr, stageCfg, gates, opts.evidence);
-      out.checks.push({ type: check.type, stage: check.stage, ok: r.pass, detail: r.results, pipelineSource: r.source });
+      let passOk = r.pass;
+      let passWhy = null;
+      if (r.pass && check.stage === 'dev-start') {
+        // CR-2026-039 TASK-02：dev-plan PASS 证据 freshness（复用 gate 失败通道，不新增错误码/gates.json）
+        const dp = readEvidenceDoc(ws, cr, 'change-requests/{cr}/review-annotations/dev-plan.yml', opts.evidence);
+        const fr = devPlanFreshness(ws, cr, dp.exists ? dp.data : null);
+        if (!fr.fresh) { passOk = false; passWhy = fr.why; }
+      }
+      out.checks.push({ type: check.type, stage: check.stage, ok: passOk, why: passWhy, detail: r.results, pipelineSource: r.source });
     } else if (check.type === 'approval') {
       const doc = readEvidenceDoc(ws, cr, 'change-requests/{cr}/approval.yml', opts.evidence);
       const section = doc.exists ? doc.data?.[check.section] : null;
@@ -645,28 +680,6 @@ async function beginLedgerCommand(ws, key, writes, commitRequired) {
  * 状态唯一写者仍是 advance）。
  */
 
-/** 锚定 "- id: <id>" 条目块（该行到下一个同缩进 "- id:" 或 EOF）。返回 {start,end,text,indent}（start/end 为字符偏移）。 */
-function matchEntryBlock(text, id) {
-  const lines = text.split('\n');
-  let startLine = -1, indent = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
-    if (m && m[2] === id) { startLine = i; indent = m[1].length; break; }
-  }
-  if (startLine === -1) return null;
-  let endLine = lines.length;
-  for (let i = startLine + 1; i < lines.length; i++) {
-    const m = lines[i].match(/^([ \t]*)- id:\s*["']?([^\s"']+)["']?\s*$/);
-    if (m && m[1].length <= indent) { endLine = i; break; }
-  }
-  let start = 0;
-  for (let i = 0; i < startLine; i++) start += lines[i].length + 1;
-  let end = start;
-  for (let i = startLine; i < endLine; i++) end += lines[i].length + 1;
-  if (endLine === lines.length && text.endsWith('\n')) end -= 1;
-  return { start, end, text: lines.slice(startLine, endLine).join('\n'), indent };
-}
-
 /** task done：块内 status 行替换 + done-at 插入，一次完成（SDD §4.1）。 */
 function editTaskDone(text, taskId) {
   const norm = text.replaceAll('\r\n', '\n');
@@ -720,7 +733,7 @@ function updateCrMdStatus(ws, cr, newStatus) {
   return { updated: true, path: p };
 }
 
-// CR-2026-027 FR-8/TASK-03：cr.md 状态文本生成纯函数（status + updated-at 更新），供 approve 原子提交在内存生成候选文本。
+// CR-2026-027 FR-8/TASK-03（CR-2026-039 TASK-03 起时间字段收敛为单一 updated）：cr.md 状态文本生成纯函数（status + updated 更新），供 approve 原子提交在内存生成候选文本。
 /* ────────────────────────── 状态读取收敛（CR-2026-018 FR-2） ──────────────────────────
  * 状态权威源 = cr.md frontmatter；_backlog.yml 退化为注册索引（owners/merge-commits 等低频字段）。
  * 迁移期兼容读：cr.md 无 status 时回退 backlog 条目 status（deprecated since v0.2.0，计划 v0.3.0 移除）。
@@ -913,14 +926,10 @@ function cmdGate(ws, cr, gates, flags) {
   if (!result.pass) process.exit(1);
 }
 
-// CR-2026-030 TASK-04（SDD §4.9）：advance 内核——不打印 JSON，供 cmdAdvance 与 reject 回退共用。
-// “Git 是权威”：standalone commit 失败时不得发 status outbox；只有 commit 成功（或 embedded 由调用方提交）
-// 才返回 committed=true 并以真实/占位 SHA 发 outbox。返回 {committed, commitDetail, ...}。
-function performAdvance(ws, cr, gates, flags) {
+function preflightAdvance(ws, cr, gates, flags) {
   if (!flags.to || !flags.trigger) fail('BAD_ARGS', 'advance 需要 --to <status> --trigger <trigger>');
   const { sm } = loadStateMachine(ws);
   const state = resolveCrState(ws, cr);
-  const snap = state.snap;
   const current = state.status;
   if (flags.expect && flags.expect !== current) {
     fail('CR_STATUS_CURRENT_MISMATCH', `期望当前状态 ${flags.expect}，实际 ${current}`);
@@ -943,6 +952,21 @@ function performAdvance(ws, cr, gates, flags) {
     const why = gate.checks.filter((c) => !c.ok).map((c) => c.why).filter(Boolean).join('；');
     fail('GATE_BLOCKED', `目标状态 ${flags.to} 的门禁未通过，拒绝写入${why ? '：' + why : ''}`, { gate });
   }
+  const crMdPath = path.join(crDir(ws, cr), 'cr.md');
+  const beforeText = readFileChecked(crMdPath);
+  if (beforeText == null) fail('CR_MD_WRITE_FAILED', `advance 读取 cr.md 失败: ${crMdPath}`);
+  return {
+    from: current, to: flags.to, trigger: flags.trigger, gate,
+    path: `change-requests/${cr}/cr.md`, beforeText, beforeSha256: sha256(beforeText),
+  };
+}
+
+// CR-2026-030 TASK-04（SDD §4.9）：advance 内核——不打印 JSON，供 cmdAdvance 与 reject 回退共用。
+// “Git 是权威”：standalone commit 失败时不得发 status outbox；只有 commit 成功（或 embedded 由调用方提交）
+// 才返回 committed=true 并以真实/占位 SHA 发 outbox。返回 {committed, commitDetail, ...}。
+function performAdvance(ws, cr, gates, flags) {
+  const candidate = preflightAdvance(ws, cr, gates, flags);
+  const current = candidate.from;
   const crmd = updateCrMdStatus(ws, cr, flags.to);
   if (!crmd.updated) fail('CR_MD_WRITE_FAILED', `advance 写入 cr.md 失败: ${crmd.why}`);
   auditLog(ws, { kind: 'advance', cr, from: current, to: flags.to, trigger: flags.trigger, by: identity(ws) });
@@ -1769,6 +1793,38 @@ function upsertReviewsStage(traceNorm, cr, stage, blockText) {
   return [...lines.slice(0, re), ...blockLines, ...lines.slice(re)].join('\n');
 }
 
+// CR-2026-039 TASK-01（SDD §4.1）：dev-plan composite digest 唯一权威定义。
+// entries = plan.md 首项 + tasks/ 下全部 TASK-*.md（workspace-relative POSIX path 字符串升序，plan.md 自然居首），
+// 每项 { path, content }（键序固定），content 为 CRLF→LF 规范化全文（纪律 #1）；JSON.stringify 无空白后 UTF-8 sha256。
+// 任一预期缺失返回带 repairTarget 的结构化失败（不跳过、不降级为空集合）；权限/I/O 异常继续抛出，不宽泛 catch。
+function devPlanCompositeDigest(ws, cr) {
+  const planRel = `change-requests/${cr}/plan.md`;
+  const planRaw = readFileChecked(path.join(ws, planRel));
+  if (planRaw == null) return { ok: false, repairTarget: 'write-dev-plan', why: 'plan.md 缺失' };
+  const tasksDir = path.join(ws, 'change-requests', cr, 'tasks');
+  if (!fs.existsSync(tasksDir)) return { ok: false, repairTarget: 'write-dev-tasks', why: 'tasks/ 缺失' };
+  const names = fs.readdirSync(tasksDir).filter((f) => /^TASK-.*\.md$/.test(f)).sort();
+  if (names.length === 0) return { ok: false, repairTarget: 'write-dev-tasks', why: 'TASK-*.md 集合为空' };
+  const entries = [{ path: planRel, content: planRaw.replaceAll('\r\n', '\n') }];
+  for (const f of names) {
+    const taskRaw = readFileChecked(path.join(tasksDir, f));
+    if (taskRaw == null) return { ok: false, repairTarget: 'write-dev-tasks', why: `TASK 文件缺失: ${f}` };
+    entries.push({ path: `change-requests/${cr}/tasks/${f}`, content: taskRaw.replaceAll('\r\n', '\n') });
+  }
+  return { ok: true, digest: sha256(JSON.stringify(entries)) };
+}
+
+// CR-2026-039 TASK-02（SDD §4.3）：dev-plan PASS 证据 freshness 唯一判定（cmdNext 与 runGateChecks 两消费点共用）。
+// legacy 无 digest → review-dev-plan；subject 不完整 → 透传 helper repairTarget；digest 漂移 → review-dev-plan。
+function devPlanFreshness(ws, cr, annData) {
+  const recSha = annData && typeof annData === 'object' ? annData['subject-sha256'] : null;
+  if (recSha == null) return { fresh: false, repairTarget: 'review-dev-plan', why: 'dev-plan annotation 无 subject-sha256（legacy 或畸形），无法判 freshness，重审刷新证据' };
+  const cur = devPlanCompositeDigest(ws, cr);
+  if (!cur.ok) return { fresh: false, repairTarget: cur.repairTarget, why: `dev-plan subject 不完整：${cur.why}` };
+  if (cur.digest !== recSha) return { fresh: false, repairTarget: 'review-dev-plan', why: `dev-plan digest 漂移（annotation 记录 ${String(recSha).slice(0, 16)}…，当前重算 ${cur.digest.slice(0, 16)}…；plan/TASK 在评审后被改动），重审刷新证据` };
+  return { fresh: true };
+}
+
 async function cmdReviewRecord(ws, cr, gates, flags) {
   const stage = flags.stage;
   const fileName = REVIEW_STAGE_FILES[stage];
@@ -1921,6 +1977,13 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
     lines.push(`subject-file: change-requests/${cr}/sdd.md`);
     lines.push(`subject-sha256: ${sha256(sddRaw.replaceAll('\r\n', '\n'))}`);
   }
+  if (stage === 'dev-plan') {
+    // CR-2026-039 TASK-01（SDD §4.2）：plan.md + 全部 TASK-*.md composite digest；pass/block 两轨同写；
+    // 失败统一 SUBJECT_NOT_FOUND（在任何账本写入之前，零写入）；供 TASK-02 next/gate freshness 消费。
+    const subject = devPlanCompositeDigest(ws, cr);
+    if (!subject.ok) fail('SUBJECT_NOT_FOUND', subject.why, { repairTarget: subject.repairTarget });
+    lines.push(`subject-sha256: ${subject.digest}`);
+  }
   if (stage === 'code') {
     // TASK-06（SDD §3.4）：机器注入逐仓 source SHA 与受控 artifact digest；approve-code 重核后原样签入
     const rs = await runTxAsync((async () => buildReleaseSubjects(resolveRepositories(ws), cr))());
@@ -2063,29 +2126,34 @@ function upsertTopField(lines, indent, key, value) {
   return hit ? lines.map((l) => (re.test(l) ? newLine : l)) : [...lines, newLine];
 }
 
-/** checkpoint-add：块内 checkpoints[] 追加 + remote-ref/last-push-at/last-push-by 更新（SDD §3.1）。 */
-function editCheckpointAdd(text, cr, meta) {
-  const norm = text.replaceAll('\r\n', '\n');
-  const block = matchEntryBlock(norm, cr);
-  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
-  const lines = block.text.split('\n');
-  const fieldIndent = ' '.repeat(block.indent + 2);
-  const itemIndent = ' '.repeat(block.indent + 4);
-  const subIndent = ' '.repeat(block.indent + 6);
-  // 1) checkpoints[] 追加（无键则创建；空 flow [] 展开为块序列）
-  const cpItem = [
-    `${itemIndent}- repo: ${meta.repo}`,
-    `${subIndent}sha: ${meta.sha}`,
-    meta.remoteRef ? `${subIndent}remote-ref: "${meta.remoteRef}"` : null,
-    `${subIndent}pushed-at: "${nowIso()}"`,
-    `${subIndent}by: "${meta.by}"`,
-  ].filter(Boolean).join('\n');
-  let result = appendToBlockSequence(lines, 'checkpoints', cpItem, fieldIndent);
-  // 2) remote-ref / last-push-at / last-push-by 更新（无则插入到条目块尾部）
-  if (meta.remoteRef) result = upsertTopField(result, fieldIndent, 'remote-ref', meta.remoteRef);
-  result = upsertTopField(result, fieldIndent, 'last-push-at', nowIso());
-  result = upsertTopField(result, fieldIndent, 'last-push-by', meta.by);
-  return norm.slice(0, block.start) + result.join('\n') + norm.slice(block.end);
+/** checkpoint：单一深原语。状态守卫在 CLI 层（从 KB CR worktree cr.md 读 status，非主 checkout）；
+ * 事务逻辑唯一实现在 workspace-transactions.mjs。 */
+async function cmdCheckpoint(ws, cr, gates, flags) {
+  const ctx = resolveRepositories(ws);
+  const kb = ctx.repositories.find((r) => r.role === 'knowledge-base');
+  if (!kb) fail('REPO_GRAPH_INVALID', 'repositories 缺 knowledge-base role');
+  const crMdP = path.join(kb.worktreePath, cr, 'change-requests', cr, 'cr.md');
+  let status = null;
+  try {
+    const text = fs.readFileSync(crMdP, 'utf8').replaceAll('\r\n', '\n');
+    const m = matchFrontmatter(text);
+    if (m) { const doc = parseYaml(m.body); status = doc && doc.status; }
+  } catch { /* status 缺失由 checkpointCr 的 worktree 校验兜底 */ }
+  if (status == null) fail('CR_MD_STATUS_MISSING', `${cr} 的 KB CR worktree cr.md 缺少 status: ${crMdP}`);
+  const { sm } = loadStateMachine(ws);
+  if ((sm.terminal || []).includes(status)) {
+    fail('ILLEGAL_LEDGER_STATE', `checkpoint 不允许在终态 ${status} 执行`, { current: status, expect: '非终态' });
+  }
+  const result = await runTxAsync(checkpointCr(ctx, { cr, message: flags.message == null ? undefined : String(flags.message), workspace: ws }));
+  auditLog(ws, { kind: 'checkpoint', cr, txId: result.txId, batchId: result.batchId, phase: result.phase, changed: result.changed, actor: identity(ws) });
+  if (result.changed && result.metadataCommit) {
+    emitOutboxEvent(ws, {
+      event_kind: 'checkpoint', cr_id: cr, commit_sha: result.metadataCommit, actor: identity(ws),
+      payload: { batch_id: result.batchId, repositories: (result.repositories || []).map((r) => ({ repo: r.repo, sourceSha: r.sourceSha })) },
+      dedup_name: `checkpoint-${cr}-${result.metadataCommit}.json`,
+    });
+  }
+  ok({ op: 'checkpoint', ...result });
 }
 
 /** owner-set：块内 owners.{role} 的 id + assigned-at 更新（crctl 生成时间戳）。 */
@@ -2197,7 +2265,8 @@ function editCrOwnerProjection(text, cr, role, newId, historyEntry, handoverAt) 
   }
   const { out } = replaceOwnerSlot(lines, role, newId, 2, handoverAt);
   const entryLine = `  - { role: ${historyEntry.role}, from: ${historyEntry.from || '""'}, to: ${historyEntry.to}, at: "${historyEntry.at}", reason: ${historyEntry.reason}${historyEntry.note ? `, note: ${yamlScalar(historyEntry.note)}` : ''} }`;
-  const body = appendOwnerHistory(out, entryLine).join('\n');
+  // CR-2026-039 TASK-03：移交同样刷新单一 updated（与移交时间一致）
+  const body = refreshCrMdUpdated(appendOwnerHistory(out, entryLine).join('\n'), handoverAt);
   return norm.replace(m.match, '---\n' + body + '\n---');
 }
 
@@ -2243,25 +2312,6 @@ function editBacklogSet(text, cr, field, value) {
   const fieldIndent = ' '.repeat(block.indent + 2);
   const out = upsertTopField(lines, fieldIndent, field, value);
   return norm.slice(0, block.start) + out.join('\n') + norm.slice(block.end);
-}
-
-function cmdCheckpointAdd(ws, cr, gates, flags) {
-  if (!flags.repo || !flags.sha) fail('BAD_ARGS', 'checkpoint-add 需要 --repo <r> --sha <sha> [--remote-ref <ref>]');
-  const state = resolveCrState(ws, cr);
-  // FR-11（CR-2026-022）：LEGAL 从状态机派生全非终态（transitions from/to + wildcards 展开，排除 (new) 与 terminal），
-  // 不硬编码列表——push-progress 在 drafting/task-breakdown 等阶段也会被调用，窄列表会炸 ILLEGAL_LEDGER_STATE；
-  // 与 cmdOwnerSet 的 sm.terminal 判断同源，状态机增态自动覆盖。
-  const { sm } = loadStateMachine(ws);
-  const known = new Set();
-  for (const t of sm.transitions || []) { known.add(t.from); known.add(t.to); }
-  for (const list of Object.values(sm.wildcards || {})) for (const s of list) known.add(s);
-  const LEGAL = [...known].filter((s) => s !== '(new)' && !(sm.terminal || []).includes(s));
-  if (!LEGAL.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `checkpoint-add 仅允许在非终态执行，当前 ${state.status}`, { current: state.status, expect: LEGAL });
-  const snap = loadBacklogEntry(ws, cr);
-  const newText = editCheckpointAdd(snap.text, cr, { repo: flags.repo, sha: flags.sha, remoteRef: flags['remote-ref'] || null, by: identity(ws) });
-  casWrite(snap.path, snap.hash, newText);
-  auditLog(ws, { kind: 'ledger', op: 'checkpoint-add', cr, actor: identity(ws), repo: flags.repo, sha: flags.sha });
-  ok({ op: 'checkpoint-add', cr, repo: flags.repo, sha: flags.sha, file: snap.path });
 }
 
 async function cmdOwnerSet(ws, cr, gates, flags) {
@@ -2603,6 +2653,9 @@ function cmdNext(ws, cr, gates, flags) {
         return suggest('review-dev-plan', dp.exists ? 'dev-plan.yml 畸形（缺 verdict/blockers），重跑评审' : '缺少 dev-plan.yml 评审记录，先跑 review-dev-plan');
       }
       if (dp.data.verdict === 'pass' && dp.data.blockers.length === 0) {
+        // CR-2026-039 TASK-02：PASS 后先判 freshness；漂移/legacy/不完整 → 按 repairTarget 可执行路由
+        const fr = devPlanFreshness(ws, cr, dp.data);
+        if (!fr.fresh) return suggest(fr.repairTarget, fr.why);
         return suggest('crctl approve --stage dev-start', '开发计划评审 pass 且无 blocker，等待开发启动人工确认', true);
       }
       const route = resolveDevPlanRoute(dp.data);
@@ -2791,7 +2844,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl review-record <cr_id> --stage <requirement|tech-design|code> --from <payload.yml> [--bump-attempt]
                                                 schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）；code 阶段机器注入 release-subjects（payload 提供/覆盖 → RELEASE_SUBJECTS_FORGED）
   crctl review-note  <cr_id> [--stage <s>] --note <text>  approval.yml supplemental-reviews[] 追加（不接受 --by，身份 crctl 生成）
-  crctl checkpoint-add <cr_id> --repo <r> --sha <sha> [--remote-ref <ref>]   _backlog checkpoints[] 追加 + 推送元数据（developing~writing-back）
+  crctl checkpoint <cr_id> [--message <text>]   单一深原语：全仓 source commit → 非 KB lease publish → KB metadata commit 唯一完整批次可见点（非终态）
   crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   双投影 owners 更新 + 正式移交 commit（非终态）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
@@ -2802,8 +2855,8 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl workspace cleanup <cr_id> --mode partial|archived   只删干净 worktree；dirty/unknown/未合并 ref 保留
   crctl merge <cr_id>                                可恢复跨仓 merge saga：prepare(commit-tree) → 逐仓 lease publish → 全部 confirmed 后 detached Transaction Workspace 单 finalize commit（status=merging + merge-commits.yml + merge-verification.md）→ lease push
   crctl merge status <cr_id>                        只读快照：journal phase + 每仓 intent/observation（零写入、零 fetch）
-  crctl writeback-apply <cr_id> --stage <s> --candidate <manifest.json> --spec-id <id>
-                                                    candidate-only writeback 应用：manifest 校验（schema/allowlist/path/blob/before/inputDigest/snapshot）→ txws 应用 → 精确 stage → commit+trailer → lease push（TASK-08）
+  crctl writeback-apply <cr_id> --stage <s> --spec-id <id> --target-version <ver>
+                                                    内部固定 generator/candidate + journal 前完整 preflight；baseline 与 writing-back 状态同 write-set/commit/push，origin-confirmed 后补 status/audit 投影
   crctl archive <cr_id> [--spec-id <id>]                          单一幂等归档：四账本同批 write-set + archive commit + lease push → cleanup（txws/CR worktree/本地 ref）；cleanup 失败返回 CR_ARCHIVE_CLEANUP_PENDING，重跑只续清理；rejected/withdrawn 未合并远端 ref 保留为 preservedRefs（TASK-09）
   crctl upgrade-check                                         临时只读预检（TASK-11）：origin 权威事实分类新协议激活风险（safe/requiresReapproval/blocksUpgrade/canActivate）；有 blocker 或事实不确定 exit 1，全程零写入；协议切换后随 CUSTOM-TODO-009 整体删除
   crctl report [--period <N>d]                   跨 CR 聚合：状态直方图/SLA（累计口径）+ periodActivity（受 --period 窗口过滤，如 7d/30d；不传则不过滤，只读）
@@ -2866,14 +2919,14 @@ async function main() {
     case 'attempt': return cmdAttempt(ws, requireCr(positional), gates, flags);
     case 'review-record': return cmdReviewRecord(ws, requireCr(positional), gates, flags);
     case 'review-note': return cmdReviewNote(ws, requireCr(positional), gates, flags);
-    case 'checkpoint-add': return cmdCheckpointAdd(ws, requireCr(positional), gates, flags);
+    case 'checkpoint': return cmdCheckpoint(ws, requireCr(positional), gates, flags);
     case 'owner-set': return cmdOwnerSet(ws, requireCr(positional), gates, flags);
     case 'backlog-set': return cmdBacklogSet(ws, requireCr(positional), gates, flags);
     case 'inbox-emit': return cmdInboxEmit(ws, requireCr(positional), gates, flags);
     case 'register': return cmdRegister(ws, flags);
     case 'workspace': return cmdWorkspace(ws, positional, flags);
     case 'merge': return cmdMerge(ws, positional, flags);
-    case 'writeback-apply': return cmdWritebackApply(ws, positional, flags);
+    case 'writeback-apply': return cmdWritebackApply(ws, positional, flags, gates);
     case 'archive': return cmdArchive(ws, positional, flags);
     case 'upgrade-check': return cmdUpgradeCheck(ws, flags);
     case 'report': return cmdReport(ws, gates, flags);
@@ -2933,17 +2986,42 @@ async function cmdArchive(ws, positional, flags) {
   auditLog(ws, { kind: 'archive', cr, txId: result.txId, phase: result.phase, status: result.status, changed: result.changed, actor: identity(ws) });
   ok({ op: 'archive', ...result });
 }
-async function cmdWritebackApply(ws, positional, flags) {
+async function cmdWritebackApply(ws, positional, flags, gates) {
   const cr = positional[0];
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'writeback-apply 需要 CR-ID');
+  const allowedFlags = new Set(['cmdList', 'workspace', 'stage', 'spec-id', 'target-version', 'milestone-name', 'brief', 'milestone-file']);
+  const unknownFlags = Object.keys(flags).filter((key) => !allowedFlags.has(key));
+  if (unknownFlags.length) fail('BAD_ARGS', `writeback-apply 不接受参数: ${unknownFlags.map((x) => `--${x}`).join(', ')}`);
   const stage = flags.stage;
-  const candidate = flags.candidate;
   const specId = flags['spec-id'];
+  const targetVersion = flags['target-version'];
   if (!['baseline', 'tasks', 'traceability'].includes(stage)) fail('BAD_ARGS', 'writeback-apply 需要 --stage baseline|tasks|traceability');
-  if (!candidate) fail('BAD_ARGS', 'writeback-apply 需要 --candidate <manifest.json>');
+  if (flags.candidate || flags['candidate-out'] || flags.generator || flags.manifest) fail('BAD_ARGS', 'writeback-apply 不接受 candidate/generator/manifest 路径；由 crctl 按 stage 内部固定');
   if (!specId) fail('BAD_ARGS', 'writeback-apply 需要 --spec-id <id>');
+  if (!targetVersion) fail('BAD_ARGS', 'writeback-apply 需要 --target-version <version>');
+  if (stage === 'baseline' && flags['milestone-file'] != null) fail('BAD_ARGS', 'baseline 不接受 --milestone-file');
+  if (stage === 'tasks' && (flags['milestone-name'] != null || flags.brief != null || flags['milestone-file'] != null)) fail('BAD_ARGS', 'tasks 不接受 milestone 参数');
+  if (stage === 'traceability' && !flags['milestone-file']) fail('BAD_ARGS', 'traceability 需要 --milestone-file <workspace-relative-path>');
+  if (stage === 'traceability' && (flags['milestone-name'] != null || flags.brief != null)) fail('BAD_ARGS', 'traceability 不接受 --milestone-name/--brief');
   const ctx = resolveRepositories(ws);
-  const result = await runTxAsync(applyWriteback(ctx, { cr, stage, candidate, specId, workspace: ws }));
-  auditLog(ws, { kind: 'writeback', cr, txId: result.txId, stage, phase: result.phase, changed: result.changed, actor: identity(ws) });
+  const result = await runTxAsync(applyWriteback(ctx, {
+    cr, stage, specId, targetVersion, workspace: ws,
+    milestoneName: flags['milestone-name'], brief: flags.brief, milestoneFile: flags['milestone-file'],
+    validateBaselineAdvance: ({ workspace, plannedExisting }) => preflightAdvance(workspace, cr, gates, {
+      to: 'writing-back', trigger: 'writeback-prd-sdd', expect: 'merging', specId, plannedExisting,
+    }),
+    emitStatusEvent: ({ from, to, trigger, commit, dedupName }) => {
+      const name = emitOutboxEvent(ws, {
+        event_kind: 'status', cr_id: cr, from_status: from, to_status: to, trigger,
+        commit_sha: commit, actor: identity(ws), dedup_name: dedupName,
+      });
+      if (!name) throw new Error('status outbox 写入失败');
+      return name;
+    },
+    emitAdvanceAudit: ({ from, to, trigger, commit, dedupKey }) => auditLogOnce(ws, {
+      kind: 'advance', cr, from, to, trigger, by: identity(ws), commit, result: 'success',
+    }, dedupKey),
+  }));
+  auditLog(ws, { kind: 'writeback', cr, txId: result.txId, stage, phase: result.phase, commit: result.commit, changed: result.changed, actor: identity(ws) });
   ok({ op: 'writeback-apply', ...result });
 }
