@@ -98,7 +98,6 @@ crctl task init {cr_id} --workspace <knowledge-base CR worktree>
 
 - 初次拆分：`crctl advance --to task-breakdown --trigger write-dev-tasks --expect tech-design-reviewed`
 - `task-breakdown` 回修：使用状态机既有 `write-dev-tasks` 自环
-- Commit：`crctl git commit -m "task-breakdown {cr_id}: {N} tasks" --cwd <worktree>`
 
 ### Step 6 — 输出摘要
 

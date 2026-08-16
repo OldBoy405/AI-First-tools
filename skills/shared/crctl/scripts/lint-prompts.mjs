@@ -11,7 +11,7 @@
  *   node skills/shared/crctl/scripts/lint-prompts.mjs [--mode report|enforce] [--root <dir>]
  *   --mode report（默认）：输出 file:line + 规则 + 级别，退出 0（不阻断提交）
  *   --mode enforce：命中 CONTRADICTS/STALE-REF 即退出 1（LINT_DRIFT）
- * 规则：R1~R6（CR-2026-021）+ R7（crctl 命令参数形态：advance --to/--trigger、全角/伪旗标、backlog-set 字段白名单、--template subject 编号）+ R8（inbox-emit 接口：函数式违例、--event 枚举） + R9（CR 上下文「下一步」提示收敛 crctl next，CR-2026-023）
+ * 规则：R1~R6（CR-2026-021）+ R7（crctl 命令参数形态：advance --to/--trigger、全角/伪旗标、backlog-set 字段白名单、--template subject 编号）+ R8（inbox-emit 接口：函数式违例、--event 枚举） + R9（CR 上下文「下一步」提示收敛 crctl next，CR-2026-023） + R10~R13（CR-2026-042：废弃公开 interface、已退役 Skill 引用、Agent/README 状态机副本、Agent backlog 状态推断）
  *   豁免契约（CR-2026-022 FR-25）：<!-- lint-prompts:ignore --> 只豁免其所在行 ± radius 行（radius=1，测试向量固化），不再整段生效
  *
  * 零第三方依赖（不变量 3）；读入先 CRLF 归一（纪律 #1）。
@@ -64,6 +64,7 @@ function loadAuthorityTransitions(root) {
   if (trHits.length !== 1) failParse(`dir-graph.yaml change-request-track.state_machine.transitions 块必须唯一，实际找到 ${trHits.length} 个`);
   const tr = trHits[0];
   const pairs = new Set();
+  const states = new Set();
   let seen = 0;
   for (let i = tr.idx + 1; i < lines.length; i++) {
     const l = lines[i];
@@ -76,11 +77,13 @@ function loadAuthorityTransitions(root) {
     if (trigger.length < 2 || trigger[0] !== trigger[trigger.length - 1] || !['"', "'"].includes(trigger[0])) {
       failParse(`transitions 第 ${i + 1} 行 trigger 引号不完整: ${trigger}`);
     }
+    states.add(mm[1].trim());
+    states.add(mm[2].trim());
     pairs.add(mm[2].trim() + '\u0000' + trigger.slice(1, -1));
     seen += 1;
   }
   if (seen === 0) failParse('transitions 为空（至少需要一条声明）');
-  return pairs;
+  return { pairs, states };
 }
 
 /** R7 命令字面量解析：--to/--trigger 支持单引号/双引号/无引号 token；返回 {to, trigger} 或含模板变量时 {dynamic:true}。 */
@@ -115,8 +118,12 @@ function loadJudgements(root) {
   const skillIndex = fs.readFileSync(SKILLS_INDEX_PATH, 'utf8').replaceAll('\r\n', '\n');
   const skillIds = new Set([...skillIndex.matchAll(/^\s*-\s*id:\s*([\w-]+)/gm)].map((m) => m[1]));
   // CR-2026-030 TASK-05（FR-9）：R7 权威 trigger 字面量判据直读 root/dir-graph.yaml（单一事实源，零复制常量）
-  const transitions = loadAuthorityTransitions(root);
-  return { denyFilesLoose, gitSubs, backlogSetFields, inboxEvents, skillIds, transitions };
+  const { pairs: transitions, states } = loadAuthorityTransitions(root);
+  // CR-2026-042：R12/R13 判据——从权威 transitions 同次加载具名状态集合（排除注册前 (new)）。
+  const stateMatchers = [...states]
+    .filter((s) => s !== '(new)')
+    .map((name) => ({ name, re: new RegExp('(?<![A-Za-z0-9_-])' + escapeRegExp(name) + '(?![A-Za-z0-9_-])') }));
+  return { denyFilesLoose, gitSubs, backlogSetFields, inboxEvents, skillIds, transitions, stateMatchers };
 }
 
 const LITERAL_BLACKLIST = {
@@ -145,6 +152,10 @@ function walkFiles(root) {
         walk(p);
       } else if (name === 'SKILL.md' || name.endsWith('.pipeline.json')) {
         out.push(p);
+      } else {
+        const rel = path.relative(root, p).replaceAll('\\', '/');
+        const isAgentMd = rel.startsWith('agents/') && name.endsWith('.md');
+        if (rel === 'README.md' || isAgentMd) out.push(p);
       }
     }
   };
@@ -295,6 +306,41 @@ function runRules(para, ctx) {
       }
     }
   }
+  // R10（CR-2026-042）：废弃公开 interface（可执行形态）——cr-init、crctl test 旧旗标、review_llm input
+  const crInitIdx = t.indexOf('cr-init');
+  if (crInitIdx !== -1) {
+    findings.push({ rule: 'R10', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + lineOf(t, crInitIdx) - 1, why: 'cr-init 已由 crctl register 取代' });
+  }
+  for (const flag of ['--cmd', '--cwd', '--timeout']) {
+    const re = new RegExp('crctl\\s+test[^\\n]*' + flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    if (re.test(t)) {
+      findings.push({ rule: 'R10', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + lineOf(t, t.indexOf(flag)) - 1, why: `crctl test 旧旗标 ${flag} 已废弃，测试执行只经 --plan` });
+    }
+  }
+  if (/review_llm/.test(t)) {
+    findings.push({ rule: 'R10', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + lineOf(t, t.indexOf('review_llm')) - 1, why: 'review_llm 已删除，评审 runner 由 runtime 在进入 Pipeline 前选择' });
+  }
+  // R11（CR-2026-042）：已退役 Skill active 引用
+  for (const retired of ['change-impact-analysis', 'feedback-writeback']) {
+    const idx = t.indexOf(retired);
+    if (idx !== -1) {
+      findings.push({ rule: 'R11', level: 'STALE-REF', file: ctx.file, line: para.startLine + lineOf(t, idx) - 1, why: `已退役 Skill 引用：${retired}` });
+    }
+  }
+  // R12（CR-2026-042）：Agent/README 状态机副本（同段 3+ 具名状态）
+  if (/^agents\/[^/]+\.md$/.test(ctx.file) || ctx.file === 'README.md') {
+    const present = ctx.stateMatchers.filter((s) => s.re.test(t)).map((s) => s.name);
+    if (present.length >= 3) {
+      findings.push({ rule: 'R12', level: 'CONTRADICTS', file: ctx.file, line: para.startLine, why: `同段出现 ${present.length} 个具名状态（${present.join('、')}），构成状态机副本` });
+    }
+  }
+  // R13（CR-2026-042）：Agent backlog 状态推断（_backlog.yml 与 status/状态判断同段）
+  if (/^agents\/[^/]+\.md$/.test(ctx.file) && t.includes('_backlog.yml')) {
+    const infers = /\bstatus\b/i.test(t) || /状态/.test(t) || ctx.stateMatchers.some((s) => s.re.test(t));
+    if (infers) {
+      findings.push({ rule: 'R13', level: 'CONTRADICTS', file: ctx.file, line: para.startLine, why: 'Agent 同段将 _backlog.yml 与 status/状态判断结合，CR 状态判断应以 crctl status/next 为准' });
+    }
+  }
   // 豁免收窄（FR-25，CR-2026-022）：<!-- lint-prompts:ignore --> 只豁免其所在行 ± radius 行（radius=1 契约），不再整段生效
   const radius = 1;
   return findings.filter((f) => !isIgnored(lines, f.line - para.startLine, radius));
@@ -313,6 +359,10 @@ function isIgnored(lines, idx, radius = 1) {
     if (lines[k].includes('<!-- lint-prompts:ignore -->')) return true;
   }
   return false;
+}
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function lineOf(text, index) {

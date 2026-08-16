@@ -56,6 +56,8 @@ CR 状态机（15 具名状态 + 注册前 `(new)`，**28 条声明转移、wild
 
 8 个 Pipeline 的 JSON 编排定义（节点顺序、reviewLoop 配置、触发的 Skill），是 Skill 调用顺序的权威声明。
 
+**reviewer 选择边界（CR-2026-042）**：代码评审的 runner 由 Agent/runtime 在进入 Pipeline 前选择，Pipeline 不设置额外的 reviewer 选择人工暂停节点；`review-code` 节点直接使用当前 runner 并在 `dimensions.reviewer-model` 留痕。
+
 ### `skills/writeback/scripts/`
 
 回写机械步骤的版本化执行脚本（CR-2026-020 起）：`writeback-prd-sdd.mjs` / `writeback-tasks.mjs` / `writeback-traceability.mjs` + 公共库 `lib.mjs` + 回归套件 `test/writeback.test.mjs`。**硬边界：只写 specs/ 与 delivery/ 内容文件，账本四类文件（`_backlog.yml` / `_history.yml` / `cr.md` / CR `tasks/_index.yml`）只读**——账本写入仍唯一经 crctl；与 crctl 平行、互不依赖。

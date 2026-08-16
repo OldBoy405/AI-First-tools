@@ -1,6 +1,6 @@
 ---
 name: merge-feature-branch
-description: feature-writeback pipeline 第 1 节点：一次调用 crctl merge 深原语完成跨仓合并（prepare→lease publish→detached Transaction Workspace finalize），Skill 只做前置确认与结果分类，不写任何 Git 命令序列。
+description: feature-writeback pipeline 第 1 节点：一次调用 crctl merge 深原语完成跨仓合并，Skill 只做前置确认与结果分类，不写任何 Git 命令序列。
 ---
 
 # Skill: merge-feature-branch
@@ -14,8 +14,7 @@ description: feature-writeback pipeline 第 1 节点：一次调用 crctl merge 
 ## 用途
 
 把所有参与仓的同名分支（`requirement/CR-YYYY-NNN`）合并回各自 trunk，并把 CR 推进到 `merging`。
-参与仓、trunk、worktree、release-subjects 重核、lease publish、冲突检测、断点恢复、finalize commit、
-merge-commits.yml / merge-verification.md 落盘，全部由深原语 `crctl merge` 独占完成（CR-2026-031 TASK-07）。
+全部由深原语 `crctl merge` 独占完成（CR-2026-031 TASK-07）。
 
 本 Skill 只拥有：**业务前置确认、一次深原语调用、结果分类**。不写 Git 命令序列、不手写任何账本、不做补偿算法。
 
@@ -42,13 +41,7 @@ merge-commits.yml / merge-verification.md 落盘，全部由深原语 `crctl mer
 crctl merge {cr_id} --workspace {knowledge-base 主 checkout}
 ```
 
-深原语内部完成（Skill 不重复、不干预）：
-
-- release-subjects 单缝重核（head/remote-ref/prd/sdd/task/missing 六类漂移）；
-- 逐仓 `merge-tree` prepare + `commit-tree` 生成 merge commit（无本地 trunk 移动，冲突零远端副作用）；
-- 逐仓 lease publish + 远端事实分类（confirmed 跳过 / pushable 续推 / rebuild 重做 / history rewrite 硬阻断）；
-- 全部 confirmed 后 detached Transaction Workspace 单 finalize commit：`status=merging` + `merge-commits.yml` + `merge-verification.md`，lease push；
-- 全程事务 journal，任意中断后**重跑同一条命令**即从断点续跑。
+深原语内部完成跨仓合并（Skill 不重复、不干预）。
 
 ### Step 3 — 结果分类（只透传深原语 JSON，不发明第二套字段）
 

@@ -30,7 +30,7 @@
       "kind": "skill",
       "label": "从远端恢复 worktree",
       "ref": "resume-from-remote",
-      "prompt": "读取 dir-graph.yaml repositories[*]（active≠false），对每个仓执行恢复：\n1. 通过 controlled-shell 在对应 repo.path fetch origin\n2. 将 worktree 恢复到 workspace 根目录的 `.rayai-worktrees/{bucket}/requirement/{{inputs.cr_id}}`；role=knowledge-base 的仓固定 bucket=`knowledge-base`，其他仓 bucket=repo.id；必须使用 controlled-shell worktree add，不输出手工命令\n3. **恢复只读，不改变任何 Owner（CR-2026-030 FR-4/AC-12）**：本节点输入与正文均不包含 Owner 变更参数或写入动作；正式移交只走 handover-cr 唯一入口\n\n在 node-2.md 输出各仓 worktree 绝对路径、当前 HEAD、三角色 owner、是否有未合并改动。",
+      "prompt": "调用公开的 `resume-from-remote` Skill，传入 cr_id 与 workspace 上下文，消费各仓恢复结果、owner 信息和结构化错误。Pipeline 不展开 fetch、worktree、路径派生或恢复算法。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },

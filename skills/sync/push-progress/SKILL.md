@@ -1,6 +1,6 @@
 ---
 name: push-progress
-description: "调用一次 crctl checkpoint 深原语，将同一 CR 全部 active repo 的未提交变更打包为 wip 提交并推送 origin 同名分支，由 crctl 生成并落账 latest-checkpoint 与 KB metadata commit。"
+description: "调用一次 crctl checkpoint 深原语，将同一 CR 全部 active repo 的进度提交并推送到远端作为 checkpoint。"
 ---
 
 # Skill: push-progress
@@ -33,12 +33,12 @@ description: "调用一次 crctl checkpoint 深原语，将同一 CR 全部 acti
 crctl checkpoint {cr_id} [--message {message}] --workspace <installation-workspace>
 ```
 
-一次调用完成：全仓 preflight（worktree/branch/敏感路径预检）→ 逐仓 source commit（tracked+untracked 未忽略变化）→ 非 knowledge-base 仓 lease publish → knowledge-base `latest-checkpoint` 账本 + metadata commit → 精确确认完整批次。中断重跑同一命令补齐；幂等重放 no-op 返回 `changed=false`。
+一次调用完成：全部 Git、账本编辑与恢复分类由 `crctl checkpoint` 深原语独占。中断重跑同一命令补齐；幂等重放 no-op 返回 `changed=false`。
 
 ### Step 2 — 解释固定输出
 
 - `phase=complete` 且 `changed=true`：完整批次已保存；输出 `batchId`、`repositories[]`（每仓 `sourceSha`+`confirmed`）与 `metadataCommit`。
-- `phase=complete` 且 `changed=false`（no-op）：无新变化，未创建 journal/commit/push。
+- `phase=complete` 且 `changed=false`（no-op）：无新变化，未创建 commit/push。
 - 错误：按 `code` 与 `recoverCommand` 分流；`CHECKPOINT_SENSITIVE_PATH`/`CHECKPOINT_REMOTE_*` 等为硬阻断，`recoverCommand` 为重跑补齐。
 
 ### Step 3 — 输出摘要
