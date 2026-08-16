@@ -1151,9 +1151,10 @@ async function cmdApprove(ws, cr, gates, flags) {
   process.stdout.write(summaryLines.join('\n') + '\n');
   const approver = flags.approver || identity(ws);
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  rl.question(`以 approver=${approver} 批准该阶段？只有输入 yes 才会写入 approval.yml [yes/N] `, async (answer) => {
+  rl.question(`以 approver=${approver} 批准该阶段？只有输入 y 或 yes 才会写入 approval.yml [y/N] `, async (answer) => {
     rl.close();
-    if (answer.trim().toLowerCase() !== 'yes') {
+    // CR-2026-044 FR-09：四 stage 共享入口接受 trim 后大小写不敏感的 y|yes；其余输入保持既有 reject 回退
+    if (!['y', 'yes'].includes(answer.trim().toLowerCase())) {
       auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined' });
       // FR-12（CR-2026-022）：驳回必须真正执行状态机已声明的 {stage}:reject 回退转换（AGENTS.md 强制），不再只是 fail
       const rollback = REJECT_ROLLBACK[stage];

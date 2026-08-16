@@ -4243,3 +4243,18 @@ test('CR-2026-044 TASK-01 ②: TTY approve 接受 trim 后大小写不敏感的 
     } finally { rmSync(ws, { recursive: true, force: true }); }
   }
 });
+
+test('CR-2026-044 TASK-02: TTY approve 空输入/n/no/其他文本仍执行既有 reject 权威回退', () => {
+  for (const input of ['\n', 'n\n', 'N\n', 'no\n', 'maybe\n']) {
+    const { ws } = makeCodeStageWorkspace();
+    try {
+      // reject 回退目标态 developing 的门禁要求 development-start 审批段（fixture 补齐）
+      writeDevStartApproval(ws);
+      runCodeReviewAndAdvance(ws);
+      const r = runCrctlInTty(['approve', 'CR-D1', '--stage', 'code', '--workspace', ws], input);
+      assert.equal(r.status, 1, `输入 ${JSON.stringify(input)} 应驳回: ${r.rawStderr}`);
+      assert.equal(r.stderr.error.code, 'APPROVAL_DECLINED_ROLLED_BACK', `输入 ${JSON.stringify(input)}: ${r.rawStdout}${r.rawStderr}`);
+      assert.equal(r.stderr.error.rolledBackTo, 'developing', `输入 ${JSON.stringify(input)}`);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+});
