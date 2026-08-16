@@ -4117,7 +4117,8 @@ test('TASK-06 ④: approve 前各类漂移全部 RELEASE_SUBJECT_DRIFT 零写入
     spawnSync('git', ['add', '-A'], { cwd: wt });
     spawnSync('git', ['commit', '-q', '-m', 'late'], { cwd: wt });
     expectDrift('code');
-    // 恢复 HEAD 后：远端 requirement 分支被改写（本地 ref 模拟 remote ref 漂移）-> kind=code（reason=remote-ref-drift）
+    // 恢复 HEAD 后：远端 requirement 分支被改写（本地 ref 模拟 publication lag）
+    // -> CR-2026-044 FR-03/FR-04：本地 verifier 不再读取远端 ref，本地事实未漂移时审批仍应通过
     spawnSync('git', ['reset', '-q', '--hard', 'HEAD~1'], { cwd: wt });
     spawnSync('git', ['commit', '-q', '--allow-empty', '-m', 'forged remote'], { cwd: wt });
     const forgedSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wt, encoding: 'utf8' }).stdout.trim();
@@ -4125,14 +4126,12 @@ test('TASK-06 ④: approve 前各类漂移全部 RELEASE_SUBJECT_DRIFT 零写入
     const remoteRef = 'refs/remotes/origin/requirement/CR-D1';
     spawnSync('git', ['update-ref', remoteRef, forgedSha], { cwd: ws });
     const rRemote = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws]);
-    assert.equal(rRemote.status, 1, 'remote-ref-drift 应失败');
-    assert.equal(rRemote.stderr.error.code, 'RELEASE_SUBJECT_DRIFT');
-    assert.equal(rRemote.stderr.error.reason, 'remote-ref-drift');
+    assert.equal(rRemote.status, 0, 'publication lag 不得阻断本地审批: ' + rRemote.rawStderr);
+    assert.equal(rRemote.stdout.to, 'code-approved');
     spawnSync('git', ['update-ref', '-d', remoteRef], { cwd: ws });
-    // grant 未被消费、状态未动：恢复 worktree HEAD 后原 grant 仍可放行
+    // 审批已完成：紧邻目标态重放同 grant 仍为零副作用幂等
     const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws]);
     assert.equal(r.status, 0, r.rawStderr);
-    assert.equal(r.stdout.to, 'code-approved');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -4255,6 +4254,91 @@ test('CR-2026-044 TASK-02: TTY approve 空输入/n/no/其他文本仍执行既�
       assert.equal(r.status, 1, `输入 ${JSON.stringify(input)} 应驳回: ${r.rawStderr}`);
       assert.equal(r.stderr.error.code, 'APPROVAL_DECLINED_ROLLED_BACK', `输入 ${JSON.stringify(input)}: ${r.rawStdout}${r.rawStderr}`);
       assert.equal(r.stderr.error.rolledBackTo, 'developing', `输入 ${JSON.stringify(input)}`);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-044 TASK-03: KB metadata 精确白名单——六成员逐项放行、白名单外路径逐项失败', async () => {
+  const g = (cwd, args) => { const r = spawnSync('git', args, { cwd, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
+  const allowed = [
+    'change-requests/CR-D1/approval.yml',
+    'change-requests/CR-D1/cr.md',
+    'change-requests/CR-D1/traceability.yml',
+    'change-requests/CR-D1/review-loop.yml',
+    'change-requests/_backlog.yml',
+    'change-requests/CR-D1/review-annotations/extra-note.yml',
+  ];
+  for (const rel of allowed) {
+    const { ws, privateKey } = makeCodeStageWorkspace();
+    try {
+      runCodeReviewAndAdvance(ws);
+      const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+      const p = path.join(wt, ...rel.split('/'));
+      mkdirSync(path.dirname(p), { recursive: true });
+      appendFileSync(p, `\n# whitelist touch ${rel}\n`);
+      g(wt, ['add', '-A']); g(wt, ['commit', '-q', '-m', `whitelist ${rel}`]);
+      const gp = makeCodeGrant(ws, privateKey);
+      const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws]);
+      assert.equal(r.status, 0, `白名单路径 ${rel} 应放行: ${r.rawStderr}`);
+      assert.equal(r.stdout.to, 'code-approved');
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+  // 白名单外：受控 artifact 漂移给精确 kind（prd/task），非受控路径才 kind=code（PRD §7 失败分类）
+  for (const [rel, kind] of [['change-requests/CR-D1/prd.md', 'prd'], ['change-requests/CR-D1/tasks/TASK-01.md', 'task'], ['docs/late.txt', 'code']]) {
+    const { ws, privateKey } = makeCodeStageWorkspace();
+    try {
+      runCodeReviewAndAdvance(ws);
+      const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+      const p = path.join(wt, ...rel.split('/'));
+      mkdirSync(path.dirname(p), { recursive: true });
+      appendFileSync(p, `\n# non-whitelist touch ${rel}\n`);
+      g(wt, ['add', '-A']); g(wt, ['commit', '-q', '-m', `non-whitelist ${rel}`]);
+      const gp = makeCodeGrant(ws, privateKey);
+      const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws]);
+      assert.equal(r.status, 1, `白名单外路径 ${rel} 应拒绝`);
+      assert.equal(r.stderr.error.code, 'RELEASE_SUBJECT_DRIFT');
+      assert.equal(r.stderr.error.kind, kind, `${rel} 漂移 kind 应精确为 ${kind}`);
+      assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-D1', 'approval.yml')), false, `${rel} 漂移时零写入`);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-044 TASK-03: workspace 非 healthy（dirty/wrong-branch）零 snapshot 硬失败；missing 仍 RELEASE_SUBJECT_EMPTY', () => {
+  // dirty：worktree 有未提交变更
+  {
+    const { ws } = makeCodeStageWorkspace();
+    try {
+      const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+      writeCodeReviewPayload(ws);
+      writeFileSync(path.join(wt, 'uncommitted.txt'), 'dirty\n');
+      const r = runCrctl(['review-record', 'CR-D1', '--stage', 'code', '--workspace', ws]);
+      assert.equal(r.status, 1);
+      assert.equal(r.stderr.error.code, 'RELEASE_WORKSPACE_INVALID');
+      assert.equal(r.stderr.error.classification, 'dirty');
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+  // wrong-branch：worktree 切到别的分支
+  {
+    const { ws } = makeCodeStageWorkspace();
+    try {
+      const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+      writeCodeReviewPayload(ws);
+      spawnSync('git', ['checkout', '-q', '-b', 'wrong-branch'], { cwd: wt });
+      const r = runCrctl(['review-record', 'CR-D1', '--stage', 'code', '--workspace', ws]);
+      assert.equal(r.status, 1);
+      assert.equal(r.stderr.error.code, 'RELEASE_WORKSPACE_INVALID');
+      assert.equal(r.stderr.error.classification, 'wrong-branch');
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+  // missing：worktree 不存在 -> 受控 artifact 为空（既有 fail-closed 语义）
+  {
+    const { ws } = makeCodeStageWorkspace();
+    try {
+      writeCodeReviewPayload(ws);
+      rmSync(path.join(ws, '.rayai-worktrees'), { recursive: true, force: true });
+      const r = runCrctl(['review-record', 'CR-D1', '--stage', 'code', '--workspace', ws]);
+      assert.equal(r.status, 1);
+      assert.equal(r.stderr.error.code, 'RELEASE_SUBJECT_EMPTY');
     } finally { rmSync(ws, { recursive: true, force: true }); }
   }
 });

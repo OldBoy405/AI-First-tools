@@ -973,9 +973,11 @@ function collectControlledArtifacts(ctx, cr) {
 
 /**
  * 构造 release subjects（当前事实快照）：
- * - repositories：每个 active 仓的 requirement 分支远端 ref 名 + 该仓 CR worktree HEAD（被评审源 SHA）；
+ * - repositories：每个 active 仓的预期发布分支名 + 该仓本地 CR worktree 的 clean committed HEAD（被评审源 SHA）；
  * - artifacts：受控文件集合 + 逐文件 SHA-256 + 集合 digest。
- * worktree 缺失或无任何受控 artifact 均硬失败（不得产出空快照）。
+ * CR-2026-044 FR-02：snapshot 只绑定本地事实，不 fetch、不读 remote-tracking ref；
+ * remote-ref 仅表示预期发布分支名，不证明远端存在或已同步（发布完整性归 checkpoint/merge）。
+ * 任一仓 workspace 非 healthy 或无任何受控 artifact 均硬失败（不得产出空快照）。
  */
 export async function buildReleaseSubjects(ctx, cr) {
   const files = collectControlledArtifacts(ctx, cr);
@@ -984,19 +986,11 @@ export async function buildReleaseSubjects(ctx, cr) {
   }
   const repositories = [];
   for (const repo of ctx.repositories) {
-    const wt = path.join(repo.worktreePath, cr);
-    if (!fs.existsSync(wt)) {
-      throw new TxError('RELEASE_WORKSPACE_MISSING', `${repo.id} 的 CR worktree 不存在: ${wt}（code 评审前必须先 ensure workspace）`, { repo: repo.id, worktree: wt });
+    const info = classifyRepoWorkspace(ctx, repo, cr);
+    if (info.classification !== 'healthy') {
+      throw new TxError('RELEASE_WORKSPACE_INVALID', `${repo.id} workspace 分类=${info.classification}，不能构造 release-subjects（code 评审前必须先 ensure workspace）`, { repo: repo.id, classification: info.classification, worktreePath: info.worktreePath, branch: info.branch, dirty: info.dirty });
     }
-    const sha = gitMust(wt, ['rev-parse', 'HEAD']);
-    // 真实仓存在 origin 时要求 reviewed HEAD 已推送；无 remote 的内存/单仓测试 fixture 保持可用。
-    if (gitRun(repo.rootPath, ['remote', 'get-url', 'origin']).status === 0) {
-      gitMust(repo.rootPath, ['fetch', 'origin']);
-      const remote = gitRun(repo.rootPath, ['rev-parse', '--verify', `refs/remotes/origin/${branchForCr(cr)}`]);
-      if (remote.status !== 0 || remote.stdout !== sha) {
-        throw new TxError('RELEASE_REMOTE_NOT_PUSHED', `${repo.id} 的 requirement ref 未推送或不等于 worktree HEAD`, { repo: repo.id, head: sha, remote: remote.status === 0 ? remote.stdout : null });
-      }
-    }
+    const sha = gitMust(info.worktreePath, ['rev-parse', 'HEAD']);
     repositories.push({ repo: repo.id, remoteRef: `refs/heads/${branchForCr(cr)}`, reviewedSourceSha: sha });
   }
   return {
@@ -1030,9 +1024,12 @@ export function renderReleaseSubjects(rs) {
 const artifactKindOf = (p) => (p.endsWith('/prd.md') ? 'prd' : p.endsWith('/sdd.md') ? 'sdd' : 'task');
 
 /**
- * 重核 release subjects 与当前事实：任一漂移返回 {ok:false, kind, details}，零写入。
- * code：任一仓 worktree HEAD 或被推送的远端 requirement 分支 ≠ reviewed-source-sha，或仓集合不一致；
- * prd/sdd/task：对应受控文件哈希漂移、缺失或文件集合/digest 不一致。
+ * 重核 release subjects 与当前本地事实：任一漂移返回 {ok:false, kind, details}，零写入。
+ * CR-2026-044 FR-03：只重核本地 workspace/source/artifact，不 fetch、不读 remote-tracking ref；
+ * 远端 requirement ref 缺失或滞后属于 publication lag，由 checkpoint/merge 处理，不在此判失效。
+ * 失败 kind 优先级（PRD §7 失败分类）：先核 artifact 内容与集合（prd/sdd/task 精确 kind，
+ * 含未提交篡改；PRD/SDD 漂移无条件硬阻断），再逐仓核本地 source 事实（kind=code：
+ * workspace 非 healthy、non-KB HEAD ≠ reviewed-source-sha、KB 白名单外路径漂移或仓集合不一致）。
  */
 export async function verifyReleaseSubjects(ctx, cr, snapshot) {
   const bad = (kind, details) => ({ ok: false, kind, details });
@@ -1049,17 +1046,39 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
     if (!repo) return bad('code', { reason: 'repo-not-active', repo: r.repo });
     if (snapRepos.has(r.repo)) return bad('code', { reason: 'repo-duplicate', repo: r.repo });
     snapRepos.add(r.repo);
-    const wt = path.join(repo.worktreePath, cr);
-    let head = null;
-    if (fs.existsSync(wt)) {
-      const rr = gitRun(wt, ['rev-parse', 'HEAD']);
-      head = rr.status === 0 ? rr.stdout : null;
+  }
+  for (const repo of ctx.repositories) {
+    if (!snapRepos.has(repo.id)) return bad('code', { reason: 'repo-missing', repo: repo.id });
+  }
+  // artifact 逐文件重核先行（按 snapshot 声明序）：保证 PRD/SDD/TASK 漂移始终得到精确 kind，
+  // 不被 workspace/source 层 kind=code 覆盖（PRD §7：PRD/SDD 漂移无条件硬阻断）。
+  for (const f of snapshot.artifacts.files) {
+    const abs = path.join(crRoot, ...String(f.path || '').split('/'));
+    const raw = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null;
+    const actual = raw == null ? null : sha256(raw.replaceAll('\r\n', '\n'));
+    if (actual !== f.sha256) {
+      return bad(artifactKindOf(String(f.path)), { reason: raw == null ? 'missing' : 'hash-drift', path: f.path, expected: f.sha256, actual });
     }
-    const hasOrigin = gitRun(repo.rootPath, ['remote', 'get-url', 'origin']).status === 0;
-    const rem = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branchForCr(cr)}`]);
-    if ((hasOrigin || rem.status === 0) && (rem.status !== 0 || rem.stdout !== head)) {
-      return bad('code', { reason: 'remote-ref-drift', repo: r.repo, expected: head, actual: rem.status === 0 ? rem.stdout : null });
+  }
+  // 文件集合与 digest 一致性（新增/删除受控文件也是漂移）
+  const current = collectControlledArtifacts(ctx, cr);
+  if (current.length !== snapshot.artifacts.files.length
+    || current.some((f, i) => f.path !== snapshot.artifacts.files[i].path)) {
+    const firstDiff = current.find((f, i) => !snapshot.artifacts.files[i] || snapshot.artifacts.files[i].path !== f.path)
+      || snapshot.artifacts.files[current.length];
+    return bad(artifactKindOf(String(firstDiff && firstDiff.path || 'tasks')), { reason: 'file-set-drift', current: current.map((f) => f.path), snapshot: snapshot.artifacts.files.map((f) => f.path) });
+  }
+  const digest = sha256(snapshot.artifacts.files.map((f) => `${f.path}:${f.sha256}`).join('\n'));
+  if (digest !== snapshot.artifacts.digest) return bad('task', { reason: 'digest-drift', expected: snapshot.artifacts.digest, actual: digest });
+  // 逐仓本地 source 事实：healthy 分类 + HEAD/祖先/白名单（不读远端）
+  for (const r of snapshot.repositories) {
+    const repo = byId.get(r.repo);
+    const info = classifyRepoWorkspace(ctx, repo, cr);
+    if (info.classification !== 'healthy') {
+      return bad('code', { reason: 'workspace-invalid', repo: r.repo, classification: info.classification, worktreePath: info.worktreePath });
     }
+    const wt = info.worktreePath;
+    const head = gitMust(wt, ['rev-parse', 'HEAD']);
     if (r.repo === ctx.knowledgeBaseRepoId) {
       if (gitRun(wt, ['merge-base', '--is-ancestor', repoReviewedSha(r), head]).status !== 0) {
         return bad('code', { reason: 'head-drift', repo: r.repo, expectedAncestor: repoReviewedSha(r), actual: head });
@@ -1079,28 +1098,6 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
       return bad('code', { reason: 'head-drift', repo: r.repo, expected: repoReviewedSha(r), actual: head });
     }
   }
-  for (const repo of ctx.repositories) {
-    if (!snapRepos.has(repo.id)) return bad('code', { reason: 'repo-missing', repo: repo.id });
-  }
-  // artifact 逐文件重核（按 snapshot 声明序）
-  for (const f of snapshot.artifacts.files) {
-    const abs = path.join(crRoot, ...String(f.path || '').split('/'));
-    const raw = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null;
-    const actual = raw == null ? null : sha256(raw.replaceAll('\r\n', '\n'));
-    if (actual !== f.sha256) {
-      return bad(artifactKindOf(String(f.path)), { reason: raw == null ? 'missing' : 'hash-drift', path: f.path, expected: f.sha256, actual });
-    }
-  }
-  // 文件集合与 digest 一致性（新增/删除受控文件也是漂移）
-  const current = collectControlledArtifacts(ctx, cr);
-  if (current.length !== snapshot.artifacts.files.length
-    || current.some((f, i) => f.path !== snapshot.artifacts.files[i].path)) {
-    const firstDiff = current.find((f, i) => !snapshot.artifacts.files[i] || snapshot.artifacts.files[i].path !== f.path)
-      || snapshot.artifacts.files[current.length];
-    return bad(artifactKindOf(String(firstDiff && firstDiff.path || 'tasks')), { reason: 'file-set-drift', current: current.map((f) => f.path), snapshot: snapshot.artifacts.files.map((f) => f.path) });
-  }
-  const digest = sha256(snapshot.artifacts.files.map((f) => `${f.path}:${f.sha256}`).join('\n'));
-  if (digest !== snapshot.artifacts.digest) return bad('task', { reason: 'digest-drift', expected: snapshot.artifacts.digest, actual: digest });
   return { ok: true };
 }
 /* ────────────────────────── mergeCr（SDD §5.2，TASK-07） ──────────────────────────
