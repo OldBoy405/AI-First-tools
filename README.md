@@ -377,6 +377,7 @@ flowchart TD
 | 需求评审 | `prd.md`、`source` | 检查完整性、可测试性、范围和对齐情况；block 时回到 PRD 修订 | `review-annotations/requirement.yml`、`traceability.yml`、通过时 status=`requirement-reviewing` | 否 |
 | 需求审批 | `prd.md`、已通过的需求评审记录 | 仅在 `verdict=pass` 且 `blockers=[]` 后人工判断 PRD 是否可进入架构设计 | 通过或驳回结论 | 否 |
 | 记录审批并推进 | `execution_context.cr_id`、`owners.requirement.id` | 写入审批证据并推进状态 | `approval.yml#requirement`、status=`requirement-approved` | 否 |
+| 推送审批结果 checkpoint | `execution_context.cr_id` | 需求阶段终点完成条件（CR-2026-044）：保存审批状态与证据到远端分支；失败保持 `requirement-approved`，重跑同一 checkpoint，不重新审批 | 远端 checkpoint、`latest-checkpoint` 更新 | 否 |
 
 ## 2. 架构设计流程
 
@@ -400,7 +401,6 @@ flowchart TD
 |------|------|------|
 | `cr_id` | 是 | 已审批需求的 CR-ID，前置 status=`requirement-approved` |
 | `tech_context` | 否 | 架构约束、复用组件、已知风险等 |
-| `auto_push_after_sdd` | 否 | 架构审批后是否自动推送 checkpoint，默认 true |
 
 ### 节点
 
@@ -410,7 +410,7 @@ flowchart TD
 | 架构设计评审 | `sdd.md`、`prd.md` | 检查 PRD 对齐、架构合理性、接口完整性、可测试性；block 时回到 SDD 修订 | `review-annotations/sdd.yml`、`traceability.yml` | 否 |
 | 架构审批 | `sdd.md`、已通过的技术评审记录、`owners.development.id` | 仅在 `verdict=pass` 且 `blockers=[]` 后人工决定是否可进入开发任务拆分 | 通过或驳回结论 | 否 |
 | 记录审批并推进 | `cr_id`、`owners.development.id` | 写入技术审批证据并推进状态 | `approval.yml#tech-design`、status=`tech-design-reviewed` | 否 |
-| 推送架构 checkpoint | `sdd.md`、评审记录、审批记录 | 保存架构阶段产物到远端分支 | 远端 checkpoint、`latest-checkpoint` 更新 | 是，`auto_push_after_sdd=false` |
+| 推送架构 checkpoint | `sdd.md`、评审记录、审批记录 | 架构阶段终点完成条件（CR-2026-044）：保存架构阶段产物到远端分支；失败保持 `tech-design-reviewed`，重跑同一 checkpoint，不重新审批 | 远端 checkpoint、`latest-checkpoint` 更新 | 否 |
 
 ## 3. 代码编写流程
 
@@ -471,7 +471,7 @@ flowchart TD
 | 代码评审 | 真实 diff、changed files、提交记录、`sdd.md`、TASK、`test-report.md` | 检查实现对齐、工程质量、安全性和测试证据可信度；block 时回到代码实现 | `review-annotations/code.yml`、通过时 status=`code-reviewing`，否则回到 `developing` | 否 |
 | 代码审批 | 代码评审记录、测试报告、`owners.development.id`、`owners.test.id` | 仅在代码评审 `verdict=pass`、`blockers=[]` 且 `test-report.status=pass` 后人工确认代码可以进入回写 | 通过或驳回结论 | 否 |
 | 记录代码审批 | `code.yml`、`test-report.md`、`owners.development.id` | 写入代码审批证据并推进状态，并校验测试报告 tester 与 `owners.test.id` 对齐 | `approval.yml#code`、status=`code-approved` | 否 |
-| 推送审批结果 | 代码评审、审批、测试报告、traceability | 保存 code-approved 状态与最终证据 | 远端 checkpoint | 是，失败不阻塞本地状态，但应尽快补推 |
+| 推送审批结果 | 代码评审、审批、测试报告、traceability | 代码阶段终点完成条件（CR-2026-044）：保存 code-approved 状态与最终证据；失败保持 `code-approved`，重跑同一 checkpoint，不重新审批 | 远端 checkpoint | 否 |
 
 ## 3a. Workspace 基线新鲜度（freshness）
 
@@ -587,7 +587,7 @@ flowchart TD
 |------|------------|----------|
 | 规划前置流程 | 已有明确需求输入时，可不跑 `/planning`、`/insight-brief`、`/comp-radar` | `source` 可为空或指向手工输入 |
 | planning 前三类调研节点 | 对应 `skip_*` 为 true | 规划报告少一个输入来源，但流程可继续 |
-| 自动 checkpoint | 对应 `auto_push_*` 为 false | 本地可继续，换机或协作接手能力下降 |
+| 可选 checkpoint（PRD 草稿 / TASK） | 对应 `auto_push_*` 为 false | 本地可继续，换机或协作接手能力下降；审批后的阶段终点 checkpoint 不可跳过（CR-2026-044） |
 | 竞品转规划建议 | `report-to-planning-suggestion` 失败或不需要建议 | 可只保留竞品报告 |
 | writeback-tasks 空任务 | `tasks/` 为空 | 记录警告后继续，但 traceability 可能缺少任务链路 |
 | 主流程质量门 | 不可跳过 | 跳过会破坏状态机和证据链 |
