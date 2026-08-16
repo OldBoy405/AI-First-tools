@@ -38,6 +38,7 @@ scope: drift-governance
 | `writeback-apply` | 业务输入原子回写：`--stage baseline|tasks|traceability --spec-id <id> --target-version <ver>`（traceability 另需 workspace-relative `--milestone-file`）。crctl 内部固定 generator 与 `.crctl/candidates/{CR-ID}/{stage}`，journal 前完整 preflight；baseline 文件与 `merging→writing-back` 同 write-set/commit/lease push，origin-confirmed 后幂等发送 status outbox/advance audit。公共接口拒绝 candidate/generator/manifest 路径 | writeback 阶段 |
 | `archive` | 单一幂等归档（CR-2026-031 TASK-09；CR-2026-032 固定返回）：`[--spec-id <id>]`——四账本（cr.md/_backlog/_history/_index）同批 recoverable write-set + archive commit + lease push；origin confirmed 后 cleanup（txws/CR worktree/本地 ref，clean 才删），失败返回 phase=cleanup-pending（status 恒 archived）重跑只续清理；rejected/withdrawn 远端未合并 ref 保留为 preservedRefs。统一固定返回 commit/lastCleanupError/remaining/preservedRefs/recoverCommand/warnings；writing-back 在 origin confirmed 后、cleanup 前发 schema v1 archive outbox（EMIT_FAILED 仅 warning，重跑补发不阻断归档） | cr-archive |
 | `checkpoint` | 单一深原语：全仓 source commit + 非 KB lease publish + KB latest-checkpoint/metadata commit；前置态 = 非终态（CR-2026-033） | push-progress |
+| `workspace freshness` / `workspace sync` | 基线新鲜度窄子命令（CR-2026-043）：freshness 只读分类各仓 CR 分支对 trunk 的新鲜度（fresh/behind-clean/diverged/unknown）；sync 仅对 behind-clean 仓执行显式 ff-only 前移（幂等续跑，失败重跑同一命令）；能力面声明，算法与错误码以 `crctl.mjs`/`workspace-transactions.mjs` 实现为准 | workspace-freshness |
 | `git` | controlled-shell 白名单的 IDE 运行时适配器：按「子命令 + 形态 + 调用者」三元放行，越界返回 `FORBIDDEN_SUBCOMMAND`，全量审计日志；`commit --template` 支持 `--cr` 显式直传（FR-10） | `controlled-shell` |
 
 ## 单一事实源约定（重要）

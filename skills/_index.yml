@@ -189,6 +189,11 @@ skills:
     brief: "按 dir-graph active repos 在已有本地 CR worktree 中从远端 fast-forward 拉取最新进度"
     status: active
 
+  - id: workspace-freshness
+    path: ./sync/workspace-freshness/SKILL.md
+    brief: "基线新鲜度 gate：只读分类各仓 CR worktree 对 trunk 的新鲜度，behind-clean 显式 ff-only 同步，输出 continue/synced-continue/replay/manual 路由"
+    status: active
+
   - id: resume-from-remote
     path: ./sync/resume-from-remote/SKILL.md
     brief: "新电脑/新成员：按 dir-graph active repos 从 origin/requirement/{CR-ID} 重建同名 CR worktree"

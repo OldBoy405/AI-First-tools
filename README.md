@@ -425,12 +425,17 @@ flowchart TD
   D3 --> D3b["推送任务 checkpoint<br/>push-progress"]
   D3 --> D4["确认进入开发<br/>human_approval"]
   D4 --> D5["记录开发启动<br/>approve-dev-start"]
-  D5 --> D6["代码编写<br/>implement-code"]
+  D5 --> D5F["Workspace 新鲜度（实施前）<br/>workspace-freshness"]
+  D5F -- "continue / synced-continue" --> D6["代码编写<br/>implement-code"]
+  D5F -- "manual：阻断" --> D5M["人工处理基线事实"]
   D6 --> D7["生成测试报告<br/>write-test-report"]
   D7 --> D7G{"测试证据通过?"}
   D7G -- "否：review_feedback" --> D6
   D7G -- "是" --> D8["推送代码 checkpoint<br/>push-progress"]
-  D8 --> D8S["选择代码评审 LLM<br/>human_approval"]
+  D8 --> D8F["Workspace 新鲜度（评审前）<br/>workspace-freshness"]
+  D8F -- "continue" --> D8S["选择代码评审 LLM<br/>human_approval"]
+  D8F -- "replay：基线已前进" --> D6
+  D8F -- "manual：阻断" --> D8M["人工处理基线事实"]
   D8S --> D9["代码评审<br/>review-code"]
   D9 --> D9G{"代码评审通过?"}
   D9G -- "否：review_feedback" --> D6
@@ -457,14 +462,38 @@ flowchart TD
 | 推送任务 checkpoint | `plan.md`、`tasks/`、traceability 改动 | 保存设计与任务拆分进度 | 远端 checkpoint、`latest-checkpoint` 更新 | 是，`auto_push_after_task=false` |
 | 确认进入开发 | `plan.md`、`tasks/`、`owners.development.id` | 人工确认任务拆分可进入编码 | 通过或暂缓结论 | 否 |
 | 记录开发启动 | `cr_id`、`owners.development.id` | 写入开发启动确认并解锁编码 | `approval.yml#development-start`、status=`developing` | 否 |
+| Workspace 新鲜度（实施前） | `cr_id`、gate=`implement-start` | 只读检查各仓 CR worktree 对 trunk 的新鲜度；behind-clean 时显式同步；manual 阻断不进实施 | route=continue / synced-continue / manual（见 §3a） | 否 |
 | 代码编写 | PRD、SDD、TASK、repo worktree map、coding runtime、`owners.development.id`、可选 `review_feedback` | 按 TASK 在 CR worktree 中实现代码；若为回修轮次，则只修复测试或代码评审指出的问题 | 代码变更、验证命令与结果、runtime 信息、fixed-blockers | 否 |
 | 生成测试报告 | `implement-code` 输出、TASK 验收条件、`owners.test.id` | 汇总 lint/test/build、TASK 覆盖和未覆盖风险；block 时回到代码实现 | `test-report.md`、`traceability.yml#tests` | 否 |
 | 推送代码 checkpoint | 代码变更、`test-report.md`、traceability | 将代码和测试证据统一保存到远端分支 | 各 repo checkpoint SHA | 否 |
+| Workspace 新鲜度（评审前） | `cr_id`、gate=`review-start` | 评审前重核基线；behind-clean 同步后要求重放重建证据（replay）；diverged/manual 阻断 | route=continue / replay / manual（见 §3a） | 否 |
 | 选择代码评审 LLM | 统一 checkpoint 结果、触发参数 `review_llm` | 暂停等待人工选择执行评审的模型/runner；已指定 `review_llm` 时快速确认 | 无状态写入 | 否 |
 | 代码评审 | 真实 diff、changed files、提交记录、`sdd.md`、TASK、`test-report.md` | 检查实现对齐、工程质量、安全性和测试证据可信度；block 时回到代码实现 | `review-annotations/code.yml`、通过时 status=`code-reviewing`，否则回到 `developing` | 否 |
 | 代码审批 | 代码评审记录、测试报告、`owners.development.id`、`owners.test.id` | 仅在代码评审 `verdict=pass`、`blockers=[]` 且 `test-report.status=pass` 后人工确认代码可以进入回写 | 通过或驳回结论 | 否 |
 | 记录代码审批 | `code.yml`、`test-report.md`、`owners.development.id` | 写入代码审批证据并推进状态，并校验测试报告 tester 与 `owners.test.id` 对齐 | `approval.yml#code`、status=`code-approved` | 否 |
 | 推送审批结果 | 代码评审、审批、测试报告、traceability | 保存 code-approved 状态与最终证据 | 远端 checkpoint | 是，失败不阻塞本地状态，但应尽快补推 |
+
+## 3a. Workspace 基线新鲜度（freshness）
+
+适用场景：代码实施开始前与代码评审开始前，确认各 active repo 的 CR worktree 没有落后或偏离 trunk；也用于人工排查同步阻断。
+
+```bash
+crctl workspace freshness <CR-ID>   # 只读分类：不写任何仓（fetch 更新远端跟踪引用除外）
+crctl workspace sync <CR-ID>        # 显式同步：仅把 behind-clean 的仓前移到检查时捕获的 trunk SHA
+```
+
+每仓新鲜度四值含义：
+
+| freshness | 含义 | 处理 |
+|-----------|------|------|
+| `fresh` | 分支与 trunk 同步或仅领先（正常开发态） | 无需动作 |
+| `behind-clean` | 分支落后 trunk 且无独有提交，可机械前移 | 显式 `workspace sync` 前移 |
+| `diverged` | 分支与 trunk 互不为祖先 | 人工处理，不自动合并/变基 |
+| `unknown` | 事实不可比较（worktree 缺失/dirty/分支不对/trunk 不可确认） | 人工恢复事实后重跑检查 |
+
+失败后的人工动作：只重跑返回的 `recoverCommand`（同一条 `workspace sync` 命令）续跑；`WORKSPACE_FRESHNESS_CHANGED` 表示检查与写入之间事实变化（trunk/HEAD/dirty 漂移），确认现场后重跑；`diverged`/`dirty`/`unknown` 一律人工处理（提交未提交变更、解决分叉或重开 worktree）后重新进入 gate。
+
+权威契约：`skills/sync/workspace-freshness/SKILL.md`（gate 路由）与 `skills/shared/crctl/SKILL.md`（子命令能力面）；本节不复制分类算法与恢复状态机细节。
 
 ## 4. 回写归档流程
 

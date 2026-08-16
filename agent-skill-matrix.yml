@@ -87,6 +87,7 @@ actors:
     can-call:
       - push-progress
       - pull-progress
+      - workspace-freshness
       - cr-show
       - controlled-shell
       - crctl
@@ -200,6 +201,7 @@ actors:
       - writeback-traceability
       - push-progress
       - pull-progress
+      - workspace-freshness
       - resume-from-remote
       - list-remote-checkpoints
       - handover-cr

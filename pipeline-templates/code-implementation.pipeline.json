@@ -131,6 +131,15 @@
       "timeoutMinutes": 5
     },
     {
+      "id": "00000000-0000-0000-0015-000000000016",
+      "kind": "skill",
+      "label": "Workspace freshness（实施前）",
+      "ref": "workspace-freshness",
+      "prompt": "执行 workspace-freshness gate：\n- cr_id: {{inputs.cr_id}}\n- gate: implement-start\n\n调用一次只读新鲜度检查；仅当结果 syncable 时调用显式同步，然后按 route 分流：\n- route=continue 或 synced-continue：继续进入 implement-code；\n- route=manual：立即 abort 本 pipeline，输出逐仓 blockers 与人工处理指引，不进入 implement-code。\n\n在 node-16.md 输出 route、facts、blockers。",
+      "onFail": "abort",
+      "timeoutMinutes": 10
+    },
+    {
       "id": "00000000-0000-0000-0015-000000000006",
       "kind": "code_generation",
       "label": "代码编写",
@@ -191,6 +200,15 @@
       "timeoutMinutes": 15
     },
     {
+      "id": "00000000-0000-0000-0015-000000000017",
+      "kind": "skill",
+      "label": "Workspace freshness（评审前）",
+      "ref": "workspace-freshness",
+      "prompt": "执行 workspace-freshness gate：\n- cr_id: {{inputs.cr_id}}\n- gate: review-start\n\n调用一次只读新鲜度检查；仅当结果 syncable 时调用显式同步，然后按 route 分流：\n- route=continue：继续进入评审 LLM 选择节点；\n- route=replay：基线已前进，既有实现/测试/checkpoint 证据全部失效；按 review-code 节点的 reviewLoop.replayNodes 将 review_feedback（基线已前进，需重建实现/测试/checkpoint 证据）传回 implement-code 顺序重放；\n- route=manual：立即 abort 本 pipeline，输出逐仓 blockers 与人工处理指引，不盲目消耗 reviewLoop。\n\n在 node-17.md 输出 route、facts、blockers。",
+      "onFail": "abort",
+      "timeoutMinutes": 10
+    },
+    {
       "id": "00000000-0000-0000-0015-000000000013",
       "kind": "human_approval",
       "label": "选择代码评审 LLM",
@@ -225,6 +243,11 @@
             "nodeId": "00000000-0000-0000-0015-000000000008",
             "ref": "push-progress",
             "purpose": "publish-repaired-code-and-evidence-checkpoint"
+          },
+          {
+            "nodeId": "00000000-0000-0000-0015-000000000017",
+            "ref": "workspace-freshness",
+            "purpose": "re-verify-baseline"
           },
           {
             "nodeId": "00000000-0000-0000-0015-000000000009",
@@ -291,5 +314,5 @@
     }
   ],
   "createdAt": "2026-05-18T00:00:00+08:00",
-  "updatedAt": "2026-08-09T13:20:00+08:00"
+  "updatedAt": "2026-08-16T01:55:00+08:00"
 }

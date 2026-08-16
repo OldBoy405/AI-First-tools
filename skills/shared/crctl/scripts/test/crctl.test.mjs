@@ -1138,7 +1138,7 @@ test('CR-2026-037 Prompt 采纳：Skill/Pipeline 调 task init 且不指导直�
   assert.match(pipelineText, /crctl task init/);
   assert.match(pipelineText, /不得手写索引/);
   assert.doesNotMatch(pipelineText, /同时生成 tasks\/_index\.yml/);
-  assert.equal(pipeline.nodes.length, 15); // CR-2026-039 TASK-04：新增评审后审批前 checkpoint 节点（…0015）
+  assert.equal(pipeline.nodes.length, 17); // CR-2026-043 TASK-04：新增两个 workspace-freshness gate 节点（…0016 实施前 / …0017 评审前）
 });
 
 test('task done：正常路径 pending→done + done-at + audit 记录（AC-1）', () => {

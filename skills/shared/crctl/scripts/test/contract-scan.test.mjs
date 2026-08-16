@@ -73,14 +73,14 @@ test('AC-2b: architecture-design reviewLoop 结构快照不变', () => {
   );
 });
 
-test('AC-2c: code-implementation review-code reviewLoop 结构快照不变', () => {
+test('AC-2c: code-implementation review-code reviewLoop 结构快照（CR-2026-043：replayNodes 插入 workspace-freshness 基线重核）', () => {
   const p = JSON.parse(readFileSync(path.join(ROOT, 'pipeline-templates', 'code-implementation.pipeline.json'), 'utf8'));
   const n = p.nodes.find((x) => x.ref === 'review-code');
   assert.equal(n.reviewLoop.repairNodeId, '00000000-0000-0000-0015-000000000006');
   assert.equal(n.reviewLoop.repairRef, 'implement-code');
   assert.equal(n.reviewLoop.replayPolicy, 'rerun-listed-nodes-in-order');
   assert.equal(n.reviewLoop.maxAttempts, 3);
-  assert.deepEqual(n.reviewLoop.replayNodes.map((r) => r.ref), ['implement-code', 'write-test-report', 'push-progress', 'review-code']);
+  assert.deepEqual(n.reviewLoop.replayNodes.map((r) => r.ref), ['implement-code', 'write-test-report', 'push-progress', 'workspace-freshness', 'review-code']);
   assert.deepEqual(n.reviewLoop.passCondition, {
     allOf: [
       { path: 'verdict', equals: 'pass' },
