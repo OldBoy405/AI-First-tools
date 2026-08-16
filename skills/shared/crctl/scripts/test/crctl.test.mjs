@@ -3291,14 +3291,15 @@ test('CR-2026-029：feature-writeback pipeline 各节点 prompt 收敛为深原�
   const pl = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, 'pipeline-templates', 'feature-writeback.pipeline.json'), 'utf8'));
   const merge = pl.nodes.find((n) => n.ref === 'merge-feature-branch');
   assert.ok(merge, 'merge-feature-branch 节点存在');
-  assert.ok(merge.prompt.includes('crctl merge {{inputs.cr_id}}'), 'prompt 含 crctl merge 深原语');
+  assert.ok(merge.prompt.includes('merge-feature-branch'), 'prompt 调用公开 merge-feature-branch Skill');
   assert.ok(merge.prompt.includes('operational_workspace'), 'prompt 透传 operational_workspace');
-  assert.ok(!merge.prompt.includes('--no-ff') && !merge.prompt.includes('merge --abort'), '无手工 merge 流程');
+  assert.ok(!/write-set|lease|Transaction Workspace|commit-tree|merge --abort/.test(merge.prompt), '不展开 merge 内部事务');
   const wb = pl.nodes.find((n) => n.ref === 'writeback-prd-sdd');
-  assert.ok(wb.prompt.includes('writeback-apply'), 'writeback 节点含 writeback-apply');
+  assert.ok(wb.prompt.includes('writeback-prd-sdd'), 'writeback 节点调用公开 Skill');
+  assert.ok(!/write-set|journal|generator|candidate/.test(wb.prompt), '不展开 writeback 内部算法');
   const arc = pl.nodes.find((n) => n.ref === 'cr-archive');
-  assert.ok(arc.prompt.includes('crctl archive {{inputs.cr_id}}'), 'archive 节点含 crctl archive 深原语');
-  assert.ok(!arc.prompt.includes('archive-move'), '无 archive-move 旧命令');
+  assert.ok(arc.prompt.includes('cr-archive'), 'archive 节点调用公开 Skill');
+  assert.ok(!/write-set|lease|四账本|archive-move/.test(arc.prompt), '不展开 archive 内部算法');
 });
 
 test('CR-2026-029：write-dev-tasks 无发布联调类任务拆分指引（FR-3）', () => {
@@ -4248,6 +4249,7 @@ test('CR-2026-042 静态合同：CI 合并（check-skill-matrix.yml 删除、crc
   assert.equal(existsSync(path.join(PACKAGE_ROOT, '.github', 'workflows', 'check-skill-matrix.yml')), false, 'check-skill-matrix.yml 应删除');
   const ci = readFileSync(path.join(PACKAGE_ROOT, '.github', 'workflows', 'crctl-ci.yml'), 'utf8');
   assert.ok(ci.includes('check-skill-matrix.mjs') && ci.includes('check-agents-contract.mjs'), 'crctl-ci 应调用两个 checker');
+  assert.ok(ci.includes("n.kind === 'skill' && !n.ref"), 'Pipeline skill node 缺 ref 时必须阻断');
   for (const p of ['README.md', 'AGENT-SKILL-MATRIX.md', 'agent-skill-matrix.yml', 'dir-graph.yaml', 'agents/**', 'skills/**', 'pipeline-templates/**', 'skills/shared/controlled-shell/rules.json', '.github/workflows/crctl-ci.yml']) {
     assert.ok(ci.includes(p), `paths 应覆盖 ${p}`);
   }
@@ -4276,4 +4278,6 @@ test('CR-2026-042 静态合同：已知 Skill 越界文本零命中', () => {
   assert.equal(/crctl git commit/.test(tasks), false, 'write-dev-tasks 不应含手工 commit 配方');
   const reg = readFileSync(path.join(PACKAGE_ROOT, 'skills', 'requirement', 'requirement-register', 'SKILL.md'), 'utf8');
   assert.equal(/recoverable write-set|三账本（/.test(reg), false, 'requirement-register 不应复述内部 write-set/三账本步骤');
+  const writeback = readFileSync(path.join(PACKAGE_ROOT, 'pipeline-templates', 'feature-writeback.pipeline.json'), 'utf8');
+  assert.ok(writeback.includes('milestone_file'), 'writeback-traceability 必须保留 milestone_file 业务输入');
 });

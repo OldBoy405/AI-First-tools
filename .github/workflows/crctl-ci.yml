@@ -93,6 +93,7 @@ jobs:
             const seen = new Set();
             for (const id of ids) { if (seen.has(id)) errs.push(f + ': 重复 node id ' + id); seen.add(id); }
             for (const n of (d.nodes || [])) {
+              if (n.kind === 'skill' && !n.ref) errs.push(f + ': skill node 缺 ref');
               if (n.kind === 'skill' && n.ref && !active.has(n.ref)) errs.push(f + ': inactive skill ref ' + n.ref);
               const rl = n.reviewLoop;
               if (rl) {
