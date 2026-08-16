@@ -12,7 +12,10 @@ on:
       - 'agent-skill-matrix.yml'
       - 'agents/**'
       - 'AGENTS.md'
+      - 'AGENT-SKILL-MATRIX.md'
+      - 'README.md'
       - 'ARCHITECTURE.md'
+      - 'skills/shared/controlled-shell/rules.json'
       - '.github/workflows/crctl-ci.yml'
   pull_request:
     paths:
@@ -22,7 +25,10 @@ on:
       - 'agent-skill-matrix.yml'
       - 'agents/**'
       - 'AGENTS.md'
+      - 'AGENT-SKILL-MATRIX.md'
+      - 'README.md'
       - 'ARCHITECTURE.md'
+      - 'skills/shared/controlled-shell/rules.json'
       - '.github/workflows/crctl-ci.yml'
 
 jobs:
@@ -59,12 +65,45 @@ jobs:
         shell: bash
         run: node skills/shared/crctl/scripts/check-agents-contract.mjs
 
-      - name: Pipeline JSON parse (all templates)
+      - name: Pipeline JSON structure assertions (all templates)
         shell: bash
         run: |
-          for f in pipeline-templates/*.pipeline.json; do
-            node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))"
-          done
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const files = fs.readdirSync('pipeline-templates').filter((f) => f.endsWith('.pipeline.json'));
+          const idx = fs.readFileSync('skills/_index.yml', 'utf8').replaceAll('\r\n', '\n');
+          let cur = null;
+          const active = new Set();
+          for (const l of idx.split('\n')) {
+            const m = l.match(/^\s*-\s*id:\s*(\S+)/);
+            if (m) { cur = m[1]; continue; }
+            const s = l.match(/^\s*status:\s*(\w+)/);
+            if (s && cur) { if (s[1] === 'active') active.add(cur); cur = null; }
+          }
+          const errs = [];
+          for (const f of files) {
+            let d;
+            try { d = JSON.parse(fs.readFileSync('pipeline-templates/' + f, 'utf8')); }
+            catch { errs.push(f + ': JSON 解析失败'); continue; }
+            if (!d.id) errs.push(f + ': 缺 id');
+            if (!d.triggerCommand) errs.push(f + ': 缺 triggerCommand');
+            if (!Array.isArray(d.inputs)) errs.push(f + ': 缺 inputs[]');
+            if (!Array.isArray(d.nodes)) errs.push(f + ': 缺 nodes[]');
+            const ids = (d.nodes || []).map((n) => n.id);
+            const seen = new Set();
+            for (const id of ids) { if (seen.has(id)) errs.push(f + ': 重复 node id ' + id); seen.add(id); }
+            for (const n of (d.nodes || [])) {
+              if (n.kind === 'skill' && n.ref && !active.has(n.ref)) errs.push(f + ': inactive skill ref ' + n.ref);
+              const rl = n.reviewLoop;
+              if (rl) {
+                if (rl.repairNodeId && !ids.includes(rl.repairNodeId)) errs.push(f + ': ' + n.id + ' 悬空 repairNodeId ' + rl.repairNodeId);
+                for (const r of (rl.replayNodes || [])) if (!ids.includes(r.nodeId)) errs.push(f + ': ' + n.id + ' 悬空 replayNodes ' + r.nodeId);
+              }
+            }
+          }
+          if (errs.length) { console.error(errs.join('\n')); process.exit(1); }
+          console.log('pipeline structure OK (' + files.length + ' templates)');
+          NODE
 
       - name: crctl full test suite
         shell: bash

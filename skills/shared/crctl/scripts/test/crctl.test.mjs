@@ -1138,7 +1138,7 @@ test('CR-2026-037 Prompt 采纳：Skill/Pipeline 调 task init 且不指导直�
   assert.match(pipelineText, /crctl task init/);
   assert.match(pipelineText, /不得手写索引/);
   assert.doesNotMatch(pipelineText, /同时生成 tasks\/_index\.yml/);
-  assert.equal(pipeline.nodes.length, 17); // CR-2026-043 TASK-04：新增两个 workspace-freshness gate 节点（…0016 实施前 / …0017 评审前）
+  assert.equal(pipeline.nodes.length, 16); // CR-2026-042：删除 reviewer 选择暂停节点 …0013，17 -> 16
 });
 
 test('task done：正常路径 pending→done + done-at + audit 记录（AC-1）', () => {
@@ -4213,3 +4213,67 @@ test('TASK-06 ⑤: release-drift 单一回退转换 code-approved -> developing 
 
 
 
+
+// ── CR-2026-042 静态合同：Pipeline 16 节点 / CI 合并 / README / Skill 收敛 ──
+
+test('CR-2026-042 静态合同：code Pipeline 16 节点、无 review_llm、无 …0013、后继与 replayNodes', () => {
+  const p = path.join(PACKAGE_ROOT, 'pipeline-templates', 'code-implementation.pipeline.json');
+  const raw = readFileSync(p, 'utf8');
+  const d = JSON.parse(raw);
+  assert.deepEqual(d.inputs.map((i) => i.key), ['cr_id', 'target_version', 'auto_push_after_task']);
+  const ids = d.nodes.map((n) => n.id);
+  assert.equal(ids.length, 16, '节点数应为 16');
+  assert.equal(ids.includes('00000000-0000-0000-0015-000000000013'), false, '…0013 应删除');
+  assert.equal(ids.indexOf('00000000-0000-0000-0015-000000000009'), ids.indexOf('00000000-0000-0000-0015-000000000017') + 1, '…0017 直接后继 …0009');
+  const rc = d.nodes.find((n) => n.id === '00000000-0000-0000-0015-000000000009');
+  const replay = rc.reviewLoop.replayNodes.map((r) => r.nodeId);
+  assert.deepEqual(replay, [
+    '00000000-0000-0000-0015-000000000006',
+    '00000000-0000-0000-0015-000000000007',
+    '00000000-0000-0000-0015-000000000008',
+    '00000000-0000-0000-0015-000000000017',
+    '00000000-0000-0000-0015-000000000009',
+  ], 'review-code replayNodes 顺序不变');
+  assert.equal(/review_llm/.test(raw), false, 'review_llm 应零命中');
+});
+
+test('CR-2026-042 静态合同：_index.yml nodes=16 且无 reviewer 选择暂停描述', () => {
+  const idx = readFileSync(path.join(PACKAGE_ROOT, 'pipeline-templates', '_index.yml'), 'utf8').replace(/\r\n/g, '\n');
+  const m = idx.match(/id: code-implementation-v1[\s\S]*?nodes:\s*(\d+)/);
+  assert.equal(Number(m[1]), 16, 'code-implementation nodes 应为 16');
+  assert.equal(/选择代码评审 LLM/.test(idx), false, '不应再有 reviewer 选择暂停描述');
+});
+
+test('CR-2026-042 静态合同：CI 合并（check-skill-matrix.yml 删除、crctl-ci 双 checker + paths）', () => {
+  assert.equal(existsSync(path.join(PACKAGE_ROOT, '.github', 'workflows', 'check-skill-matrix.yml')), false, 'check-skill-matrix.yml 应删除');
+  const ci = readFileSync(path.join(PACKAGE_ROOT, '.github', 'workflows', 'crctl-ci.yml'), 'utf8');
+  assert.ok(ci.includes('check-skill-matrix.mjs') && ci.includes('check-agents-contract.mjs'), 'crctl-ci 应调用两个 checker');
+  for (const p of ['README.md', 'AGENT-SKILL-MATRIX.md', 'agent-skill-matrix.yml', 'dir-graph.yaml', 'agents/**', 'skills/**', 'pipeline-templates/**', 'skills/shared/controlled-shell/rules.json', '.github/workflows/crctl-ci.yml']) {
+    assert.ok(ci.includes(p), `paths 应覆盖 ${p}`);
+  }
+  assert.ok(ci.includes('ubuntu-latest') && ci.includes('windows-latest'), '双平台 matrix 应保留');
+});
+
+test('CR-2026-042 静态合同：README 8 节 + 权威链接 + 禁止内容零命中', () => {
+  const readme = readFileSync(path.join(PACKAGE_ROOT, 'README.md'), 'utf8').replace(/\r\n/g, '\n');
+  for (const sec of ['Tools 定位', '概念生命周期', 'Owner 职责', '8 条 Pipeline 入口', '自动评审与人工审批', 'checkpoint / merge / operational workspace / archive', 'crctl status/next', '权威事实源链接']) {
+    assert.ok(readme.includes(sec), `README 应含「${sec}」`);
+  }
+  for (const link of ['dir-graph.yaml', 'agent-skill-matrix.yml', 'crctl.mjs', 'ARCHITECTURE.md']) {
+    assert.ok(readme.includes(link), `README 应含权威链接 ${link}`);
+  }
+  for (const banned of ['review_llm', '选择代码评审', 'change-impact-analysis', 'feedback-writeback']) {
+    assert.equal(readme.includes(banned), false, `README 不应含 ${banned}`);
+  }
+});
+
+test('CR-2026-042 静态合同：已知 Skill 越界文本零命中', () => {
+  const prd = readFileSync(path.join(PACKAGE_ROOT, 'skills', 'requirement', 'write-requirement-prd', 'SKILL.md'), 'utf8');
+  for (const banned of ['engineering-docs', 'MCP', 'owClient', '_config.yml', 'validate-doc']) {
+    assert.equal(prd.includes(banned), false, `write-requirement-prd 不应含 ${banned}`);
+  }
+  const tasks = readFileSync(path.join(PACKAGE_ROOT, 'skills', 'develop', 'write-dev-tasks', 'SKILL.md'), 'utf8');
+  assert.equal(/crctl git commit/.test(tasks), false, 'write-dev-tasks 不应含手工 commit 配方');
+  const reg = readFileSync(path.join(PACKAGE_ROOT, 'skills', 'requirement', 'requirement-register', 'SKILL.md'), 'utf8');
+  assert.equal(/recoverable write-set|三账本（/.test(reg), false, 'requirement-register 不应复述内部 write-set/三账本步骤');
+});

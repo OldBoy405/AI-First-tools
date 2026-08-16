@@ -23,6 +23,6 @@ crctl writeback-apply {cr_id} --stage tasks
   --workspace {knowledge-base installation workspace}
 ```
 
-`crctl` 内部固定 `writeback-tasks.mjs` 与 `.crctl/candidates/{CR-ID}/tasks`，完成 generator、manifest 全矩阵校验、recoverable write-set、精确 staged set、commit 和 lease push。Skill 不传 candidate/manifest/generator 路径，不手写 Git 或 delivery 索引。
+`crctl` 内部固定 `writeback-tasks.mjs` 与 `.crctl/candidates/{CR-ID}/tasks`。Skill 不传 candidate/manifest/generator 路径，不手写 Git 或 delivery 索引。
 
 幂等语义仍以 `delivery/task/*.md` frontmatter id 集合为准；无新增 done TASK 时 `changed=false`。`WRITEBACK_REMOTE_STALE` 使用同一业务命令重跑，history rewrite 硬阻断。输出 txId/commit/files/warnings，下一步以 `crctl next {cr_id}` 为准。

@@ -159,7 +159,7 @@ Agent：好的，_index.yml 共登记 N 个竞品，我将逐一抓取并生成�
 - **不得编造**任何动态条目，所有条目必须附来源 URL；网络失败时明确提示降级（请用户手工提供输入）
 - **不得修改** `specs/*/PRD.md` 或 `specs/*/SDD.md`（属 CR/writeback 管控保护范围）
 - **不得写入** `change-requests/`（仅只读查询）
-- **不得手工编辑** `specs/_index.yml`、`specs/_history.yml`、`change-requests/_backlog.yml`、`docs/competitive/_index.yml`
+- **不得绕过 `crctl` 手工编辑受控账本**（如 `_backlog.yml`/`_history.yml`/`_index.yml`，写入一律经 `crctl` 子命令）
 - **不得操作** `docs/references/`（只读参考资料）
 - **不得操作** `_archived/`、平台运行时代码目录、主工作区业务代码目录
 - **不得手写 frontmatter**：报告 frontmatter 必须通过 `engineering-docs` skill 的模板与 schema 步骤生成

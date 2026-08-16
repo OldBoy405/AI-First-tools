@@ -1,6 +1,6 @@
 ---
 name: requirement-register
-description: 需求编写期入口：一次调用 crctl register 深原语完成 CR-ID 分配、三账本注册、注册 commit/lease push 与逐仓 worktree ensure；Skill 只做前置确认与结果分类，不写任何 Git 命令序列、不手写账本。
+description: 需求编写期入口：一次调用 crctl register 深原语完成 CR 注册与逐仓 worktree ensure；Skill 只做前置确认与结果分类，不写任何 Git 命令序列、不手写账本。
 ---
 
 # Skill: requirement-register
@@ -12,8 +12,8 @@ description: 需求编写期入口：一次调用 crctl register 深原语完成
 
 ## 用途
 
-需求编写的起点：生成唯一 CR-ID（`CR-YYYY-NNN`）、在 knowledge-base trunk 登记 CR（`_backlog.yml` + `_index.yml` + `cr.md` 三账本同批）、注册 commit + trailer + lease push、并按 `dir-graph.yaml#repositories` 为所有 active repo 创建 `requirement/{cr_id}` worktree。
-以上全部由深原语 `crctl register` 独占完成（CR-2026-031 TASK-05）：CR-ID 分配、账本编辑、commit/lease push、worktree ensure 均不再由模型手写。
+需求编写的起点：生成唯一 CR-ID（`CR-YYYY-NNN`），在 knowledge-base trunk 登记 CR，并按 `dir-graph.yaml#repositories` 为所有 active repo 创建 `requirement/{cr_id}` worktree。
+以上全部由深原语 `crctl register` 独占完成（CR-2026-031 TASK-05）。
 
 本 Skill 只拥有：**业务前置确认、一次深原语调用、结果分类**。
 
@@ -51,13 +51,7 @@ crctl register --registration-key {registration_key} --title "{title}"
   --workspace {knowledge-base 主 checkout}
 ```
 
-深原语内部完成（Skill 不重复、不干预）：
-
-- CR-ID 分配（`CR-{Y}-{NNN+1}`，scanMaxCrNumber + CAS 账本写）；
-- 三账本（`cr.md` 新建 + `_backlog.yml` 追加 + `_index.yml` 登记）同批 recoverable write-set（CRLF→LF + SHA-256 CAS 锚点）；
-- 注册 commit + trailer（AI-First-Op: register）+ lease push；
-- 逐仓 worktree ensure（`requirement/{cr_id}` 分支从 trunk 派生，不切换主工作区 HEAD）；
-- 全程事务 journal，任意中断后**重跑同一条命令**即从断点续跑（同 registration_key 同输入）。
+深原语内部完成 CR 注册与逐仓 worktree ensure（Skill 不重复、不干预）。
 
 ### Step 3 — 结果分类（只透传深原语 JSON，不发明第二套字段）
 

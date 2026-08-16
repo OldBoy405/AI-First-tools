@@ -1,6 +1,6 @@
 ---
 name: cr-archive
-description: "归档终态 CR：一次调用 crctl archive 深原语完成四账本同批归档 + lease push + 事务化 cleanup（txws/CR worktree/本地分支），Skill 只做前置确认与结果分类。"
+description: "归档终态 CR：一次调用 crctl archive 深原语完成归档与清理，Skill 只做前置确认与结果分类。"
 ---
 
 # Skill: cr-archive
@@ -12,8 +12,8 @@ description: "归档终态 CR：一次调用 crctl archive 深原语完成四账
 
 ## 用途
 
-把终态 CR（`writing-back` / `rejected` / `withdrawn`）归档：四账本（`cr.md`、`_backlog.yml`、`_history.yml`、`_index.yml`）同批改写、归档 commit + lease push、随后清理 Transaction Workspace / CR worktree / 本地 requirement 分支。
-全部事务逻辑（write-set、lease push、classify、cleanup 分级删除、断点恢复）由深原语 `crctl archive` 独占完成（CR-2026-031 TASK-09）。
+把终态 CR（`writing-back` / `rejected` / `withdrawn`）归档。
+全部事务逻辑由深原语 `crctl archive` 独占完成（CR-2026-031 TASK-09）。
 
 本 Skill 只拥有：**前置确认、一次深原语调用、结果分类**。不写 Git 命令序列、不手写任何账本、不做清理算法。
 
@@ -49,14 +49,7 @@ description: "归档终态 CR：一次调用 crctl archive 深原语完成四账
 crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 checkout}
 ```
 
-深原语内部完成（Skill 不重复、不干预）：
-
-- 四账本同批 recoverable write-set（backlog 移出 / history 追加含 notify-log / index 终态 / cr.md 终态）；
-- 精确 staged set 断言 + 归档 commit（trailer）+ lease push（远端前进自动 rebuild 重算）；
-- origin confirmed 后逐单元 cleanup：Transaction Workspace、各仓 CR worktree、本地 requirement 分支——**clean 才删，dirty/unknown 零删除保留现场**；
-- `archived` 删除远端 requirement 分支；`rejected` / `withdrawn` 的未合并远端 ref **保留**（输出 `preservedRefs`）；
-- writing-back 路径在 origin confirmed 后、cleanup 前发送 schema v1 `archive` outbox 事件；发送失败只记 warning，不阻断归档，重跑补发；
-- 全程事务 journal，任意中断后**重跑同一条命令**即从断点续跑/续清理。
+深原语内部完成归档与清理（Skill 不重复、不干预）。
 
 ### Step 3 — 结果分类（只透传深原语 JSON，不发明第二套字段）
 

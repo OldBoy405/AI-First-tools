@@ -26,7 +26,7 @@ test('AC-1: 节点序 review-code(…0009) < checkpoint(…0015) < human_approva
   assert.ok(idx(HUMAN_APPROVAL) < idx(APPROVE_CODE), 'human_approval < approve-code');
 });
 
-test('AC-2: checkpoint 节点 onFail=abort、ref=push-progress；节点 id 全局唯一（CR-2026-043 后 17 节点）', () => {
+test('AC-2: checkpoint 节点 onFail=abort、ref=push-progress；节点 id 全局唯一（CR-2026-042 后 16 节点）', () => {
   const n = bySuffix('000000000015');
   assert.equal(n.onFail, 'abort');
   assert.equal(n.ref, 'push-progress');
@@ -35,7 +35,7 @@ test('AC-2: checkpoint 节点 onFail=abort、ref=push-progress；节点 id 全�
   assert.ok(n.prompt.includes('{{inputs.cr_id}}'), 'prompt 引用 cr_id');
   const ids = nodes.map((n) => n.id);
   assert.equal(new Set(ids).size, ids.length, '节点 id 全局唯一');
-  assert.equal(ids.length, 17, '既有 15 节点 + CR-2026-043 新增 2 个 freshness gate');
+  assert.equal(ids.length, 16, 'CR-2026-042 删除 reviewer 选择暂停 …0013 后为 16 节点');
 });
 
 test('AC-3: review-code reviewLoop.replayNodes 为 5 项，含 workspace-freshness(…0017) 重核（CR-2026-043）', () => {
@@ -64,9 +64,9 @@ test('CR-2026-043: 两个 workspace-freshness gate 位置/ref/onFail 正确', ()
   // 实施前 gate：approve-dev-start(…0005) 之后、implement-code(…0006) 之前
   assert.ok(idx('00000000-0000-0000-0015-000000000005') < idx('00000000-0000-0000-0015-000000000016'), '…016 在 approve-dev-start 后');
   assert.ok(idx('00000000-0000-0000-0015-000000000016') < idx('00000000-0000-0000-0015-000000000006'), '…016 在 implement-code 前');
-  // 评审前 gate：统一 checkpoint push-progress(…0008) 之后、选择评审 LLM human_approval(…0013) 之前
+  // 评审前 gate：统一 checkpoint push-progress(…0008) 之后、review-code(…0009) 之前（CR-2026-042 删除评审 LLM 选择 …0013）
   assert.ok(idx('00000000-0000-0000-0015-000000000008') < idx('00000000-0000-0000-0015-000000000017'), '…017 在统一 checkpoint 后');
-  assert.ok(idx('00000000-0000-0000-0015-000000000017') < idx('00000000-0000-0000-0015-000000000013'), '…017 在评审 LLM 选择前');
+  assert.ok(idx('00000000-0000-0000-0015-000000000017') < idx('00000000-0000-0000-0015-000000000009'), '…017 在 review-code 前');
   assert.ok(impl.prompt.includes('implement-start'));
   assert.ok(review.prompt.includes('review-start'));
 });

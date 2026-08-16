@@ -29,14 +29,6 @@
       "required": false,
       "default": false,
       "description": "勾选后 plan.md 与 tasks/ 完成后立即 push-progress 到 origin"
-    },
-    {
-      "key": "review_llm",
-      "label": "代码评审 LLM",
-      "type": "text",
-      "required": false,
-      "placeholder": "留空则在评审前暂停由人工选择",
-      "description": "指定执行 review-code 的模型/runner；留空时节点「选择代码评审 LLM」会暂停等待人工选择"
     }
   ],
   "nodes": [
@@ -204,24 +196,16 @@
       "kind": "skill",
       "label": "Workspace freshness（评审前）",
       "ref": "workspace-freshness",
-      "prompt": "执行 workspace-freshness gate：\n- cr_id: {{inputs.cr_id}}\n- gate: review-start\n\n调用一次只读新鲜度检查；仅当结果 syncable 时调用显式同步，然后按 route 分流：\n- route=continue：继续进入评审 LLM 选择节点；\n- route=replay：基线已前进，既有实现/测试/checkpoint 证据全部失效；按 review-code 节点的 reviewLoop.replayNodes 将 review_feedback（基线已前进，需重建实现/测试/checkpoint 证据）传回 implement-code 顺序重放；\n- route=manual：立即 abort 本 pipeline，输出逐仓 blockers 与人工处理指引，不盲目消耗 reviewLoop。\n\n在 node-17.md 输出 route、facts、blockers。",
+      "prompt": "执行 workspace-freshness gate：\n- cr_id: {{inputs.cr_id}}\n- gate: review-start\n\n调用一次只读新鲜度检查；仅当结果 syncable 时调用显式同步，然后按 route 分流：\n- route=continue：继续进入 review-code 节点；\n- route=replay：基线已前进，既有实现/测试/checkpoint 证据全部失效；按 review-code 节点的 reviewLoop.replayNodes 将 review_feedback（基线已前进，需重建实现/测试/checkpoint 证据）传回 implement-code 顺序重放；\n- route=manual：立即 abort 本 pipeline，输出逐仓 blockers 与人工处理指引，不盲目消耗 reviewLoop。\n\n在 node-17.md 输出 route、facts、blockers。",
       "onFail": "abort",
       "timeoutMinutes": 10
-    },
-    {
-      "id": "00000000-0000-0000-0015-000000000013",
-      "kind": "human_approval",
-      "label": "选择代码评审 LLM",
-      "approvalPrompt": "代码与测试证据已推送统一 checkpoint，即将进入代码评审。\n\n若触发参数 review_llm 已指定，请按该模型执行并快速确认；否则请在此暂停并询问用户选择评审 LLM：\n① 当前会话默认模型\n② 外部 CLI runner（按代码执行设置中可用 runner 列出选项）\n③ 其他指定模型\n\n记录用户选择后再勾选继续；驳回则中止本轮评审。",
-      "onFail": "abort",
-      "timeoutMinutes": 4320
     },
     {
       "id": "00000000-0000-0000-0015-000000000009",
       "kind": "skill",
       "label": "代码评审",
       "ref": "review-code",
-      "prompt": "执行评审前确认上一节点选定的评审 LLM（触发参数 {{inputs.review_llm}} 或人工审批环节的用户选择）；按该模型/runner 执行本评审，并在 .crctl/tmp/review-code.yml 的 dimensions 中记录 reviewer-model 留痕（自报），使评审证据可追溯由哪个模型产出。其余取证与落盘要求不变（评审判断写临时 payload，经 crctl review-record --stage code --bump-attempt 落盘 review-annotations/code.yml）。非阻塞发现一律进 suggestions，verdict 只判 CR 本身；语义：blockers=本 CR 内要处理的，suggestions=本 CR 内不处理的。\n在 CR workspace 的各参与代码仓 worktree 执行只读评审取证：读取真实 changed files、完整 diff、近 20 条相关提交，以及 change-requests/{{inputs.cr_id}}/test-report.md 机器区、traceability.yml#tests 与 test-evidence/cmd-NN.log（只读取证，不重新执行 lint/test/build；测试执行已收敛为 crctl test --plan，证据缺失/漂移/status 非 pass 一律 blocker）；仅有 diff stat、commit log 或口头测试结论不足以通过评审。对照 CR worktree 中 change-requests/{{inputs.cr_id}}/sdd.md 与 tasks/* 评审：\n① 代码↔TASK↔SDD 对齐度\n② 工程质量（lint / test / build 结果，取自 test-report.md 机器区与日志，不重跑）\n③ 关键路径可读性与安全性\n④ 测试覆盖与 test-report 可信度\n⑤ 前端质量（仅 diff 触及 *.tsx|*.vue|*.css|*.html 时触发，检查三项：a11y 对比度达 WCAG AA——破 AA 升 blocker；组件 loading/empty/error 状态完整覆盖；构建体积在预算内——后两项未达为 minor）\n\n评审判断写入 .crctl/tmp/review-code.yml（非受控临时路径），经 `crctl review-record --stage code --from .crctl/tmp/review-code.yml --bump-attempt` 落盘 review-annotations/code.yml（review-loop 记账由 --bump-attempt 级联）。在 node-9.md 输出 verdict、blockers（每条内含可执行修复说明）、repair-target、current-attempt 轮次、diff range、验证证据与建议。若 verdict=block、blockers 非空或 test-report.status 非 pass，pipeline 不得进入 human_approval；必须按 reviewLoop.replayNodes 将 review_feedback 传回 implement-code 自动修复，并重新执行 write-test-report、push-progress 与 review-code，直至 verdict=pass 且 blockers 为空且 test-report.status=pass，或达到 reviewLoop.maxAttempts 后停止。",
+      "prompt": "执行评审前由 runtime 决定 reviewer runner，并在 .crctl/tmp/review-code.yml 的 dimensions 中记录 reviewer-model 留痕（自报），使评审证据可追溯由哪个模型产出。其余取证与落盘要求不变（评审判断写临时 payload，经 crctl review-record --stage code --bump-attempt 落盘 review-annotations/code.yml）。非阻塞发现一律进 suggestions，verdict 只判 CR 本身；语义：blockers=本 CR 内要处理的，suggestions=本 CR 内不处理的。\n在 CR workspace 的各参与代码仓 worktree 执行只读评审取证：读取真实 changed files、完整 diff、近 20 条相关提交，以及 change-requests/{{inputs.cr_id}}/test-report.md 机器区、traceability.yml#tests 与 test-evidence/cmd-NN.log（只读取证，不重新执行 lint/test/build；测试执行已收敛为 crctl test --plan，证据缺失/漂移/status 非 pass 一律 blocker）；仅有 diff stat、commit log 或口头测试结论不足以通过评审。对照 CR worktree 中 change-requests/{{inputs.cr_id}}/sdd.md 与 tasks/* 评审：\n① 代码↔TASK↔SDD 对齐度\n② 工程质量（lint / test / build 结果，取自 test-report.md 机器区与日志，不重跑）\n③ 关键路径可读性与安全性\n④ 测试覆盖与 test-report 可信度\n⑤ 前端质量（仅 diff 触及 *.tsx|*.vue|*.css|*.html 时触发，检查三项：a11y 对比度达 WCAG AA——破 AA 升 blocker；组件 loading/empty/error 状态完整覆盖；构建体积在预算内——后两项未达为 minor）\n\n评审判断写入 .crctl/tmp/review-code.yml（非受控临时路径），经 `crctl review-record --stage code --from .crctl/tmp/review-code.yml --bump-attempt` 落盘 review-annotations/code.yml（review-loop 记账由 --bump-attempt 级联）。在 node-9.md 输出 verdict、blockers（每条内含可执行修复说明）、repair-target、current-attempt 轮次、diff range、验证证据与建议。若 verdict=block、blockers 非空或 test-report.status 非 pass，pipeline 不得进入 human_approval；必须按 reviewLoop.replayNodes 将 review_feedback 传回 implement-code 自动修复，并重新执行 write-test-report、push-progress 与 review-code，直至 verdict=pass 且 blockers 为空且 test-report.status=pass，或达到 reviewLoop.maxAttempts 后停止。",
       "reviewLoop": {
         "repairNodeId": "00000000-0000-0000-0015-000000000006",
         "repairRef": "implement-code",
