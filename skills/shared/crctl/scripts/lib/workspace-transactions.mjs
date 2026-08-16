@@ -1276,36 +1276,76 @@ export async function mergeCr(ctx, input) {
       return { cr, txId: journal.txId, phase: 'release-drift', changed: false, drift: { kind: v.kind, ...v.details }, recoverCommand };
     }
 
+    // CR-2026-044 FR-05：新事务全仓 publication preflight——远端 requirement source 精确等于本地 HEAD 才允许
+    // 首次 prepare；publication lag 错误携带 checkpoint recoverCommand，状态保持 code-approved。
+    // 既有 prepare/publish journal 的恢复不重跑 preflight（按已持久化 sourceSha 续跑，不采纳移动 ref）。
+    const checkpointRecoverCommand = `crctl checkpoint ${cr} --workspace ${JSON.stringify(ctx.installRoot)}`;
+    let publicationFacts = null;
+    if (!(payload.repos || []).length) {
+      publicationFacts = new Map();
+      for (const repo of ctx.repositories) {
+        assertGraph();
+        const snapRepo = snapshot.repositories.find((r) => r.repo === repo.id);
+        if (!snapRepo) throw new TxError('RELEASE_SUBJECT_DRIFT', `release-subjects 缺 ${repo.id} 仓声明`, { cr, repo: repo.id });
+        gitMust(repo.rootPath, ['fetch', 'origin']);
+        const localHead = gitMust(path.join(repo.worktreePath, cr), ['rev-parse', 'HEAD']);
+        const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
+        const src = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', sourceRef]);
+        if (src.status !== 0) {
+          throw new TxError('MERGE_SOURCE_MISSING', `${repo.id} 缺少远端 source ref ${sourceRef}（被评审分支未 checkpoint，先执行 recoverCommand 再重跑 merge）`, { repo: repo.id, ref: sourceRef, recoverCommand: checkpointRecoverCommand });
+        }
+        if (src.stdout !== localHead) {
+          throw new TxError('RELEASE_REMOTE_NOT_PUSHED', `${repo.id} 远端 ${sourceRef} 未同步本地 HEAD（publication lag，先执行 recoverCommand 再重跑 merge）`, { repo: repo.id, head: localHead, remote: src.stdout, recoverCommand: checkpointRecoverCommand });
+        }
+        publicationFacts.set(repo.id, { sourceSha: src.stdout, baseSha: gitMust(repo.rootPath, ['rev-parse', `refs/remotes/origin/${repo.trunk}`]) });
+      }
+    }
+
     // per-repo prepare（无 ref/worktree/账本副作用）
     for (const repo of ctx.repositories) {
       assertGraph();
-      const snapRepo = snapshot.repositories.find((r) => r.repo === repo.id);
-      if (!snapRepo) throw new TxError('RELEASE_SUBJECT_DRIFT', `release-subjects 缺 ${repo.id} 仓声明`, { cr, repo: repo.id });
-      gitMust(repo.rootPath, ['fetch', 'origin']);
-      const baseSha = gitMust(repo.rootPath, ['rev-parse', `refs/remotes/origin/${repo.trunk}`]);
-      const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
-      const src = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', sourceRef]);
-      if (src.status !== 0) throw new TxError('MERGE_SOURCE_MISSING', `${repo.id} 缺少远端 source ref ${sourceRef}（被评审分支未 push）`, { repo: repo.id, ref: sourceRef });
-      const sourceMatches = repo.id === ctx.knowledgeBaseRepoId
-        ? gitRun(repo.rootPath, ['merge-base', '--is-ancestor', repoReviewedSha(snapRepo), src.stdout]).status === 0
-        : src.stdout === repoReviewedSha(snapRepo);
-      if (!sourceMatches) {
-        throw new TxError('RELEASE_SUBJECT_DRIFT', `${repo.id} 远端 ${sourceRef} 与 approved source 不一致`, { repo: repo.id, expected: repoReviewedSha(snapRepo), actual: src.stdout });
-      }
       const prev = (payload.repos || []).find((r) => r.repo === repo.id);
       // 已发布/已确认的仓不再重做 prepare：candidate 与 baseSha 保持（发布后 base 不得漂移）
       if (prev && (prev.pushed || prev.confirmed)) continue;
-      if (prev && prev.baseSha === baseSha && prev.sourceSha === src.stdout && prev.mergeSha) continue;
+      let baseSha, sourceSha;
+      if (publicationFacts) {
+        // 新事务首次 prepare：消费 preflight 冻结事实，不做第二轮 fetch/source 读取
+        const fact = publicationFacts.get(repo.id);
+        baseSha = fact.baseSha;
+        sourceSha = fact.sourceSha;
+      } else {
+        // 既有 journal 恢复：按原合同重新 fetch；已 prepared 仓的 source 用 journal 冻结 SHA，
+        // 不重新采纳移动的 requirement ref（merge source 不取移动分支最新值）。
+        const snapRepo = snapshot.repositories.find((r) => r.repo === repo.id);
+        if (!snapRepo) throw new TxError('RELEASE_SUBJECT_DRIFT', `release-subjects 缺 ${repo.id} 仓声明`, { cr, repo: repo.id });
+        gitMust(repo.rootPath, ['fetch', 'origin']);
+        baseSha = gitMust(repo.rootPath, ['rev-parse', `refs/remotes/origin/${repo.trunk}`]);
+        if (prev) {
+          sourceSha = prev.sourceSha;
+        } else {
+          const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
+          const src = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', sourceRef]);
+          if (src.status !== 0) throw new TxError('MERGE_SOURCE_MISSING', `${repo.id} 缺少远端 source ref ${sourceRef}（被评审分支未 push）`, { repo: repo.id, ref: sourceRef });
+          const sourceMatches = repo.id === ctx.knowledgeBaseRepoId
+            ? gitRun(repo.rootPath, ['merge-base', '--is-ancestor', repoReviewedSha(snapRepo), src.stdout]).status === 0
+            : src.stdout === repoReviewedSha(snapRepo);
+          if (!sourceMatches) {
+            throw new TxError('RELEASE_SUBJECT_DRIFT', `${repo.id} 远端 ${sourceRef} 与 approved source 不一致`, { repo: repo.id, expected: repoReviewedSha(snapRepo), actual: src.stdout });
+          }
+          sourceSha = src.stdout;
+        }
+      }
+      if (prev && prev.baseSha === baseSha && prev.sourceSha === sourceSha && prev.mergeSha) continue;
       const prepared = prepareMergeTree({
-        repo, baseSha, sourceSha: src.stdout, cr,
+        repo, baseSha, sourceSha, cr,
         tmpRoot: path.join(ctx.installRoot, '.crctl', 'tmp'),
         knowledgeBase: repo.id === ctx.knowledgeBaseRepoId,
       });
       const tree = prepared.treeSha;
-      const msg = `merge ${cr}: ${repo.id}\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${baseSha}\nAI-First-Merge-Source: ${src.stdout}\n`;
-      const mergeSha = gitMust(repo.rootPath, ['commit-tree', tree, '-p', baseSha, '-p', src.stdout, '-F', '-'], { input: msg });
-      const rec = prev || { repo: repo.id, baseSha, sourceSha: src.stdout, mergeSha, pushed: false, confirmed: false };
-      Object.assign(rec, { baseSha, sourceSha: src.stdout, mergeSha });
+      const msg = `merge ${cr}: ${repo.id}\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${baseSha}\nAI-First-Merge-Source: ${sourceSha}\n`;
+      const mergeSha = gitMust(repo.rootPath, ['commit-tree', tree, '-p', baseSha, '-p', sourceSha, '-F', '-'], { input: msg });
+      const rec = prev || { repo: repo.id, baseSha, sourceSha, mergeSha, pushed: false, confirmed: false };
+      Object.assign(rec, { baseSha, sourceSha, mergeSha });
       if (!prev) payload.repos.push(rec);
       did = true;
       await save(`prepared-${repo.id}`);
@@ -1334,16 +1374,15 @@ export async function mergeCr(ctx, input) {
           throw new TxError('MERGE_REMOTE_HISTORY_REWRITTEN', `${repo.id} 远端 trunk 历史在事务中被重写，硬阻断（不猜测、不自动 force）`, { repo: repo.id, remoteSha, expectedBase: rec.baseSha });
         }
         if (cls === 'rebuild') {
-          const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
-          const src = gitMust(repo.rootPath, ['rev-parse', '--verify', sourceRef]);
+          // CR-2026-044：rebuild 使用 journal 已持久化的冻结 sourceSha，不重新采纳移动的 requirement ref
           const prepared = prepareMergeTree({
-            repo, baseSha: remoteSha, sourceSha: src, cr,
+            repo, baseSha: remoteSha, sourceSha: rec.sourceSha, cr,
             tmpRoot: path.join(ctx.installRoot, '.crctl', 'tmp'),
             knowledgeBase: repo.id === ctx.knowledgeBaseRepoId,
           });
-          const msg = `merge ${cr}: ${repo.id} (rebuild)\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${remoteSha}\nAI-First-Merge-Source: ${src}\n`;
+          const msg = `merge ${cr}: ${repo.id} (rebuild)\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${remoteSha}\nAI-First-Merge-Source: ${rec.sourceSha}\n`;
           rec.baseSha = remoteSha;
-          rec.mergeSha = gitMust(repo.rootPath, ['commit-tree', prepared.treeSha, '-p', remoteSha, '-p', src, '-F', '-'], { input: msg });
+          rec.mergeSha = gitMust(repo.rootPath, ['commit-tree', prepared.treeSha, '-p', remoteSha, '-p', rec.sourceSha, '-F', '-'], { input: msg });
           rec.pushed = false;
           did = true;
           await save(`rebuild-${repo.id}`);
