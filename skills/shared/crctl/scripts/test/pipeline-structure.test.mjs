@@ -145,14 +145,14 @@ test('CR-2026-044 AC-14: architecture-design 删除 auto_push_after_sdd，审批
   assert.equal(p.nodes.length, 5, '节点数保持 5');
 });
 
-test('CR-2026-044 AC-13: code-implementation 审批后 checkpoint abort、TASK checkpoint 仍可选、17 节点不变', () => {
+test('CR-2026-044 AC-13: code-implementation 审批后 checkpoint abort、TASK checkpoint 仍可选、16 节点不变（CR-2026-042 删除评审 LLM 节点后）', () => {
   const p = readPipeline('code-implementation.pipeline.json');
   const final = p.nodes.find((n) => /审批结果/.test(n.label || '') && n.ref === 'push-progress');
   assert.ok(final, '审批结果 checkpoint 节点存在');
   assert.equal(final.onFail, 'abort', '审批后 checkpoint 必须 abort');
   const taskCkpt = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_task/.test(n.prompt));
   assert.ok(taskCkpt && taskCkpt.onFail === 'skip', 'TASK checkpoint 仍可选');
-  assert.equal(p.nodes.length, 17, '节点数保持 17');
+  assert.equal(p.nodes.length, 16, 'CR-2026-042 移除评审 LLM 选择节点后为 16 节点');
 });
 
 test('CR-2026-044 AC-12: architecture/code 入口取得 authority path，并由 execution_context 原样传给后续节点', () => {

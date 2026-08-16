@@ -4348,6 +4348,8 @@ test('CR-2026-044 TASK-03: workspace 非 healthy（dirty/wrong-branch/missing/pa
     spawnSync('git', ['worktree', 'prune'], { cwd: ws });
     mkdirSync(wt, { recursive: true });
   }, 'path-unregistered');
+});
+
 // ── CR-2026-042 静态合同：Pipeline 16 节点 / CI 合并 / README / Skill 收敛 ──
 
 test('CR-2026-042 静态合同：code Pipeline 16 节点、无 review_llm、无 …0013、后继与 replayNodes', () => {
