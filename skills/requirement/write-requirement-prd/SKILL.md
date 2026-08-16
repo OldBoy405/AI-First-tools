@@ -1,6 +1,6 @@
 ---
 name: write-requirement-prd
-description: 在 requirement/CR-* worktree 内编写 PRD 需求文档，落盘到 change-requests/{CR-ID}/prd.md，遵循 engineering-docs PRD 规范。
+description: 在 requirement/CR-* worktree 内编写 PRD 需求文档，落盘到 change-requests/{CR-ID}/prd.md，遵循 PRD 规范。
 ---
 
 # Skill: write-requirement-prd
@@ -12,7 +12,7 @@ description: 在 requirement/CR-* worktree 内编写 PRD 需求文档，落盘�
 
 ## 用途
 
-在已创建的 CR worktree 内，根据用户提供的需求信息编写完整 PRD，落盘到 `change-requests/{CR-ID}/prd.md`。PRD 通过 `engineering-docs` skill 保证 frontmatter 合规。
+在已创建的 CR worktree 内，根据用户提供的需求信息编写完整 PRD，落盘到 `change-requests/{CR-ID}/prd.md`。
 
 > ⚠️ **路径约定**：PRD 写入 `change-requests/{CR-ID}/prd.md`，**不写入 specs/**（specs/ 在回写期才更新）。
 
@@ -41,7 +41,6 @@ description: 在 requirement/CR-* worktree 内编写 PRD 需求文档，落盘�
 - 读取 `change-requests/{cr_id}/cr.md` 获取 title / summary / target-version / source / owners.requirement
 - `summary` 中已确认的边界（注册阶段拍板或审批确认的范围/排除项）与当前上下文无冲突时优先原样采纳进 PRD 范围与 AC，不以换措辞方式重新定义已拍板事项
 - 若 `source` 指向规划报告路径，读取报告中对应功能的规划建议
-- 读取 `change-requests/_config.yml` 获取 PRD 模板约定
 - 若存在 `review_feedback`，读取上一轮 `review-annotations/requirement.yml` 中的 blockers 与 reviewer 摘要
 
 ### Step 3 — 生成 PRD
@@ -53,7 +52,7 @@ description: 在 requirement/CR-* worktree 内编写 PRD 需求文档，落盘�
 3. 对每条修复增加可核查证据，例如新增/修改的 FR、AC、NFR 或范围说明。
 4. 修订完成后重新提交，由下一轮 `review-requirement` 校验。
 
-PRD 结构遵循 engineering-docs 规范：
+PRD 结构：
 
 ```yaml
 ---
@@ -83,7 +82,7 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 
 落盘到当前 knowledge-base worktree（`.rayai-worktrees/knowledge-base/requirement/{cr_id}`）的 `change-requests/{cr_id}/prd.md`。
 
-Commit：`feat({cr_id}): draft PRD - {title}`
+落盘后重新读取 `prd.md`，按 Step 3 的明确合同校验 frontmatter 必填字段、七个章节和未替换占位符；任一项缺失立即停止，不进入后续评审。提交与发布由外层 checkpoint / `crctl` 流程负责，Skill 不输出手工 commit 指令。
 
 ### Step 5 — 更新 _backlog.yml
 

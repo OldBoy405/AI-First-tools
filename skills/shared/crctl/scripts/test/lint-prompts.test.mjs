@@ -351,3 +351,101 @@ for (const [name, dg] of Object.entries(BROKEN_DIR_GRAPHS)) {
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 }
+
+// ── CR-2026-042 TASK-03：R10~R13（废弃 interface、退役 Skill、状态机副本、backlog 推断）──
+
+test('R10：cr-init / crctl test 旧旗标 / review_llm → CONTRADICTS', () => {
+  const dir = makeFixture({
+    'skills/x/SKILL.md': '# 注册\n\n调用 cr-init 建档。\n\n# 测试\n\n执行 crctl test --cmd "x" 跑测试。\n\n# 评审\n\n若 inputs.review_llm 已指定则用之。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('R10') && r.stdout.includes('CONTRADICTS'), `应命中 R10: ${r.stdout}`);
+    assert.equal((r.stdout.match(/\[CONTRADICTS\] R10/g) || []).length, 3, `应命中 3 处 R10: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R10 不误报：crctl test --plan 与 crctl register 不报', () => {
+  const dir = makeFixture({
+    'skills/x/SKILL.md': '# 测试\n\n运行一次 crctl test --plan .crctl/tmp/test-plan.json。\n\n# 注册\n\n调用 crctl register 建档。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(!r.stdout.includes('R10'), `合法形态不报: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R11：已退役 Skill active 引用 → STALE-REF', () => {
+  const dir = makeFixture({
+    'agents/x.md': '# 路由\n\n调用 change-impact-analysis 分析影响；必要时 feedback-writeback。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('R11') && r.stdout.includes('STALE-REF'), `应命中 R11: ${r.stdout}`);
+    assert.equal((r.stdout.match(/\[STALE-REF\] R11/g) || []).length, 2, `应命中 2 处 R11: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R12：Agent/README 同段 3+ 具名状态 → CONTRADICTS；2 个状态不误报', () => {
+  const dir = makeFixture({
+    'agents/x.md': '# 流程\n\ntask-breakdown → tech-design-reviewed → merging。\n\n# 短链\n\ncode-approved 后进入 merging。\n',
+    'README.md': '# 总览\n\ntask-breakdown → tech-design-reviewed → merging。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('R12') && r.stdout.includes('CONTRADICTS'), `应命中 R12: ${r.stdout}`);
+    assert.equal((r.stdout.match(/\[CONTRADICTS\] R12/g) || []).length, 2, `agent 与 README 各命中 1 处: ${r.stdout}`);
+    assert.ok(!r.stdout.includes('code-approved 后进入'), '2 个状态不误报');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R12 不适用：Skill 同段 3+ 状态不报（只约束 Agent/README）', () => {
+  const dir = makeFixture({
+    'skills/x/SKILL.md': '# 前后置\n\ntask-breakdown → tech-design-reviewed → merging 是合法前后置状态。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(!r.stdout.includes('R12'), `Skill 不适用 R12: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R13：Agent 从 _backlog.yml 推断 status/状态 → CONTRADICTS；只读上下文不误报', () => {
+  const dir = makeFixture({
+    'agents/x.md': '# 流程\n\n从 change-requests/_backlog.yml 读取 status 决定下一步。\n\n# 中文\n\n从 _backlog.yml 读取状态判断。\n\n# 只读\n\n读取 change-requests/_backlog.yml 获取已有 CR 列表。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('R13') && r.stdout.includes('CONTRADICTS'), `应命中 R13: ${r.stdout}`);
+    assert.equal((r.stdout.match(/\[CONTRADICTS\] R13/g) || []).length, 2, `英文 status 与中文状态各命中 1 处: ${r.stdout}`);
+    assert.ok(!r.stdout.includes('获取已有 CR 列表'), '只读上下文不误报');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('R12/R13：LF 与 CRLF 输入结果一致', () => {
+  const body = '# 流程\n\ntask-breakdown → tech-design-reviewed → merging。\n\n从 change-requests/_backlog.yml 读取 status 决定下一步。\n';
+  const lfDir = makeFixture({ 'agents/x.md': body });
+  const crlfDir = makeFixture({});
+  try {
+    const p = path.join(crlfDir, 'agents', 'x.md');
+    mkdirSync(path.dirname(p), { recursive: true });
+    writeFileSync(p, body.replaceAll('\n', '\r\n'));
+    writeFileSync(path.join(crlfDir, 'dir-graph.yaml'), MINI_DIR_GRAPH.replaceAll('\n', '\r\n'));
+    const rl = runLint(['--mode', 'report', '--root', lfDir]);
+    const rc = runLint(['--mode', 'report', '--root', crlfDir]);
+    const count = (s, rule) => s.split('\n').filter((l) => l.includes(`[CONTRADICTS] ${rule}:`)).length;
+    assert.equal(count(rl.stdout, 'R12'), 1, `LF R12: ${rl.stdout}`);
+    assert.equal(count(rc.stdout, 'R12'), 1, `CRLF R12: ${rc.stdout}`);
+    assert.equal(count(rl.stdout, 'R13'), 1, `LF R13: ${rl.stdout}`);
+    assert.equal(count(rc.stdout, 'R13'), 1, `CRLF R13: ${rc.stdout}`);
+  } finally { rmSync(lfDir, { recursive: true, force: true }); rmSync(crlfDir, { recursive: true, force: true }); }
+});
+
+test('R13 豁免：<!-- lint-prompts:ignore --> ±1 行内豁免', () => {
+  const dir = makeFixture({
+    'agents/x.md': '# 流程\n<!-- lint-prompts:ignore -->\n历史原因：从 change-requests/_backlog.yml 读取 status 的旧说明。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(!r.stdout.includes('R13'), `ignore 应豁免 R13: ${r.stdout}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

@@ -142,7 +142,7 @@ Agent：收到，我会重点分析 AI 相关特性的现状...
 - **未经用户明确确认，不得写入任何文件**（包括草稿、中间产物）
 - **不得修改** `specs/*/PRD.md` 或 `specs/*/SDD.md`（属 CR/writeback 管控保护范围，变更必须通过新 CR 流程）
 - **不得写入** `change-requests/`（仅只读查询）
-- **不得手工编辑** `specs/_index.yml`、`specs/_history.yml` 或 `change-requests/_backlog.yml`
+- **不得绕过 `crctl` 手工编辑受控账本**（如 `_backlog.yml`/`_history.yml`/`_index.yml`，写入一律经 `crctl` 子命令）
 - **不得编造**产品业务细节，所有内容必须来源于产品快照或用户输入
 - **不得操作** `docs/references/`（只读参考资料）
 - **不得操作** `_archived/`（历史归档只读）

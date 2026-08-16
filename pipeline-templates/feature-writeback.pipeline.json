@@ -37,7 +37,7 @@
       "kind": "skill",
       "label": "合并 CR workspace 全仓同名分支",
       "ref": "merge-feature-branch",
-      "prompt": "执行 merge-feature-branch：\n- cr_id: {{inputs.cr_id}}\n- workspace: knowledge-base 主 checkout\n\n动作：\n1. 校验 change-requests/{{inputs.cr_id}}/cr.md 当前 status=code-approved，否则 abort\n2. 一次调用深原语：`crctl merge {{inputs.cr_id}} --workspace {knowledge-base 主 checkout}`——prepare（commit-tree 无副作用）→ 逐仓 lease publish → 全部 confirmed 后 detached Transaction Workspace 单 finalize commit（status=merging + merge-commits.yml + merge-verification.md）→ lease push\n3. 只透传深原语返回的 operational_workspace 到后续节点；不写任何 Git 命令序列、不手写 merge-commits 账本\n4. 结果分类：exit 0 phase=complete → 记录 operational_workspace；MERGE_PREPARE_CONFLICT → 解决后重跑；phase=release-drift（kind=code/task）→ 深原语已回退 code-approved→developing，回到开发期；APPROVED_ARTIFACT_DRIFT（prd/sdd）→ 走需求/设计修订链路；MERGE_REMOTE_HISTORY_REWRITTEN → 人工介入；中间态非零 → 重跑同命令续跑\n\n在 node-1.md 输出：operational_workspace、merge 事务 txId、phase。",
+      "prompt": "执行 merge-feature-branch：\n- cr_id: {{inputs.cr_id}}\n- workspace: knowledge-base 主 checkout\n\n动作：\n1. 校验 change-requests/{{inputs.cr_id}}/cr.md 当前 status=code-approved，否则 abort\n2. 调用公开的 merge-feature-branch Skill，消费返回的 operational_workspace 与结构化结果；冲突、漂移和中间态按 Skill 错误语义处理\n\n在 node-1.md 输出：operational_workspace、merge 事务 txId、phase。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },
@@ -46,7 +46,7 @@
       "kind": "skill",
       "label": "回写 PRD / SDD 到 specs/",
       "ref": "writeback-prd-sdd",
-      "prompt": "执行 writeback-prd-sdd：传递 cr_id={{inputs.cr_id}}、spec_id={{inputs.spec_id}}、target_version={{inputs.target_version}}。Skill 只调用一次 `crctl writeback-apply {{inputs.cr_id}} --stage baseline --spec-id {{inputs.spec_id}} --target-version {{inputs.target_version}} --workspace {knowledge-base installation workspace}`。crctl 内部固定 generator/candidate，完成 journal 前 preflight，并把 baseline 与 merging→writing-back 状态放入同一 write-set/commit/push；禁止 Pipeline 传内部路径、另跑 generator、独立 advance 或展开 Git/journal 算法。WRITEBACK_REMOTE_STALE 同一业务命令重跑；history rewrite 硬阻断。在 node-2.md 输出 txId、commit、status、files、warnings。",
+      "prompt": "执行公开的 writeback-prd-sdd Skill：传递 cr_id、spec_id、target_version，消费结构化结果并在 node-2.md 输出结果摘要。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },
@@ -55,7 +55,7 @@
       "kind": "skill",
       "label": "回写 TASK 到 delivery/",
       "ref": "writeback-tasks",
-      "prompt": "执行 writeback-tasks：传递 cr_id={{inputs.cr_id}}、spec_id={{inputs.spec_id}}、target_version={{inputs.target_version}}。Skill 只调用一次 `crctl writeback-apply {{inputs.cr_id}} --stage tasks --spec-id {{inputs.spec_id}} --target-version {{inputs.target_version}} --workspace {knowledge-base installation workspace}`；固定 generator/candidate 和 Git 事务由 crctl 内部拥有。禁止 Pipeline 传内部路径或展开算法。输出 txId、commit、files、warnings。",
+      "prompt": "执行公开的 writeback-tasks Skill：传递 cr_id、spec_id、target_version，消费结构化结果并在 node-3.md 输出结果摘要。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -64,7 +64,7 @@
       "kind": "skill",
       "label": "回写追溯链",
       "ref": "writeback-traceability",
-      "prompt": "执行 writeback-traceability：按证据源在 operational workspace 起草 milestone-file（merge-commits 由固定 generator 从 change-requests/{{inputs.cr_id}}/merge-commits.yml 注入，不手工誊抄），然后 Skill 只调用一次 `crctl writeback-apply {{inputs.cr_id}} --stage traceability --spec-id {{inputs.spec_id}} --target-version {{inputs.target_version}} --milestone-file {workspace-relative-path} --workspace {knowledge-base installation workspace}`。禁止传 candidate/generator/manifest 路径或展开 Git 事务。输出 txId、commit、files、warnings 与未对齐项。",
+      "prompt": "执行公开的 writeback-traceability Skill：传递 cr_id、spec_id、target_version 与 operational-workspace-relative `milestone_file`，消费结构化结果并在 node-4.md 输出结果摘要。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -73,7 +73,7 @@
       "kind": "skill",
       "label": "归档 CR",
       "ref": "cr-archive",
-      "prompt": "执行 cr-archive：\n- cr_id: {{inputs.cr_id}}, spec_id: {{inputs.spec_id}}\n\n动作：\n1. 一次调用深原语：`crctl archive {{inputs.cr_id}} --spec-id {{inputs.spec_id}} --workspace {knowledge-base 主 checkout}`——四账本（cr.md/_backlog/_history/_index）同批 recoverable write-set → archive commit + trailer → lease push → origin confirmed 后 cleanup（txws/CR worktree/本地分支，clean 才删）\n2. 结果分类：exit 0 phase=complete → 归档完成；phase=cleanup-pending（status=archived）→ 清理未完成，重跑同命令只续清理；ARCHIVE_* 错误 → 按信息处理\n3. 模型不写 cleanup-report、不手写账本、不输出手工 git 指令\n\n在 node-5.md 输出归档汇总：spec_id、txId、phase、preservedRefs（若有）。",
+      "prompt": "执行 cr-archive：\n- cr_id: {{inputs.cr_id}}, spec_id: {{inputs.spec_id}}\n\n动作：\n1. 调用公开的 cr-archive Skill，传递 cr_id、spec_id 并消费 `complete` / `cleanup-pending` / 结构化错误结果。\n\n在 node-5.md 输出归档结果摘要。",
       "onFail": "abort",
       "timeoutMinutes": 10
     }
