@@ -4213,3 +4213,33 @@ test('TASK-06 ⑤: release-drift 单一回退转换 code-approved -> developing 
 
 
 
+
+/* ── CR-2026-044 TASK-01：失败向量冻结红测试（目标行为；由 TASK-02/03 转绿） ── */
+
+test('CR-2026-044 TASK-01 ①: local valid + remote requirement ref 滞后 -> approve-code 仍应通过（红测试）', async () => {
+  const { ws, privateKey } = makeCodeStageWorkspace();
+  try {
+    runCodeReviewAndAdvance(ws);
+    const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+    // 本地事实不变，仅伪造 remote-tracking requirement ref 为陈旧事实（模拟 publication lag）
+    spawnSync('git', ['commit', '-q', '--allow-empty', '-m', 'forged remote'], { cwd: wt });
+    const forgedSha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: wt, encoding: 'utf8' }).stdout.trim();
+    spawnSync('git', ['reset', '-q', '--hard', 'HEAD~1'], { cwd: wt });
+    spawnSync('git', ['update-ref', 'refs/remotes/origin/requirement/CR-D1', forgedSha], { cwd: ws });
+    const gp = makeCodeGrant(ws, privateKey);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 0, 'publication lag 不得阻断本地审批: ' + r.rawStderr);
+    assert.equal(r.stdout.to, 'code-approved');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-044 TASK-01 ②: TTY approve 接受 trim 后大小写不敏感的 y|yes（红测试）', () => {
+  for (const input of ['y\n', 'Y\n', 'YES\n', 'YeS\n', '  yes  \n']) {
+    const { ws } = makeCodeStageWorkspace();
+    try {
+      runCodeReviewAndAdvance(ws);
+      const r = runCrctlInTty(['approve', 'CR-D1', '--stage', 'code', '--workspace', ws], input);
+      assert.equal(r.status, 0, `输入 ${JSON.stringify(input)} 应批准: ${r.rawStderr}`);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+});

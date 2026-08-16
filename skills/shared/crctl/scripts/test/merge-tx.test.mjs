@@ -272,3 +272,35 @@ test('TASK-07 AC-1：PRD 漂移零 publish → APPROVED_ARTIFACT_DRIFT 硬阻断
     assert.ok(!log.includes('merge ' + cr + ':'), '零远端副作用');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
+
+test('CR-2026-044 TASK-01 ③: merge publication preflight — 远端 source 缺失/滞后在首次 prepare 前阻断且 recoverCommand 指向 checkpoint（红测试）', () => {
+  // A) 任一仓远端 source 缺失
+  {
+    const { base, kb, others, cr } = makeCodeApprovedFixture();
+    try {
+      git(path.join(base, 'origin-tools.git'), ['update-ref', '-d', `refs/heads/requirement/${cr}`]);
+      git(others.tools, ['update-ref', '-d', `refs/remotes/origin/requirement/${cr}`]);
+      const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
+      assert.notEqual(r.status, 0);
+      assert.equal(r.errJson.error.code, 'MERGE_SOURCE_MISSING');
+      assert.ok(String(r.errJson.error.recoverCommand || '').includes('checkpoint'), 'publication lag 的 recoverCommand 必须指向 checkpoint');
+      const st = runCrctl(['merge', 'status', cr, '--workspace', kb], { cwd: kb });
+      assert.equal(st.json.repos.length, 0, '首次 prepare 前必须零 candidate');
+      assert.ok(fs.readFileSync(path.join(kb, 'change-requests', cr, 'cr.md'), 'utf8').includes('status: code-approved'), 'publication lag 不得回退状态');
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  }
+  // B) 任一仓远端 source 滞后本地 HEAD
+  {
+    const { base, kb, others, cr } = makeCodeApprovedFixture();
+    try {
+      const oldSha = git(others.tools, ['rev-parse', 'master']);
+      git(path.join(base, 'origin-tools.git'), ['update-ref', `refs/heads/requirement/${cr}`, oldSha]);
+      const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
+      assert.notEqual(r.status, 0);
+      assert.equal(r.errJson.error.code, 'RELEASE_REMOTE_NOT_PUSHED');
+      assert.ok(String(r.errJson.error.recoverCommand || '').includes('checkpoint'), 'publication lag 的 recoverCommand 必须指向 checkpoint');
+      const st = runCrctl(['merge', 'status', cr, '--workspace', kb], { cwd: kb });
+      assert.equal(st.json.repos.length, 0, '首次 prepare 前必须零 candidate');
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  }
+});
