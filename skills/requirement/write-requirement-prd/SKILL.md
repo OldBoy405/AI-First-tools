@@ -82,7 +82,7 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 
 落盘到当前 knowledge-base worktree（`.rayai-worktrees/knowledge-base/requirement/{cr_id}`）的 `change-requests/{cr_id}/prd.md`。
 
-运行 `crctl validate change-requests/{cr_id}/prd.md --workspace <worktree>` 校验 PRD 结构；校验失败立即停止，不进入后续评审。提交与发布由外层 checkpoint / `crctl` 流程负责，Skill 不输出手工 commit 指令。
+落盘后重新读取 `prd.md`，按 Step 3 的明确合同校验 frontmatter 必填字段、七个章节和未替换占位符；任一项缺失立即停止，不进入后续评审。提交与发布由外层 checkpoint / `crctl` 流程负责，Skill 不输出手工 commit 指令。
 
 ### Step 5 — 更新 _backlog.yml
 

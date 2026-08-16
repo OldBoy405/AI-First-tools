@@ -4274,6 +4274,8 @@ test('CR-2026-042 静态合同：已知 Skill 越界文本零命中', () => {
   for (const banned of ['engineering-docs', 'MCP', 'owClient', '_config.yml', 'validate-doc']) {
     assert.equal(prd.includes(banned), false, `write-requirement-prd 不应含 ${banned}`);
   }
+  assert.equal(/crctl validate|Commit：/.test(prd), false, 'write-requirement-prd 不应调用不支持 PRD 的 validate 或输出手工 commit');
+  assert.match(prd, /重新读取 `prd\.md`.*frontmatter 必填字段、七个章节和未替换占位符/, 'write-requirement-prd 保留等价文档校验');
   const tasks = readFileSync(path.join(PACKAGE_ROOT, 'skills', 'develop', 'write-dev-tasks', 'SKILL.md'), 'utf8');
   assert.equal(/crctl git commit/.test(tasks), false, 'write-dev-tasks 不应含手工 commit 配方');
   const reg = readFileSync(path.join(PACKAGE_ROOT, 'skills', 'requirement', 'requirement-register', 'SKILL.md'), 'utf8');
