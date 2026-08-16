@@ -2859,13 +2859,14 @@ export async function archiveCr(ctx, input) {
 /* ────────────────────────── TASK-11：upgrade-check（临时只读预检）──────────────────────────
  * 从 origin 权威事实分类新协议激活风险（SDD §4.6）：fetch 后只读 origin trunk 的 CR 状态与
  * 本机 merge journal（已发布事实），不创建 workspace、不修改审批、不合成 snapshot、零写入。
- * 分类：developing 及之前阶段 = safe；旧 code-approved 零 publish = requiresReapproval；
+ * 分类（CR-2026-044 FR-11）：developing 及之前阶段与零 publish 的 code-approved = safe；
+ *       code-reviewing = requiresReapproval（重跑 review-code）；
  *       merging/writing-back/部分 publish/authority unknown = blocksUpgrade（保守）。
  * 本命令为临时工具：全部安装完成协议切换且无旧事务后，随 dispatch/help/tests 整体删除
  * （CUSTOM-TODO-009 删除条件）。
  */
 
-const UPGRADE_SAFE_STATUSES = new Set(['drafting', 'requirement-reviewing', 'requirement-approved', 'tech-designing', 'tech-design-review-pending', 'tech-design-reviewed', 'task-breakdown', 'developing', 'code-reviewing']);
+const UPGRADE_SAFE_STATUSES = new Set(['drafting', 'requirement-reviewing', 'requirement-approved', 'tech-designing', 'tech-design-review-pending', 'tech-design-reviewed', 'task-breakdown', 'developing']);
 const UPGRADE_TERMINAL = new Set(['archived', 'rejected', 'withdrawn']);
 const UPGRADE_BLOCKER_STATUSES = new Set(['merging', 'writing-back']);
 
@@ -2899,6 +2900,11 @@ export function checkUpgrade(ctx) {
       blocksUpgrade.push({ cr, status, why: 'in-flight-writeback', detail: 'status=' + status + '（回写期在途，authority=Transaction Workspace，切协议前须归档）' });
       continue;
     }
+    if (status === 'code-reviewing') {
+      // CR-2026-044 FR-11/AC-21：本地化 verifier 激活后须重跑 review-code 重建本地 snapshot
+      requiresReapproval.push({ cr, status, why: 'code-reviewing-rereview', detail: '重跑 review-code 重建本地 release snapshot 后再审批' });
+      continue;
+    }
     if (status === 'code-approved') {
       // 旧 code-approved：查 merge journal 是否已有发布事实
       const ms = mergeStatus(ctx, cr);
@@ -2906,7 +2912,8 @@ export function checkUpgrade(ctx) {
       if (published) {
         blocksUpgrade.push({ cr, status, why: 'partial-publish', detail: `merge journal phase=${ms.phase} 已有 publish，切协议前须完成或回退`, txId: ms.txId });
       } else {
-        requiresReapproval.push({ cr, status, why: 'legacy-code-approved', detail: '旧协议 code-approved 零 publish：切协议后须重核 release-subjects 并重新审批' });
+        // CR-2026-044 FR-11/AC-22：零 publish 且本地 snapshot 一致时无需重审批，checkpoint 后 merge
+        safe.push({ cr, status, note: '旧协议 code-approved 零 publish：本地 snapshot 一致时 checkpoint 后 merge，无需重新审批' });
       }
       continue;
     }

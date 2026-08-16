@@ -56,7 +56,8 @@ crctl merge {cr_id} --workspace {knowledge-base 主 checkout}
 |------|------|
 | exit 0，`phase=complete`，返回 `operational_workspace` | 合并完成。后续 writeback 节点以返回的 `operational_workspace`（detached Transaction Workspace）为唯一编辑位置 |
 | `MERGE_PREPARE_CONFLICT` | 某仓冲突，零远端副作用。按提示解决该仓分支冲突后重跑本 Skill |
-| `phase=release-drift`（kind=code/task） | 深原语已自动走唯一回退转换 `code-approved -> developing`（输出含 `advanced`）。回到开发期修复后重新走评审/审批 |
+| `phase=release-drift`（kind=code/task） | 本地已审批 source/TASK 真实漂移且零 publish：深原语已自动走唯一回退转换 `code-approved -> developing`（输出含 `advanced`）。回到开发期修复后重新走评审/审批 |
+| `MERGE_SOURCE_MISSING` / `RELEASE_REMOTE_NOT_PUSHED`（CR-2026-044） | publication lag：本地证据有效但远端 requirement ref 缺失或滞后。状态保持 `code-approved`，不回退；按 extra.recoverCommand 先 checkpoint 再重跑 merge |
 | `APPROVED_ARTIFACT_DRIFT`（kind=prd/sdd） | 已审批需求/设计文档漂移，硬阻断。走需求/设计修订链路，不得手工绕过 |
 | `MERGE_REMOTE_HISTORY_REWRITTEN` | 远端 trunk 历史被改写，硬阻断。人工介入核实，不得自动 force |
 | 非零且 `phase` 为中间态（publish 部分完成等） | 事务已持久化：直接**重跑同一条命令**续跑（幂等恢复），禁止手工清理或补偿 |

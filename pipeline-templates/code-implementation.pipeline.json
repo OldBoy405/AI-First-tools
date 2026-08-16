@@ -45,7 +45,7 @@
       "kind": "skill",
       "label": "编写开发计划",
       "ref": "write-dev-plan",
-      "prompt": "校验 CR {{inputs.cr_id}} 当前 status=tech-design-reviewed。基于 CR worktree 中 change-requests/{{inputs.cr_id}}/sdd.md 编写 plan.md：\n- 交付里程碑与排期\n- 任务依赖图\n- 风险与回滚策略\n- 验收与发布策略\n- target_version: {{inputs.target_version}}\n\n在 node-1.md 输出计划关键里程碑摘要、估算总工时和实际写入路径。",
+      "prompt": "先执行一次 `crctl workspace inspect {{inputs.cr_id}}`（CR-2026-044 FR-06）：要求全部 resources[].classification=healthy，再消费返回的 operationalWorkspace 作为本 pipeline 的业务权威路径并原样传给后续节点；任一资源非 healthy 或 operationalWorkspace 为空时中止并指向 /resume，不自动补齐、不从目录命名猜路径。\n\n校验 CR {{inputs.cr_id}} 当前 status=tech-design-reviewed。基于 operational_workspace 中 change-requests/{{inputs.cr_id}}/sdd.md 编写 plan.md：\n- 交付里程碑与排期\n- 任务依赖图\n- 风险与回滚策略\n- 验收与发布策略\n- target_version: {{inputs.target_version}}\n\n在 node-1.md 输出计划关键里程碑摘要、估算总工时和实际写入路径。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -308,8 +308,8 @@
       "kind": "skill",
       "label": "推送代码审批结果到远端",
       "ref": "push-progress",
-      "prompt": "执行 push-progress：cr_id={{inputs.cr_id}}，message=代码审批结果。\n\n在 node-12.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
-      "onFail": "skip",
+      "prompt": "执行 push-progress：cr_id={{inputs.cr_id}}，message=代码审批结果。\n\n本节点是代码阶段终点完成条件（CR-2026-044 FR-07），不可跳过；失败时保持 code-approved，只重跑同一 checkpoint，不重新审批。\n\n在 node-12.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
+      "onFail": "abort",
       "timeoutMinutes": 10
     }
   ],

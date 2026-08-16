@@ -47,6 +47,6 @@ description: 需求审批通过后的收尾动作：在 approval.yml 记录审�
 | status 不是 `requirement-reviewing` | crctl approve 拒绝（CR_STATUS_CURRENT_MISMATCH），abort |
 | 评审证据未通过（review-annotations/requirement.yml verdict 非 pass 或 blockers 非空） | crctl approve 拒绝（GATE_BLOCKED），先修复并重跑 review-requirement |
 | 非 TTY 调用 | crctl approve 拒绝（APPROVAL_REQUIRES_HUMAN），必须人工在终端执行 |
-| 审批人回答非 yes（TTY） | crctl 自动执行状态机回退转换（CR 回退到 drafting，错误码 APPROVAL_DECLINED_ROLLED_BACK），请重新执行 write-requirement-prd |
+| 审批人回答非 y/yes（TTY，CR-2026-044 起 trim 后大小写不敏感接受 `y\|yes`） | crctl 自动执行状态机回退转换（CR 回退到 drafting，错误码 APPROVAL_DECLINED_ROLLED_BACK），请重新执行 write-requirement-prd |
 | grant decision=reject | crctl 验签后执行权威回退，返回 `APPROVAL_DECLINED_ROLLED_BACK`（业务结果，中止正向流程）；伪造签名/跨 CR/证据漂移/错误状态均为技术错误（SIGNATURE_INVALID/GRANT_MISMATCH/EVIDENCE_DRIFT/GRANT_STATE_MISMATCH），零写入并中止 |
 | 紧邻结果态重放（approve 已到 requirement-approved 且字段一致 / reject 已回退到 drafting） | crctl 返回 `changed=false` 幂等成功，不重复 audit/commit/outbox |

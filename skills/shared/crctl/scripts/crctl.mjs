@@ -2830,6 +2830,16 @@ async function cmdWorkspace(ws, positional, flags) {
   }
   const mode = sub === 'inspect' ? 'inspect' : sub === 'ensure' ? 'resume' : flags.mode;
   const result = await runTxAsync(ensureWorkspace(ctx, { cr, mode }));
+  if (sub === 'inspect') {
+    // CR-2026-044 FR-06：暴露既有 authority resolver 的单一 operationalWorkspace 路径；
+    // missing/inconsistent 返回结构化错误信息（不猜路径），由调用方中止并指向 resume。
+    let operationalWorkspace = null, operationalWorkspaceError = null;
+    try { operationalWorkspace = resolveOperationalWorkspace(ctx, cr).path; } catch (e) {
+      if (e instanceof TxError) operationalWorkspaceError = { code: e.code, message: e.message };
+      else throw e;
+    }
+    return ok({ op: 'workspace-inspect', cr, mode, ...result, operationalWorkspace, operationalWorkspaceError });
+  }
   ok({ op: `workspace-${sub}`, cr, mode, ...result });
 }
 

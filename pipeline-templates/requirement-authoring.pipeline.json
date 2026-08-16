@@ -144,6 +144,15 @@
       "prompt": "读取 node-1.md 的 execution_context。在 human_approval 通过后执行 approve-requirement：\n- cr_id: {execution_context.cr_id}\n- approver: {execution_context.owners.requirement.id}\n\n经 `crctl approve --stage requirement`（仅人类交互式终端）完成：校验评审证据、写 approval.yml、级联 advance 到 requirement-approved。在 node-6.md 输出审批记录路径、当前 status、需求负责人和下一步 architecture pipeline 指令。",
       "onFail": "abort",
       "timeoutMinutes": 5
+    },
+    {
+      "id": "00000000-0000-0000-0011-000000000007",
+      "kind": "skill",
+      "label": "推送需求审批结果 checkpoint",
+      "ref": "push-progress",
+      "prompt": "读取 node-1.md 的 execution_context，执行 push-progress：cr_id={execution_context.cr_id}，message=需求审批结果。\n\n本节点是需求阶段终点完成条件（CR-2026-044 FR-07），不可跳过；失败时保持 requirement-approved，只重跑同一 checkpoint，不重新审批。\n\n在 node-7.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
+      "onFail": "abort",
+      "timeoutMinutes": 10
     }
   ],
   "createdAt": "2026-05-07T00:00:00+08:00",

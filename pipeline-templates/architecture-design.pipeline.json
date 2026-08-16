@@ -21,14 +21,6 @@
       "required": false,
       "placeholder": "可补充现有架构约束、已知风险、复用组件或边界要求",
       "description": "作为 write-tech-design 的额外技术上下文"
-    },
-    {
-      "key": "auto_push_after_sdd",
-      "label": "架构设计审批后自动推送远端",
-      "type": "boolean",
-      "required": false,
-      "default": false,
-      "description": "勾选后 SDD 评审和人工审批完成后立即 push-progress 到 origin"
     }
   ],
   "nodes": [
@@ -37,7 +29,7 @@
       "kind": "skill",
       "label": "编写架构设计",
       "ref": "write-tech-design",
-      "prompt": "<!-- lint-prompts:ignore --> 回修说明：只读上一轮评审记录并修订 sdd.md\n读取 CR worktree 中 change-requests/{{inputs.cr_id}}/prd.md，结合技术背景「{{inputs.tech_context}}」在同目录写 sdd.md：\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n- 架构概览（模块/边界/依赖）\n- 数据模型\n- 接口契约（API / IPC / 事件）\n- 关键算法与流程\n- 技术选型与替代方案\n- 每个 FR-* 映射到技术实现条目\n- 安全与性能考量\n\n状态要求：初次生成要求 CR status=requirement-approved；<!-- lint-prompts:ignore --> 回修说明：只读上一轮评审记录并修订\n若来自 reviewLoop 回修，允许 status=tech-designing，并只读 review_feedback 或上一轮评审记录（review-annotations/sdd.yml，经 crctl validate 校验）作为修复输入。回修时必须逐条消费 review_feedback.blockers（blocker 字符串内含可执行修复说明），修订同一 sdd.md，并在 node-1.md 输出 self_repair_attempt。要求：只写 CR worktree 中的 change-requests/{{inputs.cr_id}}/sdd.md，不写 specs/。在 node-1.md 输出 SDD 关键章节摘要、FR 覆盖率和实际写入路径。",
+      "prompt": "<!-- lint-prompts:ignore --> 回修说明：只读上一轮评审记录并修订 sdd.md\n先执行一次 `crctl workspace inspect {{inputs.cr_id}}`（CR-2026-044 FR-06）：要求全部 resources[].classification=healthy，再消费返回的 operationalWorkspace 作为本 pipeline 的业务权威路径并原样传给后续节点；任一资源非 healthy 或 operationalWorkspace 为空时中止并指向 /resume，不自动补齐、不从目录命名猜路径。\n\n读取 operational_workspace 中 change-requests/{{inputs.cr_id}}/prd.md，结合技术背景「{{inputs.tech_context}}」在同目录写 sdd.md：\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n- 架构概览（模块/边界/依赖）\n- 数据模型\n- 接口契约（API / IPC / 事件）\n- 关键算法与流程\n- 技术选型与替代方案\n- 每个 FR-* 映射到技术实现条目\n- 安全与性能考量\n\n状态要求：初次生成要求 CR status=requirement-approved；<!-- lint-prompts:ignore --> 回修说明：只读上一轮评审记录并修订\n若来自 reviewLoop 回修，允许 status=tech-designing，并只读 review_feedback 或上一轮评审记录（review-annotations/sdd.yml，经 crctl validate 校验）作为修复输入。回修时必须逐条消费 review_feedback.blockers（blocker 字符串内含可执行修复说明），修订同一 sdd.md，并在 node-1.md 输出 self_repair_attempt。要求：只写 CR worktree 中的 change-requests/{{inputs.cr_id}}/sdd.md，不写 specs/。在 node-1.md 输出 SDD 关键章节摘要、FR 覆盖率和实际写入路径。",
       "onFail": "abort",
       "timeoutMinutes": 25
     },
@@ -92,8 +84,8 @@
       "kind": "skill",
       "label": "推送架构设计到远端",
       "ref": "push-progress",
-      "prompt": "若 {{inputs.auto_push_after_sdd}}=false 则在 node-5.md 输出 SKIPPED 并 return。\n否则执行 push-progress：cr_id={{inputs.cr_id}}，message=架构设计已审批。\n\n在 node-5.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
-      "onFail": "skip",
+      "prompt": "执行 push-progress：cr_id={{inputs.cr_id}}，message=架构设计已审批。\n\n本节点是架构阶段终点完成条件（CR-2026-044 FR-07），不可跳过；失败时保持 tech-design-reviewed，只重跑同一 checkpoint，不重新审批。\n\n在 node-5.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
+      "onFail": "abort",
       "timeoutMinutes": 10
     }
   ],

@@ -12,7 +12,7 @@ description: code-implementation pipeline 的基线新鲜度 gate：只读检查
 
 ## 用途
 
-在实施开始与代码评审开始前，判断 CR worktree 相对 trunk 的基线新鲜度，并给出唯一路由决定。只读检查由 `crctl workspace freshness` 完成；仅当结果为可同步（behind-clean）时才调用 `crctl workspace sync` 显式同步。本 Skill 只做业务路由，不复制分类算法，不执行任何状态推进或账本编辑。
+在实施开始与代码评审开始前，判断 CR worktree 相对 trunk 的基线新鲜度，并给出唯一路由决定。本 Skill 职责收敛为“远端 trunk 新鲜度预检”（CR-2026-044 FR-08）：不参与本地业务证据门禁，fetch/sync 失败可中止当前 Pipeline 节点，但不改变 CR status、approval、review verdict 或 reviewLoop attempt。只读检查由 `crctl workspace freshness` 完成；仅当结果为可同步（behind-clean）时才调用 `crctl workspace sync` 显式同步。本 Skill 只做业务路由，不复制分类算法，不执行任何状态推进或账本编辑。
 
 ---
 

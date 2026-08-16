@@ -28,11 +28,11 @@ pipeline-templates:
     name: 需求编写
     scope: product-design
     trigger: requirement
-    nodes: 6
+    nodes: 7  # CR-2026-044：审批后新增强制终点 checkpoint
     status: active
     brief: >-
       需求编写期主流水线：CR 注册（含需求/开发/测试三角色 owner 与 assigned-at）+ active repo worktree 创建 → PRD 编写
-      → 远端 checkpoint（可选）→ 需求评审 → 人工审批 → approve-requirement 状态推进。
+      → PRD 草稿 checkpoint（可选）→ 需求评审 → 人工审批 → approve-requirement 状态推进 → 审批结果 checkpoint（强制）。
       产物落 change-requests/CR-*/prd.md，specs/ 保持不动。
     added: "2026-05-07"
 
@@ -44,8 +44,8 @@ pipeline-templates:
     nodes: 5
     status: active
     brief: >-
-      架构设计流水线：承接已审批需求 PRD，输出 sdd.md 技术设计文档
-      → 技术设计评审 → 人工审批 → approve-tech-design 状态推进 → 远端 checkpoint（可选）。
+      架构设计流水线：承接已审批需求 PRD（入口经 workspace inspect 取 authority path），输出 sdd.md 技术设计文档
+      → 技术设计评审 → 人工审批 → approve-tech-design 状态推进 → 架构 checkpoint（强制，CR-2026-044 起删除 auto_push_after_sdd）。
       前置 CR status=requirement-approved，审批后 CR status=tech-design-reviewed，可进入 /coding。
     added: "2026-05-18"
 
@@ -61,7 +61,7 @@ pipeline-templates:
       → 远端 checkpoint（可选）→ 人工确认进入 developing
       → 根据配置调用 code generation runtime/CLI 编码
       → 生成测试报告 → 统一 checkpoint → 选择代码评审 LLM（人工确认） → 代码评审 → 代码审批（人工）→ approve-code 状态推进
-      → 审批结果 checkpoint。
+      → 审批结果 checkpoint（强制，CR-2026-044）。入口经 workspace inspect 取 authority path。
       前置 CR status=tech-design-reviewed，审批后 CR status=code-approved，可进入 writeback。
     added: "2026-05-18"
 
