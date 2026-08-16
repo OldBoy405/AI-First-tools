@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 import { git, runCrctl, makeFixture } from './merge-fixture.mjs';
 import { TxError, resolveRepositories, classifyWorkspaceFreshness, isAncestorOrThrow, syncWorkspaceToTrunk } from '../lib/workspace-transactions.mjs';
@@ -320,6 +321,76 @@ test('TASK-02：ws-sync-after-repo 故障注入后续跑只使用 journal 原始
     assert.equal(headOf(f.kb, 'tools'), toolsTarget);
     assert.ok(r.repositories.every((x) => ['fast-forwarded', 'unchanged'].includes(x.action)));
   } finally { delete process.env.CRCTL_FAULT_POINT; fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('代码评审 B1：单 pending 仓 crash-after-ff 重跑保持 changed=true，并重核已完成仓（回归）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    const before = headOf(f.kb, 'tools');
+    advanceTrunk(f.base, 'tools', 'b1-single');
+    process.env.CRCTL_FAULT_POINT = 'ws-sync-after-repo';
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'FAULT_INJECTED');
+    delete process.env.CRCTL_FAULT_POINT;
+    const resumed = await sync(f.kb);
+    assert.equal(resumed.changed, true, '事务已执行 ff，重跑不得误报 changed=false');
+    assert.equal(resumed.repositories.find((r) => r.repo === 'tools').action, 'fast-forwarded');
+    // 新 fixture 验证 fast-forwarded 记录若被外部改写，恢复必须阻断而非 complete。
+    const g = makeFreshnessFixture();
+    try {
+      const gBefore = headOf(g.kb, 'tools');
+      advanceTrunk(g.base, 'tools', 'b1-drift');
+      process.env.CRCTL_FAULT_POINT = 'ws-sync-after-repo';
+      await assert.rejects(() => sync(g.kb), (e) => e.code === 'FAULT_INJECTED');
+      delete process.env.CRCTL_FAULT_POINT;
+      git(wtPath(g.kb, 'tools', CR), ['reset', '--hard', '-q', gBefore]); // 测试专用：模拟外部改写已 ff 仓
+      await assert.rejects(() => sync(g.kb), (e) => e.code === 'WORKSPACE_FRESHNESS_CHANGED');
+      assert.ok(journals(g.kb, CR).every((j) => j.phase !== 'complete'));
+    } finally { delete process.env.CRCTL_FAULT_POINT; fs.rmSync(g.base, { recursive: true, force: true }); }
+    assert.notEqual(before, headOf(f.kb, 'tools'));
+  } finally { delete process.env.CRCTL_FAULT_POINT; fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('代码评审 B2：intentDigest 绑定全仓；在途 unchanged 仓 HEAD 漂移硬阻断（回归）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceTrunk(f.base, 'tools', 'b2'); // tools pending，kb/multica unchanged
+    process.env.CRCTL_FAULT_POINT = 'ws-sync-after-preflight';
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'FAULT_INJECTED');
+    delete process.env.CRCTL_FAULT_POINT;
+    const j = journals(f.kb, CR)[0];
+    const repos = j.workspace.repos.map((r) => ({ repo: r.repo, beforeSha: r.beforeSha, targetTrunkSha: r.targetTrunkSha }));
+    const expected = crypto.createHash('sha256').update(JSON.stringify({ graphDigest: j.graphDigest, cr: CR, repos }), 'utf8').digest('hex');
+    assert.equal(j.inputDigest, expected, 'digest 覆盖全部 3 仓，不只 pending 仓');
+    advanceBranch(f.kb, 'kb', 'b2-drift'); // preflight 时 unchanged 的仓发生漂移
+    await assert.rejects(() => sync(f.kb), (e) => e.code === 'WORKSPACE_FRESHNESS_CHANGED');
+    assert.notEqual(headOf(f.kb, 'tools'), j.workspace.repos.find((r) => r.repo === 'tools').targetTrunkSha, '后续 pending 仓零写入');
+  } finally { delete process.env.CRCTL_FAULT_POINT; fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('代码评审 B3：ff-only 执行失败精确映射 WORKSPACE_SYNC_CONFLICT（回归）', async () => {
+  const f = makeFreshnessFixture();
+  try {
+    advanceTrunk(f.base, 'tools', 'b3');
+    const wt = wtPath(f.kb, 'tools', CR);
+    const rawIndex = git(wt, ['rev-parse', '--git-path', 'index']);
+    const indexPath = path.isAbsolute(rawIndex) ? rawIndex : path.resolve(wt, rawIndex);
+    const lockPath = `${indexPath}.lock`;
+    fs.writeFileSync(lockPath, 'force merge index lock failure\n');
+    try {
+      await assert.rejects(() => sync(f.kb), (e) => e.code === 'WORKSPACE_SYNC_CONFLICT' && e.extra.repo === 'tools');
+    } finally { fs.rmSync(lockPath, { force: true }); }
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+});
+
+test('代码评审 B4：status --porcelain 技术失败不得被误判 clean/fresh（回归）', () => {
+  const f = makeFreshnessFixture();
+  try {
+    const wt = wtPath(f.kb, 'kb', CR);
+    const rawIndex = git(wt, ['rev-parse', '--git-path', 'index']);
+    const indexPath = path.isAbsolute(rawIndex) ? rawIndex : path.resolve(wt, rawIndex);
+    fs.writeFileSync(indexPath, 'corrupt index\n');
+    assert.throws(() => classify(f.kb), (e) => e instanceof TxError && e.code === 'TX_GIT_FAILED');
+  } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
 });
 
 test('TASK-02：latest complete 后 trunk 再前进 → 新事务（createAfterComplete），旧 journal 保留（AC-2）', async () => {

@@ -769,8 +769,8 @@ export function classifyWorkspaceFreshness(ctx, cr) {
       continue;
     }
     fact.headSha = gitMust(info.worktreePath, ['rev-parse', 'HEAD']);
-    const st = gitRun(info.worktreePath, ['status', '--porcelain']);
-    if (st.stdout !== '') {
+    const status = gitMust(info.worktreePath, ['status', '--porcelain']);
+    if (status !== '') {
       fact.dirty = true;
       fact.reason = 'dirty-during-check';
       blocked = true;
@@ -808,27 +808,40 @@ export function classifyWorkspaceFreshness(ctx, cr) {
  * 全 fresh → no-op 零 journal；阻断 → 零写入抛错零 journal；syncable → intent 绑定 journal，
  * 在途重跑只恢复原 intent（不重算 digest），多仓只向前，不 reset/revert/删 journal。 */
 
-/** 逐仓重核 + 唯一写操作；任一漂移硬失败且停止后续仓。成功时原位更新 rec（afterSha/action）。 */
-function syncOneRepo(ctx, cr, rec) {
+/** 逐仓重核：基础分类、status、HEAD 与 fetch 后 trunk 都必须仍等于记录 intent。 */
+function recheckRecordedRepo(ctx, cr, rec) {
   const repo = getRepository(ctx, rec.repo);
-  const wt = path.join(repo.worktreePath, cr);
   const info = classifyRepoWorkspace(ctx, repo, cr);
   if (info.classification !== 'healthy') {
     throw new TxError('WORKSPACE_FRESHNESS_CHANGED', `${rec.repo}: 重核时 workspace 分类=${info.classification}，与记录 intent 漂移，拒绝写入`, { repo: rec.repo, classification: info.classification });
   }
-  if (gitRun(wt, ['status', '--porcelain']).stdout !== '') {
+  const status = gitMust(info.worktreePath, ['status', '--porcelain']);
+  if (status !== '') {
     throw new TxError('WORKSPACE_FRESHNESS_CHANGED', `${rec.repo}: 重核时 worktree 非 clean，拒绝写入`, { repo: rec.repo });
   }
-  const head = gitMust(wt, ['rev-parse', 'HEAD']);
-  if (head !== rec.beforeSha) {
-    throw new TxError('WORKSPACE_FRESHNESS_CHANGED', `${rec.repo}: HEAD 已偏离 preflight 记录（记录=${rec.beforeSha} 当前=${head}）`, { repo: rec.repo, beforeSha: rec.beforeSha, head });
-  }
+  const head = gitMust(info.worktreePath, ['rev-parse', 'HEAD']);
   gitMust(repo.rootPath, ['fetch', 'origin']);
   const trunkNow = gitMust(repo.rootPath, ['rev-parse', `refs/remotes/origin/${repo.trunk}`]);
   if (trunkNow !== rec.targetTrunkSha) {
     throw new TxError('WORKSPACE_FRESHNESS_CHANGED', `${rec.repo}: trunk 在 preflight 后前进/变化（记录=${rec.targetTrunkSha} 当前=${trunkNow}）`, { repo: rec.repo, targetTrunkSha: rec.targetTrunkSha, trunkNow });
   }
-  gitMust(wt, ['merge', '--ff-only', rec.targetTrunkSha]);
+  return { wt: info.worktreePath, head };
+}
+
+/** 逐仓重核 + 唯一写操作；任一漂移硬失败且停止后续仓。成功时原位更新 rec（afterSha/action）。 */
+function syncOneRepo(ctx, cr, rec) {
+  const { wt, head } = recheckRecordedRepo(ctx, cr, rec);
+  if (head !== rec.beforeSha) {
+    throw new TxError('WORKSPACE_FRESHNESS_CHANGED', `${rec.repo}: HEAD 已偏离 preflight 记录（记录=${rec.beforeSha} 当前=${head}）`, { repo: rec.repo, beforeSha: rec.beforeSha, head });
+  }
+  try {
+    gitMust(wt, ['merge', '--ff-only', rec.targetTrunkSha]);
+  } catch (e) {
+    if (e instanceof TxError && e.code === 'TX_GIT_FAILED') {
+      throw new TxError('WORKSPACE_SYNC_CONFLICT', `${rec.repo}: ff-only 到 ${rec.targetTrunkSha} 失败（${e.message}）`, { repo: rec.repo, targetTrunkSha: rec.targetTrunkSha, cause: e.message });
+    }
+    throw e;
+  }
   rec.afterSha = gitMust(wt, ['rev-parse', 'HEAD']);
   if (rec.afterSha !== rec.targetTrunkSha) {
     throw new TxError('WORKSPACE_SYNC_CONFLICT', `${rec.repo}: ff-only 后 HEAD（${rec.afterSha}）≠ 目标 trunk SHA（${rec.targetTrunkSha}）`, { repo: rec.repo });
@@ -851,18 +864,28 @@ export async function syncWorkspaceToTrunk(ctx, { cr }) {
       if (journal.graphDigest !== ctx.graphDigest) {
         throw new TxError('GRAPH_CHANGED_DURING_TRANSACTION', '在途 sync 事务的 dir-graph 声明已变化，拒绝继续', { journalDigest: journal.graphDigest, currentDigest: ctx.graphDigest });
       }
-      let changed = false;
+      let changed = payload.repos.some((r) => r.beforeSha !== r.targetTrunkSha && ['fast-forwarded', 'confirmed'].includes(r.action));
       const save = async (phase) => { payload.phase = phase; journal.phase = phase; await saveJournal({ path: journalPath, journal }); };
       for (const rec of payload.repos) {
-        if (rec.action === 'fast-forwarded' || rec.action === 'confirmed' || rec.action === 'unchanged') continue;
-        const repo = getRepository(ctx, rec.repo);
-        const info = classifyRepoWorkspace(ctx, repo, cr);
-        if (info.classification !== 'healthy') {
-          throw new TxError('WORKSPACE_FRESHNESS_CHANGED', `${rec.repo}: 恢复时 workspace 分类=${info.classification}，与记录 intent 漂移，拒绝写入`, { repo: rec.repo, classification: info.classification });
+        if (!['pending', 'unchanged', 'fast-forwarded', 'confirmed'].includes(rec.action)) {
+          throw new TxError('TX_JOURNAL_INVALID', `${rec.repo}: workspace journal action 非法: ${rec.action}`, { repo: rec.repo, action: rec.action });
         }
-        const wt = info.worktreePath;
-        const head = gitMust(wt, ['rev-parse', 'HEAD']);
-        if (head === rec.targetTrunkSha) { rec.action = 'confirmed'; continue; }
+        const { head } = recheckRecordedRepo(ctx, cr, rec);
+        if (rec.action === 'unchanged') {
+          if (head !== rec.beforeSha) {
+            throw new TxError('WORKSPACE_FRESHNESS_CHANGED', `${rec.repo}: 恢复时 unchanged HEAD（${head}）≠ 记录 before（${rec.beforeSha}）`, { repo: rec.repo });
+          }
+          continue;
+        }
+        if (rec.action === 'fast-forwarded' || rec.action === 'confirmed' || head === rec.targetTrunkSha) {
+          if (head !== rec.targetTrunkSha) {
+            throw new TxError('WORKSPACE_FRESHNESS_CHANGED', `${rec.repo}: 恢复时已完成仓 HEAD（${head}）≠ 记录 target（${rec.targetTrunkSha}）`, { repo: rec.repo });
+          }
+          rec.action = 'fast-forwarded'; // 兼容旧 journal 的 confirmed 非接口值
+          rec.afterSha = head;
+          changed = changed || rec.beforeSha !== rec.targetTrunkSha;
+          continue;
+        }
         if (head !== rec.beforeSha) {
           throw new TxError('WORKSPACE_FRESHNESS_CHANGED', `${rec.repo}: 恢复时 HEAD（${head}）既非记录 before（${rec.beforeSha}）也非 target（${rec.targetTrunkSha}）`, { repo: rec.repo });
         }
@@ -892,7 +915,7 @@ export async function syncWorkspaceToTrunk(ctx, { cr }) {
       throw new TxError('WORKSPACE_SYNC_BLOCKED', `${blocker.repo}: 新鲜度=${blocker.freshness}（${blocker.reason}），零写入阻断`, { repo: blocker.repo, workspaceClassification: blocker.workspaceClassification, reason: blocker.reason });
     }
     // syncable：intent 绑定 before/target；latest complete 同 intent 再现 = 外部回退，保守阻断。
-    const intentDigest = sha256(JSON.stringify({ graphDigest: ctx.graphDigest, cr, repos: unhandled.filter((r) => r.action === 'pending').map((r) => ({ repo: r.repo, beforeSha: r.beforeSha, targetTrunkSha: r.targetTrunkSha })) }));
+    const intentDigest = sha256(JSON.stringify({ graphDigest: ctx.graphDigest, cr, repos: unhandled.map((r) => ({ repo: r.repo, beforeSha: r.beforeSha, targetTrunkSha: r.targetTrunkSha })) }));
     if (existing && existing.journal.phase === 'complete' && existing.journal.inputDigest === intentDigest) {
       throw new TxError('WORKSPACE_FRESHNESS_CHANGED', '已完成的 sync intent 在外部回退后再次出现，拒绝复用旧 complete（人工确认事实）', { txId: existing.journal.txId });
     }
