@@ -45,7 +45,7 @@
       "kind": "skill",
       "label": "编写开发计划",
       "ref": "write-dev-plan",
-      "prompt": "先执行一次 `crctl workspace inspect {{inputs.cr_id}}`（CR-2026-044 FR-06）：要求全部 resources[].classification=healthy，再消费返回的 operationalWorkspace 作为本 pipeline 的业务权威路径并原样传给后续节点；任一资源非 healthy 或 operationalWorkspace 为空时中止并指向 /resume，不自动补齐、不从目录命名猜路径。\n\n校验 CR {{inputs.cr_id}} 当前 status=tech-design-reviewed。基于 operational_workspace 中 change-requests/{{inputs.cr_id}}/sdd.md 编写 plan.md：\n- 交付里程碑与排期\n- 任务依赖图\n- 风险与回滚策略\n- 验收与发布策略\n- target_version: {{inputs.target_version}}\n\n在 node-1.md 输出计划关键里程碑摘要、估算总工时和实际写入路径。",
+      "prompt": "先执行一次 `crctl workspace inspect {{inputs.cr_id}}`（CR-2026-044 FR-06）：要求全部 resources[].classification=healthy，再消费返回的 operationalWorkspace 作为本 pipeline 的业务权威路径并原样传给后续节点；任一资源非 healthy 或 operationalWorkspace 为空时中止并指向 /resume，不自动补齐、不从目录命名猜路径。\n\n校验 CR {{inputs.cr_id}} 当前 status=tech-design-reviewed。基于 operational_workspace 中 change-requests/{{inputs.cr_id}}/sdd.md 编写 plan.md：\n- 交付里程碑与排期\n- 任务依赖图\n- 风险与回滚策略\n- 验收与发布策略\n- target_version: {{inputs.target_version}}\n\n在 node-1.md 输出计划关键里程碑摘要、估算总工时和实际写入路径，并在末尾输出机器可读 YAML：\n```yaml\nexecution_context:\n  cr_id: {{inputs.cr_id}}\n  operational_workspace: {workspace inspect.operationalWorkspace 原样值}\n  resources: {workspace inspect.resources 原样值}\n```\n后续节点只能从 execution_context.cr_id、execution_context.operational_workspace 与 execution_context.resources 取 workspace 事实。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -54,7 +54,7 @@
       "kind": "skill",
       "label": "拆分开发任务",
       "ref": "write-dev-tasks",
-      "prompt": "将 CR worktree 中 change-requests/{{inputs.cr_id}}/plan.md 与 sdd.md 拆解为独立可执行的 TASK，每个 TASK 产出 change-requests/{{inputs.cr_id}}/tasks/TASK-NN.md：\n- 任务描述（目标、输入、输出）\n- 涉及文件/模块清单\n- 实现要点（引用 SDD 对应章节）\n- 验收条件（测试用例或验证步骤）\n- 依赖的其他 TASK\n- 接口契约（消费/产出的精确签名：函数名、参数、返回类型；跨 TASK 命名不得对不上）\n\nTASK 卡全部写完后调用 `crctl task init {{inputs.cr_id}} --workspace <knowledge_base_worktree>` 生成受控 tasks/_index.yml；命令失败立即中止，不得手写索引。用返回的 totalEstimateHours 核对 plan 总估算，再通过既有 `write-dev-tasks` 转换将 CR status 推进或自环到 task-breakdown。在 node-2.md 输出 TASK 列表、总数、总工时和依赖关系。",
+      "prompt": "读取 node-1.md 末尾的 execution_context；只在 execution_context.operational_workspace 中读取 plan.md/sdd.md 并拆解为独立可执行的 TASK，每个 TASK 产出 change-requests/{{inputs.cr_id}}/tasks/TASK-NN.md：\n- 任务描述（目标、输入、输出）\n- 涉及文件/模块清单\n- 实现要点（引用 SDD 对应章节）\n- 验收条件（测试用例或验证步骤）\n- 依赖的其他 TASK\n- 接口契约（消费/产出的精确签名：函数名、参数、返回类型；跨 TASK 命名不得对不上）\n\nTASK 卡全部写完后调用 `crctl task init {execution_context.cr_id} --workspace {execution_context.operational_workspace}` 生成受控 tasks/_index.yml；命令失败立即中止，不得手写索引。用返回的 totalEstimateHours 核对 plan 总估算，再通过既有 `write-dev-tasks` 转换将 CR status 推进或自环到 task-breakdown。在 node-2.md 输出 TASK 列表、总数、总工时和依赖关系。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },
@@ -63,7 +63,7 @@
       "kind": "skill",
       "label": "开发计划与 TASK 合并评审",
       "ref": "review-dev-plan",
-      "prompt": "读取 node-2.md 的 TASK 拆分输出，执行 review-dev-plan：\n- cr_id: {{inputs.cr_id}}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n对 knowledge_base_worktree 中 change-requests/{{inputs.cr_id}}/plan.md、tasks/_index.yml 与全部 TASK-*.md 对照 sdd.md 与 review-annotations/sdd.yml 执行八类维度合并评审（SDD→plan 覆盖/plan→TASK 覆盖/TASK 可执行性/依赖拓扑/接口契约一致性/验收可验证性/范围与极简性/风险与回滚 + 估算一致性）。评审判断写入 .crctl/tmp/review-dev-plan.yml（顶层 repair-target 可选字段表达双轨：缺省 write-dev-plan，上游设计疑点写 write-tech-design），经 `crctl review-record --stage dev-plan --from .crctl/tmp/review-dev-plan.yml --bump-attempt` 落盘 review-annotations/dev-plan.yml（review-loop 记账与 traceability 投影由 --bump-attempt 级联）。在 node-3.md 输出 verdict、route、blockers、repair-target、current-attempt 与评审摘要。\n路由处理：\n- PASS（verdict=pass 且 blockers=[]）：保持 task-breakdown，进入后续 push-progress 与 human_approval；\n- NORMAL（repair-target=write-dev-plan）：状态回退由 review-dev-plan Skill 以权威完整 trigger（review-dev-plan:block -> write-dev-plan）完成，本节点只按 replayNodes 重放 write-dev-plan → write-dev-tasks → review-dev-plan，直至 pass 或 maxAttempts=3 后 LOOP_EXHAUSTED 停止；\n- UPSTREAM（repair-target=write-tech-design）：回退与 UPSTREAM_DESIGN_BLOCKER 业务结果由 Skill 输出，本节点收到后立即 abort 本 pipeline（等待人工走技术设计修订链路）；不得在本节点修改 review-annotations/sdd.yml。",
+      "prompt": "读取 node-1.md 末尾的 execution_context 与 node-2.md 的 TASK 拆分输出；所有 workspace 参数只使用 execution_context.operational_workspace。执行 review-dev-plan：\n- cr_id: {{inputs.cr_id}}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n对 execution_context.operational_workspace 中 change-requests/{execution_context.cr_id}/plan.md、tasks/_index.yml 与全部 TASK-*.md 对照 sdd.md 与 review-annotations/sdd.yml 执行八类维度合并评审（SDD→plan 覆盖/plan→TASK 覆盖/TASK 可执行性/依赖拓扑/接口契约一致性/验收可验证性/范围与极简性/风险与回滚 + 估算一致性）。评审判断写入 .crctl/tmp/review-dev-plan.yml（顶层 repair-target 可选字段表达双轨：缺省 write-dev-plan，上游设计疑点写 write-tech-design），经 `crctl review-record --stage dev-plan --from .crctl/tmp/review-dev-plan.yml --bump-attempt` 落盘 review-annotations/dev-plan.yml（review-loop 记账与 traceability 投影由 --bump-attempt 级联）。在 node-3.md 输出 verdict、route、blockers、repair-target、current-attempt 与评审摘要。\n路由处理：\n- PASS（verdict=pass 且 blockers=[]）：保持 task-breakdown，进入后续 push-progress 与 human_approval；\n- NORMAL（repair-target=write-dev-plan）：状态回退由 review-dev-plan Skill 以权威完整 trigger（review-dev-plan:block -> write-dev-plan）完成，本节点只按 replayNodes 重放 write-dev-plan → write-dev-tasks → review-dev-plan，直至 pass 或 maxAttempts=3 后 LOOP_EXHAUSTED 停止；\n- UPSTREAM（repair-target=write-tech-design）：回退与 UPSTREAM_DESIGN_BLOCKER 业务结果由 Skill 输出，本节点收到后立即 abort 本 pipeline（等待人工走技术设计修订链路）；不得在本节点修改 review-annotations/sdd.yml。",
       "reviewLoop": {
         "repairRef": "write-dev-plan",
         "feedbackInput": "review_feedback",
@@ -109,7 +109,7 @@
       "kind": "skill",
       "label": "推送设计/任务到远端",
       "ref": "push-progress",
-      "prompt": "若 {{inputs.auto_push_after_task}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则执行 push-progress：cr_id={{inputs.cr_id}}，message=计划与任务。\n\n在 node-3.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
+      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n若 {{inputs.auto_push_after_task}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则执行 push-progress：cr_id={execution_context.cr_id}，message=计划与任务。\n\n在 node-3.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
       "onFail": "skip",
       "timeoutMinutes": 10
     },
@@ -126,7 +126,7 @@
       "kind": "skill",
       "label": "记录开发启动确认并推进状态",
       "ref": "approve-dev-start",
-      "prompt": "在 human_approval 通过后执行 approve-dev-start：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n校验 cr.md 中 owners.development.id 与 assigned-at 均存在，校验 plan.md、tasks/_index.yml 与 TASK-*.md 均存在，经 `crctl approve --stage dev-start`（仅人类交互式终端）完成：校验 plan/tasks、写 approval.yml、级联 advance 到 developing。在 node-5.md 输出审批记录路径、当前 status、开发负责人和下一步 implement-code 指令。",
+      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n在 human_approval 通过后执行 approve-dev-start：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n校验 cr.md 中 owners.development.id 与 assigned-at 均存在，校验 plan.md、tasks/_index.yml 与 TASK-*.md 均存在，经 `crctl approve --stage dev-start`（仅人类交互式终端）完成：校验 plan/tasks、写 approval.yml、级联 advance 到 developing。在 node-5.md 输出审批记录路径、当前 status、开发负责人和下一步 implement-code 指令。",
       "onFail": "abort",
       "timeoutMinutes": 5
     },
@@ -135,7 +135,7 @@
       "kind": "skill",
       "label": "Workspace freshness（实施前）",
       "ref": "workspace-freshness",
-      "prompt": "执行 workspace-freshness gate：\n- cr_id: {{inputs.cr_id}}\n- gate: implement-start\n\n调用一次只读新鲜度检查；仅当结果 syncable 时调用显式同步，然后按 route 分流：\n- route=continue 或 synced-continue：继续进入 implement-code；\n- route=manual：立即 abort 本 pipeline，输出逐仓 blockers 与人工处理指引，不进入 implement-code。\n\n在 node-16.md 输出 route、facts、blockers。",
+      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n执行 workspace-freshness gate：\n- cr_id: {execution_context.cr_id}\n- gate: implement-start\n\n调用一次只读新鲜度检查；仅当结果 syncable 时调用显式同步，然后按 route 分流：\n- route=continue 或 synced-continue：继续进入 implement-code；\n- route=manual：立即 abort 本 pipeline，输出逐仓 blockers 与人工处理指引，不进入 implement-code。\n\n在 node-16.md 输出 route、facts、blockers。",
       "onFail": "abort",
       "timeoutMinutes": 10
     },
@@ -144,7 +144,7 @@
       "kind": "code_generation",
       "label": "代码编写",
       "ref": "implement-code",
-      "prompt": "启动前校验 CR {{inputs.cr_id}} 当前 status=developing。根据配置选择 code generation runtime：优先使用代码执行设置中的 defaultRuntimeId；不可用时 fallback 到第一个可用 external CLI runner，并在输出中记录 runtime 与 fallback 情况。\n\n解析 dir-graph.yaml#repositories，为 CR {{inputs.cr_id}} 构造 CR workspace repo map：\n- 文档 worktree：.rayai-worktrees/knowledge-base/requirement/{{inputs.cr_id}}\n- 独立代码仓 worktree：.rayai-worktrees/{repo.id}/requirement/{{inputs.cr_id}}\n- 非独立代码目录：knowledge-base CR worktree 内对应代码路径\n\n启动前校验所有 active repo 的 CR worktree 存在、分支均为 requirement/{{inputs.cr_id}}，并且以下 CR worktree 文档完整：\n- {crWorkspaceDocsRoot}/change-requests/{{inputs.cr_id}}/prd.md\n- {crWorkspaceDocsRoot}/change-requests/{{inputs.cr_id}}/sdd.md\n- {crWorkspaceDocsRoot}/change-requests/{{inputs.cr_id}}/tasks/TASK-*.md\n\n按 TASK 实现代码：优先使用 subagent-driven-development；目标运行时未提供时按 TASK 顺序串行实现（等价于降级到 executing-plans 语义），并在节点输出中注明降级。代码写入对应 repo 的 CR worktree，禁止触碰主工作区 change-requests/ 或主工作区代码目录。\n\n执行 TASK 前读取 tasks/_index.yml 的 depends-on 拓扑排序：前置 TASK 未 done 不启动本 TASK，并在节点输出注明被阻塞 TASK 与等待的前置项；同一 repo worktree 内会修改同一文件的多个 TASK 必须串行，回修模式一律串行（已装 dispatching-parallel-agents 时同层无依赖 TASK 可并发派发，并发只影响耗时不影响产出）。实现按 coding-discipline §1 选方案、§2 切步骤；自修复先按 §3 定位根因。\n\n若来自 reviewLoop 回修，读取 review_feedback（来自 write-test-report 或 review-code 的 blockers、repair-target=implement-code）和 self_repair_attempt，只修复被指出的问题（blocker 字符串内含可执行修复说明），保持无关代码不扩散，并重新运行受影响验证。\n\n在 node-6.md 输出实际读取路径、实际写入仓库、runtime、fallback、run/session id、验证命令与结果。",
+      "prompt": "读取 node-1.md 末尾的 execution_context；文档 authority 只使用 execution_context.operational_workspace，多仓路径只使用 execution_context.resources[].worktreePath，不自行拼接目录。\n\n启动前校验 CR {execution_context.cr_id} 当前 status=developing。根据配置选择 code generation runtime：优先使用代码执行设置中的 defaultRuntimeId；不可用时 fallback 到第一个可用 external CLI runner，并在输出中记录 runtime 与 fallback 情况。\n\n从 execution_context.resources 原样读取 active repo 的 repo/worktreePath/classification，构造 CR workspace repo map；不得根据 repo.id、CR-ID 或目录命名拼接路径。非独立代码目录由 crctl/Skill 现有结构化结果解析，不从主 checkout 猜测\n\n启动前校验所有 active repo 的 CR worktree 存在、分支均为 requirement/{{inputs.cr_id}}，并且以下 CR worktree 文档完整：\n- {crWorkspaceDocsRoot}/change-requests/{{inputs.cr_id}}/prd.md\n- {crWorkspaceDocsRoot}/change-requests/{{inputs.cr_id}}/sdd.md\n- {crWorkspaceDocsRoot}/change-requests/{{inputs.cr_id}}/tasks/TASK-*.md\n\n按 TASK 实现代码：优先使用 subagent-driven-development；目标运行时未提供时按 TASK 顺序串行实现（等价于降级到 executing-plans 语义），并在节点输出中注明降级。代码写入对应 repo 的 CR worktree，禁止触碰主工作区 change-requests/ 或主工作区代码目录。\n\n执行 TASK 前读取 tasks/_index.yml 的 depends-on 拓扑排序：前置 TASK 未 done 不启动本 TASK，并在节点输出注明被阻塞 TASK 与等待的前置项；同一 repo worktree 内会修改同一文件的多个 TASK 必须串行，回修模式一律串行（已装 dispatching-parallel-agents 时同层无依赖 TASK 可并发派发，并发只影响耗时不影响产出）。实现按 coding-discipline §1 选方案、§2 切步骤；自修复先按 §3 定位根因。\n\n若来自 reviewLoop 回修，读取 review_feedback（来自 write-test-report 或 review-code 的 blockers、repair-target=implement-code）和 self_repair_attempt，只修复被指出的问题（blocker 字符串内含可执行修复说明），保持无关代码不扩散，并重新运行受影响验证。\n\n在 node-6.md 输出实际读取路径、实际写入仓库、runtime、fallback、run/session id、验证命令与结果。",
       "onFail": "abort",
       "timeoutMinutes": 240
     },
@@ -153,7 +153,7 @@
       "kind": "skill",
       "label": "生成测试报告",
       "ref": "write-test-report",
-      "prompt": "读取 implement-code 的 node-6.md 输出，执行 write-test-report：\n- cr_id: {{inputs.cr_id}}\n- source_node: node-6.md\n- tester: {cr.md owners.test.id}\n\n校验 cr.md 中 owners.test.id 与 assigned-at 均存在。生成 .crctl/tmp/test-plan.json（cr-test-plan/v1，仅 repo/cwd/executable/args/timeoutSeconds 白名单，无 shell 字符串、无 command 字段），运行一次 `crctl test {{inputs.cr_id}} --plan .crctl/tmp/test-plan.json --workspace <worktree>` 生成 test-report.md 机器区并原子更新 traceability.yml#tests 与 review-loop.yml（write-test-report）；模型只在 `<!-- crctl:analysis-below -->` 后写分析（TASK 验收覆盖、未覆盖风险、结果解读），不得直接编辑机器区/traceability/review-loop。在 node-7.md 输出 status、blockers（每条内含可执行修复说明）、repair-target、current-attempt 轮次、测试报告路径、测试负责人、结果与未覆盖风险。\n\n若 status=block、验证证据缺失或测试失败，pipeline 不得进入 human_approval，也不得进入后续 push-progress / review-code；必须按 reviewLoop.replayNodes 将 review_feedback 传回 implement-code 自动修复，并重新生成测试报告，直至 status=pass，或达到 reviewLoop.maxAttempts 后停止。",
+      "prompt": "读取 node-1.md 末尾的 execution_context 与 implement-code 的 node-6.md 输出；所有 workspace 参数只使用 execution_context.operational_workspace。执行 write-test-report：\n- cr_id: {{inputs.cr_id}}\n- source_node: node-6.md\n- tester: {cr.md owners.test.id}\n\n校验 cr.md 中 owners.test.id 与 assigned-at 均存在。生成 .crctl/tmp/test-plan.json（cr-test-plan/v1，仅 repo/cwd/executable/args/timeoutSeconds 白名单，无 shell 字符串、无 command 字段），运行一次 `crctl test {execution_context.cr_id} --plan .crctl/tmp/test-plan.json --workspace {execution_context.operational_workspace}` 生成 test-report.md 机器区并原子更新 traceability.yml#tests 与 review-loop.yml（write-test-report）；模型只在 `<!-- crctl:analysis-below -->` 后写分析（TASK 验收覆盖、未覆盖风险、结果解读），不得直接编辑机器区/traceability/review-loop。在 node-7.md 输出 status、blockers（每条内含可执行修复说明）、repair-target、current-attempt 轮次、测试报告路径、测试负责人、结果与未覆盖风险。\n\n若 status=block、验证证据缺失或测试失败，pipeline 不得进入 human_approval，也不得进入后续 push-progress / review-code；必须按 reviewLoop.replayNodes 将 review_feedback 传回 implement-code 自动修复，并重新生成测试报告，直至 status=pass，或达到 reviewLoop.maxAttempts 后停止。",
       "reviewLoop": {
         "repairNodeId": "00000000-0000-0000-0015-000000000006",
         "repairRef": "implement-code",
@@ -195,7 +195,7 @@
       "kind": "skill",
       "label": "推送代码+文档统一 checkpoint",
       "ref": "push-progress",
-      "prompt": "执行 push-progress：cr_id={{inputs.cr_id}}，message=代码与测试证据。\n\n在 node-8.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
+      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n执行 push-progress：cr_id={execution_context.cr_id}，message=代码与测试证据。\n\n在 node-8.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -204,7 +204,7 @@
       "kind": "skill",
       "label": "Workspace freshness（评审前）",
       "ref": "workspace-freshness",
-      "prompt": "执行 workspace-freshness gate：\n- cr_id: {{inputs.cr_id}}\n- gate: review-start\n\n调用一次只读新鲜度检查；仅当结果 syncable 时调用显式同步，然后按 route 分流：\n- route=continue：继续进入评审 LLM 选择节点；\n- route=replay：基线已前进，既有实现/测试/checkpoint 证据全部失效；按 review-code 节点的 reviewLoop.replayNodes 将 review_feedback（基线已前进，需重建实现/测试/checkpoint 证据）传回 implement-code 顺序重放；\n- route=manual：立即 abort 本 pipeline，输出逐仓 blockers 与人工处理指引，不盲目消耗 reviewLoop。\n\n在 node-17.md 输出 route、facts、blockers。",
+      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n执行 workspace-freshness gate：\n- cr_id: {execution_context.cr_id}\n- gate: review-start\n\n调用一次只读新鲜度检查；仅当结果 syncable 时调用显式同步，然后按 route 分流：\n- route=continue：继续进入评审 LLM 选择节点；\n- route=replay：基线已前进，既有实现/测试/checkpoint 证据全部失效；按 review-code 节点的 reviewLoop.replayNodes 将 review_feedback（基线已前进，需重建实现/测试/checkpoint 证据）传回 implement-code 顺序重放；\n- route=manual：立即 abort 本 pipeline，输出逐仓 blockers 与人工处理指引，不盲目消耗 reviewLoop。\n\n在 node-17.md 输出 route、facts、blockers。",
       "onFail": "abort",
       "timeoutMinutes": 10
     },
@@ -221,7 +221,7 @@
       "kind": "skill",
       "label": "代码评审",
       "ref": "review-code",
-      "prompt": "执行评审前确认上一节点选定的评审 LLM（触发参数 {{inputs.review_llm}} 或人工审批环节的用户选择）；按该模型/runner 执行本评审，并在 .crctl/tmp/review-code.yml 的 dimensions 中记录 reviewer-model 留痕（自报），使评审证据可追溯由哪个模型产出。其余取证与落盘要求不变（评审判断写临时 payload，经 crctl review-record --stage code --bump-attempt 落盘 review-annotations/code.yml）。非阻塞发现一律进 suggestions，verdict 只判 CR 本身；语义：blockers=本 CR 内要处理的，suggestions=本 CR 内不处理的。\n在 CR workspace 的各参与代码仓 worktree 执行只读评审取证：读取真实 changed files、完整 diff、近 20 条相关提交，以及 change-requests/{{inputs.cr_id}}/test-report.md 机器区、traceability.yml#tests 与 test-evidence/cmd-NN.log（只读取证，不重新执行 lint/test/build；测试执行已收敛为 crctl test --plan，证据缺失/漂移/status 非 pass 一律 blocker）；仅有 diff stat、commit log 或口头测试结论不足以通过评审。对照 CR worktree 中 change-requests/{{inputs.cr_id}}/sdd.md 与 tasks/* 评审：\n① 代码↔TASK↔SDD 对齐度\n② 工程质量（lint / test / build 结果，取自 test-report.md 机器区与日志，不重跑）\n③ 关键路径可读性与安全性\n④ 测试覆盖与 test-report 可信度\n⑤ 前端质量（仅 diff 触及 *.tsx|*.vue|*.css|*.html 时触发，检查三项：a11y 对比度达 WCAG AA——破 AA 升 blocker；组件 loading/empty/error 状态完整覆盖；构建体积在预算内——后两项未达为 minor）\n\n评审判断写入 .crctl/tmp/review-code.yml（非受控临时路径），经 `crctl review-record --stage code --from .crctl/tmp/review-code.yml --bump-attempt` 落盘 review-annotations/code.yml（review-loop 记账由 --bump-attempt 级联）。在 node-9.md 输出 verdict、blockers（每条内含可执行修复说明）、repair-target、current-attempt 轮次、diff range、验证证据与建议。若 verdict=block、blockers 非空或 test-report.status 非 pass，pipeline 不得进入 human_approval；必须按 reviewLoop.replayNodes 将 review_feedback 传回 implement-code 自动修复，并重新执行 write-test-report、push-progress 与 review-code，直至 verdict=pass 且 blockers 为空且 test-report.status=pass，或达到 reviewLoop.maxAttempts 后停止。",
+      "prompt": "读取 node-1.md 末尾的 execution_context；所有评审取证路径只使用 execution_context.operational_workspace 与 execution_context.resources[].worktreePath。\n\n执行评审前确认上一节点选定的评审 LLM（触发参数 {{inputs.review_llm}} 或人工审批环节的用户选择）；按该模型/runner 执行本评审，并在 .crctl/tmp/review-code.yml 的 dimensions 中记录 reviewer-model 留痕（自报），使评审证据可追溯由哪个模型产出。其余取证与落盘要求不变（评审判断写临时 payload，经 crctl review-record --stage code --bump-attempt 落盘 review-annotations/code.yml）。非阻塞发现一律进 suggestions，verdict 只判 CR 本身；语义：blockers=本 CR 内要处理的，suggestions=本 CR 内不处理的。\n在 CR workspace 的各参与代码仓 worktree 执行只读评审取证：读取真实 changed files、完整 diff、近 20 条相关提交，以及 change-requests/{{inputs.cr_id}}/test-report.md 机器区、traceability.yml#tests 与 test-evidence/cmd-NN.log（只读取证，不重新执行 lint/test/build；测试执行已收敛为 crctl test --plan，证据缺失/漂移/status 非 pass 一律 blocker）；仅有 diff stat、commit log 或口头测试结论不足以通过评审。对照 CR worktree 中 change-requests/{{inputs.cr_id}}/sdd.md 与 tasks/* 评审：\n① 代码↔TASK↔SDD 对齐度\n② 工程质量（lint / test / build 结果，取自 test-report.md 机器区与日志，不重跑）\n③ 关键路径可读性与安全性\n④ 测试覆盖与 test-report 可信度\n⑤ 前端质量（仅 diff 触及 *.tsx|*.vue|*.css|*.html 时触发，检查三项：a11y 对比度达 WCAG AA——破 AA 升 blocker；组件 loading/empty/error 状态完整覆盖；构建体积在预算内——后两项未达为 minor）\n\n评审判断写入 .crctl/tmp/review-code.yml（非受控临时路径），经 `crctl review-record --stage code --from .crctl/tmp/review-code.yml --bump-attempt` 落盘 review-annotations/code.yml（review-loop 记账由 --bump-attempt 级联）。在 node-9.md 输出 verdict、blockers（每条内含可执行修复说明）、repair-target、current-attempt 轮次、diff range、验证证据与建议。若 verdict=block、blockers 非空或 test-report.status 非 pass，pipeline 不得进入 human_approval；必须按 reviewLoop.replayNodes 将 review_feedback 传回 implement-code 自动修复，并重新执行 write-test-report、push-progress 与 review-code，直至 verdict=pass 且 blockers 为空且 test-report.status=pass，或达到 reviewLoop.maxAttempts 后停止。",
       "reviewLoop": {
         "repairNodeId": "00000000-0000-0000-0015-000000000006",
         "repairRef": "implement-code",
@@ -282,7 +282,7 @@
       "kind": "skill",
       "label": "代码评审 PASS 后审批前 checkpoint",
       "ref": "push-progress",
-      "prompt": "执行 push-progress：cr_id={{inputs.cr_id}}，message=代码评审通过后审批前 checkpoint。\n\n在节点输出中记录 batchId、repositories、phase；phase 非 complete 时中止，不得进入人工审批。",
+      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n执行 push-progress：cr_id={execution_context.cr_id}，message=代码评审通过后审批前 checkpoint。\n\n在节点输出中记录 batchId、repositories、phase；phase 非 complete 时中止，不得进入人工审批。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -299,7 +299,7 @@
       "kind": "skill",
       "label": "记录代码审批并推进状态",
       "ref": "approve-code",
-      "prompt": "在 human_approval 通过后执行 approve-code：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n经 `crctl approve --stage code`（仅人类交互式终端）完成校验与写入；调用参数：认 test-report.md 的 tester 与 cr.md owners.test.id 一致或记录偏差原因。写入 approval.yml 的 code 段，并将 CR status 推进到 code-approved。在 node-11.md 输出审批记录路径、当前 status、开发负责人、测试负责人和下一步 writeback pipeline 指令。",
+      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n在 human_approval 通过后执行 approve-code：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n经 `crctl approve --stage code`（仅人类交互式终端）完成校验与写入；调用参数：认 test-report.md 的 tester 与 cr.md owners.test.id 一致或记录偏差原因。写入 approval.yml 的 code 段，并将 CR status 推进到 code-approved。在 node-11.md 输出审批记录路径、当前 status、开发负责人、测试负责人和下一步 writeback pipeline 指令。",
       "onFail": "abort",
       "timeoutMinutes": 5
     },
@@ -308,7 +308,7 @@
       "kind": "skill",
       "label": "推送代码审批结果到远端",
       "ref": "push-progress",
-      "prompt": "执行 push-progress：cr_id={{inputs.cr_id}}，message=代码审批结果。\n\n本节点是代码阶段终点完成条件（CR-2026-044 FR-07），不可跳过；失败时保持 code-approved，只重跑同一 checkpoint，不重新审批。\n\n在 node-12.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
+      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n执行 push-progress：cr_id={execution_context.cr_id}，message=代码审批结果。\n\n本节点是代码阶段终点完成条件（CR-2026-044 FR-07），不可跳过；失败时保持 code-approved，只重跑同一 checkpoint，不重新审批。\n\n在 node-12.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
       "onFail": "abort",
       "timeoutMinutes": 10
     }

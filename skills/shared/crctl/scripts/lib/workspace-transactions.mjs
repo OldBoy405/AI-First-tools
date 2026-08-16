@@ -980,16 +980,21 @@ function collectControlledArtifacts(ctx, cr) {
  * 任一仓 workspace 非 healthy 或无任何受控 artifact 均硬失败（不得产出空快照）。
  */
 export async function buildReleaseSubjects(ctx, cr) {
+  const workspaceByRepo = new Map();
+  for (const repo of ctx.repositories) {
+    const info = classifyRepoWorkspace(ctx, repo, cr);
+    if (info.classification !== 'healthy') {
+      throw new TxError('RELEASE_WORKSPACE_INVALID', `${repo.id} workspace 分类=${info.classification}，不能构造 release-subjects（code 评审前必须先 ensure workspace）`, { repo: repo.id, classification: info.classification, worktreePath: info.worktreePath, branch: info.branch, dirty: info.dirty });
+    }
+    workspaceByRepo.set(repo.id, info);
+  }
   const files = collectControlledArtifacts(ctx, cr);
   if (!files.length) {
     throw new TxError('RELEASE_SUBJECT_EMPTY', `${cr} 无受控 artifact（PRD/SDD/plan/tasks），不能构造 release-subjects`, { cr });
   }
   const repositories = [];
   for (const repo of ctx.repositories) {
-    const info = classifyRepoWorkspace(ctx, repo, cr);
-    if (info.classification !== 'healthy') {
-      throw new TxError('RELEASE_WORKSPACE_INVALID', `${repo.id} workspace 分类=${info.classification}，不能构造 release-subjects（code 评审前必须先 ensure workspace）`, { repo: repo.id, classification: info.classification, worktreePath: info.worktreePath, branch: info.branch, dirty: info.dirty });
-    }
+    const info = workspaceByRepo.get(repo.id);
     const sha = gitMust(info.worktreePath, ['rev-parse', 'HEAD']);
     repositories.push({ repo: repo.id, remoteRef: `refs/heads/${branchForCr(cr)}`, reviewedSourceSha: sha });
   }

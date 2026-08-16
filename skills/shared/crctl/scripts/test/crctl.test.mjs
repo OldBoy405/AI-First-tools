@@ -4232,14 +4232,33 @@ test('CR-2026-044 TASK-01 ①: local valid + remote requirement ref 滞后 -> ap
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
-test('CR-2026-044 TASK-01 ②: TTY approve 接受 trim 后大小写不敏感的 y|yes（红测试）', () => {
-  for (const input of ['y\n', 'Y\n', 'YES\n', 'YeS\n', '  yes  \n']) {
+function makeTtyApprovalWorkspace(stage) {
+  if (stage === 'code') {
     const { ws } = makeCodeStageWorkspace();
-    try {
-      runCodeReviewAndAdvance(ws);
-      const r = runCrctlInTty(['approve', 'CR-D1', '--stage', 'code', '--workspace', ws], input);
-      assert.equal(r.status, 0, `输入 ${JSON.stringify(input)} 应批准: ${r.rawStderr}`);
-    } finally { rmSync(ws, { recursive: true, force: true }); }
+    runCodeReviewAndAdvance(ws);
+    return ws;
+  }
+  const { ws } = makeDevStartWorkspace();
+  if (stage === 'requirement') {
+    writeCrEntry(ws, 'CR-D1', 'requirement-reviewing');
+    writeEvidence(ws, 'CR-D1', 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\ndimensions:\n  completeness: ok\n');
+  } else if (stage === 'tech-design') {
+    writeCrEntry(ws, 'CR-D1', 'tech-design-review-pending');
+    writeEvidence(ws, 'CR-D1', 'sdd.md', '# SDD\n');
+    writeEvidence(ws, 'CR-D1', 'review-annotations/sdd.yml', 'verdict: pass\nblockers: []\ndimensions:\n  alignment: ok\n');
+  }
+  return ws;
+}
+
+test('CR-2026-044 TASK-01 ②/TASK-02/AC-16: 四个 TTY stage 接受 trim 后大小写不敏感的 y|yes', () => {
+  for (const stage of ['requirement', 'tech-design', 'dev-start', 'code']) {
+    for (const input of ['y\n', 'Y\n', 'yes\n', 'YES\n', 'YeS\n', '  yes  \n']) {
+      const ws = makeTtyApprovalWorkspace(stage);
+      try {
+        const r = runCrctlInTty(['approve', 'CR-D1', '--stage', stage, '--workspace', ws], input);
+        assert.equal(r.status, 0, `stage=${stage} 输入 ${JSON.stringify(input)} 应批准: ${r.rawStderr}`);
+      } finally { rmSync(ws, { recursive: true, force: true }); }
+    }
   }
 });
 
@@ -4303,42 +4322,29 @@ test('CR-2026-044 TASK-03: KB metadata 精确白名单——六成员逐项放�
   }
 });
 
-test('CR-2026-044 TASK-03: workspace 非 healthy（dirty/wrong-branch）零 snapshot 硬失败；missing 仍 RELEASE_SUBJECT_EMPTY', () => {
-  // dirty：worktree 有未提交变更
-  {
+test('CR-2026-044 TASK-03: workspace 非 healthy（dirty/wrong-branch/missing/path-unregistered）零 snapshot 硬失败并返回分类事实', () => {
+  const expectClassification = (mutate, classification) => {
     const { ws } = makeCodeStageWorkspace();
     try {
       const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
       writeCodeReviewPayload(ws);
-      writeFileSync(path.join(wt, 'uncommitted.txt'), 'dirty\n');
+      mutate(ws, wt);
       const r = runCrctl(['review-record', 'CR-D1', '--stage', 'code', '--workspace', ws]);
       assert.equal(r.status, 1);
       assert.equal(r.stderr.error.code, 'RELEASE_WORKSPACE_INVALID');
-      assert.equal(r.stderr.error.classification, 'dirty');
+      assert.equal(r.stderr.error.classification, classification);
+      assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-D1', 'review-annotations', 'code.yml')), false, 'snapshot 零写入');
     } finally { rmSync(ws, { recursive: true, force: true }); }
-  }
-  // wrong-branch：worktree 切到别的分支
-  {
-    const { ws } = makeCodeStageWorkspace();
-    try {
-      const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
-      writeCodeReviewPayload(ws);
-      spawnSync('git', ['checkout', '-q', '-b', 'wrong-branch'], { cwd: wt });
-      const r = runCrctl(['review-record', 'CR-D1', '--stage', 'code', '--workspace', ws]);
-      assert.equal(r.status, 1);
-      assert.equal(r.stderr.error.code, 'RELEASE_WORKSPACE_INVALID');
-      assert.equal(r.stderr.error.classification, 'wrong-branch');
-    } finally { rmSync(ws, { recursive: true, force: true }); }
-  }
-  // missing：worktree 不存在 -> 受控 artifact 为空（既有 fail-closed 语义）
-  {
-    const { ws } = makeCodeStageWorkspace();
-    try {
-      writeCodeReviewPayload(ws);
-      rmSync(path.join(ws, '.rayai-worktrees'), { recursive: true, force: true });
-      const r = runCrctl(['review-record', 'CR-D1', '--stage', 'code', '--workspace', ws]);
-      assert.equal(r.status, 1);
-      assert.equal(r.stderr.error.code, 'RELEASE_SUBJECT_EMPTY');
-    } finally { rmSync(ws, { recursive: true, force: true }); }
-  }
+  };
+  expectClassification((_ws, wt) => writeFileSync(path.join(wt, 'uncommitted.txt'), 'dirty\n'), 'dirty');
+  expectClassification((_ws, wt) => spawnSync('git', ['checkout', '-q', '-b', 'wrong-branch'], { cwd: wt }), 'wrong-branch');
+  expectClassification((ws, wt) => {
+    spawnSync('git', ['worktree', 'remove', wt], { cwd: ws });
+    spawnSync('git', ['branch', '-D', 'requirement/CR-D1'], { cwd: ws });
+  }, 'missing');
+  expectClassification((ws, wt) => {
+    rmSync(wt, { recursive: true, force: true });
+    spawnSync('git', ['worktree', 'prune'], { cwd: ws });
+    mkdirSync(wt, { recursive: true });
+  }, 'path-unregistered');
 });

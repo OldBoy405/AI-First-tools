@@ -32,7 +32,7 @@ test('AC-2: checkpoint 节点 onFail=abort、ref=push-progress；节点 id 全�
   assert.equal(n.ref, 'push-progress');
   assert.equal(n.kind, 'skill');
   assert.ok(/checkpoint/i.test(n.label), 'label 表达 checkpoint 语义');
-  assert.ok(n.prompt.includes('{{inputs.cr_id}}'), 'prompt 引用 cr_id');
+  assert.ok(/\{\{inputs\.cr_id\}\}|\{execution_context\.cr_id\}/.test(n.prompt), 'prompt 引用 cr_id');
   const ids = nodes.map((n) => n.id);
   assert.equal(new Set(ids).size, ids.length, '节点 id 全局唯一');
   assert.equal(ids.length, 17, '既有 15 节点 + CR-2026-043 新增 2 个 freshness gate');
@@ -59,7 +59,7 @@ test('CR-2026-043: 两个 workspace-freshness gate 位置/ref/onFail 正确', ()
     assert.equal(n.ref, 'workspace-freshness');
     assert.equal(n.kind, 'skill');
     assert.equal(n.onFail, 'abort');
-    assert.ok(n.prompt.includes('{{inputs.cr_id}}'), 'prompt 引用 cr_id');
+    assert.ok(/\{\{inputs\.cr_id\}\}|\{execution_context\.cr_id\}/.test(n.prompt), 'prompt 引用 cr_id');
   }
   // 实施前 gate：approve-dev-start(…0005) 之后、implement-code(…0006) 之前
   assert.ok(idx('00000000-0000-0000-0015-000000000005') < idx('00000000-0000-0000-0015-000000000016'), '…016 在 approve-dev-start 后');
@@ -155,13 +155,22 @@ test('CR-2026-044 AC-13: code-implementation 审批后 checkpoint abort、TASK c
   assert.equal(p.nodes.length, 17, '节点数保持 17');
 });
 
-test('CR-2026-044 AC-12: architecture/code 入口经 workspace inspect 取 authority path 并原样传递', () => {
+test('CR-2026-044 AC-12: architecture/code 入口取得 authority path，并由 execution_context 原样传给后续节点', () => {
   for (const name of ['architecture-design.pipeline.json', 'code-implementation.pipeline.json']) {
     const p = readPipeline(name);
     const first = p.nodes[0];
     assert.ok(first.prompt.includes('crctl workspace inspect'), `${name} 首节点调用 workspace inspect`);
     assert.ok(first.prompt.includes('operationalWorkspace'), `${name} 首节点消费 operationalWorkspace`);
+    assert.ok(first.prompt.includes('execution_context:'), `${name} 首节点输出机器可读 execution_context`);
+    assert.ok(first.prompt.includes('operational_workspace:'), `${name} execution_context 固定 authority path`);
     assert.ok(/classification=healthy/.test(first.prompt), `${name} 首节点要求全部 resources healthy`);
     assert.ok(/resume/.test(first.prompt), `${name} 非 healthy 时指向 resume`);
+    for (const node of p.nodes.slice(1).filter((n) => n.prompt)) {
+      assert.ok(node.prompt.includes('execution_context.operational_workspace'), `${name}/${node.ref || node.kind} 后续节点消费同一 authority path`);
+    }
   }
+  const code = readPipeline('code-implementation.pipeline.json');
+  const implement = code.nodes.find((n) => n.ref === 'implement-code');
+  assert.ok(implement.prompt.includes('execution_context.resources[].worktreePath'), 'implement-code 从 inspect resources 取多仓路径');
+  assert.ok(!implement.prompt.includes('.rayai-worktrees/'), 'implement-code 不再按目录命名拼接 worktree 路径');
 });
