@@ -1151,9 +1151,10 @@ async function cmdApprove(ws, cr, gates, flags) {
   process.stdout.write(summaryLines.join('\n') + '\n');
   const approver = flags.approver || identity(ws);
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  rl.question(`以 approver=${approver} 批准该阶段？只有输入 yes 才会写入 approval.yml [yes/N] `, async (answer) => {
+  rl.question(`以 approver=${approver} 批准该阶段？只有输入 y 或 yes 才会写入 approval.yml [y/N] `, async (answer) => {
     rl.close();
-    if (answer.trim().toLowerCase() !== 'yes') {
+    // CR-2026-044 FR-09：四 stage 共享入口接受 trim 后大小写不敏感的 y|yes；其余输入保持既有 reject 回退
+    if (!['y', 'yes'].includes(answer.trim().toLowerCase())) {
       auditLog(ws, { kind: 'approve', cr, stage, approver, result: 'declined' });
       // FR-12（CR-2026-022）：驳回必须真正执行状态机已声明的 {stage}:reject 回退转换（AGENTS.md 强制），不再只是 fail
       const rollback = REJECT_ROLLBACK[stage];
@@ -2829,6 +2830,16 @@ async function cmdWorkspace(ws, positional, flags) {
   }
   const mode = sub === 'inspect' ? 'inspect' : sub === 'ensure' ? 'resume' : flags.mode;
   const result = await runTxAsync(ensureWorkspace(ctx, { cr, mode }));
+  if (sub === 'inspect') {
+    // CR-2026-044 FR-06：暴露既有 authority resolver 的单一 operationalWorkspace 路径；
+    // missing/inconsistent 返回结构化错误信息（不猜路径），由调用方中止并指向 resume。
+    let operationalWorkspace = null, operationalWorkspaceError = null;
+    try { operationalWorkspace = resolveOperationalWorkspace(ctx, cr).path; } catch (e) {
+      if (e instanceof TxError) operationalWorkspaceError = { code: e.code, message: e.message };
+      else throw e;
+    }
+    return ok({ op: 'workspace-inspect', cr, mode, ...result, operationalWorkspace, operationalWorkspaceError });
+  }
   ok({ op: `workspace-${sub}`, cr, mode, ...result });
 }
 

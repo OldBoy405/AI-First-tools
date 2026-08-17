@@ -32,7 +32,7 @@ test('AC-2: checkpoint 节点 onFail=abort、ref=push-progress；节点 id 全�
   assert.equal(n.ref, 'push-progress');
   assert.equal(n.kind, 'skill');
   assert.ok(/checkpoint/i.test(n.label), 'label 表达 checkpoint 语义');
-  assert.ok(n.prompt.includes('{{inputs.cr_id}}'), 'prompt 引用 cr_id');
+  assert.ok(/\{\{inputs\.cr_id\}\}|\{execution_context\.cr_id\}/.test(n.prompt), 'prompt 引用 cr_id');
   const ids = nodes.map((n) => n.id);
   assert.equal(new Set(ids).size, ids.length, '节点 id 全局唯一');
   assert.equal(ids.length, 16, 'CR-2026-042 删除 reviewer 选择暂停 …0013 后为 16 节点');
@@ -59,7 +59,7 @@ test('CR-2026-043: 两个 workspace-freshness gate 位置/ref/onFail 正确', ()
     assert.equal(n.ref, 'workspace-freshness');
     assert.equal(n.kind, 'skill');
     assert.equal(n.onFail, 'abort');
-    assert.ok(n.prompt.includes('{{inputs.cr_id}}'), 'prompt 引用 cr_id');
+    assert.ok(/\{\{inputs\.cr_id\}\}|\{execution_context\.cr_id\}/.test(n.prompt), 'prompt 引用 cr_id');
   }
   // 实施前 gate：approve-dev-start(…0005) 之后、implement-code(…0006) 之前
   assert.ok(idx('00000000-0000-0000-0015-000000000005') < idx('00000000-0000-0000-0015-000000000016'), '…016 在 approve-dev-start 后');
@@ -111,4 +111,66 @@ test('AC-4: inputs 中无 suggestion_policy', () => {
 test('human_approval(…0010) approvalPrompt 含评审后 checkpoint phase=complete 前提', () => {
   const n = bySuffix('000000000010');
   assert.ok(n.approvalPrompt.includes('评审后 checkpoint phase=complete'), '审批提示追加 checkpoint 前提');
+});
+
+/* ── CR-2026-044 TASK-05：三条 Pipeline 阶段终点 checkpoint 合同与 operational workspace 传递 ── */
+
+const TOOLS_ROOT_044 = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
+const readPipeline = (name) => JSON.parse(readFileSync(path.join(TOOLS_ROOT_044, 'pipeline-templates', name), 'utf8').replaceAll('\r\n', '\n'));
+
+test('CR-2026-044 AC-13/14: requirement-authoring 审批后强制 checkpoint（7 节点），草稿 checkpoint 仍可选', () => {
+  const p = readPipeline('requirement-authoring.pipeline.json');
+  const idx = (refAfter) => p.nodes.findIndex((n) => n.ref === refAfter);
+  const approveIdx = p.nodes.findIndex((n) => n.ref === 'approve-requirement');
+  assert.notEqual(approveIdx, -1, 'approve-requirement 节点存在');
+  const end = p.nodes[approveIdx + 1];
+  assert.ok(end, 'approve-requirement 后存在终点 checkpoint 节点');
+  assert.equal(end.ref, 'push-progress');
+  assert.equal(end.onFail, 'abort', '审批后 checkpoint 必须 abort');
+  const draft = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_prd/.test(n.prompt));
+  assert.ok(draft && draft.onFail === 'skip', 'PRD 草稿 checkpoint 仍可选');
+  assert.equal(p.nodes.length, 7, '新增终点 checkpoint 后为 7 节点');
+  const indexText = readFileSync(path.join(TOOLS_ROOT_044, 'pipeline-templates', '_index.yml'), 'utf8').replaceAll('\r\n', '\n');
+  const m = indexText.match(/- id: requirement-authoring-v1\n(?:.*\n)*?\s*nodes:\s*(\d+)/);
+  assert.equal(Number(m[1]), 7, '_index.yml requirement-authoring nodes=7');
+});
+
+test('CR-2026-044 AC-14: architecture-design 删除 auto_push_after_sdd，审批后 checkpoint abort，5 节点不变', () => {
+  const p = readPipeline('architecture-design.pipeline.json');
+  assert.ok(!p.inputs.some((i) => i.key === 'auto_push_after_sdd'), 'auto_push_after_sdd 输入已删除');
+  const push = p.nodes.filter((n) => n.ref === 'push-progress');
+  assert.equal(push.length, 1, '仅一个 checkpoint 节点');
+  assert.equal(push[0].onFail, 'abort', '架构终点 checkpoint 必须 abort');
+  assert.ok(!/SKIPPED|auto_push/.test(push[0].prompt), 'checkpoint prompt 无 skip 分支');
+  assert.equal(p.nodes.length, 5, '节点数保持 5');
+});
+
+test('CR-2026-044 AC-13: code-implementation 审批后 checkpoint abort、TASK checkpoint 仍可选、16 节点不变（CR-2026-042 删除评审 LLM 节点后）', () => {
+  const p = readPipeline('code-implementation.pipeline.json');
+  const final = p.nodes.find((n) => /审批结果/.test(n.label || '') && n.ref === 'push-progress');
+  assert.ok(final, '审批结果 checkpoint 节点存在');
+  assert.equal(final.onFail, 'abort', '审批后 checkpoint 必须 abort');
+  const taskCkpt = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_task/.test(n.prompt));
+  assert.ok(taskCkpt && taskCkpt.onFail === 'skip', 'TASK checkpoint 仍可选');
+  assert.equal(p.nodes.length, 16, 'CR-2026-042 移除评审 LLM 选择节点后为 16 节点');
+});
+
+test('CR-2026-044 AC-12: architecture/code 入口取得 authority path，并由 execution_context 原样传给后续节点', () => {
+  for (const name of ['architecture-design.pipeline.json', 'code-implementation.pipeline.json']) {
+    const p = readPipeline(name);
+    const first = p.nodes[0];
+    assert.ok(first.prompt.includes('crctl workspace inspect'), `${name} 首节点调用 workspace inspect`);
+    assert.ok(first.prompt.includes('operationalWorkspace'), `${name} 首节点消费 operationalWorkspace`);
+    assert.ok(first.prompt.includes('execution_context:'), `${name} 首节点输出机器可读 execution_context`);
+    assert.ok(first.prompt.includes('operational_workspace:'), `${name} execution_context 固定 authority path`);
+    assert.ok(/classification=healthy/.test(first.prompt), `${name} 首节点要求全部 resources healthy`);
+    assert.ok(/resume/.test(first.prompt), `${name} 非 healthy 时指向 resume`);
+    for (const node of p.nodes.slice(1).filter((n) => n.prompt)) {
+      assert.ok(node.prompt.includes('execution_context.operational_workspace'), `${name}/${node.ref || node.kind} 后续节点消费同一 authority path`);
+    }
+  }
+  const code = readPipeline('code-implementation.pipeline.json');
+  const implement = code.nodes.find((n) => n.ref === 'implement-code');
+  assert.ok(implement.prompt.includes('execution_context.resources[].worktreePath'), 'implement-code 从 inspect resources 取多仓路径');
+  assert.ok(!implement.prompt.includes('.rayai-worktrees/'), 'implement-code 不再按目录命名拼接 worktree 路径');
 });

@@ -378,3 +378,23 @@ test('TASK-10：register 成功 → outbox 发 status+owners 事件（同真实 
     assert.equal(fs.readdirSync(outDir).length, before);
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
+
+test('CR-2026-044 TASK-05: workspace inspect 输出 authority operationalWorkspace；missing 时结构化错误不猜路径', () => {
+  const { base, kb } = makeFixture();
+  try {
+    const cr = `CR-${YEAR}-999`;
+    // missing 态：resources 照常诊断，authority 为 null + 结构化错误码（不猜路径）
+    let r = runCrctl(['workspace', 'inspect', cr, '--workspace', kb], { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.json.operationalWorkspace, null);
+    assert.ok(r.json.operationalWorkspaceError && r.json.operationalWorkspaceError.code, 'missing 时必须给结构化错误码');
+    // register 后 healthy：operationalWorkspace === knowledge-base CR worktree（既有 resolver 唯一事实）
+    r = runCrctl(regArgs(kb), { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    const regCr = r.json.cr;
+    r = runCrctl(['workspace', 'inspect', regCr, '--workspace', kb], { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.json.operationalWorkspaceError, null);
+    assert.equal(r.json.operationalWorkspace, wtPath(kb, 'knowledge-base', regCr));
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});

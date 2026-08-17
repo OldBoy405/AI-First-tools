@@ -973,30 +973,29 @@ function collectControlledArtifacts(ctx, cr) {
 
 /**
  * 构造 release subjects（当前事实快照）：
- * - repositories：每个 active 仓的 requirement 分支远端 ref 名 + 该仓 CR worktree HEAD（被评审源 SHA）；
+ * - repositories：每个 active 仓的预期发布分支名 + 该仓本地 CR worktree 的 clean committed HEAD（被评审源 SHA）；
  * - artifacts：受控文件集合 + 逐文件 SHA-256 + 集合 digest。
- * worktree 缺失或无任何受控 artifact 均硬失败（不得产出空快照）。
+ * CR-2026-044 FR-02：snapshot 只绑定本地事实，不 fetch、不读 remote-tracking ref；
+ * remote-ref 仅表示预期发布分支名，不证明远端存在或已同步（发布完整性归 checkpoint/merge）。
+ * 任一仓 workspace 非 healthy 或无任何受控 artifact 均硬失败（不得产出空快照）。
  */
 export async function buildReleaseSubjects(ctx, cr) {
+  const workspaceByRepo = new Map();
+  for (const repo of ctx.repositories) {
+    const info = classifyRepoWorkspace(ctx, repo, cr);
+    if (info.classification !== 'healthy') {
+      throw new TxError('RELEASE_WORKSPACE_INVALID', `${repo.id} workspace 分类=${info.classification}，不能构造 release-subjects（code 评审前必须先 ensure workspace）`, { repo: repo.id, classification: info.classification, worktreePath: info.worktreePath, branch: info.branch, dirty: info.dirty });
+    }
+    workspaceByRepo.set(repo.id, info);
+  }
   const files = collectControlledArtifacts(ctx, cr);
   if (!files.length) {
     throw new TxError('RELEASE_SUBJECT_EMPTY', `${cr} 无受控 artifact（PRD/SDD/plan/tasks），不能构造 release-subjects`, { cr });
   }
   const repositories = [];
   for (const repo of ctx.repositories) {
-    const wt = path.join(repo.worktreePath, cr);
-    if (!fs.existsSync(wt)) {
-      throw new TxError('RELEASE_WORKSPACE_MISSING', `${repo.id} 的 CR worktree 不存在: ${wt}（code 评审前必须先 ensure workspace）`, { repo: repo.id, worktree: wt });
-    }
-    const sha = gitMust(wt, ['rev-parse', 'HEAD']);
-    // 真实仓存在 origin 时要求 reviewed HEAD 已推送；无 remote 的内存/单仓测试 fixture 保持可用。
-    if (gitRun(repo.rootPath, ['remote', 'get-url', 'origin']).status === 0) {
-      gitMust(repo.rootPath, ['fetch', 'origin']);
-      const remote = gitRun(repo.rootPath, ['rev-parse', '--verify', `refs/remotes/origin/${branchForCr(cr)}`]);
-      if (remote.status !== 0 || remote.stdout !== sha) {
-        throw new TxError('RELEASE_REMOTE_NOT_PUSHED', `${repo.id} 的 requirement ref 未推送或不等于 worktree HEAD`, { repo: repo.id, head: sha, remote: remote.status === 0 ? remote.stdout : null });
-      }
-    }
+    const info = workspaceByRepo.get(repo.id);
+    const sha = gitMust(info.worktreePath, ['rev-parse', 'HEAD']);
     repositories.push({ repo: repo.id, remoteRef: `refs/heads/${branchForCr(cr)}`, reviewedSourceSha: sha });
   }
   return {
@@ -1030,9 +1029,12 @@ export function renderReleaseSubjects(rs) {
 const artifactKindOf = (p) => (p.endsWith('/prd.md') ? 'prd' : p.endsWith('/sdd.md') ? 'sdd' : 'task');
 
 /**
- * 重核 release subjects 与当前事实：任一漂移返回 {ok:false, kind, details}，零写入。
- * code：任一仓 worktree HEAD 或被推送的远端 requirement 分支 ≠ reviewed-source-sha，或仓集合不一致；
- * prd/sdd/task：对应受控文件哈希漂移、缺失或文件集合/digest 不一致。
+ * 重核 release subjects 与当前本地事实：任一漂移返回 {ok:false, kind, details}，零写入。
+ * CR-2026-044 FR-03：只重核本地 workspace/source/artifact，不 fetch、不读 remote-tracking ref；
+ * 远端 requirement ref 缺失或滞后属于 publication lag，由 checkpoint/merge 处理，不在此判失效。
+ * 失败 kind 优先级（PRD §7 失败分类）：先核 artifact 内容与集合（prd/sdd/task 精确 kind，
+ * 含未提交篡改；PRD/SDD 漂移无条件硬阻断），再逐仓核本地 source 事实（kind=code：
+ * workspace 非 healthy、non-KB HEAD ≠ reviewed-source-sha、KB 白名单外路径漂移或仓集合不一致）。
  */
 export async function verifyReleaseSubjects(ctx, cr, snapshot) {
   const bad = (kind, details) => ({ ok: false, kind, details });
@@ -1049,17 +1051,39 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
     if (!repo) return bad('code', { reason: 'repo-not-active', repo: r.repo });
     if (snapRepos.has(r.repo)) return bad('code', { reason: 'repo-duplicate', repo: r.repo });
     snapRepos.add(r.repo);
-    const wt = path.join(repo.worktreePath, cr);
-    let head = null;
-    if (fs.existsSync(wt)) {
-      const rr = gitRun(wt, ['rev-parse', 'HEAD']);
-      head = rr.status === 0 ? rr.stdout : null;
+  }
+  for (const repo of ctx.repositories) {
+    if (!snapRepos.has(repo.id)) return bad('code', { reason: 'repo-missing', repo: repo.id });
+  }
+  // artifact 逐文件重核先行（按 snapshot 声明序）：保证 PRD/SDD/TASK 漂移始终得到精确 kind，
+  // 不被 workspace/source 层 kind=code 覆盖（PRD §7：PRD/SDD 漂移无条件硬阻断）。
+  for (const f of snapshot.artifacts.files) {
+    const abs = path.join(crRoot, ...String(f.path || '').split('/'));
+    const raw = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null;
+    const actual = raw == null ? null : sha256(raw.replaceAll('\r\n', '\n'));
+    if (actual !== f.sha256) {
+      return bad(artifactKindOf(String(f.path)), { reason: raw == null ? 'missing' : 'hash-drift', path: f.path, expected: f.sha256, actual });
     }
-    const hasOrigin = gitRun(repo.rootPath, ['remote', 'get-url', 'origin']).status === 0;
-    const rem = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branchForCr(cr)}`]);
-    if ((hasOrigin || rem.status === 0) && (rem.status !== 0 || rem.stdout !== head)) {
-      return bad('code', { reason: 'remote-ref-drift', repo: r.repo, expected: head, actual: rem.status === 0 ? rem.stdout : null });
+  }
+  // 文件集合与 digest 一致性（新增/删除受控文件也是漂移）
+  const current = collectControlledArtifacts(ctx, cr);
+  if (current.length !== snapshot.artifacts.files.length
+    || current.some((f, i) => f.path !== snapshot.artifacts.files[i].path)) {
+    const firstDiff = current.find((f, i) => !snapshot.artifacts.files[i] || snapshot.artifacts.files[i].path !== f.path)
+      || snapshot.artifacts.files[current.length];
+    return bad(artifactKindOf(String(firstDiff && firstDiff.path || 'tasks')), { reason: 'file-set-drift', current: current.map((f) => f.path), snapshot: snapshot.artifacts.files.map((f) => f.path) });
+  }
+  const digest = sha256(snapshot.artifacts.files.map((f) => `${f.path}:${f.sha256}`).join('\n'));
+  if (digest !== snapshot.artifacts.digest) return bad('task', { reason: 'digest-drift', expected: snapshot.artifacts.digest, actual: digest });
+  // 逐仓本地 source 事实：healthy 分类 + HEAD/祖先/白名单（不读远端）
+  for (const r of snapshot.repositories) {
+    const repo = byId.get(r.repo);
+    const info = classifyRepoWorkspace(ctx, repo, cr);
+    if (info.classification !== 'healthy') {
+      return bad('code', { reason: 'workspace-invalid', repo: r.repo, classification: info.classification, worktreePath: info.worktreePath });
     }
+    const wt = info.worktreePath;
+    const head = gitMust(wt, ['rev-parse', 'HEAD']);
     if (r.repo === ctx.knowledgeBaseRepoId) {
       if (gitRun(wt, ['merge-base', '--is-ancestor', repoReviewedSha(r), head]).status !== 0) {
         return bad('code', { reason: 'head-drift', repo: r.repo, expectedAncestor: repoReviewedSha(r), actual: head });
@@ -1079,28 +1103,6 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
       return bad('code', { reason: 'head-drift', repo: r.repo, expected: repoReviewedSha(r), actual: head });
     }
   }
-  for (const repo of ctx.repositories) {
-    if (!snapRepos.has(repo.id)) return bad('code', { reason: 'repo-missing', repo: repo.id });
-  }
-  // artifact 逐文件重核（按 snapshot 声明序）
-  for (const f of snapshot.artifacts.files) {
-    const abs = path.join(crRoot, ...String(f.path || '').split('/'));
-    const raw = fs.existsSync(abs) ? fs.readFileSync(abs, 'utf8') : null;
-    const actual = raw == null ? null : sha256(raw.replaceAll('\r\n', '\n'));
-    if (actual !== f.sha256) {
-      return bad(artifactKindOf(String(f.path)), { reason: raw == null ? 'missing' : 'hash-drift', path: f.path, expected: f.sha256, actual });
-    }
-  }
-  // 文件集合与 digest 一致性（新增/删除受控文件也是漂移）
-  const current = collectControlledArtifacts(ctx, cr);
-  if (current.length !== snapshot.artifacts.files.length
-    || current.some((f, i) => f.path !== snapshot.artifacts.files[i].path)) {
-    const firstDiff = current.find((f, i) => !snapshot.artifacts.files[i] || snapshot.artifacts.files[i].path !== f.path)
-      || snapshot.artifacts.files[current.length];
-    return bad(artifactKindOf(String(firstDiff && firstDiff.path || 'tasks')), { reason: 'file-set-drift', current: current.map((f) => f.path), snapshot: snapshot.artifacts.files.map((f) => f.path) });
-  }
-  const digest = sha256(snapshot.artifacts.files.map((f) => `${f.path}:${f.sha256}`).join('\n'));
-  if (digest !== snapshot.artifacts.digest) return bad('task', { reason: 'digest-drift', expected: snapshot.artifacts.digest, actual: digest });
   return { ok: true };
 }
 /* ────────────────────────── mergeCr（SDD §5.2，TASK-07） ──────────────────────────
@@ -1279,36 +1281,76 @@ export async function mergeCr(ctx, input) {
       return { cr, txId: journal.txId, phase: 'release-drift', changed: false, drift: { kind: v.kind, ...v.details }, recoverCommand };
     }
 
+    // CR-2026-044 FR-05：新事务全仓 publication preflight——远端 requirement source 精确等于本地 HEAD 才允许
+    // 首次 prepare；publication lag 错误携带 checkpoint recoverCommand，状态保持 code-approved。
+    // 既有 prepare/publish journal 的恢复不重跑 preflight（按已持久化 sourceSha 续跑，不采纳移动 ref）。
+    const checkpointRecoverCommand = `crctl checkpoint ${cr} --workspace ${JSON.stringify(ctx.installRoot)}`;
+    let publicationFacts = null;
+    if (!(payload.repos || []).length) {
+      publicationFacts = new Map();
+      for (const repo of ctx.repositories) {
+        assertGraph();
+        const snapRepo = snapshot.repositories.find((r) => r.repo === repo.id);
+        if (!snapRepo) throw new TxError('RELEASE_SUBJECT_DRIFT', `release-subjects 缺 ${repo.id} 仓声明`, { cr, repo: repo.id });
+        gitMust(repo.rootPath, ['fetch', 'origin']);
+        const localHead = gitMust(path.join(repo.worktreePath, cr), ['rev-parse', 'HEAD']);
+        const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
+        const src = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', sourceRef]);
+        if (src.status !== 0) {
+          throw new TxError('MERGE_SOURCE_MISSING', `${repo.id} 缺少远端 source ref ${sourceRef}（被评审分支未 checkpoint，先执行 recoverCommand 再重跑 merge）`, { repo: repo.id, ref: sourceRef, recoverCommand: checkpointRecoverCommand });
+        }
+        if (src.stdout !== localHead) {
+          throw new TxError('RELEASE_REMOTE_NOT_PUSHED', `${repo.id} 远端 ${sourceRef} 未同步本地 HEAD（publication lag，先执行 recoverCommand 再重跑 merge）`, { repo: repo.id, head: localHead, remote: src.stdout, recoverCommand: checkpointRecoverCommand });
+        }
+        publicationFacts.set(repo.id, { sourceSha: src.stdout, baseSha: gitMust(repo.rootPath, ['rev-parse', `refs/remotes/origin/${repo.trunk}`]) });
+      }
+    }
+
     // per-repo prepare（无 ref/worktree/账本副作用）
     for (const repo of ctx.repositories) {
       assertGraph();
-      const snapRepo = snapshot.repositories.find((r) => r.repo === repo.id);
-      if (!snapRepo) throw new TxError('RELEASE_SUBJECT_DRIFT', `release-subjects 缺 ${repo.id} 仓声明`, { cr, repo: repo.id });
-      gitMust(repo.rootPath, ['fetch', 'origin']);
-      const baseSha = gitMust(repo.rootPath, ['rev-parse', `refs/remotes/origin/${repo.trunk}`]);
-      const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
-      const src = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', sourceRef]);
-      if (src.status !== 0) throw new TxError('MERGE_SOURCE_MISSING', `${repo.id} 缺少远端 source ref ${sourceRef}（被评审分支未 push）`, { repo: repo.id, ref: sourceRef });
-      const sourceMatches = repo.id === ctx.knowledgeBaseRepoId
-        ? gitRun(repo.rootPath, ['merge-base', '--is-ancestor', repoReviewedSha(snapRepo), src.stdout]).status === 0
-        : src.stdout === repoReviewedSha(snapRepo);
-      if (!sourceMatches) {
-        throw new TxError('RELEASE_SUBJECT_DRIFT', `${repo.id} 远端 ${sourceRef} 与 approved source 不一致`, { repo: repo.id, expected: repoReviewedSha(snapRepo), actual: src.stdout });
-      }
       const prev = (payload.repos || []).find((r) => r.repo === repo.id);
       // 已发布/已确认的仓不再重做 prepare：candidate 与 baseSha 保持（发布后 base 不得漂移）
       if (prev && (prev.pushed || prev.confirmed)) continue;
-      if (prev && prev.baseSha === baseSha && prev.sourceSha === src.stdout && prev.mergeSha) continue;
+      let baseSha, sourceSha;
+      if (publicationFacts) {
+        // 新事务首次 prepare：消费 preflight 冻结事实，不做第二轮 fetch/source 读取
+        const fact = publicationFacts.get(repo.id);
+        baseSha = fact.baseSha;
+        sourceSha = fact.sourceSha;
+      } else {
+        // 既有 journal 恢复：按原合同重新 fetch；已 prepared 仓的 source 用 journal 冻结 SHA，
+        // 不重新采纳移动的 requirement ref（merge source 不取移动分支最新值）。
+        const snapRepo = snapshot.repositories.find((r) => r.repo === repo.id);
+        if (!snapRepo) throw new TxError('RELEASE_SUBJECT_DRIFT', `release-subjects 缺 ${repo.id} 仓声明`, { cr, repo: repo.id });
+        gitMust(repo.rootPath, ['fetch', 'origin']);
+        baseSha = gitMust(repo.rootPath, ['rev-parse', `refs/remotes/origin/${repo.trunk}`]);
+        if (prev) {
+          sourceSha = prev.sourceSha;
+        } else {
+          const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
+          const src = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', sourceRef]);
+          if (src.status !== 0) throw new TxError('MERGE_SOURCE_MISSING', `${repo.id} 缺少远端 source ref ${sourceRef}（被评审分支未 push）`, { repo: repo.id, ref: sourceRef });
+          const sourceMatches = repo.id === ctx.knowledgeBaseRepoId
+            ? gitRun(repo.rootPath, ['merge-base', '--is-ancestor', repoReviewedSha(snapRepo), src.stdout]).status === 0
+            : src.stdout === repoReviewedSha(snapRepo);
+          if (!sourceMatches) {
+            throw new TxError('RELEASE_SUBJECT_DRIFT', `${repo.id} 远端 ${sourceRef} 与 approved source 不一致`, { repo: repo.id, expected: repoReviewedSha(snapRepo), actual: src.stdout });
+          }
+          sourceSha = src.stdout;
+        }
+      }
+      if (prev && prev.baseSha === baseSha && prev.sourceSha === sourceSha && prev.mergeSha) continue;
       const prepared = prepareMergeTree({
-        repo, baseSha, sourceSha: src.stdout, cr,
+        repo, baseSha, sourceSha, cr,
         tmpRoot: path.join(ctx.installRoot, '.crctl', 'tmp'),
         knowledgeBase: repo.id === ctx.knowledgeBaseRepoId,
       });
       const tree = prepared.treeSha;
-      const msg = `merge ${cr}: ${repo.id}\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${baseSha}\nAI-First-Merge-Source: ${src.stdout}\n`;
-      const mergeSha = gitMust(repo.rootPath, ['commit-tree', tree, '-p', baseSha, '-p', src.stdout, '-F', '-'], { input: msg });
-      const rec = prev || { repo: repo.id, baseSha, sourceSha: src.stdout, mergeSha, pushed: false, confirmed: false };
-      Object.assign(rec, { baseSha, sourceSha: src.stdout, mergeSha });
+      const msg = `merge ${cr}: ${repo.id}\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${baseSha}\nAI-First-Merge-Source: ${sourceSha}\n`;
+      const mergeSha = gitMust(repo.rootPath, ['commit-tree', tree, '-p', baseSha, '-p', sourceSha, '-F', '-'], { input: msg });
+      const rec = prev || { repo: repo.id, baseSha, sourceSha, mergeSha, pushed: false, confirmed: false };
+      Object.assign(rec, { baseSha, sourceSha, mergeSha });
       if (!prev) payload.repos.push(rec);
       did = true;
       await save(`prepared-${repo.id}`);
@@ -1337,16 +1379,15 @@ export async function mergeCr(ctx, input) {
           throw new TxError('MERGE_REMOTE_HISTORY_REWRITTEN', `${repo.id} 远端 trunk 历史在事务中被重写，硬阻断（不猜测、不自动 force）`, { repo: repo.id, remoteSha, expectedBase: rec.baseSha });
         }
         if (cls === 'rebuild') {
-          const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
-          const src = gitMust(repo.rootPath, ['rev-parse', '--verify', sourceRef]);
+          // CR-2026-044：rebuild 使用 journal 已持久化的冻结 sourceSha，不重新采纳移动的 requirement ref
           const prepared = prepareMergeTree({
-            repo, baseSha: remoteSha, sourceSha: src, cr,
+            repo, baseSha: remoteSha, sourceSha: rec.sourceSha, cr,
             tmpRoot: path.join(ctx.installRoot, '.crctl', 'tmp'),
             knowledgeBase: repo.id === ctx.knowledgeBaseRepoId,
           });
-          const msg = `merge ${cr}: ${repo.id} (rebuild)\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${remoteSha}\nAI-First-Merge-Source: ${src}\n`;
+          const msg = `merge ${cr}: ${repo.id} (rebuild)\n\nAI-First-Op: merge\nAI-First-Tx: ${journal.txId}\nAI-First-CR: ${cr}\nAI-First-Merge-Repo: ${repo.id}\nAI-First-Merge-Base: ${remoteSha}\nAI-First-Merge-Source: ${rec.sourceSha}\n`;
           rec.baseSha = remoteSha;
-          rec.mergeSha = gitMust(repo.rootPath, ['commit-tree', prepared.treeSha, '-p', remoteSha, '-p', src, '-F', '-'], { input: msg });
+          rec.mergeSha = gitMust(repo.rootPath, ['commit-tree', prepared.treeSha, '-p', remoteSha, '-p', rec.sourceSha, '-F', '-'], { input: msg });
           rec.pushed = false;
           did = true;
           await save(`rebuild-${repo.id}`);
@@ -2823,13 +2864,14 @@ export async function archiveCr(ctx, input) {
 /* ────────────────────────── TASK-11：upgrade-check（临时只读预检）──────────────────────────
  * 从 origin 权威事实分类新协议激活风险（SDD §4.6）：fetch 后只读 origin trunk 的 CR 状态与
  * 本机 merge journal（已发布事实），不创建 workspace、不修改审批、不合成 snapshot、零写入。
- * 分类：developing 及之前阶段 = safe；旧 code-approved 零 publish = requiresReapproval；
+ * 分类（CR-2026-044 FR-11）：developing 及之前阶段与零 publish 的 code-approved = safe；
+ *       code-reviewing = requiresReapproval（重跑 review-code）；
  *       merging/writing-back/部分 publish/authority unknown = blocksUpgrade（保守）。
  * 本命令为临时工具：全部安装完成协议切换且无旧事务后，随 dispatch/help/tests 整体删除
  * （CUSTOM-TODO-009 删除条件）。
  */
 
-const UPGRADE_SAFE_STATUSES = new Set(['drafting', 'requirement-reviewing', 'requirement-approved', 'tech-designing', 'tech-design-review-pending', 'tech-design-reviewed', 'task-breakdown', 'developing', 'code-reviewing']);
+const UPGRADE_SAFE_STATUSES = new Set(['drafting', 'requirement-reviewing', 'requirement-approved', 'tech-designing', 'tech-design-review-pending', 'tech-design-reviewed', 'task-breakdown', 'developing']);
 const UPGRADE_TERMINAL = new Set(['archived', 'rejected', 'withdrawn']);
 const UPGRADE_BLOCKER_STATUSES = new Set(['merging', 'writing-back']);
 
@@ -2863,6 +2905,11 @@ export function checkUpgrade(ctx) {
       blocksUpgrade.push({ cr, status, why: 'in-flight-writeback', detail: 'status=' + status + '（回写期在途，authority=Transaction Workspace，切协议前须归档）' });
       continue;
     }
+    if (status === 'code-reviewing') {
+      // CR-2026-044 FR-11/AC-21：本地化 verifier 激活后须重跑 review-code 重建本地 snapshot
+      requiresReapproval.push({ cr, status, why: 'code-reviewing-rereview', detail: '重跑 review-code 重建本地 release snapshot 后再审批' });
+      continue;
+    }
     if (status === 'code-approved') {
       // 旧 code-approved：查 merge journal 是否已有发布事实
       const ms = mergeStatus(ctx, cr);
@@ -2870,7 +2917,8 @@ export function checkUpgrade(ctx) {
       if (published) {
         blocksUpgrade.push({ cr, status, why: 'partial-publish', detail: `merge journal phase=${ms.phase} 已有 publish，切协议前须完成或回退`, txId: ms.txId });
       } else {
-        requiresReapproval.push({ cr, status, why: 'legacy-code-approved', detail: '旧协议 code-approved 零 publish：切协议后须重核 release-subjects 并重新审批' });
+        // CR-2026-044 FR-11/AC-22：零 publish 且本地 snapshot 一致时无需重审批，checkpoint 后 merge
+        safe.push({ cr, status, note: '旧协议 code-approved 零 publish：本地 snapshot 一致时 checkpoint 后 merge，无需重新审批' });
       }
       continue;
     }

@@ -1,5 +1,6 @@
 // CR-2026-031 TASK-11：upgrade-check（临时只读预检）测试。
-// 覆盖：safe（developing/终态）、requiresReapproval（旧 code-approved 零 publish）、
+// 覆盖：safe（developing/终态/零 publish code-approved，CR-2026-044 FR-11）、
+// requiresReapproval（code-reviewing 重评）、
 // blocksUpgrade（merging/writing-back/partial-publish/authority-unknown）、
 // 执行前后工作区文件树与 origin refs 不变（零写入断言）、canActivate/exit 码。
 import test from 'node:test';
@@ -45,11 +46,13 @@ test('TASK-11：四类 legacy fixture 分类准确 + 执行前后零写入', () 
   const f = makeUpgradeFixture();
   const { base, kb, cr } = f;
   try {
-    const cSafe = cr(1), cReappr = cr(2), cBlock = cr(3), cPublish = cr(4), cUnknown = cr(5);
+    const cSafe = cr(1), cReappr = cr(2), cBlock = cr(3), cPublish = cr(4), cUnknown = cr(5), cReview = cr(9);
     // safe：developing（未到审批终态）
     addCrStatus(kb, path.join(base, 'origin-kb.git'), cSafe, 'developing');
-    // requiresReapproval：旧 code-approved 零 publish（无 merge journal）
+    // CR-2026-044：零 publish code-approved → safe（checkpoint 后 merge，无需重审批）
     addCrStatus(kb, path.join(base, 'origin-kb.git'), cReappr, 'code-approved');
+    // CR-2026-044：code-reviewing → requiresReapproval（重跑 review-code）
+    addCrStatus(kb, path.join(base, 'origin-kb.git'), cReview, 'code-reviewing');
     // blocksUpgrade：merging（回写期在途）
     addCrStatus(kb, path.join(base, 'origin-kb.git'), cBlock, 'merging');
     // blocksUpgrade：partial-publish（code-approved + merge journal 有 pushed 事实）
@@ -82,7 +85,8 @@ test('TASK-11：四类 legacy fixture 分类准确 + 执行前后零写入', () 
     assert.equal(j.temporary, true);
     assert.equal(j.canActivate, false);
     assert.ok(j.safe.some((x) => x.cr === cSafe), 'developing → safe');
-    assert.ok(j.requiresReapproval.some((x) => x.cr === cReappr), '旧 code-approved 零 publish → requiresReapproval');
+    assert.ok(j.safe.some((x) => x.cr === cReappr), '零 publish code-approved → safe（CR-2026-044）');
+    assert.ok(j.requiresReapproval.some((x) => x.cr === cReview && x.why === 'code-reviewing-rereview'), 'code-reviewing → requiresReapproval（CR-2026-044）');
     assert.ok(j.blocksUpgrade.some((x) => x.cr === cBlock && x.why === 'in-flight-writeback'), 'merging → blocksUpgrade');
     assert.ok(j.blocksUpgrade.some((x) => x.cr === cPublish && x.why === 'partial-publish'), 'partial-publish → blocksUpgrade');
     assert.ok(j.blocksUpgrade.some((x) => x.cr === cUnknown && x.why === 'authority-unknown'), 'authority-unknown → blocksUpgrade');
@@ -99,12 +103,14 @@ test('TASK-11：全部 safe + requiresReapproval（无 blocker）→ canActivate
     addCrStatus(kb, path.join(base, 'origin-kb.git'), cr(6), 'developing');
     addCrStatus(kb, path.join(base, 'origin-kb.git'), cr(7), 'archived');
     addCrStatus(kb, path.join(base, 'origin-kb.git'), cr(8), 'code-approved');
+    addCrStatus(kb, path.join(base, 'origin-kb.git'), cr(9), 'code-reviewing');
     const before = treeFingerprint(kb);
     const r = runCrctl(['upgrade-check', '--workspace', kb], { cwd: kb });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.json.canActivate, true);
     assert.equal(r.json.blocksUpgrade.length, 0);
-    assert.ok(r.json.requiresReapproval.length >= 1, 'code-approved 在 requiresReapproval');
+    assert.ok(r.json.safe.some((x) => x.cr === cr(8)), '零 publish code-approved 在 safe');
+    assert.ok(r.json.requiresReapproval.some((x) => x.cr === cr(9)), 'code-reviewing 在 requiresReapproval');
     assert.equal(treeFingerprint(kb), before, '工作区零写入');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

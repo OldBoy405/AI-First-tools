@@ -42,7 +42,7 @@ updated: "2026-08-05T15:10:00+08:00"
 
 状态机与账本的唯一可执行治理入口。CLI/门禁留在 `crctl.mjs`；YAML 子集、repository/workspace 事务与持久化原语分别下沉到同级 `lib/yaml-subset.mjs`、`lib/workspace-transactions.mjs`、`lib/durable-tx.mjs`。lib 不反向依赖 CLI，也不形成第二命令入口。
 
-`register`、`merge`、`writeback-apply`、`archive`、`checkpoint` 使用 journal envelope、目录锁与 recoverable write-set。`checkpoint`（CR-2026-033）是单一深原语：复用既有 durable 层与 `workspace-transactions.mjs#checkpointCr`，将逐仓 Git 算法收敛为全仓 source commit → 非 KB lease publish → KB `latest-checkpoint` + metadata commit 唯一完整批次可见点；业务 payload 校验归 workspace-transactions（durable-tx 只做 generic envelope/op-payload slot），测试入口 `skills/shared/crctl/scripts/test/checkpoint-tx.test.mjs`。`approve`、`review-record`、`owner-set` 的多文件写使用同一 `durable-tx.mjs` 中的 command-level ledger transaction：commit 前中断按持久化 before snapshots 整组回滚；commit 后中断按 `AI-First-Tx` trailer 确认 authority 后只清理 journal。旧 `casWriteMulti` 与专属半状态故障点已删除。其余单文件账本命令继续使用 hash-CAS；所有路径共享 `.crctl/audit.log` 与 controlled Git，无旁路。
+`register`、`merge`、`writeback-apply`、`archive`、`checkpoint` 使用 journal envelope、目录锁与 recoverable write-set。本地业务证据与远端发布事实分层（CR-2026-044）：release-subjects 构造/重核只读本地 healthy committed worktree（不 fetch、不读 remote-tracking ref），status/gate/review/approve 不受网络影响；发布完整性由 checkpoint 与 merge 首次 prepare 前的全仓 publication preflight 承担（publication lag 保持 `code-approved` 并指向 checkpoint）；`workspace inspect` 额外暴露既有 authority resolver 的 `operationalWorkspace` 供 Pipeline 入口消费。`checkpoint`（CR-2026-033）是单一深原语：复用既有 durable 层与 `workspace-transactions.mjs#checkpointCr`，将逐仓 Git 算法收敛为全仓 source commit → 非 KB lease publish → KB `latest-checkpoint` + metadata commit 唯一完整批次可见点；业务 payload 校验归 workspace-transactions（durable-tx 只做 generic envelope/op-payload slot），测试入口 `skills/shared/crctl/scripts/test/checkpoint-tx.test.mjs`。`approve`、`review-record`、`owner-set` 的多文件写使用同一 `durable-tx.mjs` 中的 command-level ledger transaction：commit 前中断按持久化 before snapshots 整组回滚；commit 后中断按 `AI-First-Tx` trailer 确认 authority 后只清理 journal。旧 `casWriteMulti` 与专属半状态故障点已删除。其余单文件账本命令继续使用 hash-CAS；所有路径共享 `.crctl/audit.log` 与 controlled Git，无旁路。
 
 ### `skills/shared/crctl/gates.json` + `dir-graph.yaml`
 
@@ -90,7 +90,7 @@ crctl（scripts/crctl.mjs）          # 状态与账本的唯一写入执行器�
 4. **行尾与硬失败纪律**：任何对账本文件做哈希、跨行正则、逐行解析的代码，读入先 `\r\n → \n` 规范化，解析器用 `split(/\r?\n/)`；跨行正则匹配失败必须硬失败报错，禁止静默降级为空结果（核查：新增解析函数是否在 `replaceAll('\r\n','\n')` 之后才做正则匹配；匹配失败路径是否调用 `fail(...)` 而非返回原文/空值）。
 5. **状态机口径唯一**：状态机 = 15 个具名状态 + 注册前 `(new)`；转移 = 28 条声明，wildcard 展开后 50 条。任何文档/断言/代码注释引用状态机规模必须与此口径一致（核查：新文档若提及"N 个状态/M 条转移"，核对是否为该口径）。
 6. **git 是权威，outbox 只是投影**：`crctl` 状态/事件写入 git 后才是权威事实；`.crctl/outbox/` 事件写入失败只记审计、不阻塞主操作（核查：`emitOutboxEvent` 的失败分支是否仍返回主命令的 `ok()` 结果）。
-7. **人工审批无旁路**：需求/架构/开发启动/代码四个人工审批节点只能经 `crctl approve`（交互式 TTY）或 Ed25519 签名授权完成，非 TTY 调用一律拒绝（核查：`cmdApprove` 的 TTY/签名校验分支是否可被参数绕过）。
+7. **人工审批无旁路**：需求/架构/开发启动/代码四个人工审批节点只能经 `crctl approve`（交互式 TTY，共享入口 trim 后大小写不敏感接受 `y|yes`，CR-2026-044）或 Ed25519 签名授权完成，非 TTY 调用一律拒绝（核查：`cmdApprove` 的 TTY/签名校验分支是否可被参数绕过）。
 
 ## 6. 刻意不做（Negative Space）
 

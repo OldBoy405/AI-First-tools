@@ -272,3 +272,87 @@ test('TASK-07 AC-1：PRD 漂移零 publish → APPROVED_ARTIFACT_DRIFT 硬阻断
     assert.ok(!log.includes('merge ' + cr + ':'), '零远端副作用');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
+
+test('CR-2026-044 TASK-01 ③: merge publication preflight — 远端 source 缺失/滞后在首次 prepare 前阻断且 recoverCommand 指向 checkpoint（红测试）', () => {
+  // A) 任一仓远端 source 缺失
+  {
+    const { base, kb, others, cr } = makeCodeApprovedFixture();
+    try {
+      git(path.join(base, 'origin-tools.git'), ['update-ref', '-d', `refs/heads/requirement/${cr}`]);
+      git(others.tools, ['update-ref', '-d', `refs/remotes/origin/requirement/${cr}`]);
+      const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
+      assert.notEqual(r.status, 0);
+      assert.equal(r.errJson.error.code, 'MERGE_SOURCE_MISSING');
+      assert.ok(String(r.errJson.error.recoverCommand || '').includes('checkpoint'), 'publication lag 的 recoverCommand 必须指向 checkpoint');
+      const st = runCrctl(['merge', 'status', cr, '--workspace', kb], { cwd: kb });
+      assert.equal(st.json.repos.length, 0, '首次 prepare 前必须零 candidate');
+      assert.ok(fs.readFileSync(path.join(kb, 'change-requests', cr, 'cr.md'), 'utf8').includes('status: code-approved'), 'publication lag 不得回退状态');
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  }
+  // B) 任一仓远端 source 滞后本地 HEAD
+  {
+    const { base, kb, others, cr } = makeCodeApprovedFixture();
+    try {
+      const oldSha = git(others.tools, ['rev-parse', 'master']);
+      git(path.join(base, 'origin-tools.git'), ['update-ref', `refs/heads/requirement/${cr}`, oldSha]);
+      const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
+      assert.notEqual(r.status, 0);
+      assert.equal(r.errJson.error.code, 'RELEASE_REMOTE_NOT_PUSHED');
+      assert.ok(String(r.errJson.error.recoverCommand || '').includes('checkpoint'), 'publication lag 的 recoverCommand 必须指向 checkpoint');
+      const st = runCrctl(['merge', 'status', cr, '--workspace', kb], { cwd: kb });
+      assert.equal(st.json.repos.length, 0, '首次 prepare 前必须零 candidate');
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-044 TASK-04 AC-2: publication lag 阻断后先 checkpoint（模拟 push）再重跑 merge 成功进入 prepare/publish/finalize', () => {
+  const { base, kb, others, cr, kbWt, headByRepo } = makeCodeApprovedFixture();
+  try {
+    const oldSha = git(others.tools, ['rev-parse', 'master']);
+    git(path.join(base, 'origin-tools.git'), ['update-ref', `refs/heads/requirement/${cr}`, oldSha]);
+    const r1 = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
+    assert.notEqual(r1.status, 0);
+    assert.equal(r1.errJson.error.code, 'RELEASE_REMOTE_NOT_PUSHED');
+    assert.equal((runCrctl(['merge', 'status', cr, '--workspace', kb], { cwd: kb })).json.repos.length, 0, 'lag 时零 candidate');
+    // 模拟 checkpoint：把 tools 被评审分支重新发布到本地 worktree HEAD
+    const toolsWt = path.join(kb, '.rayai-worktrees', 'tools', 'requirement', cr);
+    git(toolsWt, ['push', '-q', '--force', 'origin', 'HEAD:refs/heads/requirement/' + cr]);
+    git(others.tools, ['fetch', '-q', 'origin']);
+    const r2 = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.equal(r2.json.phase, 'complete');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-044 TASK-04 AC-5: 已有 prepare journal 的 trunk rebuild 使用冻结 sourceSha，不采纳移动的 requirement ref', () => {
+  const { base, kb, others, cr } = makeCodeApprovedFixture();
+  try {
+    // kb prepare 后 fault，journal 记录 kb 的 prepared（未 push）
+    const r1 = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb, env: { CRCTL_FAULT_POINT: 'merge-after-prepare' } });
+    assert.notEqual(r1.status, 0);
+    // 从 journal 读取 kb 的冻结 sourceSha（merge status 只读快照不含 sourceSha）
+    const journalPath = path.join(kb, '.crctl', 'transactions', 'merge', cr);
+    const txId = fs.readdirSync(journalPath).find((d) => fs.existsSync(path.join(journalPath, d, 'journal.json')));
+    const frozenSource = JSON.parse(fs.readFileSync(path.join(journalPath, txId, 'journal.json'), 'utf8')).merge.repos.find((x) => x.repo === 'kb').sourceSha;
+    // 竞争者推进 kb trunk（触发 rebuild），同时把 kb requirement 分支移到别处（模拟移动 ref）
+    const clone = path.join(base, 'rival-kb-moved');
+    git(base, ['clone', '-q', path.join(base, 'origin-kb.git'), clone]);
+    git(clone, ['config', 'user.email', 'rival@aifirst.dev']); git(clone, ['config', 'user.name', 'Rival']);
+    fs.writeFileSync(path.join(clone, 'rival.txt'), 'rival');
+    git(clone, ['add', '-A']); git(clone, ['commit', '-q', '-m', 'rival trunk commit']);
+    git(clone, ['push', '-q', 'origin', 'HEAD:refs/heads/master']);
+    // 把远端 requirement 分支移到竞争者提交（移动 ref）；rebuild 不得采纳它
+    git(path.join(base, 'origin-kb.git'), ['update-ref', `refs/heads/requirement/${cr}`, git(clone, ['rev-parse', 'HEAD'])]);
+    const r2 = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.equal(r2.json.phase, 'complete');
+    // kb merge commit 的 source 亲本仍是冻结 sourceSha，而非移动后的 requirement ref
+    const bare = path.join(base, 'origin-kb.git');
+    const mergeCommit = git(bare, ['rev-list', '--format=%s', 'master']).split('\n').reverse().filter((l) => l.startsWith('merge ' + cr + ': kb'));
+    assert.ok(mergeCommit.length >= 1, '存在 kb merge commit');
+    const mc = git(bare, ['log', '--format=%H %s', 'master']).split('\n').find((l) => l.includes(`merge ${cr}: kb`));
+    const mcSha = mc.split(' ')[0];
+    const parents = git(bare, ['rev-list', '--parents', '-n', '1', mcSha]).split(' ').slice(1);
+    assert.ok(parents.includes(frozenSource), `rebuild merge 的 source 亲本应为冻结 sourceSha ${frozenSource.slice(0, 8)}，实际 parents=${parents.map((p) => p.slice(0, 8)).join(',')}`);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
