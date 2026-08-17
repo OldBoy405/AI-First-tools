@@ -1362,6 +1362,29 @@ test('review-record：tech-design stage 写入 sdd.yml（非 tech-design.yml）+
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('CR-2026-045 TASK-01：review outbox payload 含 attempt/blockers/reviewed_at/subject_sha256', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-review-pending');
+    writeEvidence(ws, 'CR-T1', 'sdd.md', '---\nid: CR-T1-sdd\nstatus: draft\n---\n# 1. 概览\n');
+    const payload = writeReviewPayload(ws, 'CR-T1', 'tech-design',
+      'verdict: block\nblockers:\n  - "blk1"\ndimensions:\n  a: b\nsuggestions: []\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const outbox = path.join(ws, '.crctl', 'outbox');
+    const files = readdirSync(outbox).filter((f) => f.includes('-review-'));
+    assert.ok(files.length >= 1, '存在 review outbox 事件');
+    const ev = JSON.parse(readFileSync(path.join(outbox, files[0]), 'utf8'));
+    assert.equal(ev.event_kind, 'review');
+    assert.equal(ev.payload.stage, 'tech-design');
+    assert.equal(ev.payload.verdict, 'block');
+    assert.equal(typeof ev.payload.attempt, 'number');
+    assert.ok(Array.isArray(ev.payload.blockers) && ev.payload.blockers.includes('blk1'));
+    assert.ok(typeof ev.payload.reviewed_at === 'string' && ev.payload.reviewed_at.length > 0);
+    assert.match(ev.payload.subject_sha256, /^[0-9a-f]{64}$/);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
 test('review-record：verdict 非法 → SCHEMA_INVALID，不写 canonical、payload 保留', () => {
   const ws = makeWorkspace();
   try {

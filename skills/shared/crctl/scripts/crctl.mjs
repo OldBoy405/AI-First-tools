@@ -1948,6 +1948,7 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const existing = readFileChecked(target);
   const yamlOf = (v) => (typeof v === 'string' ? `"${String(v).replaceAll('"', '\\"')}"` : JSON.stringify(v));
+  let subjectDigest = null;
   const lines = [
     `cr-id: ${cr}`,
     `review-type: ${stage}`,
@@ -1968,22 +1969,25 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
     const prdPath = path.join(crDir(ws, cr), 'prd.md');
     const prdRaw = readFileChecked(prdPath);
     if (prdRaw == null) fail('SUBJECT_NOT_FOUND', `requirement review-record 需要 ${prdPath} 存在（写入 subject-sha256）`);
+    subjectDigest = sha256(prdRaw.replaceAll('\r\n', '\n'));
     lines.push(`subject-file: change-requests/${cr}/prd.md`);
-    lines.push(`subject-sha256: ${sha256(prdRaw.replaceAll('\r\n', '\n'))}`);
+    lines.push(`subject-sha256: ${subjectDigest}`);
   }
   if (stage === 'tech-design') {
     // CR-2026-027 FR-16/TASK-08：SDD subject digest（供 cmdNext tech-design freshness 判定，SDD §3.5）
     const sddPath = path.join(crDir(ws, cr), 'sdd.md');
     const sddRaw = readFileChecked(sddPath);
     if (sddRaw == null) fail('SUBJECT_NOT_FOUND', `tech-design review-record 需要 ${sddPath} 存在（写入 subject-sha256）`);
+    subjectDigest = sha256(sddRaw.replaceAll('\r\n', '\n'));
     lines.push(`subject-file: change-requests/${cr}/sdd.md`);
-    lines.push(`subject-sha256: ${sha256(sddRaw.replaceAll('\r\n', '\n'))}`);
+    lines.push(`subject-sha256: ${subjectDigest}`);
   }
   if (stage === 'dev-plan') {
     // CR-2026-039 TASK-01（SDD §4.2）：plan.md + 全部 TASK-*.md composite digest；pass/block 两轨同写；
     // 失败统一 SUBJECT_NOT_FOUND（在任何账本写入之前，零写入）；供 TASK-02 next/gate freshness 消费。
     const subject = devPlanCompositeDigest(ws, cr);
     if (!subject.ok) fail('SUBJECT_NOT_FOUND', subject.why, { repairTarget: subject.repairTarget });
+    subjectDigest = subject.digest;
     lines.push(`subject-sha256: ${subject.digest}`);
   }
   if (stage === 'code') {
@@ -2022,7 +2026,10 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
   auditLog(ws, { kind: 'ledger', op: 'review-record', cr, stage, verdict: payload.verdict, actor: reviewer, file: target });
   emitOutboxEvent(ws, {
     event_kind: 'review', cr_id: cr, actor: reviewer,
-    payload: { stage, verdict: payload.verdict, blockerCount },
+    payload: {
+      stage, verdict: payload.verdict, blockerCount,
+      attempt: projCurrent, blockers: payload.blockers, reviewed_at: recordedAt, subject_sha256: subjectDigest,
+    },
   });
   // 删除临时 payload（避免残留误提交或跨 CR 串味）——放在写入成功之后，失败路径 payload 保留供重试
   try { fs.rmSync(fromPath, { force: true }); } catch { /* 删除失败不阻塞主结果 */ }

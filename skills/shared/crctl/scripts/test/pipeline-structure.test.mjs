@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
 const PIPELINE_PATH = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..', 'pipeline-templates', 'code-implementation.pipeline.json');
@@ -166,11 +167,65 @@ test('CR-2026-044 AC-12: architecture/code 入口取得 authority path，并由 
     assert.ok(/classification=healthy/.test(first.prompt), `${name} 首节点要求全部 resources healthy`);
     assert.ok(/resume/.test(first.prompt), `${name} 非 healthy 时指向 resume`);
     for (const node of p.nodes.slice(1).filter((n) => n.prompt)) {
-      assert.ok(node.prompt.includes('execution_context.operational_workspace'), `${name}/${node.ref || node.kind} 后续节点消费同一 authority path`);
+      if (name === 'architecture-design.pipeline.json') {
+        // CR-2026-045：architecture 后续节点每节点独立 workspace inspect，不再依赖 node-1.md 的 execution_context
+        assert.ok(node.prompt.includes('crctl workspace inspect'), `${name}/${node.ref} 后续节点独立 workspace inspect`);
+        assert.ok(!node.prompt.includes('node-1.md'), `${name}/${node.ref} 不依赖 node-1.md`);
+      } else {
+        assert.ok(node.prompt.includes('execution_context.operational_workspace'), `${name}/${node.ref || node.kind} 后续节点消费同一 authority path`);
+      }
     }
   }
   const code = readPipeline('code-implementation.pipeline.json');
   const implement = code.nodes.find((n) => n.ref === 'implement-code');
   assert.ok(implement.prompt.includes('execution_context.resources[].worktreePath'), 'implement-code 从 inspect resources 取多仓路径');
   assert.ok(!implement.prompt.includes('.rayai-worktrees/'), 'implement-code 不再按目录命名拼接 worktree 路径');
+});
+
+/* ── CR-2026-045 TASK-01/TASK-02：architecture reviewLoop replayNodes + emit-registry 合同 ── */
+
+const TOOLS_ROOT_045 = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
+const EMIT_REGISTRY = path.join(TOOLS_ROOT_045, 'pipeline-templates', 'emit-registry.mjs');
+const ARCH = readPipeline('architecture-design.pipeline.json');
+
+test('CR-2026-045 AC-02: architecture reviewLoop 复用 rerun-listed-nodes-in-order + replayNodes schema', () => {
+  const n = ARCH.nodes.find((x) => x.ref === 'review-tech-design');
+  assert.equal(n.reviewLoop.replayPolicy, 'rerun-listed-nodes-in-order');
+  assert.deepEqual(n.reviewLoop.replayNodes, [
+    { nodeId: '00000000-0000-0000-0016-000000000001', ref: 'write-tech-design', purpose: 'repair-sdd' },
+    { nodeId: '00000000-0000-0000-0016-000000000002', ref: 'review-tech-design', purpose: 'rerun-current-review' },
+  ]);
+  // requirement Pipeline 不受影响
+  const req = readPipeline('requirement-authoring.pipeline.json');
+  const rn = req.nodes.find((x) => x.ref === 'review-requirement');
+  assert.equal(rn.reviewLoop.replayPolicy, undefined);
+});
+
+test('CR-2026-045 AC-03: emit-registry 输出 canonical registry 且 digest 稳定', () => {
+  const r = spawnSync(process.execPath, [EMIT_REGISTRY, '--pipeline', 'architecture-design'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, `emit-registry 退出码 0，stderr=${r.stderr}`);
+  const reg = JSON.parse(r.stdout);
+  assert.equal(reg.schema, 'ai-first.pipeline-registry/architecture-core-v1');
+  assert.equal(reg.pipelineOwner, 'dev-agent');
+  assert.equal(reg.nodePermissions.length, 4, 'architecture 有 4 个 skill 节点');
+  for (const p of reg.nodePermissions) {
+    assert.equal(typeof p.ref, 'string');
+    assert.equal(typeof p.owner, 'string');
+    assert.equal(p.pipelineOwnerCanCall, true);
+  }
+  assert.match(reg.digest, /^sha256:[0-9a-f]{64}$/);
+  // 所有 skill 节点 owner 唯一：write/review/approve 归 dev-agent，push-progress 归 system-orchestrator
+  const byRef = Object.fromEntries(reg.nodePermissions.map((p) => [p.ref, p.owner]));
+  assert.equal(byRef['write-tech-design'], 'dev-agent');
+  assert.equal(byRef['review-tech-design'], 'dev-agent');
+  assert.equal(byRef['approve-tech-design'], 'dev-agent');
+  assert.equal(byRef['push-progress'], 'system-orchestrator');
+});
+
+test('CR-2026-045: emit-registry 残留双花括号 token 硬失败且不输出空 registry', () => {
+  // 用 --pipeline 传非法 pipeline 验证 fail-closed（不依赖破坏真实 pipeline 文件）
+  const r = spawnSync(process.execPath, [EMIT_REGISTRY, '--pipeline', 'code-implementation'], { encoding: 'utf8' });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /RUNNER_UNSUPPORTED_PIPELINE/);
+  assert.equal(r.stdout, '');
 });
