@@ -13,6 +13,7 @@
     { "sub": "status", "shapes": ["^--short$"], "callers": ["*"] },
     { "sub": "diff", "shapes": ["^--cached --quiet$", "^--stat( .+)?$", "^--name-only .+$", "^--unified=\\d+ .+$"], "callers": ["*"] },
     { "sub": "log", "shapes": ["^--oneline .+$", "^--format=%B -1$", "^--reverse --format=\\S+ \\S+$"], "callers": ["*"] },
+    { "sub": "show", "shapes": ["^[0-9a-f]{40}:change-requests/CR-[0-9]{4}-[0-9]{3,}/review-annotations/(requirement|sdd|dev-plan|code)\\.yml$"], "callers": ["system-orchestrator"] },
     { "sub": "ls-remote", "shapes": ["^--heads origin( \\S+)?$"], "callers": ["*"] },
     { "sub": "rev-parse", "shapes": ["^(HEAD|origin/\\S+)$", "^--show-toplevel$", "^--is-bare-repository$", "^--verify \\S+$", "^--git-dir$"], "callers": ["*"] },
     { "sub": "symbolic-ref", "shapes": ["^refs/remotes/\\S+$"], "callers": ["*"] },

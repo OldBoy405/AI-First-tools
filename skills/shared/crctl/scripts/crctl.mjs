@@ -1963,6 +1963,11 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
     ...(payload.suggestions && payload.suggestions.length
       ? ['suggestions:', ...payload.suggestions.map((s) => `  - ${yamlOf(s)}`)]
       : ['suggestions: []']),
+    // CR-2026-045: commit-scan fallback reads the canonical annotation. Keep
+    // the crctl-owned attempt beside the verdict so outbox and fallback emit
+    // the same attempt without guessing from commit order.
+    'review-loop:',
+    `  current-attempt: ${projCurrent}`,
   ];
   if (stage === 'requirement') {
     // 被评审内容摘要（FR-19/D-12）：LF 规范化后 SHA-256，mtime 不参与判定；供 cmdNext 回修/重审路由

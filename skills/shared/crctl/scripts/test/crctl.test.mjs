@@ -1359,6 +1359,7 @@ test('review-record：tech-design stage 写入 sdd.yml（非 tech-design.yml）+
     assert.ok(out.includes('suggestions:') && out.includes('abc'), 'suggestions 写入');
     assert.ok(out.includes('review-type: tech-design'), 'review-type 写入');
     assert.ok(out.includes('cr-id: CR-T1'), 'cr-id 写入');
+    assert.match(out, /review-loop:\n  current-attempt: 0/, 'canonical annotation 持久化当前 attempt，供 commit-scan parity');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -1382,6 +1383,8 @@ test('CR-2026-045 TASK-01：review outbox payload 含 attempt/blockers/reviewed_
     assert.ok(Array.isArray(ev.payload.blockers) && ev.payload.blockers.includes('blk1'));
     assert.ok(typeof ev.payload.reviewed_at === 'string' && ev.payload.reviewed_at.length > 0);
     assert.match(ev.payload.subject_sha256, /^[0-9a-f]{64}$/);
+    const annotation = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'sdd.yml'), 'utf8');
+    assert.match(annotation, /review-loop:\n  current-attempt: 1/, 'outbox 与 commit-scan 共享 canonical attempt=1');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 

@@ -10,7 +10,9 @@ import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
-const PIPELINE_PATH = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..', 'pipeline-templates', 'code-implementation.pipeline.json');
+const TOOLS_ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
+const PIPELINE_PATH = path.join(TOOLS_ROOT, 'pipeline-templates', 'code-implementation.pipeline.json');
+const RULES_PATH = path.join(TOOLS_ROOT, 'skills', 'shared', 'controlled-shell', 'rules.json');
 const pipeline = JSON.parse(readFileSync(PIPELINE_PATH, 'utf8').replaceAll('\r\n', '\n'));
 const nodes = pipeline.nodes;
 const bySuffix = (s) => nodes.find((n) => n.id.endsWith(s));
@@ -220,6 +222,21 @@ test('CR-2026-045 AC-03: emit-registry 输出 canonical registry 且 digest 稳�
   assert.equal(byRef['review-tech-design'], 'dev-agent');
   assert.equal(byRef['approve-tech-design'], 'dev-agent');
   assert.equal(byRef['push-progress'], 'system-orchestrator');
+});
+
+test('CR-2026-045: commit-scan git show 仅放行 canonical review annotation object', () => {
+  const rules = JSON.parse(readFileSync(RULES_PATH, 'utf8').replaceAll('\r\n', '\n'));
+  const show = rules.git.find((entry) => entry.sub === 'show');
+  assert.ok(show, 'controlled-shell 必须声明 show');
+  assert.deepEqual(show.callers, ['system-orchestrator']);
+  const allowed = show.shapes.map((shape) => new RegExp(typeof shape === 'string' ? shape : shape.re, typeof shape === 'string' ? '' : shape.flags));
+  const accepts = (value) => allowed.some((re) => re.test(value));
+  assert.ok(accepts('0123456789abcdef0123456789abcdef01234567:change-requests/CR-2026-045/review-annotations/sdd.yml'));
+  for (const unsafe of [
+    'HEAD:change-requests/CR-2026-045/review-annotations/sdd.yml',
+    '0123456789abcdef0123456789abcdef01234567:../../etc/passwd',
+    '0123456789abcdef0123456789abcdef01234567:change-requests/CR-2026-045/cr.md',
+  ]) assert.equal(accepts(unsafe), false, `must reject ${unsafe}`);
 });
 
 test('CR-2026-045: emit-registry 残留双花括号 token 硬失败且不输出空 registry', () => {
