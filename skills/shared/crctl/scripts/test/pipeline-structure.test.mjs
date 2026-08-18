@@ -147,6 +147,8 @@ test('CR-2026-044 AC-14: architecture-design 删除 auto_push_after_sdd，审批
   assert.ok(!/SKIPPED|auto_push/.test(push[0].prompt), 'checkpoint prompt 无 skip 分支');
   assert.doesNotMatch(push[0].prompt, /<[^>]*workspace[^>]*>/i, 'checkpoint prompt 不得含未解析 workspace 占位符');
   assert.match(push[0].prompt, /crctl checkpoint \{\{inputs\.cr_id\}\} --message/);
+  const skill = readFileSync(path.join(TOOLS_ROOT_044, 'skills', 'sync', 'push-progress', 'SKILL.md'), 'utf8');
+  assert.doesNotMatch(skill, /<installation-workspace>/, 'push-progress Skill 不得保留可误执行的 workspace token');
   assert.equal(p.nodes.length, 5, '节点数保持 5');
 });
 

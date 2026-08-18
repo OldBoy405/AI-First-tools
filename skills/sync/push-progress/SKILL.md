@@ -34,7 +34,7 @@ description: "调用一次 crctl checkpoint 深原语，将同一 CR 全部 acti
 crctl checkpoint {cr_id} [--message {message}]
 ```
 
-standalone 场景若没有 `CRCTL_WORKSPACE`，由调用方显式传入真实 `--workspace <installation-workspace>`；`<installation-workspace>` 仅是文档参数名，不得作为 shell 字面量执行。
+standalone 场景若没有 `CRCTL_WORKSPACE`，由调用方通过 `--workspace` 显式传入真实绝对路径；不得把文档参数名当作 shell 字面量执行。
 
 一次调用完成：全部 Git、账本编辑与恢复分类由 `crctl checkpoint` 深原语独占。中断重跑同一命令补齐；幂等重放 no-op 返回 `changed=false`。
 
