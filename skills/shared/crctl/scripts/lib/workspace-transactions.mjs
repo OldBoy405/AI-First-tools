@@ -510,10 +510,33 @@ export function ensureRepoWorkspace(ctx, repo, cr) {
   switch (info.classification) {
     case 'healthy':
       return { ...info, action: 'none' };
-    case 'missing':
-      if (info.remoteBranch) gitMust(repo.rootPath, ['branch', '--track', branch, `origin/${branch}`]);
-      else gitMust(repo.rootPath, ['branch', branch, repo.trunk]);
-      return create(info.remoteBranch ? 'from-remote' : 'from-trunk');
+    case 'missing': {
+      // CR-2026-046 FR-1/3/4：刷新远端事实（fetch --prune 清理已删除的 stale tracking refs），
+      // 重新分类后从远端恢复或从 origin/{trunk} 创建；失败结构化终止，不回退本地 trunk。
+      try {
+        gitMust(repo.rootPath, ['fetch', '--prune', 'origin']);
+      } catch (e) {
+        throw new TxError('WORKSPACE_TRUNK_UNAVAILABLE', `${repo.id}: fetch origin 失败，无法确认远端 trunk 基点（不创建本地 CR branch/worktree）`, { repo: repo.id, cause: e.message });
+      }
+      const re = classifyRepoWorkspace(ctx, repo, cr);
+      if (re.classification === 'remote-only') {
+        gitMust(repo.rootPath, ['branch', '--track', branch, `origin/${branch}`]);
+        return create('from-remote');
+      }
+      if (re.classification === 'branch-only') {
+        return create('from-local-branch');
+      }
+      if (re.classification !== 'missing') {
+        throw new TxError('WORKSPACE_ENSURE_BLOCKED', `${repo.id}: fetch 后重新分类=${re.classification}，ensure 零写入硬阻断（需人工处理）`, { ...re });
+      }
+      const trunkRef = `refs/remotes/origin/${repo.trunk}`;
+      const trunk = gitRun(repo.rootPath, ['rev-parse', '--verify', '-q', trunkRef]);
+      if (trunk.status !== 0 || !trunk.stdout) {
+        throw new TxError('WORKSPACE_TRUNK_UNAVAILABLE', `${repo.id}: ${trunkRef} 不可解析（fetch 后远端无 trunk），不回退本地 trunk`, { repo: repo.id, ref: trunkRef });
+      }
+      gitMust(repo.rootPath, ['branch', branch, trunkRef]);
+      return create('from-remote-trunk');
+    }
     case 'remote-only':
       gitMust(repo.rootPath, ['branch', '--track', branch, `origin/${branch}`]);
       return create('from-remote');
@@ -1236,6 +1259,56 @@ function buildMergeSideEffects(payload) {
   return se;
 }
 
+/* ────────────────────────── CR-2026-046：merge 后本地主 checkout 同步（TASK-02） ──────────────────────────
+ * 远端 merge/finalize 确认后的非事务化 best-effort ff-only：
+ * 只处理 dir-graph 声明的 repo.rootPath 主 checkout，逐仓 8 判据短路；
+ * 副作用命令（fetch --prune / merge --ff-only）只经 gitMust 且局部捕获；
+ * 不写 journal/账本、不抛错——任何结果只反映在返回行里（FR-7/8/9/10）。 */
+export function reconcileLocalTrunks(ctx) {
+  const rows = [];
+  for (const repo of ctx.repositories) {
+    const row = { repo: repo.id, trunk: repo.trunk, before: null, remote: null, after: null, status: null, reason: null };
+    rows.push(row);
+    const head = () => {
+      const h = gitRun(repo.rootPath, ['rev-parse', '-q', 'HEAD']);
+      return h.status === 0 ? h.stdout : null;
+    };
+    row.before = head();
+
+    const cur = gitRun(repo.rootPath, ['symbolic-ref', '--short', '-q', 'HEAD']);
+    if (cur.status !== 0 || cur.stdout !== repo.trunk) { row.status = 'skipped'; row.reason = 'wrong-branch'; row.after = row.before; continue; }
+
+    const st = gitRun(repo.rootPath, ['status', '--porcelain']);
+    if (st.status !== 0 || st.stdout !== '') { row.status = 'skipped'; row.reason = 'dirty'; row.after = row.before; continue; }
+
+    try {
+      gitMust(repo.rootPath, ['fetch', '--prune', 'origin']);
+    } catch {
+      row.status = 'failed'; row.reason = 'fetch-failed'; row.after = row.before; continue;
+    }
+
+    const rr = gitRun(repo.rootPath, ['rev-parse', '--verify', '-q', `refs/remotes/origin/${repo.trunk}`]);
+    if (rr.status !== 0 || !rr.stdout) { row.status = 'failed'; row.reason = 'trunk-unavailable'; row.after = row.before; continue; }
+    row.remote = rr.stdout;
+
+    if (row.before === row.remote) { row.status = 'unchanged'; row.after = row.before; continue; }
+
+    const anc = gitRun(repo.rootPath, ['merge-base', '--is-ancestor', row.before, row.remote]);
+    if (anc.status !== 0) { row.status = 'skipped'; row.reason = 'diverged'; row.after = row.before; continue; }
+
+    try {
+      faultPoint('local-sync-ff-only-failed', { repo: repo.id });
+      gitMust(repo.rootPath, ['merge', '--ff-only', row.remote]);
+      row.after = head();
+      row.status = 'synced';
+    } catch {
+      row.after = head();
+      row.status = 'failed'; row.reason = 'ff-only-failed';
+    }
+  }
+  return rows;
+}
+
 export async function mergeCr(ctx, input) {
   const cr = input && input.cr;
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) throw new TxError('MERGE_CR_INVALID', `merge 需要合法 CR-ID，收到 ${cr}`, { cr });
@@ -1489,10 +1562,12 @@ export async function mergeCr(ctx, input) {
     if (!payload.finalizePushed) throw new TxError('MERGE_REMOTE_STALE', 'finalize push 连续 rebuild 超过上限，无法收敛', { cr });
     payload.operationalWorkspace = txws;
     await save('complete');
+    const localTrunkSync = reconcileLocalTrunks(ctx);
     return {
       cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete,
       sideEffects: buildMergeSideEffects(payload), recoverCommand,
       operationalWorkspace: txws, mergedStatus: payload.mergedStatus,
+      localTrunkSync,
     };
   } finally {
     await lock.release();

@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { git, runCrctl, sha256, makeFixture, makeCodeApprovedFixture, originMasterCount } from './merge-fixture.mjs';
-import { prepareMergeTree, replaceBacklogEntry } from '../lib/workspace-transactions.mjs';
+import { prepareMergeTree, replaceBacklogEntry, reconcileLocalTrunks, resolveRepositories } from '../lib/workspace-transactions.mjs';
 
 test('CR-2026-038 TASK-03：backlog 只替换目标完整条目并逐字保留 trunk 其余内容', () => {
   const trunk = 'schema: cr-backlog/v2\r\nchange-requests:\r\n  - id: CR-2026-001\r\n    title: trunk-before\r\n\r\n  # keep target separator\r\n  - id: CR-2026-038\r\n    title: old\r\n    unknown: trunk-old\r\n\r\n  # keep after target\r\n  - id: CR-2026-099\r\n    title: trunk-after\r\n';
@@ -354,5 +354,113 @@ test('CR-2026-044 TASK-04 AC-5: 已有 prepare journal 的 trunk rebuild 使用�
     const mcSha = mc.split(' ')[0];
     const parents = git(bare, ['rev-list', '--parents', '-n', '1', mcSha]).split(' ').slice(1);
     assert.ok(parents.includes(frozenSource), `rebuild merge 的 source 亲本应为冻结 sourceSha ${frozenSource.slice(0, 8)}，实际 parents=${parents.map((p) => p.slice(0, 8)).join(',')}`);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── CR-2026-046：merge 后本地主 checkout 同步（TASK-02） ────────────────────────── */
+
+test('CR-2026-046 TASK-02 AC-6/7：happy path 三仓 localTrunkSync=synced 且主 checkout 快进', () => {
+  const { base, kb, cr } = makeCodeApprovedFixture();
+  try {
+    const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.json.phase, 'complete');
+    const sync = r.json.localTrunkSync;
+    assert.ok(Array.isArray(sync) && sync.length === 3, '三仓必须各有一行');
+    for (const [n, dir] of [['kb', kb], ['multica', path.join(base, 'multica')], ['tools', path.join(base, 'tools')]]) {
+      const row = sync.find((x) => x.repo === n);
+      assert.ok(row, `缺 ${n} 行`);
+      assert.equal(row.trunk, 'master');
+      assert.equal(row.status, 'synced', `${n}: ${JSON.stringify(row)}`);
+      assert.equal(row.reason, null);
+      const originSha = git(path.join(base, `origin-${n}.git`), ['rev-parse', 'master']);
+      assert.equal(row.remote, originSha, `${n} remote 必须等于捕获的 origin trunk SHA`);
+      assert.equal(row.after, originSha, `${n} after 必须等于 ff-only 后的 HEAD`);
+      assert.equal(git(dir, ['rev-parse', 'master']), originSha, `${n} 主 checkout 必须已快进到远端`);
+      assert.ok(row.before !== row.after, `${n} before 应落后于 after`);
+    }
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-046 TASK-02 AC-6：reconcileLocalTrunks 表驱动六场景', () => {
+  const f = makeFixture();
+  const { base, kb, others } = f;
+  try {
+    const ctx = resolveRepositories(kb);
+    const rowsOf = () => reconcileLocalTrunks(ctx).map((r) => ({ ...r }));
+    const bare = (n) => path.join(base, `origin-${n}.git`);
+
+    // 场景 1：unchanged（远端无新提交，本地已一致）
+    let rows = rowsOf();
+    for (const n of ['kb', 'multica', 'tools']) {
+      const row = rows.find((x) => x.repo === n);
+      assert.equal(row.status, 'unchanged', `${n} ${JSON.stringify(row)}`);
+      assert.equal(row.before, row.remote);
+      assert.equal(row.after, row.before);
+    }
+
+    // 场景 2：dirty（kb 主 checkout 有未提交变更）
+    fs.writeFileSync(path.join(kb, 'stray.txt'), 'x\n');
+    rows = rowsOf();
+    assert.equal(rows.find((x) => x.repo === 'kb').status, 'skipped');
+    assert.equal(rows.find((x) => x.repo === 'kb').reason, 'dirty');
+    assert.equal(rows.find((x) => x.repo === 'kb').remote, null);
+    fs.rmSync(path.join(kb, 'stray.txt'));
+
+    // 场景 3：wrong-branch（kb checkout 到非 trunk 分支）
+    git(kb, ['checkout', '-q', '-b', 'feature-x']);
+    rows = rowsOf();
+    assert.equal(rows.find((x) => x.repo === 'kb').status, 'skipped');
+    assert.equal(rows.find((x) => x.repo === 'kb').reason, 'wrong-branch');
+    assert.equal(rows.find((x) => x.repo === 'kb').remote, null);
+    git(kb, ['checkout', '-q', 'master']);
+    git(kb, ['branch', '-D', 'feature-x']);
+
+    // 场景 4：diverged（本地前进且 origin 也前进，互不为祖先）
+    git(kb, ['fetch', '-q', 'origin']);
+    const rival = path.join(base, 'rival-kb');
+    git(base, ['clone', '-q', bare('kb'), rival]);
+    git(rival, ['config', 'user.email', 'r@r.dev']); git(rival, ['config', 'user.name', 'R']);
+    fs.writeFileSync(path.join(rival, 'r.txt'), 'r\n');
+    git(rival, ['add', '-A']); git(rival, ['commit', '-q', '-m', 'rival']); git(rival, ['push', '-q', 'origin', 'HEAD:refs/heads/master']);
+    fs.writeFileSync(path.join(kb, 'local.txt'), 'l\n');
+    git(kb, ['add', '-A']); git(kb, ['commit', '-q', '-m', 'local diverged']);
+    rows = rowsOf();
+    assert.equal(rows.find((x) => x.repo === 'kb').status, 'skipped');
+    assert.equal(rows.find((x) => x.repo === 'kb').reason, 'diverged');
+    assert.equal(rows.find((x) => x.repo === 'kb').remote, git(bare('kb'), ['rev-parse', 'master']));
+    assert.equal(rows.find((x) => x.repo === 'kb').after, rows.find((x) => x.repo === 'kb').before, 'diverged 不得移动本地');
+
+    // 场景 5：fetch-failed（bogus origin url）
+    git(kb, ['remote', 'set-url', 'origin', path.join(base, 'nonexistent.git')]);
+    rows = rowsOf();
+    assert.equal(rows.find((x) => x.repo === 'kb').status, 'failed');
+    assert.equal(rows.find((x) => x.repo === 'kb').reason, 'fetch-failed');
+    assert.equal(rows.find((x) => x.repo === 'kb').remote, null);
+    assert.equal(rows.find((x) => x.repo === 'kb').after, rows.find((x) => x.repo === 'kb').before);
+    git(kb, ['remote', 'set-url', 'origin', bare('kb')]);
+
+    // 场景 6：trunk-unavailable（远端删 trunk、本地保留 stale tracking ref，fetch --prune 后失败）
+    git(bare('kb'), ['update-ref', '-d', 'refs/heads/master']);
+    rows = rowsOf();
+    assert.equal(rows.find((x) => x.repo === 'kb').status, 'failed');
+    assert.equal(rows.find((x) => x.repo === 'kb').reason, 'trunk-unavailable');
+    assert.equal(rows.find((x) => x.repo === 'kb').remote, null);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-046 TASK-02 AC-7：local-sync-ff-only-failed 注入下 merge 仍 phase=complete 且远端成功', () => {
+  const { base, kb, cr } = makeCodeApprovedFixture();
+  try {
+    const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb, env: { CRCTL_FAULT_POINT: 'local-sync-ff-only-failed' } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.json.phase, 'complete', JSON.stringify(r.json));
+    const row = r.json.localTrunkSync.find((x) => x.repo === 'kb');
+    assert.equal(row.status, 'failed');
+    assert.equal(row.reason, 'ff-only-failed');
+    assert.equal(row.remote, git(path.join(base, 'origin-kb.git'), ['rev-parse', 'master']), 'remote 必须已捕获');
+    // 远端 merge 成功不受本地失败影响
+    const log = git(path.join(base, 'origin-kb.git'), ['log', '--format=%s', 'master']);
+    assert.ok(log.includes(`merge ${cr}: kb`), '远端 merge commit 必须存在');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

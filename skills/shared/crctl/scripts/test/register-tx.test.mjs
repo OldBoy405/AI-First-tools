@@ -10,6 +10,8 @@ import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { resolveRepositories, ensureRepoWorkspace } from '../lib/workspace-transactions.mjs';
+
 const CRCTL = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'crctl.mjs');
 const sha256 = (t) => crypto.createHash('sha256').update(t, 'utf8').digest('hex');
 const YEAR = String(new Date().getFullYear());
@@ -396,5 +398,98 @@ test('CR-2026-044 TASK-05: workspace inspect 输出 authority operationalWorkspa
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.json.operationalWorkspaceError, null);
     assert.equal(r.json.operationalWorkspace, wtPath(kb, 'knowledge-base', regCr));
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── CR-2026-046：注册基点取远端事实（TASK-01） ────────────────────────── */
+
+/** 通过临时 clone 向 bare origin 推一个推进 commit（用于制造远端领先 / 远端专用分支）。 */
+function pushRemoteCommit(base, originName, { branch = 'master', file = 'remote.txt', content = 'remote advance' } = {}) {
+  const clone = path.join(base, `rival-${originName}`);
+  git(base, ['clone', '-q', path.join(base, `origin-${originName}.git`), clone]);
+  git(clone, ['config', 'user.email', 'rival@aifirst.dev']);
+  git(clone, ['config', 'user.name', 'Rival']);
+  if (branch !== 'master') git(clone, ['checkout', '-q', '-b', branch]);
+  fs.writeFileSync(path.join(clone, file), content + '\n');
+  git(clone, ['add', '-A']);
+  git(clone, ['commit', '-q', '-m', `remote: ${branch} ${file}`]);
+  git(clone, ['push', '-q', 'origin', `HEAD:refs/heads/${branch}`]);
+  return git(path.join(base, `origin-${originName}.git`), ['rev-parse', branch]);
+}
+
+const kbRepo = (kb) => resolveRepositories(kb).repositories.find((r) => r.id === 'kb');
+
+test('CR-2026-046 TASK-01 AC-1：stale local trunk 时新 CR 分支基于 fetch 后的远端 trunk', () => {
+  const { base, kb } = makeFixture();
+  try {
+    const remoteSha = pushRemoteCommit(base, 'kb', { file: 'advance.txt' });
+    const cr = `CR-${YEAR}-901`;
+    const r = ensureRepoWorkspace(resolveRepositories(kb), kbRepo(kb), cr);
+    assert.equal(r.action, 'created:from-remote-trunk');
+    assert.equal(git(kb, ['rev-parse', `requirement/${cr}`]), remoteSha, 'CR 分支 HEAD 必须等于远端 trunk SHA');
+    assert.ok(fs.existsSync(wtPath(kb, 'knowledge-base', cr)), 'worktree 已创建');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-046 TASK-01 AC-2：仅远端有 CR 分支时 fetch 后恢复，不另建历史', () => {
+  const { base, kb } = makeFixture();
+  try {
+    const cr = `CR-${YEAR}-902`;
+    const remoteSha = pushRemoteCommit(base, 'kb', { branch: `requirement/${cr}`, file: 'feat.txt', content: 'remote cr branch' });
+    const r = ensureRepoWorkspace(resolveRepositories(kb), kbRepo(kb), cr);
+    assert.equal(r.action, 'created:from-remote');
+    assert.equal(git(kb, ['rev-parse', `requirement/${cr}`]), remoteSha);
+    assert.equal(git(kb, ['config', '--get', `branch.requirement/${cr}.remote`]), 'origin', '必须 tracking origin');
+    assert.ok(fs.existsSync(wtPath(kb, 'knowledge-base', cr)));
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-046 TASK-01 AC-3a：fetch 失败抛 WORKSPACE_TRUNK_UNAVAILABLE 且零 CR 资源', () => {
+  const { base, kb } = makeFixture();
+  try {
+    git(kb, ['remote', 'set-url', 'origin', path.join(base, 'nonexistent.git')]);
+    const cr = `CR-${YEAR}-903`;
+    assert.throws(
+      () => ensureRepoWorkspace(resolveRepositories(kb), kbRepo(kb), cr),
+      (e) => !!(e.code === 'WORKSPACE_TRUNK_UNAVAILABLE' && e.extra && e.extra.cause),
+      'fetch 失败必须结构化 WORKSPACE_TRUNK_UNAVAILABLE',
+    );
+    assert.equal(git(kb, ['branch', '--list', `requirement/${cr}`]), '', '不得创建本地 CR 分支');
+    assert.ok(!fs.existsSync(wtPath(kb, 'knowledge-base', cr)), '不得创建 worktree');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-046 TASK-01 AC-3b：远端 trunk 已删除且本地有 stale tracking ref，fetch --prune 后结构化失败', () => {
+  const { base, kb } = makeFixture();
+  try {
+    git(path.join(base, 'origin-kb.git'), ['update-ref', '-d', 'refs/heads/master']);
+    const stale = git(kb, ['rev-parse', '--verify', '-q', 'refs/remotes/origin/master']);
+    assert.ok(stale, '前置：本地 stale tracking ref 仍存在');
+    const cr = `CR-${YEAR}-904`;
+    assert.throws(
+      () => ensureRepoWorkspace(resolveRepositories(kb), kbRepo(kb), cr),
+      (e) => e.code === 'WORKSPACE_TRUNK_UNAVAILABLE',
+    );
+    const rev = spawnSync('git', ['rev-parse', '--verify', '-q', 'refs/remotes/origin/master'], { cwd: kb, encoding: 'utf8' });
+    assert.notEqual(rev.status, 0, 'fetch --prune 必须清理已删除远端的 stale tracking ref');
+    assert.equal(git(kb, ['branch', '--list', `requirement/${cr}`]), '', '不得创建本地 CR 分支');
+    assert.ok(!fs.existsSync(wtPath(kb, 'knowledge-base', cr)), '不得创建 worktree');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-046 TASK-01 AC-4：healthy / branch-only 分类不触发 fetch（bogus origin 下仍成功）', () => {
+  const { base, kb } = makeFixture();
+  try {
+    const crHealthy = `CR-${YEAR}-905`;
+    assert.equal(ensureRepoWorkspace(resolveRepositories(kb), kbRepo(kb), crHealthy).action, 'created:from-remote-trunk');
+    // 破坏 origin url：任何 fetch 都会失败，若 healthy/branch-only 触发 fetch 则本用例失败
+    git(kb, ['remote', 'set-url', 'origin', path.join(base, 'nonexistent.git')]);
+    const again = ensureRepoWorkspace(resolveRepositories(kb), kbRepo(kb), crHealthy);
+    assert.equal(again.action, 'none', 'healthy 必须不 fetch 直接复用');
+    const crBranchOnly = `CR-${YEAR}-906`;
+    git(kb, ['branch', `requirement/${crBranchOnly}`, 'master']);
+    const r = ensureRepoWorkspace(resolveRepositories(kb), kbRepo(kb), crBranchOnly);
+    assert.equal(r.action, 'created:from-local-branch', 'branch-only 必须不 fetch 直接挂接');
+    assert.ok(fs.existsSync(wtPath(kb, 'knowledge-base', crBranchOnly)));
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
