@@ -80,15 +80,21 @@ created: {YYYY-MM-DDTHH:mm:ss+08:00}
 5. **完成标志** — 定义"完成"的明确状态（如"单元测试通过 + lint 零报错"）
 6. **接口契约** — 消费：本 TASK 使用哪些上游 TASK 产出的精确函数名/参数/返回类型；产出：本 TASK 暴露给下游 TASK 的精确签名
 
-### Step 4 — 初始化 TASK 索引
+### Step 4 — 初始化或追加 TASK 索引
 
-TASK 卡全部写完后执行：
+初次拆分时，TASK 卡全部写完后执行：
 
 ```bash
 crctl task init {cr_id} --workspace <knowledge-base CR worktree>
 ```
 
-`tasks/_index.yml` 是受控账本，禁止 Agent/Skill 手写。`task init` 从 TASK frontmatter 确定性投影 id / title / status / estimate / depends-on；任一卡非法、依赖悬空/成环、已有进度或并发冲突时必须中止，不得推进状态。
+`tasks/_index.yml` 是受控账本，禁止 Agent/Skill 手写。若 CR 已进入 `developing` 且需要追加更大编号的 hardening TASK，执行：
+
+```bash
+crctl task append {cr_id} --workspace <knowledge-base CR worktree>
+```
+
+`task append` 只追加不存在且编号大于当前最大编号的 TASK，校验既有条目的 title/estimate/depends-on 未漂移，并保留既有 `done/done-at`；插入历史 TASK、修改历史进度或 CAS 冲突时零写入拒绝。
 
 **估算交叉校验（FR-23，CR-2026-022）**：用命令返回的 `totalEstimateHours` 核对 `plan.md` 章节 5 的估算总工时是否一致；不一致时输出 WARN 并说明差异（不静默覆盖 plan.md，由计划负责人决定以哪侧为准）。
 

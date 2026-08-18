@@ -479,7 +479,12 @@ export function classifyRepoWorkspace(ctx, repo, cr) {
   }
   const real = (() => { try { return fs.realpathSync(wtPath); } catch { return wtPath; } })();
   const list = gitRun(repo.rootPath, ['worktree', 'list', '--porcelain']);
-  const registered = list.status === 0 && list.stdout.split(/\r?\n/).some((l) => {
+  if (list.status !== 0) {
+    throw new TxError('WORKSPACE_GIT_INSPECT_FAILED', `${repo.id}: git worktree list --porcelain 失败（exit=${list.status}）: ${list.stderr || list.stdout}`, {
+      repo: repo.id, cwd: repo.rootPath, exit: list.status, stderr: list.stderr,
+    });
+  }
+  const registered = list.stdout.split(/\r?\n/).some((l) => {
     if (!l.startsWith('worktree ')) return false;
     return sameFileIdentity(l.slice('worktree '.length), real);
   });
@@ -3155,8 +3160,10 @@ export function runTestPlan(plan, ctx, cr) {
     if (source.status !== 0 || !/^[0-9a-f]{40,64}$/.test(source.stdout)) {
       throw new TxError('TEST_SOURCE_REVISION_INVALID', `repo ${cmd.repo} 无法解析测试源 HEAD`, { repo: cmd.repo, stderr: source.stderr });
     }
+    const childEnv = { ...process.env };
+    delete childEnv.CRCTL_OPERATIONAL_WORKSPACE;
     const r = spawnSync(cmd.executable, cmd.args, {
-      cwd: cmd.absoluteCwd, encoding: 'utf8', shell: false, timeout: cmd.timeoutSeconds * 1000,
+      cwd: cmd.absoluteCwd, encoding: 'utf8', shell: false, timeout: cmd.timeoutSeconds * 1000, env: childEnv,
     });
     const errCode = r.error ? r.error.code : null;
     const timedOut = errCode === 'ETIMEDOUT';

@@ -16,7 +16,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 // CR-2026-039 TASK-03：纯函数单测直接 import（与 archive-tx/checkpoint-tx 等测试同模式；不改变 CLI 公开面）
-import { crMdStatusText, refreshCrMdUpdated } from '../lib/workspace-transactions.mjs';
+import { crMdStatusText, refreshCrMdUpdated, classifyRepoWorkspace } from '../lib/workspace-transactions.mjs';
 
 const CRCTL = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
 // 真实 tools 包根（test → scripts → crctl → shared → skills → tools 共 5 层）：
@@ -230,6 +230,80 @@ function writeEvidence(ws, cr, relFromCrDir, content) {
   writeFileSync(p, content);
   return p;
 }
+
+// ── workspace authority resolution ───────────────────────────────────────────
+
+test('CR-2026-045: workspace precedence is --workspace > CRCTL_WORKSPACE > cwd', () => {
+  const envWs = makeWorkspace();
+  const explicitWs = makeWorkspace();
+  try {
+    writeCrEntry(envWs, 'CR-ENV', 'drafting');
+    writeCrEntry(explicitWs, 'CR-EXPLICIT', 'developing');
+
+    let r = runCrctl(['status', 'CR-ENV'], { CRCTL_WORKSPACE: envWs });
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.status, 'drafting');
+
+    r = runCrctl(['status', 'CR-EXPLICIT', '--workspace', explicitWs], {
+      CRCTL_WORKSPACE: path.join(envWs, 'does-not-exist'),
+    });
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.status, 'developing');
+
+    r = runCrctl(['status', 'CR-ENV'], { CRCTL_WORKSPACE: path.join(envWs, 'does-not-exist') });
+    assert.notEqual(r.status, 0);
+    assert.equal(r.stderr.error.code, 'WORKSPACE_NOT_FOUND');
+    assert.match(r.stderr.error.message, /CRCTL_WORKSPACE/);
+  } finally {
+    rmSync(envWs, { recursive: true, force: true });
+    rmSync(explicitWs, { recursive: true, force: true });
+  }
+});
+
+test('CR-2026-045: daemon operational workspace owns advance data while installation root owns outbox', () => {
+  const installation = makeWorkspace();
+  const operational = makeWorkspace();
+  try {
+    writeCrEntry(installation, 'CR-2026-045', 'drafting');
+    writeCrEntry(operational, 'CR-2026-045', 'requirement-approved');
+    writeApprovalYml(operational, 'CR-2026-045', 'requirement', {
+      approver: 'E2E Human',
+      'approved-at': '2026-08-18T03:00:00+08:00',
+      via: 'crctl-approve',
+      'target-status': 'requirement-approved',
+    });
+
+    const r = runCrctl([
+      'advance', 'CR-2026-045', '--to', 'tech-designing', '--trigger', 'write-tech-design',
+      '--expect', 'requirement-approved', '--no-commit',
+    ], {
+      CRCTL_WORKSPACE: installation,
+      CRCTL_OPERATIONAL_WORKSPACE: operational,
+    });
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.match(readFileSync(path.join(operational, 'change-requests', 'CR-2026-045', 'cr.md'), 'utf8'), /^status: tech-designing$/m);
+    assert.match(readFileSync(path.join(installation, 'change-requests', 'CR-2026-045', 'cr.md'), 'utf8'), /^status: drafting$/m);
+    assert.ok(readdirSync(path.join(installation, '.crctl', 'outbox')).some((name) => name.includes('CR-2026-045-status')));
+    assert.equal(existsSync(path.join(operational, '.crctl', 'outbox')), false);
+  } finally {
+    rmSync(installation, { recursive: true, force: true });
+    rmSync(operational, { recursive: true, force: true });
+  }
+});
+
+test('CR-2026-045: workspace Git inspection failures do not degrade to path-unregistered', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'crctl-not-git-'));
+  const worktreeBase = path.join(root, 'worktrees');
+  mkdirSync(path.join(worktreeBase, 'CR-2026-045'), { recursive: true });
+  try {
+    assert.throws(
+      () => classifyRepoWorkspace({}, { id: 'broken-repo', rootPath: root, worktreePath: worktreeBase }, 'CR-2026-045'),
+      (err) => err?.code === 'WORKSPACE_GIT_INSPECT_FAILED',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 // ── approve：人类在环，无旁路（治理⑤）─────────────────────────────────
 test('approve 拒绝非交互式调用（spawnSync 下 stdin 恒非 TTY），无 --stage 之外的旁路参数', () => {
@@ -872,7 +946,7 @@ test('CR-2026-031 TASK-02：已退役命令统一拒绝（cr-metrics/migrate-bac
     const r3 = runCrctl(['task', 'allocate', 'CR-T1', '--workspace', ws]);
     assert.equal(r3.status, 1);
     assert.equal(r3.stderr.error.code, 'BAD_ARGS');
-    assert.match(r3.stderr.error.message, /仅支持子命令 init\/done/);
+    assert.match(r3.stderr.error.message, /仅支持子命令 init\/append\/done/);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -1071,6 +1145,40 @@ test('CR-2026-037 task init：已有进度与非法状态 fail-closed', () => {
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('CR-2026-045 hardening：task append 在 developing 期保留历史 done 并只追加新 TASK', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeTaskCard(ws, 'CR-T1', 1, { title: 'existing' });
+    writeTaskCard(ws, 'CR-T1', 2, { title: 'new task', dependsOn: ['CR-T1-TASK-01'] });
+    writeTaskIndex(ws, 'CR-T1', [{ id: 'CR-T1-TASK-01', title: 'existing', status: 'done', doneAt: '2026-08-18T10:00:00+08:00' }]);
+    const r = runCrctl(['task', 'append', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.deepEqual(r.stdout.appended, ['CR-T1-TASK-02']);
+    let idx = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml'), 'utf8');
+    assert.match(idx, /CR-T1-TASK-01[\s\S]*status: done[\s\S]*done-at: "2026-08-18T10:00:00\+08:00"/);
+    assert.match(idx, /CR-T1-TASK-02[\s\S]*status: pending/);
+    const replay = runCrctl(['task', 'append', 'CR-T1', '--workspace', ws]);
+    assert.equal(replay.status, 0, replay.rawStderr);
+    assert.deepEqual(replay.stdout.appended, []);
+    assert.equal(replay.stdout.changed, false);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-045 hardening：task append 在历史索引漂移时零写入', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeTaskCard(ws, 'CR-T1', 1, { title: 'card title' });
+    writeTaskIndex(ws, 'CR-T1', [{ id: 'CR-T1-TASK-01', title: 'different title', status: 'done', doneAt: '2026-08-18T10:00:00+08:00' }]);
+    const p = path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml');
+    const before = readFileSync(p, 'utf8');
+    const r = runCrctl(['task', 'append', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'TASK_INDEX_DRIFT');
+    assert.equal(readFileSync(p, 'utf8'), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
 test('CR-2026-037 task-breakdown：缺索引时 gate/next 阻断，task init 后 gate 通过', () => {
   const ws = makeWorkspace();
   try {
@@ -1359,6 +1467,34 @@ test('review-record：tech-design stage 写入 sdd.yml（非 tech-design.yml）+
     assert.ok(out.includes('suggestions:') && out.includes('abc'), 'suggestions 写入');
     assert.ok(out.includes('review-type: tech-design'), 'review-type 写入');
     assert.ok(out.includes('cr-id: CR-T1'), 'cr-id 写入');
+    assert.match(out, /review-loop:\n  current-attempt: 0/, 'canonical annotation 持久化当前 attempt，供 commit-scan parity');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-045 TASK-01：review outbox payload 含 attempt/blockers/reviewed_at/subject_sha256', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-review-pending');
+    writeEvidence(ws, 'CR-T1', 'sdd.md', '---\nid: CR-T1-sdd\nstatus: draft\n---\n# 1. 概览\n');
+    const payload = writeReviewPayload(ws, 'CR-T1', 'tech-design',
+      'verdict: block\nblockers:\n  - "blk1"\ndimensions:\n  a: b\nsuggestions: []\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0);
+    const outbox = path.join(ws, '.crctl', 'outbox');
+    const files = readdirSync(outbox).filter((f) => f.includes('-review-'));
+    assert.ok(files.length >= 1, '存在 review outbox 事件');
+    const ev = JSON.parse(readFileSync(path.join(outbox, files[0]), 'utf8'));
+    assert.equal(ev.event_kind, 'review');
+    assert.equal(ev.payload.stage, 'tech-design');
+    assert.equal(ev.payload.verdict, 'block');
+    assert.equal(typeof ev.payload.attempt, 'number');
+    assert.ok(Array.isArray(ev.payload.blockers) && ev.payload.blockers.includes('blk1'));
+    assert.ok(typeof ev.payload.reviewed_at === 'string' && ev.payload.reviewed_at.length > 0);
+    assert.match(ev.payload.subject_sha256, /^[0-9a-f]{64}$/);
+    assert.equal(ev.evidence[`change-requests/CR-T1/review-annotations/sdd.yml`].slice(0, 7), 'sha256:');
+    assert.match(ev.evidence[`change-requests/CR-T1/review-annotations/sdd.yml`], /^sha256:[0-9a-f]{64}$/);
+    const annotation = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'sdd.yml'), 'utf8');
+    assert.match(annotation, /review-loop:\n  current-attempt: 1/, 'outbox 与 commit-scan 共享 canonical attempt=1');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
