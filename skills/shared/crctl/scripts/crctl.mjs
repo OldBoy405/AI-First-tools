@@ -132,9 +132,11 @@ function getPath(obj, dotted) {
 /* ────────────────────────── workspace 解析 ────────────────────────── */
 
 function detectWorkspace(explicit) {
-  if (explicit) {
-    const abs = path.resolve(explicit);
-    if (!fs.existsSync(path.join(abs, 'change-requests'))) fail('WORKSPACE_NOT_FOUND', `--workspace 指向的目录缺少 change-requests/: ${abs}`);
+  const configured = explicit || String(process.env.CRCTL_WORKSPACE || '').trim();
+  if (configured) {
+    const abs = path.resolve(configured);
+    const source = explicit ? '--workspace' : 'CRCTL_WORKSPACE';
+    if (!fs.existsSync(path.join(abs, 'change-requests'))) fail('WORKSPACE_NOT_FOUND', `${source} 指向的目录缺少 change-requests/: ${abs}`);
     return abs;
   }
   let dir = process.cwd();
@@ -287,10 +289,11 @@ function auditLogOnce(ws, record, dedupKey) {
  */
 
 function emitOutboxEvent(ws, ev) {
+  const installRoot = deriveInstallRoot(ws);
   try {
-    const dir = path.join(ws, '.crctl', 'outbox');
+    const dir = path.join(installRoot, '.crctl', 'outbox');
     fs.mkdirSync(dir, { recursive: true });
-    const gi = path.join(ws, '.crctl', '.gitignore');
+    const gi = path.join(installRoot, '.crctl', '.gitignore');
     if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n');
     const event = {
       v: 1,
@@ -315,7 +318,7 @@ function emitOutboxEvent(ws, ev) {
     fs.renameSync(tmp, path.join(dir, name)); // 原子可见：先写临时名再 rename，防半写
     return name;
   } catch (e) {
-    try { auditLog(ws, { kind: 'outbox', cr: ev.cr_id, event_kind: ev.event_kind, result: 'EMIT_FAILED', why: String(e && e.message || e) }); } catch { /* 双重失败只能放弃 */ }
+    try { auditLog(installRoot, { kind: 'outbox', cr: ev.cr_id, event_kind: ev.event_kind, result: 'EMIT_FAILED', why: String(e && e.message || e) }); } catch { /* 双重失败只能放弃 */ }
     return null;
   }
 }
@@ -515,7 +518,13 @@ function checkDeliveryIndexComplete(ws, cr) {
   return { ok: missing.length === 0, missing, code: missing.length ? 'DELIVERY_INDEX_INCOMPLETE' : undefined, why: missing.length ? `delivery/task 索引缺失 ${missing.length} 项: ${missing.join(', ')}` : null };
 }
 
+function authorityWorkspace(ws, _cr, override) {
+  const configured = override || String(process.env.CRCTL_OPERATIONAL_WORKSPACE || '').trim();
+  return configured ? path.resolve(configured) : ws;
+}
+
 function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
+  const gateWs = opts.operationalWorkspace || ws;
   const plannedExisting = opts.plannedExisting;
   if (plannedExisting != null) {
     if (!(plannedExisting instanceof Set)) fail('GATE_PLANNED_PATH_INVALID', 'plannedExisting 必须是 Set<string>');
@@ -524,8 +533,8 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
         || rel.split('/').some((seg) => !seg || seg === '.' || seg === '..')) {
         fail('GATE_PLANNED_PATH_INVALID', `plannedExisting 含非法 workspace-relative POSIX path: ${rel}`);
       }
-      const resolved = path.resolve(ws, ...rel.split('/'));
-      const root = path.resolve(ws) + path.sep;
+      const resolved = path.resolve(gateWs, ...rel.split('/'));
+      const root = path.resolve(gateWs) + path.sep;
       if (!resolved.startsWith(root)) fail('GATE_PLANNED_PATH_INVALID', `plannedExisting 越出 workspace: ${rel}`);
     }
   }
@@ -534,32 +543,32 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
   if (!checks) { out.note = `gates.json 未对状态 ${targetStatus} 声明门禁（默认放行，仅校验状态机转换）`; return out; }
   for (const check of checks) {
     if (check.type === 'fileExists') {
-      const p = path.join(ws, check.path.replaceAll('{cr}', cr).replaceAll('{spec}', opts.specId || '{spec}'));
+      const p = path.join(gateWs, check.path.replaceAll('{cr}', cr).replaceAll('{spec}', opts.specId || '{spec}'));
       if (check.path.includes('{spec}') && !opts.specId) {
         out.checks.push({ type: check.type, path: check.path, ok: false, why: '需要 --spec-id 参数才能校验 specs 落点' });
       } else {
-        const rel = path.relative(ws, p).split(path.sep).join('/');
+        const rel = path.relative(gateWs, p).split(path.sep).join('/');
         const exists = fs.existsSync(p) || (plannedExisting instanceof Set && plannedExisting.has(rel));
         out.checks.push({ type: check.type, path: p, ok: exists, why: exists ? null : '文件不存在' });
       }
     } else if (check.type === 'globNonEmpty') {
-      const dir = path.join(ws, check.dir.replaceAll('{cr}', cr));
+      const dir = path.join(gateWs, check.dir.replaceAll('{cr}', cr));
       const okv = fs.existsSync(dir) && fs.readdirSync(dir).some((f) => new RegExp(check.pattern).test(f));
       out.checks.push({ type: check.type, dir, pattern: check.pattern, ok: okv, why: okv ? null : '目录缺失或无匹配文件' });
     } else if (check.type === 'passCondition') {
       const stageCfg = gates.approvalStages[check.stage];
-      const r = evaluatePassCondition(ws, cr, stageCfg, gates, opts.evidence);
+      const r = evaluatePassCondition(gateWs, cr, stageCfg, gates, opts.evidence);
       let passOk = r.pass;
       let passWhy = null;
       if (r.pass && check.stage === 'dev-start') {
         // CR-2026-039 TASK-02：dev-plan PASS 证据 freshness（复用 gate 失败通道，不新增错误码/gates.json）
-        const dp = readEvidenceDoc(ws, cr, 'change-requests/{cr}/review-annotations/dev-plan.yml', opts.evidence);
-        const fr = devPlanFreshness(ws, cr, dp.exists ? dp.data : null);
+        const dp = readEvidenceDoc(gateWs, cr, 'change-requests/{cr}/review-annotations/dev-plan.yml', opts.evidence);
+        const fr = devPlanFreshness(gateWs, cr, dp.exists ? dp.data : null);
         if (!fr.fresh) { passOk = false; passWhy = fr.why; }
       }
       out.checks.push({ type: check.type, stage: check.stage, ok: passOk, why: passWhy, detail: r.results, pipelineSource: r.source });
     } else if (check.type === 'approval') {
-      const doc = readEvidenceDoc(ws, cr, 'change-requests/{cr}/approval.yml', opts.evidence);
+      const doc = readEvidenceDoc(gateWs, cr, 'change-requests/{cr}/approval.yml', opts.evidence);
       const section = doc.exists ? doc.data?.[check.section] : null;
       // 两轨审批（TASK-03）：TTY 的 crctl-approve 与 grant 的 server-approve 都被门禁承认
       const okv = !!(section && section.approver && section['approved-at'] && ['crctl-approve', 'server-approve'].includes(section.via));
@@ -570,7 +579,7 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
       const stageCfg = stageEntry ? stageEntry[1] : null;
       if (okv && section['evidence-digest']) {
         // 摘要漂移检测：两轨统一，只要统一字段存在就重算比对（canonical 唯一实现）
-        const currentDigest = canonicalEvidenceDigest(ws, cr, stageCfg);
+        const currentDigest = canonicalEvidenceDigest(gateWs, cr, stageCfg);
         if (currentDigest && currentDigest !== section['evidence-digest']) {
           drift = 'EVIDENCE_DRIFT';
           why = `EVIDENCE_DRIFT：approval.yml#${check.section} 记录的证据摘要 ${section['evidence-digest'].slice(0, 16)}… 与当前重算 ${currentDigest.slice(0, 16)}… 不一致，证据在审批后被改动`;
@@ -578,7 +587,7 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
         }
       } else if (okv && section['evidence-sha256-16']) {
         // 废弃字段兼容：历史审批（M0 口径）继续按单文件短哈希复核，不报错不阻塞（AC-7②）
-        const evDoc = stageCfg?.evidence?.$default ? readEvidenceDoc(ws, cr, stageCfg.evidence.$default) : { exists: false };
+        const evDoc = stageCfg?.evidence?.$default ? readEvidenceDoc(gateWs, cr, stageCfg.evidence.$default) : { exists: false };
         const currentHash = evDoc.exists ? evidenceSha16(fs.readFileSync(evDoc.path, 'utf8')) : null;
         if (currentHash && currentHash !== section['evidence-sha256-16']) {
           drift = 'EVIDENCE_DRIFT';
@@ -597,17 +606,17 @@ function runGateChecks(ws, cr, targetStatus, gates, opts = {}) {
       }
       out.checks.push({ type: check.type, section: check.section, ok: okv && !drift, why, code: drift || undefined });
     } else if (check.type === 'deliveryIndexComplete') {
-      const r = checkDeliveryIndexComplete(ws, cr);
+      const r = checkDeliveryIndexComplete(gateWs, cr);
       out.checks.push({
         type: check.type, ok: r.ok, code: r.code, missing: r.missing || [],
         why: r.ok ? null : (r.why || `delivery/task 索引缺失 ${(r.missing || []).length} 项: ${(r.missing || []).join(', ')}`),
       });
     } else if (check.type === 'attemptsWithinLimit') {
-      const r = readAttempts(ws, cr, check.loop, gates);
+      const r = readAttempts(gateWs, cr, check.loop, gates);
       // CR-2026-030 review repair（pass-at-max）：轮次到顶但最新评审 verdict=pass 时不判 exhausted——
       // pass 无需再自修复（与 review-code SKILL「pass 即可推进 code-reviewing」契约一致）；
       // block/缺证据仍 LOOP_EXHAUSTED 阻断，须人工处理。
-      const passedAtLimit = r.exhausted && latestReviewVerdict(ws, cr, check.loop) === 'pass';
+      const passedAtLimit = r.exhausted && latestReviewVerdict(gateWs, cr, check.loop) === 'pass';
       const okv = !r.exhausted || passedAtLimit;
       out.checks.push({ type: check.type, loop: check.loop, ok: okv, current: r.current, max: r.max, why: okv ? null : 'LOOP_EXHAUSTED：自修复轮次已用尽，禁止继续推进，须人工处理' });
     } else {
@@ -928,9 +937,10 @@ function cmdGate(ws, cr, gates, flags) {
 }
 
 function preflightAdvance(ws, cr, gates, flags) {
+  const dataWs = authorityWorkspace(ws, cr, flags.operationalWorkspace);
   if (!flags.to || !flags.trigger) fail('BAD_ARGS', 'advance 需要 --to <status> --trigger <trigger>');
   const { sm } = loadStateMachine(ws);
-  const state = resolveCrState(ws, cr);
+  const state = resolveCrState(dataWs, cr);
   const current = state.status;
   if (flags.expect && flags.expect !== current) {
     fail('CR_STATUS_CURRENT_MISMATCH', `期望当前状态 ${flags.expect}，实际 ${current}`);
@@ -947,13 +957,13 @@ function preflightAdvance(ws, cr, gates, flags) {
   if (!flags.specId && targetChecks.some((c) => typeof c.path === 'string' && c.path.includes('{spec}'))) {
     fail('BAD_ARGS', `advance --to ${flags.to} 需要 --spec-id <specId>：该目标态门禁需校验 specs 落点（specs/{spec}/...）。请补 --spec-id 后重试。`);
   }
-  const gate = runGateChecks(ws, cr, flags.to, gates, flags);
+  const gate = runGateChecks(ws, cr, flags.to, gates, { ...flags, operationalWorkspace: dataWs });
   if (!gate.pass) {
     // FR-5：把未过门禁的具体原因提升进错误摘要，避免调用方漏读 checks[].why
     const why = gate.checks.filter((c) => !c.ok).map((c) => c.why).filter(Boolean).join('；');
     fail('GATE_BLOCKED', `目标状态 ${flags.to} 的门禁未通过，拒绝写入${why ? '：' + why : ''}`, { gate });
   }
-  const crMdPath = path.join(crDir(ws, cr), 'cr.md');
+  const crMdPath = path.join(crDir(dataWs, cr), 'cr.md');
   const beforeText = readFileChecked(crMdPath);
   if (beforeText == null) fail('CR_MD_WRITE_FAILED', `advance 读取 cr.md 失败: ${crMdPath}`);
   return {
@@ -966,9 +976,10 @@ function preflightAdvance(ws, cr, gates, flags) {
 // “Git 是权威”：standalone commit 失败时不得发 status outbox；只有 commit 成功（或 embedded 由调用方提交）
 // 才返回 committed=true 并以真实/占位 SHA 发 outbox。返回 {committed, commitDetail, ...}。
 function performAdvance(ws, cr, gates, flags) {
-  const candidate = preflightAdvance(ws, cr, gates, flags);
+  const dataWs = authorityWorkspace(ws, cr, flags.operationalWorkspace);
+  const candidate = preflightAdvance(ws, cr, gates, { ...flags, operationalWorkspace: dataWs });
   const current = candidate.from;
-  const crmd = updateCrMdStatus(ws, cr, flags.to);
+  const crmd = updateCrMdStatus(dataWs, cr, flags.to);
   if (!crmd.updated) fail('CR_MD_WRITE_FAILED', `advance 写入 cr.md 失败: ${crmd.why}`);
   auditLog(ws, { kind: 'advance', cr, from: current, to: flags.to, trigger: flags.trigger, by: identity(ws) });
   const result = { advanced: true, cr, from: current, to: flags.to, trigger: flags.trigger, files: [crmd.path], crMd: crmd };
@@ -976,8 +987,8 @@ function performAdvance(ws, cr, gates, flags) {
     result.commit = 'embedded：由调用方在同一事务中提交上述文件';
   } else {
     const msg = `[cr] status ${cr} ${current} -> ${flags.to}`;
-    const addR = controlledGit(ws, 'add', [`change-requests/${cr}/cr.md`], ws, 'crctl-advance');
-    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], ws, 'crctl-advance') : addR;
+    const addR = controlledGit(ws, 'add', [`change-requests/${cr}/cr.md`], dataWs, 'crctl-advance');
+    const commitR = addR.ok ? controlledGit(ws, 'commit', ['-m', msg], dataWs, 'crctl-advance') : addR;
     result.commit = commitR.ok ? { message: msg } : { failed: true, detail: commitR, note: '状态文件已写入但 commit 失败，请修复后手工经 crctl git 提交' };
   }
   // outbox：状态事件。--embedded/--no-commit 时 commit_sha 留空，由 push 的 checkpoint 事件补全（§A.5）；
@@ -990,7 +1001,7 @@ function performAdvance(ws, cr, gates, flags) {
   if (!Object.keys(outboxEvidence).length) {
     const pendingStage = Object.values(gates.approvalStages || {}).find(
       (s) => Array.isArray(s.expect) && s.expect.includes(flags.to) && s.evidence);
-    if (pendingStage) outboxEvidence = collectOutboxEvidence(ws, cr, pendingStage);
+    if (pendingStage) outboxEvidence = collectOutboxEvidence(dataWs, cr, pendingStage);
   }
   if (flags.embedded || flags['no-commit']) {
     result.outbox = emitOutboxEvent(ws, {
@@ -1001,7 +1012,7 @@ function performAdvance(ws, cr, gates, flags) {
   } else if (committed) {
     result.outbox = emitOutboxEvent(ws, {
       event_kind: 'status', cr_id: cr, from_status: current, to_status: flags.to,
-      trigger: flags.trigger, commit_sha: gitHeadSha(ws),
+      trigger: flags.trigger, commit_sha: gitHeadSha(ws, dataWs),
       actor: identity(ws), evidence: outboxEvidence,
     });
   }
@@ -2030,7 +2041,7 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
   await runTxAsync(finishLedgerTransaction(ledgerTx));
   auditLog(ws, { kind: 'ledger', op: 'review-record', cr, stage, verdict: payload.verdict, actor: reviewer, file: target });
   emitOutboxEvent(ws, {
-    event_kind: 'review', cr_id: cr, actor: reviewer,
+    event_kind: 'review', cr_id: cr, commit_sha: gitHeadSha(ws), actor: reviewer,
     payload: {
       stage, verdict: payload.verdict, blockerCount,
       attempt: projCurrent, blockers: payload.blockers, reviewed_at: recordedAt, subject_sha256: subjectDigest,
@@ -2592,7 +2603,8 @@ async function cmdTest(ws, cr, gates, flags) {
     fail('BAD_ARGS', 'test 不再接受 --cmd/--cwd/--timeout，仅接受 --plan');
   }
   const ctx = resolveRepositories(ws);
-  const result = await runTxAsync(testCr(ctx, { cr, workspace: ws, planPath: flags.plan }));
+  const dataWs = authorityWorkspace(ws, cr, flags.operationalWorkspace);
+  const result = await runTxAsync(testCr(ctx, { cr, workspace: dataWs, planPath: flags.plan }));
   ok(result);
 }
 

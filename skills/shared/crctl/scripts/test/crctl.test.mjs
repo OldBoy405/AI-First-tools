@@ -16,7 +16,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 // CR-2026-039 TASK-03：纯函数单测直接 import（与 archive-tx/checkpoint-tx 等测试同模式；不改变 CLI 公开面）
-import { crMdStatusText, refreshCrMdUpdated } from '../lib/workspace-transactions.mjs';
+import { crMdStatusText, refreshCrMdUpdated, classifyRepoWorkspace } from '../lib/workspace-transactions.mjs';
 
 const CRCTL = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
 // 真实 tools 包根（test → scripts → crctl → shared → skills → tools 共 5 层）：
@@ -230,6 +230,80 @@ function writeEvidence(ws, cr, relFromCrDir, content) {
   writeFileSync(p, content);
   return p;
 }
+
+// ── workspace authority resolution ───────────────────────────────────────────
+
+test('CR-2026-045: workspace precedence is --workspace > CRCTL_WORKSPACE > cwd', () => {
+  const envWs = makeWorkspace();
+  const explicitWs = makeWorkspace();
+  try {
+    writeCrEntry(envWs, 'CR-ENV', 'drafting');
+    writeCrEntry(explicitWs, 'CR-EXPLICIT', 'developing');
+
+    let r = runCrctl(['status', 'CR-ENV'], { CRCTL_WORKSPACE: envWs });
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.status, 'drafting');
+
+    r = runCrctl(['status', 'CR-EXPLICIT', '--workspace', explicitWs], {
+      CRCTL_WORKSPACE: path.join(envWs, 'does-not-exist'),
+    });
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.status, 'developing');
+
+    r = runCrctl(['status', 'CR-ENV'], { CRCTL_WORKSPACE: path.join(envWs, 'does-not-exist') });
+    assert.notEqual(r.status, 0);
+    assert.equal(r.stderr.error.code, 'WORKSPACE_NOT_FOUND');
+    assert.match(r.stderr.error.message, /CRCTL_WORKSPACE/);
+  } finally {
+    rmSync(envWs, { recursive: true, force: true });
+    rmSync(explicitWs, { recursive: true, force: true });
+  }
+});
+
+test('CR-2026-045: daemon operational workspace owns advance data while installation root owns outbox', () => {
+  const installation = makeWorkspace();
+  const operational = makeWorkspace();
+  try {
+    writeCrEntry(installation, 'CR-2026-045', 'drafting');
+    writeCrEntry(operational, 'CR-2026-045', 'requirement-approved');
+    writeApprovalYml(operational, 'CR-2026-045', 'requirement', {
+      approver: 'E2E Human',
+      'approved-at': '2026-08-18T03:00:00+08:00',
+      via: 'crctl-approve',
+      'target-status': 'requirement-approved',
+    });
+
+    const r = runCrctl([
+      'advance', 'CR-2026-045', '--to', 'tech-designing', '--trigger', 'write-tech-design',
+      '--expect', 'requirement-approved', '--no-commit',
+    ], {
+      CRCTL_WORKSPACE: installation,
+      CRCTL_OPERATIONAL_WORKSPACE: operational,
+    });
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.match(readFileSync(path.join(operational, 'change-requests', 'CR-2026-045', 'cr.md'), 'utf8'), /^status: tech-designing$/m);
+    assert.match(readFileSync(path.join(installation, 'change-requests', 'CR-2026-045', 'cr.md'), 'utf8'), /^status: drafting$/m);
+    assert.ok(readdirSync(path.join(installation, '.crctl', 'outbox')).some((name) => name.includes('CR-2026-045-status')));
+    assert.equal(existsSync(path.join(operational, '.crctl', 'outbox')), false);
+  } finally {
+    rmSync(installation, { recursive: true, force: true });
+    rmSync(operational, { recursive: true, force: true });
+  }
+});
+
+test('CR-2026-045: workspace Git inspection failures do not degrade to path-unregistered', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'crctl-not-git-'));
+  const worktreeBase = path.join(root, 'worktrees');
+  mkdirSync(path.join(worktreeBase, 'CR-2026-045'), { recursive: true });
+  try {
+    assert.throws(
+      () => classifyRepoWorkspace({}, { id: 'broken-repo', rootPath: root, worktreePath: worktreeBase }, 'CR-2026-045'),
+      (err) => err?.code === 'WORKSPACE_GIT_INSPECT_FAILED',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 // ── approve：人类在环，无旁路（治理⑤）─────────────────────────────────
 test('approve 拒绝非交互式调用（spawnSync 下 stdin 恒非 TTY），无 --stage 之外的旁路参数', () => {
