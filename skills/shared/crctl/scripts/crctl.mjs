@@ -1602,6 +1602,19 @@ function renderTaskIndex(cr, cards) {
   return lines.join('\n') + '\n';
 }
 
+function renderTaskIndexWithProgress(cr, entries) {
+  const lines = [`cr-id: ${cr}`, 'tasks:'];
+  for (const entry of entries) {
+    lines.push(`  - id: ${entry.id}`);
+    lines.push(`    title: ${yamlStringScalar(entry.title)}`);
+    lines.push(`    status: ${entry.status}`);
+    if (entry.doneAt) lines.push(`    done-at: ${yamlStringScalar(entry.doneAt)}`);
+    lines.push(`    estimate: ${entry.estimate}`);
+    lines.push(`    depends-on: [${entry.dependsOn.join(', ')}]`);
+  }
+  return lines.join('\n') + '\n';
+}
+
 function guardTaskIndexHasNoProgress(text, cr) {
   let doc;
   try { doc = parseYaml(text.replaceAll('\r\n', '\n')); }
@@ -1640,6 +1653,56 @@ function createFileExclusive(p, text) {
     if (e && e.code === 'EEXIST') fail('CAS_CONFLICT', `${p} 在读取后被其他进程创建，本次写入中止。请重新执行。`);
     throw e;
   }
+}
+
+function cmdTaskAppend(ws, cr) {
+  const state = resolveCrState(ws, cr);
+  if (state.status !== 'developing') fail('ILLEGAL_LEDGER_STATE', `task append 仅允许在 developing 执行，当前 ${state.status}`, { current: state.status, expect: ['developing'] });
+  const set = loadTaskCards(ws, cr);
+  const p = path.join(set.dir, '_index.yml');
+  const current = readFileChecked(p);
+  if (current == null) fail('TASK_INDEX_NOT_FOUND', `缺少 ${p}；首次初始化必须使用 task init`);
+  let doc;
+  try { doc = parseYaml(current.replaceAll('\r\n', '\n')); }
+  catch { fail('TASK_INDEX_SHAPE', '现有 tasks/_index.yml 无法解析，拒绝追加'); }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc) || (doc['cr-id'] ?? doc['cr-ref']) !== cr || !Array.isArray(doc.tasks) || !doc.tasks.length) {
+    fail('TASK_INDEX_SHAPE', '现有 tasks/_index.yml 结构非法，拒绝追加');
+  }
+  const cardsById = new Map(set.cards.map((card) => [card.id, card]));
+  const seen = new Set();
+  const entries = [];
+  let maxExistingNumber = 0;
+  for (const task of doc.tasks) {
+    if (!task || typeof task !== 'object' || Array.isArray(task) || typeof task.id !== 'string' || seen.has(task.id)) {
+      fail('TASK_INDEX_SHAPE', '现有 tasks/_index.yml 含非法或重复 TASK 条目，拒绝追加');
+    }
+    seen.add(task.id);
+    const card = cardsById.get(task.id);
+    if (!card) fail('TASK_INDEX_DRIFT', `${task.id} 已在索引中但对应 TASK 卡缺失，拒绝追加`);
+    if (task.title !== card.title || task.estimate !== card.estimate
+        || !Array.isArray(task['depends-on']) || JSON.stringify(task['depends-on']) !== JSON.stringify(card.dependsOn)) {
+      fail('TASK_INDEX_DRIFT', `${task.id} 的 title/estimate/depends-on 与 TASK 卡不一致，拒绝追加`);
+    }
+    if (!['pending', 'done'].includes(task.status)
+        || (task.status === 'done' && typeof task['done-at'] !== 'string')
+        || (task.status === 'pending' && Object.hasOwn(task, 'done-at'))) {
+      fail('TASK_INDEX_SHAPE', `${task.id} 的 status/done-at 结构非法，拒绝追加`);
+    }
+    maxExistingNumber = Math.max(maxExistingNumber, card.number);
+    entries.push({ ...card, status: task.status, doneAt: task['done-at'] || null });
+  }
+  const missing = set.cards.filter((card) => !seen.has(card.id));
+  if (missing.some((card) => card.number <= maxExistingNumber)) {
+    fail('TASK_APPEND_ORDER', 'task append 只允许在现有最大编号之后追加 TASK，拒绝插入或重排历史条目');
+  }
+  assertTaskCardsFresh(set);
+  if (!missing.length) return ok({ op: 'task-append', cr, file: p, appended: [], taskCount: entries.length, changed: false });
+  const appended = missing.map((card) => card.id);
+  const next = renderTaskIndexWithProgress(cr, [...entries, ...missing.map((card) => ({ ...card, status: 'pending', doneAt: null }))]);
+  casWrite(p, sha256(current), next);
+  auditLog(ws, { kind: 'ledger', op: 'task-append', cr, actor: identity(ws), appended, changed: true });
+  ok({ op: 'task-append', cr, file: p, appended, taskCount: entries.length + missing.length,
+    totalEstimateHours: set.cards.reduce((sum, card) => sum + Number.parseInt(card.estimate, 10), 0), changed: true });
 }
 
 function cmdTaskInit(ws, cr) {
@@ -2042,6 +2105,7 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
   auditLog(ws, { kind: 'ledger', op: 'review-record', cr, stage, verdict: payload.verdict, actor: reviewer, file: target });
   emitOutboxEvent(ws, {
     event_kind: 'review', cr_id: cr, commit_sha: gitHeadSha(ws), actor: reviewer,
+    evidence: collectOutboxEvidence(ws, cr, gates.approvalStages[stage === 'dev-plan' ? 'dev-start' : stage]),
     payload: {
       stage, verdict: payload.verdict, blockerCount,
       attempt: projCurrent, blockers: payload.blockers, reviewed_at: recordedAt, subject_sha256: subjectDigest,
@@ -2942,6 +3006,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
   crctl git     <sub> [args...] [--cwd <p>]      controlled-shell 白名单执行（只读/安全面；写路径一律走深原语）
   crctl task init <cr_id>                       从 TASK-NN.md 确定性创建/刷新 tasks/_index.yml（开发启动前，CAS+审计）
+  crctl task append <cr_id>                     developing 期只追加更大编号 TASK，保留既有 done/done-at（CAS+审计）
   crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
 
 
@@ -3013,8 +3078,12 @@ async function main() {
         if (positional.length !== 2) fail('BAD_ARGS', 'task init 用法：crctl task init <CR-ID>');
         return cmdTaskInit(ws, requireCr(positional.slice(1)));
       }
+      if (positional[0] === 'append') {
+        if (positional.length !== 2) fail('BAD_ARGS', 'task append 用法：crctl task append <CR-ID>');
+        return cmdTaskAppend(ws, requireCr(positional.slice(1)));
+      }
       if (positional[0] === 'done') return cmdTaskDone(ws, requireCr(positional.slice(1)), gates, flags);
-      fail('BAD_ARGS', 'task 仅支持子命令 init/done：crctl task init <CR-ID> | crctl task done <CR-ID> --task <TASK-ID>');
+      fail('BAD_ARGS', 'task 仅支持子命令 init/append/done：crctl task init <CR-ID> | crctl task append <CR-ID> | crctl task done <CR-ID> --task <TASK-ID>');
     }
 
     case 'test': return cmdTest(ws, requireCr(positional), gates, flags);

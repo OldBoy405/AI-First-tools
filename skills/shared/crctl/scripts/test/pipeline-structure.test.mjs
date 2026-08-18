@@ -145,6 +145,8 @@ test('CR-2026-044 AC-14: architecture-design 删除 auto_push_after_sdd，审批
   assert.equal(push.length, 1, '仅一个 checkpoint 节点');
   assert.equal(push[0].onFail, 'abort', '架构终点 checkpoint 必须 abort');
   assert.ok(!/SKIPPED|auto_push/.test(push[0].prompt), 'checkpoint prompt 无 skip 分支');
+  assert.doesNotMatch(push[0].prompt, /<[^>]*workspace[^>]*>/i, 'checkpoint prompt 不得含未解析 workspace 占位符');
+  assert.match(push[0].prompt, /crctl checkpoint \{\{inputs\.cr_id\}\} --message/);
   assert.equal(p.nodes.length, 5, '节点数保持 5');
 });
 

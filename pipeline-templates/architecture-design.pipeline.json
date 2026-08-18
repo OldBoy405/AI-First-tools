@@ -97,7 +97,7 @@
       "kind": "skill",
       "label": "推送架构设计到远端",
       "ref": "push-progress",
-      "prompt": "先执行一次 `crctl workspace inspect {{inputs.cr_id}}`：要求全部 resources[].classification=healthy，再消费返回的 operationalWorkspace 作为本节点业务权威路径；任一资源非 healthy 或 operationalWorkspace 为空时中止并指向 /resume。\n\n执行 push-progress：调用一次 `crctl checkpoint {{inputs.cr_id}} --message 架构设计已审批 --workspace <installation-workspace>`；\n\n本节点是架构阶段终点完成条件（CR-2026-044 FR-07），不可跳过；失败时保持 tech-design-reviewed，只重跑同一 checkpoint，不重新审批。\n\n在 node-5.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
+      "prompt": "先执行一次 `crctl workspace inspect {{inputs.cr_id}}`：要求全部 resources[].classification=healthy，再消费返回的 operationalWorkspace 作为本节点业务权威路径；任一资源非 healthy 或 operationalWorkspace 为空时中止并指向 /resume。\n\n执行 push-progress：调用一次 `crctl checkpoint {{inputs.cr_id}} --message 架构设计已审批`；workspace 由 daemon 注入的 `CRCTL_WORKSPACE` 和 crctl 既有 repository resolver 提供，不要自行拼接 `--workspace` 或扫描目录推导路径。\n\n本节点是架构阶段终点完成条件（CR-2026-044 FR-07），不可跳过；失败时保持 tech-design-reviewed，只重跑同一 checkpoint，不重新审批。\n\n在 node-5.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
       "onFail": "abort",
       "timeoutMinutes": 10
     }

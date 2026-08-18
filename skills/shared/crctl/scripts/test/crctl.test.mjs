@@ -946,7 +946,7 @@ test('CR-2026-031 TASK-02：已退役命令统一拒绝（cr-metrics/migrate-bac
     const r3 = runCrctl(['task', 'allocate', 'CR-T1', '--workspace', ws]);
     assert.equal(r3.status, 1);
     assert.equal(r3.stderr.error.code, 'BAD_ARGS');
-    assert.match(r3.stderr.error.message, /仅支持子命令 init\/done/);
+    assert.match(r3.stderr.error.message, /仅支持子命令 init\/append\/done/);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -1145,6 +1145,40 @@ test('CR-2026-037 task init：已有进度与非法状态 fail-closed', () => {
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('CR-2026-045 hardening：task append 在 developing 期保留历史 done 并只追加新 TASK', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeTaskCard(ws, 'CR-T1', 1, { title: 'existing' });
+    writeTaskCard(ws, 'CR-T1', 2, { title: 'new task', dependsOn: ['CR-T1-TASK-01'] });
+    writeTaskIndex(ws, 'CR-T1', [{ id: 'CR-T1-TASK-01', title: 'existing', status: 'done', doneAt: '2026-08-18T10:00:00+08:00' }]);
+    const r = runCrctl(['task', 'append', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.deepEqual(r.stdout.appended, ['CR-T1-TASK-02']);
+    let idx = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml'), 'utf8');
+    assert.match(idx, /CR-T1-TASK-01[\s\S]*status: done[\s\S]*done-at: "2026-08-18T10:00:00\+08:00"/);
+    assert.match(idx, /CR-T1-TASK-02[\s\S]*status: pending/);
+    const replay = runCrctl(['task', 'append', 'CR-T1', '--workspace', ws]);
+    assert.equal(replay.status, 0, replay.rawStderr);
+    assert.deepEqual(replay.stdout.appended, []);
+    assert.equal(replay.stdout.changed, false);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-045 hardening：task append 在历史索引漂移时零写入', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'developing');
+    writeTaskCard(ws, 'CR-T1', 1, { title: 'card title' });
+    writeTaskIndex(ws, 'CR-T1', [{ id: 'CR-T1-TASK-01', title: 'different title', status: 'done', doneAt: '2026-08-18T10:00:00+08:00' }]);
+    const p = path.join(ws, 'change-requests', 'CR-T1', 'tasks', '_index.yml');
+    const before = readFileSync(p, 'utf8');
+    const r = runCrctl(['task', 'append', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'TASK_INDEX_DRIFT');
+    assert.equal(readFileSync(p, 'utf8'), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
 test('CR-2026-037 task-breakdown：缺索引时 gate/next 阻断，task init 后 gate 通过', () => {
   const ws = makeWorkspace();
   try {
@@ -1457,6 +1491,8 @@ test('CR-2026-045 TASK-01：review outbox payload 含 attempt/blockers/reviewed_
     assert.ok(Array.isArray(ev.payload.blockers) && ev.payload.blockers.includes('blk1'));
     assert.ok(typeof ev.payload.reviewed_at === 'string' && ev.payload.reviewed_at.length > 0);
     assert.match(ev.payload.subject_sha256, /^[0-9a-f]{64}$/);
+    assert.equal(ev.evidence[`change-requests/CR-T1/review-annotations/sdd.yml`].slice(0, 7), 'sha256:');
+    assert.match(ev.evidence[`change-requests/CR-T1/review-annotations/sdd.yml`], /^sha256:[0-9a-f]{64}$/);
     const annotation = readFileSync(path.join(ws, 'change-requests', 'CR-T1', 'review-annotations', 'sdd.yml'), 'utf8');
     assert.match(annotation, /review-loop:\n  current-attempt: 1/, 'outbox 与 commit-scan 共享 canonical attempt=1');
   } finally { rmSync(ws, { recursive: true, force: true }); }
