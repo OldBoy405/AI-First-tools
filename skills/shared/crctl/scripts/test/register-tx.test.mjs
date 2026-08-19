@@ -142,6 +142,38 @@ test('TASK-05 AC-1：happy path 三账本+trailer commit+lease push+三仓 workt
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
+test('origin 归因字段：origin 缺省落空串、合法值入 cr.md+_backlog、非法值硬失败零写入', () => {
+  const { base, kb } = makeFixture();
+  try {
+    // 缺省：两账本都有 origin 字段且为空串（字段永远存在，下游解析口径统一）
+    const r0 = runCrctl(regArgs(kb), { cwd: kb });
+    assert.equal(r0.status, 0, r0.stderr);
+    assert.match(fs.readFileSync(path.join(kb, 'change-requests', r0.json.cr, 'cr.md'), 'utf8'), /^origin: ""$/m);
+    assert.match(fs.readFileSync(path.join(kb, 'change-requests', '_backlog.yml'), 'utf8'), /^ {4}origin: ""$/m);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+
+  // 合法值：原文写入两账本
+  const f1 = makeFixture();
+  try {
+    const r1 = runCrctl(regArgs(f1.kb, { origin: `CR-${YEAR}-013` }), { cwd: f1.kb });
+    assert.equal(r1.status, 0, r1.stderr);
+    assert.match(fs.readFileSync(path.join(f1.kb, 'change-requests', r1.json.cr, 'cr.md'), 'utf8'), new RegExp(`^origin: CR-${YEAR}-013$`, 'm'));
+    assert.match(fs.readFileSync(path.join(f1.kb, 'change-requests', '_backlog.yml'), 'utf8'), new RegExp(`^ {4}origin: CR-${YEAR}-013$`, 'm'));
+    assert.match(r1.json.recoverCommand, new RegExp(`--origin CR-${YEAR}-013`));
+  } finally { fs.rmSync(f1.base, { recursive: true, force: true }); }
+
+  // 非法值：硬失败，且仓库零写入（不静默降级为空串）
+  const f2 = makeFixture();
+  try {
+    const before = originMasterCount(f2.base, 'kb');
+    const r2 = runCrctl(regArgs(f2.kb, { origin: 'CR-13' }), { cwd: f2.kb });
+    assert.notEqual(r2.status, 0);
+    assert.equal(r2.errJson.error.code, 'REGISTER_INPUT_INVALID');
+    assert.equal(originMasterCount(f2.base, 'kb'), before);
+    assert.ok(!fs.existsSync(path.join(f2.kb, 'change-requests', `CR-${YEAR}-001`)));
+  } finally { fs.rmSync(f2.base, { recursive: true, force: true }); }
+});
+
 test('TASK-05 AC-1：同 key 同输入重跑复用 CR-ID/txId，零重复副作用', () => {
   const { base, kb } = makeFixture();
   try {

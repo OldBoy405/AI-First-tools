@@ -31,6 +31,7 @@ description: 需求编写期入口：一次调用 crctl register 深原语完成
 | `summary` | string | ❌ | 需求摘要 |
 | `target_version` | string | ❌ | 目标版本 |
 | `source` | string | ❌ | 来源 |
+| `origin` | string | ❌ | 被修复 CR 的 ID（形如 `CR-2026-013`）。**仅当本 CR 是为修复某个已归档 CR 的缺陷而开时填**；新特性、重构、同一 spec 的后续演进均留空。填写前向用户确认“这是否一个修复”，不自行推测。格式不符会被 crctl 以 `REGISTER_INPUT_INVALID` 硬失败 |
 
 ---
 
@@ -47,7 +48,7 @@ description: 需求编写期入口：一次调用 crctl register 深原语完成
 ```text
 crctl register --registration-key {registration_key} --title "{title}"
   --owner-requirement {requirement_owner} --owner-development {dev_owner} --owner-test {test_owner}
-  [--summary "{summary}"] [--source {source}] [--target-version {target_version}] [--year Y]
+  [--summary "{summary}"] [--source {source}] [--origin {origin}] [--target-version {target_version}] [--year Y]
   --workspace {knowledge-base 主 checkout}
 ```
 

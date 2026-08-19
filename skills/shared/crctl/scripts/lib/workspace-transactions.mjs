@@ -262,7 +262,7 @@ export function assertSupportedBacklogSchemaText(text) {
 const yamlScalarLib = (v) => (/^[\w./-]+$/.test(String(v)) ? String(v) : `"${String(v).replaceAll('"', '\\"')}"`);
 
 /** 注册三账本条目的唯一模板（原 cmdCrInit 内联模板下沉；cr-init 与 register 共用）。 */
-export function buildRegistrationTexts({ cr, title, summary, source, targetVersion, owners, now }) {
+export function buildRegistrationTexts({ cr, title, summary, source, origin, targetVersion, owners, now }) {
   const ownerSlot = (id, indent) => [`${' '.repeat(indent)}id: ${id}`, `${' '.repeat(indent)}assigned-at: "${now}"`];
   const { requirement: req, development: dev, test: tst } = owners;
   const crMdText = [
@@ -280,6 +280,7 @@ export function buildRegistrationTexts({ cr, title, summary, source, targetVersi
     ...ownerSlot(tst, 4),
     `target-version: ${yamlScalarLib(targetVersion)}`,
     `source: ${yamlScalarLib(source)}`,
+    `origin: ${yamlScalarLib(origin)}`,
     'status: drafting',
     `created: "${now}"`,
     `updated: "${now}"`,
@@ -308,6 +309,7 @@ export function buildRegistrationTexts({ cr, title, summary, source, targetVersi
     ...ownerSlot(tst, 8),
     `    target-version: ${yamlScalarLib(targetVersion)}`,
     `    source: ${yamlScalarLib(source)}`,
+    `    origin: ${yamlScalarLib(origin)}`,
     '    prd-path: ""',
     `    created: "${now}"`,
     `    updated: "${now}"`,
@@ -578,10 +580,16 @@ export async function registerCr(ctx, input) {
   const year = input.year || String(new Date().getFullYear());
   const summary = input.summary ?? '';
   const source = input.source ?? 'manual';
+  // 修复类 CR 对被修复 CR 的显式归因（P3 组织智能设计 §1.2/§5 变更失败率的唯一数据源）。
+  // 空串=非修复类；非空必须是规范 CR-ID，否则硬失败——下游按此字段精确匹配，不做模糊解析。
+  const origin = input.origin ?? '';
+  if (origin && !/^CR-\d{4}-\d{3}$/.test(origin)) {
+    throw new TxError('REGISTER_INPUT_INVALID', `register --origin 非法：${origin}（须为 CR-YYYY-NNN，留空表示非修复类 CR）`, { origin });
+  }
   const targetVersion = input.targetVersion ?? 'tbd';
   const keyHash = sha256(String(input.registrationKey));
   const inputDigest = sha256(JSON.stringify({
-    title: input.title, summary, source, targetVersion, year,
+    title: input.title, summary, source, origin, targetVersion, year,
     owners: { requirement: owners.requirement, development: owners.development, test: owners.test },
   }));
   const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
@@ -589,6 +597,7 @@ export async function registerCr(ctx, input) {
     ` --owner-requirement ${owners.requirement} --owner-development ${owners.development} --owner-test ${owners.test}` +
     (summary ? ` --summary ${JSON.stringify(summary)}` : '') +
     (input.source ? ` --source ${JSON.stringify(input.source)}` : '') +
+    (origin ? ` --origin ${origin}` : '') +
     (input.targetVersion ? ` --target-version ${JSON.stringify(input.targetVersion)}` : '') +
     ` --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`;
   const lock = await acquireLock({ root: ctx.installRoot, scope: `register-${keyHash.slice(0, 16)}`, op: 'register' });
@@ -640,7 +649,7 @@ export async function registerCr(ctx, input) {
         const backlogText = fs.readFileSync(bp, 'utf8');
         assertSupportedBacklogSchemaText(backlogText);
         const indexText = fs.readFileSync(ip, 'utf8');
-        const texts = buildRegistrationTexts({ cr, title: input.title, summary, source, targetVersion, owners, now: nowIso() });
+        const texts = buildRegistrationTexts({ cr, title: input.title, summary, source, origin, targetVersion, owners, now: nowIso() });
         const newBacklog = backlogText.replaceAll('\r\n', '\n').trimEnd() + '\n' + texts.backlogEntry + '\n';
         const newIndex = indexText.replaceAll('\r\n', '\n').trimEnd() + '\n' + texts.indexEntry + '\n';
         const crMdText = texts.crMdText;

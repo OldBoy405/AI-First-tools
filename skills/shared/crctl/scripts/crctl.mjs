@@ -2839,6 +2839,7 @@ async function cmdRegister(ws, flags) {
     title: String(flags.title),
     summary: flags.summary == null ? undefined : String(flags.summary),
     source: flags.source == null ? undefined : String(flags.source),
+    origin: flags.origin == null ? undefined : String(flags.origin),
     targetVersion: flags['target-version'] == null ? undefined : String(flags['target-version']),
     year: flags.year ? String(flags.year) : undefined,
     workspace: ws,
@@ -2989,7 +2990,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
   crctl register  --registration-key <k> --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
-                        [--summary <s>] [--source <s>] [--target-version <v>] [--year Y]   幂等注册事务：CR-ID+三账本+commit/lease push+worktree ensure（TASK-05，TASK-10 起取代 cr-init）
+                        [--summary <s>] [--source <s>] [--origin <CR-ID>] [--target-version <v>] [--year Y]   幂等注册事务：CR-ID+三账本+commit/lease push+worktree ensure（TASK-05，TASK-10 起取代 cr-init）
   crctl workspace inspect <cr_id>                  各 active repo workspace 事实分类（只读）
   crctl workspace ensure  <cr_id> --mode resume    只补齐可证明缺失的 workspace 资源（零删除）
   crctl workspace cleanup <cr_id> --mode partial|archived   只删干净 worktree；dirty/unknown/未合并 ref 保留
