@@ -59,6 +59,8 @@ crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 chec
 | exit 0，`phase=cleanup-pending` | **终态 authority 已发布（status 已是终态），仅安全资源清理未完成**。`lastCleanupError=null` 且 `remaining` 非空 = 保守保留现场（dirty/unknown/未证明合入），不是错误；`lastCleanupError` 非空 = cleanup 执行异常。处理 `remaining` 后**只重跑 `recoverCommand` 续清理** |
 | `warnings=[{code:EMIT_FAILED,event_kind:archive}]` | 实时投影事件发送失败，**不表示 Git archive 失败**——authority 已发布。重跑同一 `recoverCommand` 会补发；禁止回滚 commit、重建 commit 或手工生成事件 |
 | `ARCHIVE_TASKS_PENDING` | tasks/_index.yml 仍有非 done 任务，回开发期补齐 |
+| `ARCHIVE_TRACE_PENDING` | trace 事件仍 pending 且补发失败：archive 已零写入、现场保留。只重跑同一 `crctl archive`（前置门会再次确定性补发）；禁止跳门/手工清 journal |
+| `ARCHIVE_TRACE_FACT_MISSING` | writeback traceability journal 缺失或 traceOutbox 意图不完整/digest 漂移，无法证明 trace 事件已发射：硬阻断，人工确认 journal 后重跑同一 archive |
 | `ARCHIVE_TRACEABILITY_MISSING` | 先运行 `writeback-traceability` |
 | `ARCHIVE_APPROVAL_MISSING` / `ARCHIVE_SPEC_REQUIRED` | 前置缺失，按错误信息补齐后重跑 |
 | `ARCHIVE_STATE_MISMATCH` | CR 不在可归档状态，先完成对应 pipeline gate |

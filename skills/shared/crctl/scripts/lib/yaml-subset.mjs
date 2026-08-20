@@ -78,7 +78,10 @@ function parseMap(lines, idx, indent) {
     const content = lines[i].text.trimStart();
     if (content.startsWith('- ')) break;
     const m = content.match(/^("(?:[^"\\]|\\.)*"|'[^']*'|[^:\s][^:]*?)\s*:(.*)$/);
-    if (!m) { i += 1; continue; }
+    if (!m) {
+      // CR-2026-049 TASK-01：无法解释的结构硬失败（纪律 #1，禁止静默丢行）
+      throw new Error(`YAML_SUBSET_PARSE_FAILED @line ${lines[i].no}: ${content}`);
+    }
     const key = unquote(m[1].trim());
     let rest = m[2].trim();
     if (rest === '' ) {
@@ -98,8 +101,11 @@ function parseMap(lines, idx, indent) {
 
 function parseInline(s) {
   s = s.trim();
-  if (s.startsWith('{')) return parseFlow(s).value;
-  if (s.startsWith('[')) return parseFlow(s).value;
+  if (s.startsWith('{') || s.startsWith('[')) {
+    // CR-2026-049 TASK-01：以 {/[ 开头但 flow 解析失败 → plain scalar（如 title: {TOOLS_ROOT} 路径统一）；
+    // flow 内部的未知结构仍由 parseFlow 抛错，不做静默降级。
+    try { return parseFlow(s).value; } catch { return parseScalar(s); }
+  }
   return parseScalar(s);
 }
 

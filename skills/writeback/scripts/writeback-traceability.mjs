@@ -18,7 +18,7 @@ import crypto from 'node:crypto';
 import {
   parseArgs, fail, ok, nowIso, readFile, normalize,
   readFrontmatter, extractBlock,
-  sha256, readHashRaw, writeCandidate,
+  sha256, readHashRaw, writeCandidate, parseGeneratedTraceability,
 } from './lib.mjs';
 
 const args = parseArgs(process.argv.slice(2));
@@ -225,13 +225,23 @@ if (old === null) {
 }
 // 生成后自检：用与 archive gate 同一 validator 校验 candidate 文本（FR-04 唯一函数）
 validateMilestoneEvidence({ traceText: newText, cr, specId: spec, editRoot: ws });
+// CR-2026-049 TASK-01：加固 parser 完整解析 + 结构化语义校验（top-level/spec-id/cr-ref/milestones/段数/当前段）
+const parsedTrace = parseGeneratedTraceability(newText, { cr, specId: spec });
 
 const relPath = `specs/${spec}/traceability.yml`;
+// canonical trace payload（TD-B1）：完整语义对象冻结进 manifest v2 event；crctl/读侧不二次自由解析。
+const tracePayload = { spec_id: spec, traceability: parsedTrace };
+const traceEvent = {
+  kind: 'trace',
+  payload: tracePayload,
+  payloadSha256: sha256(JSON.stringify(tracePayload)),
+};
 const { manifest, manifestPath } = writeCandidate({
   candidateOut, stage: 'traceability', cr, specId: spec, targetVersion: verNoV,
   generator: { id: 'writeback-traceability', sha256: generatorSha },
   files: [{ path: relPath, beforeSha256: old == null ? null : readHashRaw(tracePath), afterSha256: null, content: newText }],
   contentOf: () => newText,
+  event: traceEvent,
 });
 
 /* ── 末尾自检（candidate 目录内）── */
@@ -254,8 +264,8 @@ if (errors.length) fail('SELF_CHECK_FAILED', '自检断言失败：' + errors.jo
 
 ok({
   op: 'writeback-traceability', cr, spec, version, noop: false,
-  candidateDir: candidateOut, manifestPath, inputDigest: manifest.inputDigest,
-  files: manifest.files.map((f) => f.path),
+  candidateDir: candidateOut, manifestPath, inputDigest: manifest.inputDigest, manifestVersion: manifest.v,
+  files: manifest.files.map((f) => f.path), event: { kind: traceEvent.kind, payloadSha256: traceEvent.payloadSha256 },
   mergeCommits: mergeCommits.map((m) => `${m.repo}@${m.sha}`), milestone: ms.milestone,
   evidence: evidenceKeys(evidence),
 });

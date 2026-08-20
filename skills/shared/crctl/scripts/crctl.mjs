@@ -291,6 +291,8 @@ function auditLogOnce(ws, record, dedupKey) {
 function emitOutboxEvent(ws, ev) {
   const installRoot = deriveInstallRoot(ws);
   try {
+    // fault injection（测试钩子，与 CRCTL_FAULT_POINT 同风格）：模拟 outbox 落盘失败
+    if (process.env.CRCTL_OUTBOX_FAIL) throw new Error('CRCTL_OUTBOX_FAIL injected');
     const dir = path.join(installRoot, '.crctl', 'outbox');
     fs.mkdirSync(dir, { recursive: true });
     const gi = path.join(installRoot, '.crctl', '.gitignore');
@@ -3130,6 +3132,16 @@ async function cmdArchive(ws, positional, flags) {
       actor: identity(ws),
       dedup_name: `archive-${cr}-${commit}.json`,
     }),
+    // CR-2026-049 TASK-03：trace pending 前置门补发 adapter（复用 TASK-02 的 journal intent 与 dedupName）；
+    // 失败返回 null → archiveCr 抛 ARCHIVE_TRACE_PENDING，零写入保留现场。
+    replayTraceEvent: ({ cr, intent }) => emitOutboxEvent(ws, {
+      event_kind: 'trace',
+      cr_id: cr,
+      commit_sha: intent.commit,
+      actor: identity(ws),
+      payload: intent.payload,
+      dedup_name: intent.dedupName,
+    }),
   }));
   auditLog(ws, { kind: 'archive', cr, txId: result.txId, phase: result.phase, status: result.status, changed: result.changed, actor: identity(ws) });
   ok({ op: 'archive', ...result });
@@ -3169,6 +3181,16 @@ async function cmdWritebackApply(ws, positional, flags, gates) {
     emitAdvanceAudit: ({ from, to, trigger, commit, dedupKey }) => auditLogOnce(ws, {
       kind: 'advance', cr, from, to, trigger, by: identity(ws), commit, result: 'success',
     }, dedupKey),
+    // CR-2026-049 TASK-02：trace 事件发射 adapter（schema v1 + 确定性 dedup 文件名）；
+    // 失败返回 null → applyWritebackAtomic 转为 EMIT_FAILED warning 并保持 journal pending。
+    emitTraceEvent: ({ cr, commit, dedupName, payload }) => emitOutboxEvent(ws, {
+      event_kind: 'trace',
+      cr_id: cr,
+      commit_sha: commit,
+      actor: identity(ws),
+      payload,
+      dedup_name: dedupName,
+    }),
   }));
   auditLog(ws, { kind: 'writeback', cr, txId: result.txId, stage, phase: result.phase, commit: result.commit, changed: result.changed, actor: identity(ws) });
   ok({ op: 'writeback-apply', ...result });

@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { parseYaml } from '../../shared/crctl/scripts/lib/yaml-subset.mjs';
 
 /* ────────────────────────── 输出 / 错误（风格对齐 crctl.mjs）────────────────────────── */
 
@@ -163,7 +164,6 @@ export function unifiedDiff(oldText, newText, label) {
 }
 
 /* ────────────────────────── CLI 参数（--key value / --flag）────────────────────────── */
-
 export function parseArgs(argv) {
   const args = {};
   for (let i = 0; i < argv.length; i++) {
@@ -175,6 +175,47 @@ export function parseArgs(argv) {
     else args[key] = true;
   }
   return args;
+}
+
+/* ── CR-2026-049 TASK-01：加固 parser 完整解析 + 结构化语义校验（SDD §2.6）──
+ * 顶层映射、spec-id===specId、cr-ref===cr、milestones 数组、YAML 文本 `- cr:` 数与对象数组长度相等、
+ * 当前 CR 恰一段、该段含 frs|fr-chain 与 evidence。任一不满足非零退出（TRACE_SEMANTIC_INVALID），不静默降级。
+ * 放 lib.mjs（无副作用模块）供 generator 与测试共同 import；generator 是 CLI 脚本，不可被 import。 */
+export function parseGeneratedTraceability(text, { cr, specId }) {
+  let doc;
+  try {
+    doc = parseYaml(normalize(text));
+  } catch (e) {
+    fail('YAML_SUBSET_PARSE_FAILED', `traceability 解析失败：${e.message}`, { cr, specId });
+  }
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+    fail('TRACE_SEMANTIC_INVALID', 'traceability 顶层不是映射', { cr, specId });
+  }
+  if (doc['spec-id'] !== specId) {
+    fail('TRACE_SEMANTIC_INVALID', `traceability spec-id=${JSON.stringify(doc['spec-id'])} 与 ${specId} 不一致`, { cr, specId });
+  }
+  if (doc['cr-ref'] !== cr) {
+    fail('TRACE_SEMANTIC_INVALID', `traceability cr-ref=${JSON.stringify(doc['cr-ref'])} 与 ${cr} 不一致`, { cr, specId });
+  }
+  if (!Array.isArray(doc.milestones)) {
+    fail('TRACE_SEMANTIC_INVALID', 'traceability milestones 不是数组', { cr, specId });
+  }
+  // YAML 文本中 `- cr:` 数量必须等于对象数组长度（防 parser 与文本不一致）
+  const rawLines = normalize(text).split('\n').filter((l) => !/^\s*#/.test(l));
+  const textCount = rawLines.filter((l) => /^\s*- cr:\s+\S/.test(l)).length;
+  if (textCount !== doc.milestones.length) {
+    fail('TRACE_SEMANTIC_INVALID', `YAML 文本 - cr: 段数 ${textCount} != 解析对象数组长度 ${doc.milestones.length}`, { cr, specId, textCount, objectCount: doc.milestones.length });
+  }
+  const mine = doc.milestones.filter((m) => m && typeof m === 'object' && m.cr === cr);
+  if (mine.length !== 1) {
+    fail('TRACE_SEMANTIC_INVALID', `当前 CR ${cr} 段数=${mine.length}（期望恰 1）`, { cr, specId });
+  }
+  const seg = mine[0];
+  const hasFrs = Array.isArray(seg.frs) || Array.isArray(seg['fr-chain']);
+  if (!hasFrs || seg.evidence == null) {
+    fail('TRACE_SEMANTIC_INVALID', `当前 CR ${cr} 段缺少 frs|fr-chain 或 evidence`, { cr, specId, hasFrs, hasEvidence: seg.evidence != null });
+  }
+  return doc;
 }
 
 /* ────────────────────────── 账本路径防护（自检/断言用，静态可核查）────────────────────────── */
@@ -209,21 +250,23 @@ export function readHashRaw(p) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
 
-/** manifest v1 canonical 序列化（SDD §3.5）：字段固定顺序、files 按 path 排序后取
- * path/beforeSha256/afterSha256——inputDigest 即其 sha256。apply 侧（workspace-transactions.mjs）
- * 用同一公式重算比对，防 manifest 篡改/重放（WRITEBACK_MANIFEST_TAMPERED）。 */
-export function computeInputDigest({ v, stage, cr, specId, targetVersion, generator, files }) {
+/** manifest v1/v2 canonical 序列化（SDD §3.5；CR-2026-049 TASK-01 新增 v2）：字段固定顺序、files 按 path
+ * 排序后取 path/beforeSha256/afterSha256；v2（traceability）额外覆盖 event.kind/event.payload/event.payloadSha256——
+ * inputDigest 即其 sha256。apply 侧（workspace-transactions.mjs）用同一公式重算比对，防 manifest 篡改/重放。 */
+export function computeInputDigest({ v, stage, cr, specId, targetVersion, generator, files, event }) {
   const canon = JSON.stringify({
     v, stage, cr, specId, targetVersion,
     generator: { id: generator.id, sha256: generator.sha256 },
     files: files.map((f) => ({ path: f.path, beforeSha256: f.beforeSha256 == null ? null : f.beforeSha256, afterSha256: f.afterSha256 })),
+    ...(event ? { event: { kind: event.kind, payload: event.payload, payloadSha256: event.payloadSha256 } } : {}),
   });
   return sha256(canon);
 }
 
 /** candidate 写盘：blob 落盘 → manifest 落盘（inputDigest 自校验锚点）。返回 manifest 对象。
+ * event 提供时 manifest v=2（CR-2026-049 TASK-01：traceability 阶段携带 {kind,payload,payloadSha256}）。
  * 幂等：相同内容重跑生成相同 sha/blob，candidate 目录整体可删除重生成。 */
-export function writeCandidate({ candidateOut, stage, cr, specId, targetVersion, generator, files, contentOf }) {
+export function writeCandidate({ candidateOut, stage, cr, specId, targetVersion, generator, files, contentOf, event }) {
   fs.mkdirSync(candidateOut, { recursive: true });
   files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)); // manifest 要求 POSIX 字典序（SDD §3.5）
   for (const f of files) {
@@ -244,9 +287,10 @@ export function writeCandidate({ candidateOut, stage, cr, specId, targetVersion,
     fs.writeFileSync(path.join(candidateOut, f.path), content, 'utf8');
   }
   const manifest = {
-    v: 1, stage, cr, specId, targetVersion,
+    v: event ? 2 : 1, stage, cr, specId, targetVersion,
     inputDigest: '', generator,
     files: files.map((f) => ({ path: f.path, beforeSha256: f.beforeSha256 == null ? null : f.beforeSha256, afterSha256: f.afterSha256, blob: f.blob })),
+    ...(event ? { event: { kind: event.kind, payload: event.payload, payloadSha256: event.payloadSha256 } } : {}),
   };
   manifest.inputDigest = computeInputDigest(manifest);
   const manifestPath = path.join(candidateOut, 'manifest.json');
