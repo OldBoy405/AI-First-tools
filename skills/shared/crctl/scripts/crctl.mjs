@@ -314,7 +314,19 @@ function emitOutboxEvent(ws, ev) {
     // 文件名片段消毒：pending: 占位 sha（CR-2026-003）含冒号，Windows 文件名非法；只影响文件名，事件内容不动
     const shaSlug = (event.commit_sha || 'nosha').replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'nosha';
     const name = ev.dedup_name || `${ts}-${event.cr_id}-${event.event_kind}-${shaSlug}.json`;
-    if (ev.dedup_name && fs.existsSync(path.join(dir, name))) return name; // 同一事实待采集期间只留一份
+    const target = path.join(dir, name);
+    if (ev.dedup_name && fs.existsSync(target)) {
+      let existing;
+      try { existing = JSON.parse(fs.readFileSync(target, 'utf8')); } catch (e) { throw new Error(`OUTBOX_DEDUP_INVALID: ${name}: ${e.message}`); }
+      const comparable = (value) => JSON.stringify({
+        v: value.v, event_kind: value.event_kind, cr_id: value.cr_id,
+        from_status: value.from_status, to_status: value.to_status,
+        trigger: value.trigger, commit_sha: value.commit_sha,
+        actor: value.actor, evidence: value.evidence, payload: value.payload,
+      });
+      if (comparable(existing) === comparable(event)) return name;
+      throw new Error(`OUTBOX_DEDUP_CONFLICT: ${name}`);
+    }
     const tmp = path.join(dir, `.tmp-${process.pid}-${name}`);
     fs.writeFileSync(tmp, JSON.stringify(event, null, 2) + '\n', 'utf8');
     fs.renameSync(tmp, path.join(dir, name)); // 原子可见：先写临时名再 rename，防半写

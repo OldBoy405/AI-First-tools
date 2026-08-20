@@ -101,10 +101,11 @@ function parseMap(lines, idx, indent) {
 
 function parseInline(s) {
   s = s.trim();
-  if (s.startsWith('{') || s.startsWith('[')) {
-    // CR-2026-049 TASK-01：以 {/[ 开头但 flow 解析失败 → plain scalar（如 title: {TOOLS_ROOT} 路径统一）；
-    // flow 内部的未知结构仍由 parseFlow 抛错，不做静默降级。
-    try { return parseFlow(s).value; } catch { return parseScalar(s); }
+  const looksLikeFlow = s.startsWith('[') || (s.startsWith('{') && /:/.test(s));
+  if (looksLikeFlow) {
+    const parsed = parseFlow(s);
+    if (parsed.rest.trim() !== '') throw new Error(`YAML_SUBSET_PARSE_FAILED: trailing flow content: ${s}`);
+    return parsed.value;
   }
   return parseScalar(s);
 }
@@ -120,7 +121,9 @@ function parseFlow(s) {
       if (s[i] === '}') { i++; return o; }
       for (;;) {
         ws();
-        const k = flowScalar([':']); i++; // skip ':'
+        const k = flowScalar([':']);
+        if (s[i] !== ':') throw new Error(`flow map key missing ':' @${i}: ${s}`);
+        i++; // skip ':'
         o[unquote(k.trim())] = value();
         ws();
         if (s[i] === ',') { i++; continue; }
