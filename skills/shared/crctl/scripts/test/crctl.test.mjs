@@ -3228,6 +3228,40 @@ test('CR-2026-027 回修 b10：approve --resign 拒绝 server-approve，避免�
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('CR-2026-049：review-loop reset 非交互式调用拒绝（人类在环，无旁路）', () => {
+  const ws = makeWorkspace();
+  try {
+    mkdirSync(path.join(ws, 'change-requests', 'CR-TEST-1'), { recursive: true });
+    const r = runCrctl(['review-loop', 'reset', 'CR-TEST-1', '--loop', 'write-test-report', '--reason', 'x', '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'NOT_TTY');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-049：review-loop reset 耗尽态开启下一 cycle，保留 attempts 历史', () => {
+  const ws = makeWorkspace();
+  try {
+    const crDir = path.join(ws, 'change-requests', 'CR-TEST-1');
+    mkdirSync(crDir, { recursive: true });
+    writeFileSync(path.join(crDir, 'review-loop.yml'), [
+      '# 由 crctl attempt 维护，请勿手工编辑', 'loops:', '  write-test-report:', '    current-cycle: 1', '    current-attempt: 3', '    attempts:',
+      '      - { attempt: 1, at: "2026-08-21T01:00:00+08:00", by: "Ray", cycle: 1 }',
+      '      - { attempt: 2, at: "2026-08-21T02:00:00+08:00", by: "Ray", cycle: 1 }',
+      '      - { attempt: 3, at: "2026-08-21T03:00:00+08:00", by: "Ray", cycle: 1 }',
+    ].join('\n') + '\n', 'utf8');
+    const r = runCrctlInTty(['review-loop', 'reset', 'CR-TEST-1', '--loop', 'write-test-report', '--reason', 'human processed blockers', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    const out = JSON.parse(r.rawStdout);
+    assert.equal(out['current-cycle'], 2);
+    assert.equal(out['current-attempt'], 0);
+    const text = readFileSync(path.join(crDir, 'review-loop.yml'), 'utf8');
+    assert.match(text, /current-cycle: 2/);
+    assert.match(text, /current-attempt: 0/);
+    // 旧轮次保留且 cycle 标签不变
+    assert.equal((text.match(/- \{ attempt:/g) || []).length, 3);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
 test('CR-2026-027 回修 b10：approve --resign 非交互式调用拒绝（人类在环，无旁路）', () => {
   const ws = makeDevStartWorkspace().ws;
   try {
