@@ -86,7 +86,7 @@
       "kind": "skill",
       "label": "撰写需求 PRD",
       "ref": "write-requirement-prd",
-      "prompt": "读取 node-1.md 末尾的 execution_context，取得 cr_id 与 knowledge_base_worktree。执行 write-requirement-prd：\n- cr_id: {execution_context.cr_id}\n- source: {{inputs.source}}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n在 knowledge_base_worktree 中写 `change-requests/{cr_id}/prd.md`（章节结构与写作步骤由 write-requirement-prd SKILL 负责）。若来自 reviewLoop 回修，必须逐条消费 review_feedback.blockers（blocker 字符串内含可执行修复说明），修订同一 PRD。常规或回修完成后，输出 PRD 关键章节摘要、字数统计与实际写入路径，并保留 execution_context.cr_id。",
+      "prompt": "读取 node-1.md 的 execution_context。调用 write-requirement-prd：\n- cr_id: {execution_context.cr_id}\n- source: {{inputs.source}}\n- runtime_context: {execution_context}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n消费 PRD 路径、摘要与字数统计；失败按 Skill 语义中止。在 node-2.md 输出结构化结果并继续传递 execution_context。",
       "onFail": "abort",
       "timeoutMinutes": 25
     },
@@ -104,7 +104,7 @@
       "kind": "skill",
       "label": "需求评审",
       "ref": "review-requirement",
-      "prompt": "读取 node-1.md 的 execution_context，执行 review-requirement：\n- cr_id: {execution_context.cr_id}\n- reviewer: ai-reviewer\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n消费 verdict、blockers（每条内含可执行修复说明）、repair-target、current-attempt 轮次与评审摘要。若 verdict=block 或 blockers 非空，pipeline 不得进入 human_approval；必须把 review_feedback 传回 write-requirement-prd 自动修订，并重新执行本评审，直至 verdict=pass 且 blockers 为空，或达到 reviewLoop.maxAttempts 后停止。在 node-4.md 输出 verdict、blockers、repair-target、current-attempt 轮次与评审摘要。",
+      "prompt": "读取 node-1.md 的 execution_context。调用 review-requirement：\n- cr_id: {execution_context.cr_id}\n- reviewer: ai-reviewer\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n消费 verdict、blockers、repair-target、current-attempt 与评审摘要；按本节点 reviewLoop 机器字段路由。在 node-4.md 输出结构化评审结果。",
       "reviewLoop": {
         "repairNodeId": "00000000-0000-0000-0011-000000000002",
         "repairRef": "write-requirement-prd",

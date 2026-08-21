@@ -79,7 +79,7 @@
       "kind": "skill",
       "label": "竞品分析",
       "ref": "write-competitive-report",
-      "prompt": "若 {{inputs.skip_competitive}}=true 则直接在 node-3.md 输出 SKIPPED 并 return。\n否则按顺序调用既有 Skill（run-competitive-analysis 已合并下线，FR-32，CR-2026-022）：\n① fetch-competitor-updates → updates-block\n② gather-product-context → product-snapshot\n③ write-competitive-report(updates-block=①, product-snapshot=②, confirmed=false) → 草稿正文（confirmed=false 不落盘，无报告路径）\n在 node-3.md 输出草稿正文与结构化摘要。",
+      "prompt": "若 {{inputs.skip_competitive}}=true 则在 node-3.md 输出 SKIPPED 并 return。\n否则按顺序调用：\n① fetch-competitor-updates(不传竞品 ID，按 Skill 契约读取全部已注册竞品；lookback-days=30) → updates-block\n② gather-product-context → product-snapshot\n③ write-competitive-report(updates-block=①, product-snapshot=②, confirmed=false) → reportDraft\n在 node-3.md 输出 reportDraft 与结构化摘要。",
       "onFail": "skip",
       "timeoutMinutes": 20
     },
@@ -106,7 +106,7 @@
       "kind": "skill",
       "label": "产品规划报告评审",
       "ref": "review-planning-report",
-      "prompt": "读取上一节点生成的产品规划报告，执行 review-planning-report：\n- planning_report_path: {node-5 输出的报告路径}\n- topic: {{inputs.topic}}\n- target_version: {{inputs.target_version}}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n消费 approved、blockers、risks、recommendations、repair-target、repair-instructions、current-attempt 轮次（轮次持久化与评审记录写入由 Skill 负责）。\n\n若 approved=false 或 blockers 非空，pipeline 不得进入 human_approval；必须将 review_feedback 传回 write-planning-report 节点自动修订，并重新执行本评审，直至 approved=true 且 blockers 为空，或达到 reviewLoop.maxAttempts 后停止。",
+      "prompt": "读取上一节点生成的产品规划报告，执行 review-planning-report：\n- planning_report_path: {node-5 输出的报告路径}\n- topic: {{inputs.topic}}\n- target_version: {{inputs.target_version}}\n- reviewer: ai-reviewer\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n消费 approved、blockers、risks、recommendations、repair-target、repair-instructions、current-attempt 轮次（轮次持久化与评审记录写入由 Skill 负责）。\n\n若 approved=false 或 blockers 非空，pipeline 不得进入 human_approval；必须将 review_feedback 传回 write-planning-report 节点自动修订，并重新执行本评审，直至 approved=true 且 blockers 为空，或达到 reviewLoop.maxAttempts 后停止。",
       "reviewLoop": {
         "repairNodeId": "00000000-0000-0000-0010-000000000005",
         "repairRef": "write-planning-report",

@@ -79,9 +79,9 @@ CR-2026-001  [emergency-fix]  修复协作看板崩溃问题
   writeback-spec-id: collaboration-dashboard
 
 最近三次 checkpoint（DD-5，CR-2026-050：resume-cr 展示项由 cr-show 输出契约承载）
-  batchId      : 9d989acb29e9125a   @ 2026-08-21T13:00:00+08:00  phase=complete
-  batchId      : 7f1c2aa0d41e8866   @ 2026-08-21T10:30:00+08:00  phase=complete
-  batchId      : 5be3d19c02aa77dd   @ 2026-08-21T08:00:00+08:00  phase=complete
+  batchId      : <最近批次>   @ <metadata commit 时间>  phase=complete
+  batchId      : <上一批次>   @ <metadata commit 时间>  phase=complete
+  batchId      : <更早批次>   @ <metadata commit 时间>  phase=complete
 
 追溯链路
   cr.md → prd.md → sdd.md → tasks/ → specs/collaboration-dashboard/{PRD.md,SDD.md}
@@ -95,7 +95,7 @@ CR-2026-001  [emergency-fix]  修复协作看板崩溃问题
 
 ### Step 3.5 — 展示最近三次 checkpoint（CR-2026-050 DD-5）
 
-在详情视图追加「最近三次 checkpoint」段：读取 `change-requests/{cr-id}/checkpoints.yml`（或 `_backlog.yml#checkpoints` 在途段），展示最近三次的 `batchId` / 时间 / `phase`；无记录时标注"暂无 checkpoint"。该展示项由本 Skill 输出契约承载，resume-cr pipeline 不再自行实现。
+在详情视图追加「最近三次 checkpoint」段：通过 controlled-shell / `crctl git log` 读取 knowledge-base 当前 CR 分支的持久化提交历史，按提交消息精确匹配 `[cr] checkpoint {cr_id} batch <batchId>`，取最新三条并展示 `batchId` / metadata commit 时间 / `phase=complete`（只有 complete checkpoint 才产生该 metadata commit）；最新批次的仓库明细可从 `_backlog.yml#change-requests[].latest-checkpoint` 补充。禁止从未声明的 checkpoint 历史文件或数组读取；无匹配提交时标注"暂无 checkpoint"。该展示项由本 Skill 输出契约承载，resume-cr pipeline 不再自行实现。
 
 ### Step 4 — 生成下一步建议
 

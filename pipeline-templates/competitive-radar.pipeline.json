@@ -28,7 +28,14 @@
       "label": "重点维度",
       "type": "select",
       "required": false,
-      "options": ["功能对比", "定价策略", "UI/UX", "技术架构", "市场定位", "全量"],
+      "options": [
+        "功能对比",
+        "定价策略",
+        "UI/UX",
+        "技术架构",
+        "市场定位",
+        "全量"
+      ],
       "default": "全量",
       "description": "报告聚焦的分析维度"
     }
@@ -39,7 +46,7 @@
       "kind": "skill",
       "label": "抓取竞品最新动态",
       "ref": "fetch-competitor-updates",
-      "prompt": "调用 fetch-competitor-updates（参数名映射，Pipeline 不做 slug→id 索引解析）：\n- competitor-id / competitor-ids[]: {{inputs.competitor_slug}}（由 fetch-competitor-updates 解析为 id）\n- lookback-days: {{inputs.since_days}}\n- focus_dimension: {{inputs.focus_dimension}}\n消费 updates 结构化输出；将原始采集内容保存到 node-1.md。",
+      "prompt": "调用 fetch-competitor-updates：\n- competitor-slug: {{inputs.competitor_slug}}\n- lookback-days: {{inputs.since_days}}\n\n由 Skill 通过竞品索引把 slug 解析为 competitor-id；消费 updates 结构化输出。在 node-1.md 输出 updates-block。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -48,7 +55,7 @@
       "kind": "skill",
       "label": "生成竞品分析报告",
       "ref": "write-competitive-report",
-      "prompt": "按顺序调用既有 Skill（FR-04，CR-2026-050）：\n① gather-product-context → product-snapshot\n② write-competitive-report(updates-block=node-1 输出, product-snapshot=①, confirmed=false) → 草稿（两阶段确认协议：不落盘 docs/competitive/）\n在 node-2.md 输出草稿正文。",
+      "prompt": "按顺序调用：\n① gather-product-context → product-snapshot\n② write-competitive-report(updates-block=node-1 输出, product-snapshot=①, confirmed=false) → reportDraft\n在 node-2.md 输出结构化 reportDraft（body、competitorId、reportDate、sourceNodeId、sourceRef）与 product-snapshot，供后续节点消费。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },
@@ -57,7 +64,7 @@
       "kind": "skill",
       "label": "转化为规划建议",
       "ref": "report-to-planning-suggestion",
-      "prompt": "调用 report-to-planning-suggestion：\n- reportDraft: {node-2.md 草稿（body、competitorId、reportDate、sourceNodeId、sourceRef）}（草稿模式不落盘，无 reportPath）\n- focus: {{inputs.focus_dimension}}\n消费规划建议草稿；输出写入 node-3.md。",
+      "prompt": "调用 report-to-planning-suggestion：\n- reportDraft: {node-2.md reportDraft}（草稿模式不落盘，无 reportPath）\n- focus: {{inputs.focus_dimension}}\n消费规划建议草稿；输出写入 node-3.md。",
       "onFail": "abort",
       "timeoutMinutes": 10
     },
@@ -74,7 +81,7 @@
       "kind": "skill",
       "label": "写入产品规划知识库",
       "ref": "write-planning-entry",
-      "prompt": "将审批通过的规划建议（node-3.md）落盘为产品规划条目，按顺序调用（FR-04，CR-2026-050）：\n① write-competitive-report(updates-block=node-1 输出, product-snapshot=node-2 已取得值, confirmed=true) → 正式报告落盘 + 报告索引\n② write-planning-entry(source=node-3 输出, title={{inputs.competitor_slug}} 竞品雷达规划建议, target_version=unassigned, owner=product-owner) → 规划条目落盘\n消费结构化结果；在 node-5.md 输出落盘路径。",
+      "prompt": "按顺序调用：\n① write-competitive-report(updates-block=node-1 输出, product-snapshot=node-2 输出, confirmed=true) → 正式报告\n② write-planning-entry(source=node-3 输出, title={{inputs.competitor_slug}} 竞品雷达规划建议, target_version=unassigned, owner=product-owner) → 规划条目\n消费两次调用的结构化结果；失败按对应 Skill 语义中止。在 node-5.md 输出正式报告与规划条目路径。",
       "onFail": "abort",
       "timeoutMinutes": 10
     }

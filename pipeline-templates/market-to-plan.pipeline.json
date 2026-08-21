@@ -44,7 +44,7 @@
       "kind": "skill",
       "label": "提取市场洞察关键信号",
       "ref": "extract-market-insight",
-      "prompt": "调用 extract-market-insight：\n- insight_source: {{inputs.insight_source}}\n- insight_type: {{inputs.insight_type}}\n- target_version: {{inputs.target_version}}\n- owner: product-owner\n\n关键信号提取、落盘路径与 _index.yml 维护由 extract-market-insight SKILL 负责。在 node-1.md 输出 raw insight 文件路径、机会点数量与待验证问题。",
+      "prompt": "调用 extract-market-insight：\n- insight_source: {{inputs.insight_source}}\n- insight_type: {{inputs.insight_type}}\n- target_version: {{inputs.target_version}}\n- owner: product-owner\n\n消费 raw insight 路径、机会点与待验证问题。在 node-1.md 输出结构化结果。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },
@@ -53,7 +53,7 @@
       "kind": "skill",
       "label": "撰写洞察简报",
       "ref": "extract-market-insight",
-      "prompt": "读取 node-1.md 中的 raw insight 文件路径，再次调用 extract-market-insight（简报模式，FR-32，CR-2026-022：原 write-insight-brief 已合并下线）：\n- mode: brief\n- raw_insight_path: {从 node-1.md 提取的 raw insight 文件路径}\n- target_version: {{inputs.target_version}}\n- owner: product-owner\n\n由 Skill 按 mode=brief 附加简报区块并推进 _index.yml 状态。在 node-2.md 输出 brief 文件路径。",
+      "prompt": "读取 node-1.md 的 raw insight 路径。调用 extract-market-insight：\n- mode: brief\n- raw_insight_path: {node-1 输出}\n- target_version: {{inputs.target_version}}\n- owner: product-owner\n\n消费 brief 路径与结构化结果；失败按 Skill 语义中止。在 node-2.md 输出结果。",
       "onFail": "abort",
       "timeoutMinutes": 10
     },
@@ -70,7 +70,7 @@
       "id": "00000000-0000-0000-0003-000000000004",
       "kind": "human_approval",
       "label": "确认规划建议",
-      "approvalPrompt": "洞察简报（node-2.md）和规划建议草稿（node-3.md）已就绪，请审阅后确认。通过后将写入 docs/product-planning/ 并更新 _index.yml。",
+      "approvalPrompt": "洞察简报（node-2.md）和规划建议草稿（node-3.md）已就绪。请提交 approve/reject 决定及理由；批准后继续调用 write-planning-entry，驳回则中止当前正向链。",
       "onFail": "abort",
       "timeoutMinutes": 1440
     },
