@@ -25,6 +25,8 @@ description: 读取 change-requests/{CR-ID}/prd.md，在同目录编写 sdd.md �
 |------|------|------|------|
 | `cr_id` | string | ✅ | 目标 CR-ID |
 | `tech_context` | string | ❌ | 额外技术背景（架构决策/已知约束） |
+| `operational_workspace` | string | ✅ | 业务权威路径（`crctl workspace inspect` 的 operationalWorkspace 原样值；code-implementation `implement-code` 同款来源） |
+| `resources` | array | ✅ | 各参与仓的 `{repo, worktreePath}` 清单（`crctl workspace inspect` 的 resources 原样值） |
 | `review_feedback` | object | ❌ | 来自 review-tech-design 的 blockers；存在时进入自修复模式 |
 | `self_repair_attempt` | number | ❌ | 当前自动修复轮次，由 pipeline reviewLoop 注入 |
 
@@ -34,15 +36,16 @@ description: 读取 change-requests/{CR-ID}/prd.md，在同目录编写 sdd.md �
 
 ### Step 1 — 前置校验
 
-1. 确认 `change-requests/{cr_id}/prd.md` 存在。
-2. 读取本 CR **目标代码仓**根目录的 `ARCHITECTURE.md` 了解整体架构约束。目标代码仓路径解析**必须**沿用 `code-implementation` pipeline `implement-code` 节点已定的同一套约定，禁止另行发挥：
-   - 独立代码仓：`.rayai-worktrees/{repo.id}/requirement/{cr_id}`
-   - 非独立代码目录：knowledge-base CR worktree（`.rayai-worktrees/knowledge-base/requirement/{cr_id}`）内对应代码路径
-   - 多仓 CR：按 `dir-graph.yaml#repositories` 逐仓检查，**不得**因为找不到就退而查找会话中最近读过的其他仓（尤其是本方法论包 `tools` 仓自身）的 `ARCHITECTURE.md` 顶替
+1. 确认 `change-requests/{cr_id}/prd.md` 存在（在 `operational_workspace` 内解析）。
+2. 读取本 CR **目标代码仓**根目录的 `ARCHITECTURE.md` 了解整体架构约束。目标代码仓路径**只从 `resources[].worktreePath` 取值**（禁止按 `.rayai-worktrees/{repo.id}/requirement/{cr_id}` 或 `.rayai-worktrees/knowledge-base/requirement/{cr_id}` 目录命名拼接路径）：
+   - 独立代码仓：`resources[]` 中 `repo` 匹配该仓的 `worktreePath`
+   - 非独立代码目录：`resources[]` 中 knowledge-base 仓的 `worktreePath` 内对应代码路径
+   - 多仓 CR：按 `resources[]` 逐仓检查，**不得**因为找不到就退而查找会话中最近读过的其他仓（尤其是本方法论包 `tools` 仓自身）的 `ARCHITECTURE.md` 顶替
    - **仅当本 CR 的目标代码仓就是 `tools` 仓自身**（即本 CR 改的是 `tools/skills`、`crctl.mjs` 等方法论包代码）时，`tools/ARCHITECTURE.md` 才是正确的读取对象；否则它与目标仓无关，绝不可当作参考基线
    - **已存在**：直接读取，继续下一项（读取 CR 当前 status）。
-   - **不存在**（该仓首次走到技术设计评审，按需懒加载起草，成本只付一次）：本 Agent 花一轮读**目标仓自己的**代码（入口文件、目录结构、依赖方向、已有约定），套用 `skills/shared/engineering-docs/templates/ARCHITECTURE-template.md` 填成实际内容（禁止留占位符），落盘到目标仓根目录 `ARCHITECTURE.md`，与 `sdd.md` 同一 commit 提交。**禁止参考 `tools/ARCHITECTURE.md` 的内容**（其不变量如"零依赖""crctl 单一状态写者"是方法论包自身治理事实，不是通用事实）——只能把它当"8 节骨架长什么样"的结构范例，绝不能抄条款。在 Step 5 输出摘要中标注"新起草 ARCHITECTURE.md（{repo}）"，随本轮 `review-tech-design`/`approve-tech-design` 人工过一眼确认，不另开审批节点。
+   - **不存在**（该仓首次走到技术设计评审，按需懒加载起草，成本只付一次）：只为本 CR 实际涉及且缺失的仓起草——本 Agent 花一轮读**目标仓自己的**代码（入口文件、目录结构、依赖方向、已有约定），套用 `skills/shared/engineering-docs/templates/ARCHITECTURE-template.md` 填成实际内容（禁止留占位符），落盘到目标仓根目录 `ARCHITECTURE.md`，在所属 `resources[].worktreePath` 内与 `sdd.md` 各仓分别提交；本 CR 未涉及或不缺失的仓不起草。**禁止参考 `tools/ARCHITECTURE.md` 的内容**（其不变量如"零依赖""crctl 单一状态写者"是方法论包自身治理事实，不是通用事实）——只能把它当"8 节骨架长什么样"的结构范例，绝不能抄条款。在 Step 5 输出摘要中标注"新起草 ARCHITECTURE.md（{repo}）"，随本轮 `review-tech-design`/`approve-tech-design` 人工过一眼确认，不另开审批节点。
    - 仅在文件缺失时起草；已存在则只读不改——普通 CR 不得借道修订它（架构级变更需求见该文档自身"维护规则"一节）。
+   - **提交口径（FR-07.2）**：ARCHITECTURE.md 与 sdd.md 不再要求"同一 commit"；各仓在所属 `resources[].worktreePath` 分别提交，架构审批后由同一批 checkpoint（`crctl checkpoint`）纳入。
 3. 读取 CR 当前 status：
    - 初次生成：必须为 `requirement-approved`，随后调用 `crctl advance --to tech-designing --trigger write-tech-design --expect requirement-approved` 将 status 推进到 `tech-designing`。
 <!-- lint-prompts:ignore --> 描述性：回修读取评审记录
@@ -82,10 +85,18 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 7. **安全与性能考量** — 边界条件、性能目标、安全控制点
 8. **Prompt 采纳影响**（条件性小节，CR-2026-021 FR-25/AC-15）：**若本 CR 的 diff 会触及 `skills/shared/crctl/scripts/crctl.mjs` 的 dispatch 分支或 `skills/shared/controlled-shell/rules.json` 的 `protectedPaths.deny`（= crctl 命令面或 guard deny 面有新增/变更）**，本节为必填，列出应改为调用新增/扩展子命令的 skill 清单（每项含 skill 路径 + 现状 + 应改为的调用方式），供 `review-tech-design` 与人工审批逐条核对；若本 CR 不触及上述两处，本节可省略。`lint-prompts` 只能机械抓到"prompt 还在做 crctl 已接管/已禁止的事"（CONTRADICTS/STALE），抓不到"crctl 新增了能力、某 skill 该采纳却还没采纳"——这一类必须靠本节 + 评审兜底。
 
+### Step 2.5 — 设计输出收窄（FR-08，CR-2026-050）
+
+**术语硬化（收窄范围）**：只处理进入数据模型 / 状态机 / 接口契约、且存在歧义 / 别名 / 边界风险（影响 FR/AC/角色权限/验收语义）的术语；每个风险术语至少验证一个代表性边界场景；已有 `CONTEXT.md` / 术语表只读沿用；命名冲突记录 `PRD canonical term → 代码别名` 映射；语义冲突**不得自行裁决**——在首次 `crctl advance` 前停止并要求需求负责人澄清。术语预检位于首次状态推进之前。
+
+**HTTP/REST 契约（条件触发基线）**：仅当 PRD / tech_context / 方案表明**新增或修改 HTTP API** 时才编写接口契约；优先级 = 目标仓 `ARCHITECTURE.md` / 既有 OpenAPI → 客户端兼容性 → Skill 默认基线。**不强制**复数名 / kebab-case / 固定错误结构 / 全列表分页 / 固定状态码 / 一律 201+Location；SDD 只写概要、输入、输出、错误、鉴权与条件性幂等分页，复杂接口附最小 OpenAPI 片段。
+
+**决策记录（三判据）**：仅当同时满足「难以逆转 + 无上下文会疑惑 + 有真实权衡替代」时才记录决策（Decision / Context / Alternatives / Consequences）；不伪造替代方案、不新增 ADR 或审批节点。
+
 ### Step 3 — 落盘并 commit
 
-落盘到 `change-requests/{cr_id}/sdd.md`。
-Commit：`feat({cr_id}): draft SDD - tech design`
+落盘到 `operational_workspace` 中 `change-requests/{cr_id}/sdd.md`。
+Commit：`[cr] write tech design {cr_id}`（白名单前缀 `[cr] `）
 
 ### Step 4 — 推进状态至待评审
 

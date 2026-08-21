@@ -37,7 +37,7 @@
       "kind": "skill",
       "label": "合并 CR workspace 全仓同名分支",
       "ref": "merge-feature-branch",
-      "prompt": "执行 merge-feature-branch：\n- cr_id: {{inputs.cr_id}}\n- workspace: knowledge-base 主 checkout\n\n动作：\n1. 校验 change-requests/{{inputs.cr_id}}/cr.md 当前 status=code-approved，否则 abort\n2. 调用公开的 merge-feature-branch Skill，消费返回的 operational_workspace 与结构化结果；冲突、漂移和中间态按 Skill 错误语义处理\n\n在 node-1.md 输出：operational_workspace、merge 事务 txId、phase。",
+      "prompt": "调用 merge-feature-branch：\n- cr_id: {{inputs.cr_id}}\n- workspace: knowledge-base 主 checkout\n\n消费 operational_workspace、merge 事务 txId 与 phase；失败按 Skill 语义中止。在 node-1.md 输出结构化结果。",
       "onFail": "abort",
       "timeoutMinutes": 20
     },

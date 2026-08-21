@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
@@ -116,6 +116,51 @@ test('human_approval(…0010) approvalPrompt 含评审后 checkpoint phase=compl
   assert.ok(n.approvalPrompt.includes('评审后 checkpoint phase=complete'), '审批提示追加 checkpoint 前提');
 });
 
+/* ── CR-2026-050 FR-01：human approval 不再引导直接编辑受保护账本（review-annotations 指引删除） ── */
+
+test('FR-01: 三条 CR Pipeline human approval prompt 删除 review-annotations 编辑指引', () => {
+  for (const [name, suffix] of [
+    ['requirement-authoring.pipeline.json', '000000000005'],
+    ['architecture-design.pipeline.json', '000000000003'],
+    ['code-implementation.pipeline.json', '000000000010'],
+  ]) {
+    const p = readPipeline(name);
+    const n = p.nodes.find((x) => x.id.endsWith(suffix));
+    assert.ok(n, `${name} human_approval 节点存在`);
+    assert.equal(n.kind, 'human_approval');
+    const text = n.approvalPrompt || '';
+    assert.ok(!/review-annotations/.test(text), `${name} approvalPrompt 不得残留 review-annotations 路径`);
+    assert.ok(!/补充 reject_reason|reject_reason/.test(text), `${name} approvalPrompt 不得引导直接补 reject_reason`);
+    assert.ok(/approve|reject/i.test(text), `${name} approvalPrompt 保留 approve/reject 结构化决定`);
+    // FR-01 保留项：code 代码审批节点 …0010 的 checkpoint phase=complete 前提句
+    if (suffix === '000000000010') {
+      assert.ok(text.includes('评审后 checkpoint phase=complete'), '…0010 保留 checkpoint phase=complete 前提');
+    }
+  }
+});
+
+/* ── CR-2026-050 FR-05：四个 approve 节点收敛（传 cr_id、不拼 approver、无命令细节） ── */
+
+test('FR-05: 四个 approve 节点只传 cr_id，无 crctl approve 命令细节/TTY/grant/CAS/owners 拼接', () => {
+  const cases = [
+    ['requirement-authoring.pipeline.json', 'approve-requirement'],
+    ['architecture-design.pipeline.json', 'approve-tech-design'],
+    ['code-implementation.pipeline.json', 'approve-dev-start'],
+    ['code-implementation.pipeline.json', 'approve-code'],
+  ];
+  for (const [name, ref] of cases) {
+    const p = readPipeline(name);
+    const n = p.nodes.find((x) => x.ref === ref);
+    assert.ok(n, `${name}/${ref} 节点存在`);
+    const text = n.prompt || '';
+    assert.ok(/(\(execution_context\.\))?cr_id|\{\{inputs\.cr_id\}\}/.test(text), `${ref} 传完整 cr_id`);
+    assert.ok(!/crctl approve/.test(text), `${ref} 不得含 crctl approve 命令细节`);
+    assert.ok(!/TTY|grant|CAS|approval\.ya?ml|--grant|--stage/.test(text), `${ref} 不得含 TTY/grant/CAS/approval.yml 文本`);
+    assert.ok(!/owners/.test(text), `${ref} 不得在 prompt 解析/拼接 owners`);
+    assert.ok(!/pipeline\s+(指令|流程|阶段)|writeback pipeline|architecture pipeline|coding pipeline/.test(text), `${ref} 不得写死下一 pipeline 名`);
+  }
+});
+
 /* ── CR-2026-044 TASK-05：三条 Pipeline 阶段终点 checkpoint 合同与 operational workspace 传递 ── */
 
 const TOOLS_ROOT_044 = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
@@ -146,7 +191,12 @@ test('CR-2026-044 AC-14: architecture-design 删除 auto_push_after_sdd，审批
   assert.equal(push[0].onFail, 'abort', '架构终点 checkpoint 必须 abort');
   assert.ok(!/SKIPPED|auto_push/.test(push[0].prompt), 'checkpoint prompt 无 skip 分支');
   assert.doesNotMatch(push[0].prompt, /<[^>]*workspace[^>]*>/i, 'checkpoint prompt 不得含未解析 workspace 占位符');
-  assert.match(push[0].prompt, /crctl checkpoint \{\{inputs\.cr_id\}\} --message/);
+  // CR-2026-044 FR-07 溯源：架构终点 checkpoint 不可跳过、失败只重跑不重审批。
+  // 本断言由 CR-2026-050 FR-07.3 修订：prompt 不再含 `crctl checkpoint` 命令字面量
+  // （命令收敛由 push-progress SKILL 承载），语义改由 onFail=abort + phase 消费 + 阶段终点句断言。
+  assert.ok(!/crctl checkpoint/.test(push[0].prompt), 'checkpoint prompt 不含 crctl checkpoint 命令字面量');
+  assert.ok(/phase/.test(push[0].prompt), 'checkpoint prompt 消费 phase');
+  assert.ok(/阶段终点/.test(push[0].prompt), 'checkpoint prompt 保留阶段终点语义');
   const skill = readFileSync(path.join(TOOLS_ROOT_044, 'skills', 'sync', 'push-progress', 'SKILL.md'), 'utf8');
   assert.doesNotMatch(skill, /<installation-workspace>/, 'push-progress Skill 不得保留可误执行的 workspace token');
   assert.equal(p.nodes.length, 5, '节点数保持 5');
@@ -249,4 +299,231 @@ test('CR-2026-045: emit-registry 残留双花括号 token 硬失败且不输出�
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /RUNNER_UNSUPPORTED_PIPELINE/);
   assert.equal(r.stdout, '');
+});
+
+/* ── CR-2026-050 FR-12.2：requirement-authoring 关键顺序、execution_context 输出、auto_push 分支、reviewLoop 字段集 ── */
+
+test('FR-12.2: requirement-authoring 7 节点顺序、execution_context/owners 输出与 auto_push_after_prd 分支保留', () => {
+  const p = readPipeline('requirement-authoring.pipeline.json');
+  const order = p.nodes.map((n) => n.ref || n.kind);
+  assert.deepEqual(order, ['requirement-register', 'write-requirement-prd', 'push-progress', 'review-requirement', 'human_approval', 'approve-requirement', 'push-progress'], 'register → PRD → 草稿ckpt → review → 审批 → approve → 终点ckpt');
+  assert.equal(p.nodes.length, 7, '7 节点不变（FR-12.4 节点数零改动）');
+  const first = p.nodes[0];
+  assert.ok(first.prompt.includes('execution_context:'), 'register 输出机器可读 execution_context');
+  assert.ok(first.prompt.includes('owners:'), 'execution_context 含 owners（SDD §2.4）');
+  assert.ok(first.prompt.includes('knowledge_base_worktree:'), 'execution_context 含 knowledge_base_worktree');
+  assert.ok(!/crctl register/.test(first.prompt), 'register 节点无 crctl register 命令参数序列');
+  assert.ok(!/\/abs\/path/.test(first.prompt), 'register 节点无绝对路径示例');
+  const draft = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_prd/.test(n.prompt));
+  assert.ok(draft && draft.onFail === 'skip', 'PRD 草稿 checkpoint 保留 auto_push_after_prd 分支');
+  const review = p.nodes.find((n) => n.ref === 'review-requirement');
+  assert.ok(review.reviewLoop && review.reviewLoop.repairRef === 'write-requirement-prd', 'reviewLoop 机器字段不变');
+  assert.deepEqual(
+    Object.keys(review.reviewLoop).sort(),
+    ['attemptInput', 'feedbackInput', 'maxAttempts', 'onBlock', 'passCondition', 'repairNodeId', 'repairRef'],
+    'requirement-authoring reviewLoop 字段集不变（无 replayNodes，与 architecture 不同）'
+  );
+});
+
+test('FR-06.1/07.4/07.5: requirement-authoring review/register/PRD 节点收敛负向断言', () => {
+  const p = readPipeline('requirement-authoring.pipeline.json');
+  const review = p.nodes.find((n) => n.ref === 'review-requirement');
+  assert.ok(!/review-annotations/.test(review.prompt), 'review-requirement 不残留 deny 路径字面量（lint R1）');
+  assert.ok(!/crctl review-record/.test(review.prompt), 'review-requirement 无 review-record 命令细节');
+  assert.ok(!/① 完整性|② 可测试性|③ 一致性|④ 边界/.test(review.prompt), 'review-requirement 无评审维度正文');
+  const prd = p.nodes.find((n) => n.ref === 'write-requirement-prd');
+  assert.ok(!/背景与目标|用户故事|功能需求|验收标准/.test(prd.prompt), 'PRD 节点无章节清单副本');
+});
+
+/* ── CR-2026-050 FR-12.3：code-implementation 两条关键顺序、replayNodes、保留字面量与收敛负向断言 ── */
+
+test('FR-12.3: code-implementation 16 节点关键顺序与 reviewLoop replayNodes 不变', () => {
+  const p = readPipeline('code-implementation.pipeline.json');
+  assert.equal(p.nodes.length, 16, '16 节点不变');
+  const idx = (s) => p.nodes.findIndex((n) => n.id.endsWith(s));
+  // plan → TASK → review-dev-plan → 审批 → developing
+  assert.ok(idx('000000000001') < idx('000000000002'), 'write-dev-plan < write-dev-tasks');
+  assert.ok(idx('000000000002') < idx('000000000014'), 'write-dev-tasks < review-dev-plan');
+  assert.ok(idx('000000000014') < idx('000000000004'), 'review-dev-plan < human_approval');
+  assert.ok(idx('000000000004') < idx('000000000005'), 'human_approval < approve-dev-start');
+  // implement → test-report → checkpoint → freshness → review-code
+  assert.ok(idx('000000000006') < idx('000000000007'), 'implement < test-report');
+  assert.ok(idx('000000000007') < idx('000000000008'), 'test-report < 统一 checkpoint');
+  assert.ok(idx('000000000008') < idx('000000000017'), 'checkpoint < review-start freshness');
+  assert.ok(idx('000000000017') < idx('000000000009'), 'review-start freshness < review-code');
+  const reviewCode = p.nodes.find((n) => n.id.endsWith('000000000009'));
+  assert.deepEqual(reviewCode.reviewLoop.replayNodes, [
+    { nodeId: '00000000-0000-0000-0015-000000000006', ref: 'implement-code', purpose: 'repair-code' },
+    { nodeId: '00000000-0000-0000-0015-000000000007', ref: 'write-test-report', purpose: 'regenerate-test-evidence' },
+    { nodeId: '00000000-0000-0000-0015-000000000008', ref: 'push-progress', purpose: 'publish-repaired-code-and-evidence-checkpoint' },
+    { nodeId: '00000000-0000-0000-0015-000000000017', ref: 'workspace-freshness', purpose: 're-verify-baseline' },
+    { nodeId: '00000000-0000-0000-0015-000000000009', ref: 'review-code', purpose: 'rerun-current-review' },
+  ], 'review-code replayNodes 5 项不变');
+});
+
+test('FR-12.3b: code-implementation 保留字面量（gate 名/checkpoint label/auto_push/task done）与收敛负向断言', () => {
+  const p = readPipeline('code-implementation.pipeline.json');
+  const implGate = p.nodes.find((n) => n.id.endsWith('000000000016'));
+  const revGate = p.nodes.find((n) => n.id.endsWith('000000000017'));
+  assert.ok(implGate.prompt.includes('implement-start'), '实施前 gate 名 implement-start 保留');
+  assert.ok(revGate.prompt.includes('review-start'), '评审前 gate 名 review-start 保留');
+  const finalCkpt = p.nodes.find((n) => /审批结果/.test(n.label || '') && n.ref === 'push-progress');
+  assert.ok(finalCkpt, '审批结果 checkpoint 存在');
+  assert.equal(finalCkpt.onFail, 'abort', '审批结果 checkpoint onFail=abort');
+  const taskCkpt = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_task/.test(n.prompt));
+  assert.ok(taskCkpt && taskCkpt.onFail === 'skip', 'TASK checkpoint auto_push_after_task 保留');
+  // 收敛负向断言：无 deny 路径字面量残留（lint R1）、无命令细节
+  for (const [ref, bad] of [
+    ['review-dev-plan', /review-annotations|crctl review-record|--embedded|八类维度合并评审/],
+    ['review-code', /review-annotations|crctl review-record|WCAG/],
+    ['write-test-report', /traceability|crctl test --plan|cr-test-plan/],
+    ['implement-code', /defaultRuntimeId|fallback 到第一个/],
+  ]) {
+    const n = p.nodes.find((x) => x.ref === ref);
+    assert.ok(!bad.test(n.prompt), `${ref} 无残留 ${bad}`);
+  }
+});
+
+/* ── CR-2026-050 DD-7：SKILL.md Commit：指引前缀必须命中 rules.json commit 白名单 ── */
+
+test('DD-7: 全部 SKILL.md Commit 指引前缀命中 controlled-shell commit 白名单（wip:/[cr]/merge(）', () => {
+  const rules = JSON.parse(readFileSync(RULES_PATH, 'utf8').replace(/\r\n/g, '\n'));
+  const commitShape = rules.git.find((g) => g.sub === 'commit').shapes[0];
+  const commitRe = new RegExp(commitShape.re, commitShape.flags || '');
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(path.join(dir, e.name)) : e.name === 'SKILL.md' ? [path.join(dir, e.name)] : []);
+  const skillFiles = walk(path.join(TOOLS_ROOT, 'skills'));
+  assert.ok(skillFiles.length > 0, '扫描到 SKILL.md 文件');
+  const bad = [];
+  for (const f of skillFiles) {
+    const text = readFileSync(f, 'utf8').replace(/\r\n/g, '\n'); // 纪律 #1：读入先 CRLF 归一
+    for (const m of text.matchAll(/Commit：`([^`]+)`/g)) {
+      const normalized = m[1].replace(/\{[^}]+\}/g, 'X').replace(/\$\{[^}]+\}/g, 'X');
+      if (!commitRe.test('-m ' + normalized)) bad.push(`${path.relative(TOOLS_ROOT, f)}: ${m[1]}`);
+    }
+  }
+  assert.deepEqual(bad, [], 'Commit 指引前缀必须命中白名单（wip: / [cr] / merge(）——匹配失败即硬失败，不静默跳过');
+  assert.equal(commitRe.test('-m feat(CR-X): invalid'), false, '故意构造 feat( 反例必须失败');
+  assert.equal(commitRe.test('-m [planning] invalid'), false, '故意构造 [planning] 反例必须失败');
+});
+
+
+/* ── CR-2026-050 code-review attempt 1：补 AC-02～04 / 收敛禁项 / approve 双路径 / 事实源断言 ── */
+
+test('CR-2026-050 AC-02: product-planning 必填输入与草稿链可执行', () => {
+  const p = readPipeline('product-planning.pipeline.json');
+  for (const [ref, skip] of [
+    ['analyze-user-feedback', 'skip_feedback'],
+    ['conduct-market-research', 'skip_market'],
+    ['analyze-current-product', 'skip_product'],
+  ]) {
+    const n = p.nodes.find((x) => x.ref === ref);
+    assert.ok(n.prompt.includes('{{inputs.topic}}'), `${ref} 传 topic`);
+    assert.ok(n.prompt.includes(`{{inputs.${skip}}}`), `${ref} 保留 ${skip}`);
+  }
+  const comp = p.nodes.find((x) => x.ref === 'write-competitive-report');
+  for (const term of ['skip_competitive', 'fetch-competitor-updates', '全部已注册竞品', 'lookback-days=30', 'gather-product-context', 'updates-block', 'product-snapshot', 'confirmed=false', 'reportDraft']) {
+    assert.ok(comp.prompt.includes(term), `竞品草稿链含 ${term}`);
+  }
+  const write = p.nodes.find((x) => x.ref === 'write-planning-report');
+  for (const term of ['prev_outputs', 'review_feedback', 'self_repair_attempt', '{{inputs.topic}}', '{{inputs.target_version}}']) assert.ok(write.prompt.includes(term), `write-planning-report 传 ${term}`);
+  const review = p.nodes.find((x) => x.ref === 'review-planning-report');
+  for (const term of ['reviewer: ai-reviewer', 'planning_report_path', 'repair-target', 'current-attempt']) assert.ok(review.prompt.includes(term), `review-planning-report 含 ${term}`);
+  const roadmap = p.nodes.find((x) => x.ref === 'write-roadmap');
+  assert.ok(!/_index\.yml/.test(roadmap.prompt), 'write-roadmap 不跨文档更新规划索引');
+});
+
+test('CR-2026-050 AC-03: market-to-plan 简报与 context/intent 契约闭合', () => {
+  const p = readPipeline('market-to-plan.pipeline.json');
+  const brief = p.nodes.find((x) => x.id.endsWith('000000000002'));
+  for (const term of ['mode: brief', 'raw_insight_path', '{{inputs.target_version}}']) assert.ok(brief.prompt.includes(term), `简报调用含 ${term}`);
+  assert.ok(!/_index\.yml|source:/.test(brief.prompt), '简报节点不复制索引算法或伪造 source 参数');
+  const draft = p.nodes.find((x) => x.ref === 'planning-draft');
+  assert.ok(draft.prompt.indexOf('gather-product-context') < draft.prompt.indexOf('planning-draft('), '先取得 context 再 planning-draft');
+  for (const term of ['context=', 'intent=', '{{inputs.target_version}}']) assert.ok(draft.prompt.includes(term), `planning-draft 含 ${term}`);
+  const entry = p.nodes.find((x) => x.ref === 'write-planning-entry');
+  assert.ok(!/market-insights\/_index\.yml|published/.test(entry.prompt), 'write-planning-entry 不跨写 market-insights 生命周期');
+  const approval = p.nodes.find((x) => x.kind === 'human_approval');
+  assert.ok(!/_index\.yml/.test(approval.approvalPrompt), '人工节点不复制索引写入');
+});
+
+test('CR-2026-050 AC-04: competitive-radar slug 解析与 reportDraft→正式落盘顺序闭合', () => {
+  const p = readPipeline('competitive-radar.pipeline.json');
+  const fetch = p.nodes.find((x) => x.ref === 'fetch-competitor-updates');
+  assert.ok(fetch.prompt.includes('competitor-slug: {{inputs.competitor_slug}}'));
+  assert.ok(fetch.prompt.includes('lookback-days: {{inputs.since_days}}'));
+  assert.ok(!/competitor-id \/ competitor-ids\[\]/.test(fetch.prompt), '不使用模糊参数键');
+  const skill = readFileSync(path.join(TOOLS_ROOT, 'skills', 'competitive', 'fetch-competitor-updates', 'SKILL.md'), 'utf8').replaceAll('\r\n', '\n');
+  for (const term of ['`competitor-slug`', '唯一精确命中', '不得猜测']) assert.ok(skill.includes(term), `fetch Skill slug 契约含 ${term}`);
+  const draft = p.nodes.find((x) => x.ref === 'write-competitive-report');
+  for (const term of ['updates-block=node-1', 'product-snapshot', 'confirmed=false', 'reportDraft', 'sourceNodeId', 'sourceRef']) assert.ok(draft.prompt.includes(term), `草稿节点含 ${term}`);
+  const suggestion = p.nodes.find((x) => x.ref === 'report-to-planning-suggestion');
+  assert.ok(suggestion.prompt.includes('reportDraft'));
+  assert.ok(!/reportPath\s*[:=]/.test(suggestion.prompt), '草稿模式不把草稿赋给 reportPath');
+  const publish = p.nodes.find((x) => x.ref === 'write-planning-entry');
+  assert.ok(publish.prompt.indexOf('write-competitive-report') < publish.prompt.indexOf('write-planning-entry'), '正式报告先于规划条目');
+  for (const term of ['updates-block=node-1', 'product-snapshot=node-2', 'confirmed=true']) assert.ok(publish.prompt.includes(term), `正式落盘含 ${term}`);
+});
+
+test('CR-2026-050 AC-06/07/11/12: Pipeline 禁止算法文本已彻底下沉', () => {
+  const cases = [
+    ['architecture-design.pipeline.json', 'write-tech-design', /crctl advance|status=requirement-approved|change-requests\/.*prd\.md|逐条消费|git add|git commit/],
+    ['architecture-design.pipeline.json', 'review-tech-design', /crctl review-record|重新执行本评审|maxAttempts/],
+    ['requirement-authoring.pipeline.json', 'write-requirement-prd', /change-requests\/|逐条消费|章节结构|knowledge_base_worktree 中写/],
+    ['requirement-authoring.pipeline.json', 'review-requirement', /crctl review-record|自动修订|重新执行本评审|maxAttempts/],
+    ['code-implementation.pipeline.json', 'write-dev-plan', /status=|sdd\.md|计划章节/],
+    ['code-implementation.pipeline.json', 'write-dev-tasks', /crctl task init|plan\.md|sdd\.md|索引失败|接口签名/],
+    ['code-implementation.pipeline.json', 'review-dev-plan', /review-record|replayNodes 重放|write-dev-plan →|maxAttempts=3|状态回退由/],
+    ['code-implementation.pipeline.json', 'implement-code', /status=developing|按 TASK|依赖顺序|fallback|只修复被指出|重新运行受影响/],
+    ['code-implementation.pipeline.json', 'write-test-report', /crctl test|analysis-below|机器区|traceability|重新生成测试报告|验证证据缺失/],
+    ['code-implementation.pipeline.json', 'review-code', /runner|评审维度|suggestions|语义：|重新执行 write-test-report|diff range|取证命令/],
+    ['feature-writeback.pipeline.json', 'merge-feature-branch', /status=code-approved|code-approved|状态校验/],
+  ];
+  for (const [name, ref, bad] of cases) {
+    const n = readPipeline(name).nodes.find((x) => x.ref === ref);
+    assert.ok(n, `${name}/${ref} 存在`);
+    assert.doesNotMatch(n.prompt, bad, `${name}/${ref} 无禁项 ${bad}`);
+  }
+});
+
+test('CR-2026-050 AC-05: 四个 approve Skill 的 grant/TTY 双路径均显式传角色 owner --approver', () => {
+  const cases = [
+    ['skills/requirement/approve-requirement/SKILL.md', 'requirement', 'requirement'],
+    ['skills/develop/approve-tech-design/SKILL.md', 'tech-design', 'development'],
+    ['skills/develop/approve-dev-start/SKILL.md', 'dev-start', 'development'],
+    ['skills/develop/approve-code/SKILL.md', 'code', 'development'],
+  ];
+  for (const [rel, stage, role] of cases) {
+    const text = readFileSync(path.join(TOOLS_ROOT, rel), 'utf8').replaceAll('\r\n', '\n');
+    const owner = `\\{cr\\.md owners\\.${role}\\.id\\}`;
+    assert.match(text, new RegExp(`crctl approve \\{cr_id\\} --stage ${stage} --grant --approver ${owner}`), `${stage} grant 路径显式 owner`);
+    assert.match(text, new RegExp(`crctl approve \\{cr_id\\} --stage ${stage} --approver ${owner}`), `${stage} TTY 路径显式 owner`);
+  }
+});
+
+test('CR-2026-050 AC-10: cr-show 最近三次 checkpoint 使用持久化 metadata commit，不引用不存在账本', () => {
+  const text = readFileSync(path.join(TOOLS_ROOT, 'skills', 'cr', 'cr-show', 'SKILL.md'), 'utf8').replaceAll('\r\n', '\n');
+  assert.ok(text.includes('[cr] checkpoint {cr_id} batch <batchId>'));
+  assert.ok(text.includes('latest-checkpoint'));
+  assert.ok(!/change-requests\/\{cr-id\}\/checkpoints\.yml|_backlog\.yml#checkpoints/.test(text), '不引用不存在的 checkpoint 历史结构');
+});
+
+test('CR-2026-050 AC-12: 8 条 Pipeline 节点数与 UUID 全局唯一保持不变', () => {
+  const expected = {
+    'product-planning.pipeline.json': 8,
+    'requirement-authoring.pipeline.json': 7,
+    'architecture-design.pipeline.json': 5,
+    'code-implementation.pipeline.json': 16,
+    'feature-writeback.pipeline.json': 5,
+    'resume-cr.pipeline.json': 3,
+    'competitive-radar.pipeline.json': 5,
+    'market-to-plan.pipeline.json': 5,
+  };
+  const ids = [];
+  for (const [name, count] of Object.entries(expected)) {
+    const p = readPipeline(name);
+    assert.equal(p.nodes.length, count, `${name} 节点数不变`);
+    ids.push(...p.nodes.map((n) => n.id));
+  }
+  assert.equal(new Set(ids).size, ids.length, '8 条 Pipeline UUID 全局唯一');
 });

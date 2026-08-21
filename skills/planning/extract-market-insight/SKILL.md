@@ -19,6 +19,8 @@ description: 将用户输入的市场、用户反馈或竞品洞察原始素材�
 | `insight_source` | multiline | ✅ | 原始洞察素材 |
 | `insight_type` | string | ❌ | 用户痛点 / 市场机会 / 竞品压力 / 内部反馈 / 综合 |
 | `target_version` | string | ❌ | 关联目标版本；可为空 |
+| `mode` | string | ❌ | `insight` / `brief`，默认 `insight`（缺省行为与现状完全一致）；`brief` 时在 raw insight 后附加简报区块 |
+| `raw_insight_path` | string | ❌ | `mode=brief` 时必填：上一节点产出的 raw insight 文件路径 |
 | `owner` | string | ❌ | 记录人；默认 `product-owner` |
 
 ## 执行步骤
@@ -76,7 +78,7 @@ source_kind: pasted
 
 ### Step 3.5 — 简报附加区块（FR-32，CR-2026-022：write-insight-brief 合并下线，增量能力并入本 Skill）
 
-当调用方请求简报（原 write-insight-brief 场景）时，在正文后附加输出一份 ≤800 字的产品洞察简报：执行摘要 → 核心机会 → 风险与不确定性 → 建议关注方向 → 待人工决策问题；并将 `docs/market-insights/_index.yml` 对应条目 status 从 `raw` 推进为 `briefed`（生命周期 raw → briefed → published）。
+当 `mode=brief`（原 write-insight-brief 场景）时，读取 `raw_insight_path` 指向的 raw insight，在其正文后附加输出一份 ≤800 字的产品洞察简报：执行摘要 → 核心机会 → 风险与不确定性 → 建议关注方向 → 待人工决策问题；并将 `docs/market-insights/_index.yml` 对应条目 status 从 `raw` 推进为 `briefed`（生命周期 raw → briefed → published）。
 
 ### Step 4 — 维护索引
 
@@ -103,5 +105,6 @@ insights:
 | 错误 | 处理 |
 |------|------|
 | `insight_source` 为空 | 停止执行，返回 `INSIGHT_SOURCE_EMPTY` |
+| `mode=brief` 且 `raw_insight_path` 缺失或不可读 | 停止执行，按 `INSIGHT_SOURCE_EMPTY` 同族错误码硬失败；不静默降级为 insight 模式 |
 | `_index.yml` 不存在 | 初始化新建 |
 | 目录不存在 | 创建 `docs/market-insights/` |

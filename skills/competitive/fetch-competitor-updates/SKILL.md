@@ -19,9 +19,10 @@ description: 抓取竞品官网与互联网近期新闻，输出结构化动态�
 |------|------|------|
 | `competitor-id` | 否 | 单个竞品 id（如 `c-1777889517568`） |
 | `competitor-ids[]` | 否 | 多个竞品 id 列表 |
+| `competitor-slug` | 否 | 竞品索引中的 slug；仅在未传 id/ids 时通过 `_index.yml` 精确解析为 id |
 | `lookback-days` | 否 | 互联网搜索时间窗，默认 30 天 |
 
-> `competitor-id` 与 `competitor-ids[]` 都不传时，默认读取 `docs/competitive/_index.yml` 中全部 entries。
+> 优先级：`competitor-id` / `competitor-ids[]` > `competitor-slug` > 全部 entries。slug 必须在 `docs/competitive/_index.yml` 中唯一精确命中，不得猜测或把 slug 直接当 id。
 
 ---
 
@@ -31,7 +32,8 @@ description: 抓取竞品官网与互联网近期新闻，输出结构化动态�
 
 ```
 读 docs/competitive/_index.yml → 校验 schema == competitive-index/v1
-根据输入参数过滤目标竞品 id 集合
+若未传 id/ids 且传入 competitor-slug：按 entries[].slug 唯一精确匹配并取得 id；0 个或多个命中均硬失败
+根据解析后的输入过滤目标竞品 id 集合；三者均未传则使用全部 entries
 逐个读 docs/competitive/{id}.md → 提取 frontmatter：
   - name, website, positioning, tags
 ```
@@ -115,6 +117,12 @@ fetch-competitor-updates:
 
 ```
 ⚠ 竞品 {id} 未在 _index.yml 中登记，跳过。
+```
+
+### competitor-slug 未唯一命中
+
+```
+❌ competitor-slug 必须在 _index.yml 中唯一精确命中；不得猜测或直接当作 competitor-id。
 ```
 
 ### website 缺失
