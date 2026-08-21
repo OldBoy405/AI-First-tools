@@ -31,3 +31,5 @@ crctl writeback-apply {cr_id} --stage traceability
 `crctl` 内部固定 generator/candidate 并执行 manifest 校验、精确 staged set、commit 与 lease push。Skill 不传 candidate/manifest/generator 路径，不写 Git/账本算法。
 
 `MERGE_COMMITS_MISSING` 或 milestone 结构错误时修复业务源；`WRITEBACK_REMOTE_STALE` 同命令重跑；history rewrite 硬阻断。成功输出 txId/commit/files/warnings，下一步以 `crctl next {cr_id}` 为准。
+
+**trace 事件发射结果（CR-2026-049）**：`warnings=[{code:EMIT_FAILED,event_kind:trace}]` 表示 Git writeback 已完成但 trace 事件仍 pending——journal 已持久化完整 intent，不宣称 trace 已交付；重跑同一 `writeback-apply` 会确定性补发，archive 前置门也会在归档前补发。

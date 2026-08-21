@@ -21,11 +21,26 @@ function makeWritebackFixture() {
   const rb = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', '0.2', '--workspace', kb], { cwd: kb });
   assert.equal(rb.status, 0, rb.stderr);
   assert.equal(rb.json.status, 'writing-back');
-  // 补齐证据文件 + 写含 evidence 块的 traceability（archive 证据门前置）；提交保持 txws clean
-  writeEvidenceTrace(txws, cr);
+  // 补齐证据文件；traceability 段由真实 writeback-traceability 生成（CR-2026-049 起 archive 前置门要求 trace journal）
+  addEvidenceFiles(txws, cr);
+  fs.writeFileSync(path.join(txws, 'milestone.yml'), `cr: ${cr}\nmilestone: M0\ntarget-version: "0.2"\nfr-chain:\n  - fr: FR-1\n    title: 原子回写\n    tasks: [${cr}-TASK-01]\n`);
+  const rt = runCrctl(['writeback-apply', cr, '--stage', 'traceability', '--spec-id', 'test-spec', '--target-version', '0.2', '--milestone-file', 'milestone.yml', '--workspace', kb], { cwd: kb });
+  assert.equal(rt.status, 0, rt.stderr);
+  assert.equal(rt.json.phase, 'complete', JSON.stringify(rt.json || rt.errJson));
+  // 证据输入文件与 milestone.yml 不入 writeback 精确 staged set，提交并删除保持 txws clean（archive 要求）
+  fs.rmSync(path.join(txws, 'milestone.yml'), { force: true });
   git(txws, ['add', '-A']);
-  git(txws, ['commit', '-q', '-m', 'traceability fixture']);
+  git(txws, ['commit', '-q', '-m', 'evidence fixture']);
   return { base, kb, cr, txws };
+}
+
+/** 补齐 7 份 canonical 证据中的 requirement/sdd 两份 review 与 requirement/tech-design 两段 approval。 */
+function addEvidenceFiles(txws, cr) {
+  const crDir = path.join(txws, 'change-requests', cr);
+  fs.mkdirSync(path.join(crDir, 'review-annotations'), { recursive: true });
+  fs.writeFileSync(path.join(crDir, 'review-annotations', 'requirement.yml'), `cr-id: ${cr}\nreview-type: requirement\nverdict: pass\n`);
+  fs.writeFileSync(path.join(crDir, 'review-annotations', 'sdd.yml'), `cr-id: ${cr}\nreview-type: tech-design\nverdict: pass\n`);
+  fs.writeFileSync(path.join(crDir, 'approval.yml'), `requirement:\n  via: crctl-approve\ntech-design:\n  via: crctl-approve\n` + fs.readFileSync(path.join(crDir, 'approval.yml'), 'utf8'));
 }
 
 /** 在 txws 补齐 7 份 canonical 证据文件并写含 evidence 块的 traceability.yml（CR-2026-041）。 */

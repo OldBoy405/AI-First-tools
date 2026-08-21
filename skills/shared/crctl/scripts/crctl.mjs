@@ -291,6 +291,8 @@ function auditLogOnce(ws, record, dedupKey) {
 function emitOutboxEvent(ws, ev) {
   const installRoot = deriveInstallRoot(ws);
   try {
+    // fault injection（测试钩子，与 CRCTL_FAULT_POINT 同风格）：模拟 outbox 落盘失败
+    if (process.env.CRCTL_OUTBOX_FAIL) throw new Error('CRCTL_OUTBOX_FAIL injected');
     const dir = path.join(installRoot, '.crctl', 'outbox');
     fs.mkdirSync(dir, { recursive: true });
     const gi = path.join(installRoot, '.crctl', '.gitignore');
@@ -312,7 +314,19 @@ function emitOutboxEvent(ws, ev) {
     // 文件名片段消毒：pending: 占位 sha（CR-2026-003）含冒号，Windows 文件名非法；只影响文件名，事件内容不动
     const shaSlug = (event.commit_sha || 'nosha').replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'nosha';
     const name = ev.dedup_name || `${ts}-${event.cr_id}-${event.event_kind}-${shaSlug}.json`;
-    if (ev.dedup_name && fs.existsSync(path.join(dir, name))) return name; // 同一事实待采集期间只留一份
+    const target = path.join(dir, name);
+    if (ev.dedup_name && fs.existsSync(target)) {
+      let existing;
+      try { existing = JSON.parse(fs.readFileSync(target, 'utf8')); } catch (e) { throw new Error(`OUTBOX_DEDUP_INVALID: ${name}: ${e.message}`); }
+      const comparable = (value) => JSON.stringify({
+        v: value.v, event_kind: value.event_kind, cr_id: value.cr_id,
+        from_status: value.from_status, to_status: value.to_status,
+        trigger: value.trigger, commit_sha: value.commit_sha,
+        actor: value.actor, evidence: value.evidence, payload: value.payload,
+      });
+      if (comparable(existing) === comparable(event)) return name;
+      throw new Error(`OUTBOX_DEDUP_CONFLICT: ${name}`);
+    }
     const tmp = path.join(dir, `.tmp-${process.pid}-${name}`);
     fs.writeFileSync(tmp, JSON.stringify(event, null, 2) + '\n', 'utf8');
     fs.renameSync(tmp, path.join(dir, name)); // 原子可见：先写临时名再 rename，防半写
@@ -1754,6 +1768,38 @@ function cmdAttempt(ws, cr, gates, flags) {
   ok(r);
 }
 
+/* ────────────────────────── review-loop reset（CR-2026-049 人工重置）─────────────────────────
+ * 唯一受控的人工出口：review-loop 耗尽（maxAttempts）后，由人类在交互式终端确认处理完毕，
+ * 开启下一个 review cycle（current-cycle+1、current-attempt 归零、保留 attempts[] 历史）。
+ * 与 approve 同强度的人类在环硬检查（非 TTY 一律拒绝，无旁路），写审计留 reason，禁止在未耗尽时调用。 */
+function cmdReviewLoopReset(ws, cr, gates, flags) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    fail('NOT_TTY', 'review-loop reset 仅接受交互式 TTY 会话（人类在环），无旁路参数或环境变量');
+  }
+  const loopRef = flags.loop;
+  if (!loopRef) fail('BAD_ARGS', 'review-loop reset 需要 --loop <review ref>（如 write-test-report / review-code）');
+  const reason = flags.reason == null ? '' : String(flags.reason);
+  if (!reason.trim()) fail('BAD_ARGS', 'review-loop reset 需要 --reason <人工处理说明>（写入审计，禁止空）');
+  const state = readAttempts(ws, cr, loopRef, gates);
+  if (!state.exhausted) {
+    fail('LOOP_NOT_EXHAUSTED', `${loopRef} 尚未耗尽（current=${state.current}/${state.max}），无需重置`, { current: state.current, max: state.max });
+  }
+  const p = attemptsFilePath(ws, cr);
+  const all = state.data.loops ? state.data : { loops: {} };
+  const prev = all.loops[loopRef] || { 'current-cycle': 1, 'current-attempt': 0, attempts: [] };
+  const fromCycle = prev['current-cycle'] || 1;
+  const nextCycle = fromCycle + 1;
+  all.loops[loopRef] = {
+    'current-cycle': nextCycle,
+    'current-attempt': 0,
+    attempts: [...(prev.attempts || [])], // 旧轮次保留（cycle 标签不变），审计链不断
+  };
+  // review-loop.yml 由 crctl 全量生成（crctl 独占该文件，无 CAS 冲突面），复用同一渲染器
+  fs.writeFileSync(p, renderLoopText(all.loops), 'utf8');
+  auditLog(ws, { kind: 'review-loop-reset', cr, loop: loopRef, fromCycle, toCycle: nextCycle, reason, by: identity(ws) });
+  ok({ op: 'review-loop-reset', cr, loop: loopRef, 'current-cycle': nextCycle, 'current-attempt': 0, file: p, reason });
+}
+
 /* ────────────────────────── review-record（S1，CR-2026-021 TASK-02） ──────────────────────────
  * 判断/写入分离（SDD §4.1）：agent 把评审判断写进非受控临时 payload（默认 .crctl/tmp/review-{stage}.yml，
  * 已被 .crctl/.gitignore 的 `*` 规则忽略），crctl 只做确定性部分——schema 校验 → stage→文件名显式映射
@@ -2982,6 +3028,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl approve <cr_id> --stage <stage> --resign <reason>   受控历史审批迁移：仅限交互式终端迁移 via=crctl-approve；server-approve 必须由服务端重签 grant
   crctl validate <file>                          受控产物 schema 校验（validate-doc 代码化）
   crctl attempt <cr_id> --loop <ref>             review-loop 轮次唯一记账点；超限返回 LOOP_EXHAUSTED
+  crctl review-loop reset <cr_id> --loop <ref> --reason <text>   人工重置：仅在交互式终端、loop 已耗尽时开启下一 review cycle（current-cycle+1、attempt 归零、保留历史、写审计）
   crctl review-record <cr_id> --stage <requirement|tech-design|code> --from <payload.yml> [--bump-attempt]
                                                 schema 校验临时 payload 后写入 review-annotations（tech-design→sdd.yml）；code 阶段机器注入 release-subjects（payload 提供/覆盖 → RELEASE_SUBJECTS_FORGED）
   crctl review-note  <cr_id> [--stage <s>] --note <text>  approval.yml supplemental-reviews[] 追加（不接受 --by，身份 crctl 生成）
@@ -3061,6 +3108,10 @@ async function main() {
       return cmdValidate(ws, positional[0], gates);
     }
     case 'attempt': return cmdAttempt(ws, requireCr(positional), gates, flags);
+    case 'review-loop': {
+      if (positional[0] === 'reset') return cmdReviewLoopReset(ws, requireCr(positional.slice(1)), gates, flags);
+      fail('BAD_ARGS', 'review-loop 仅支持子命令 reset：crctl review-loop reset <CR-ID> --loop <ref> --reason <text>');
+    }
     case 'review-record': return cmdReviewRecord(ws, requireCr(positional), gates, flags);
     case 'review-note': return cmdReviewNote(ws, requireCr(positional), gates, flags);
     case 'checkpoint': return cmdCheckpoint(ws, requireCr(positional), gates, flags);
@@ -3130,6 +3181,16 @@ async function cmdArchive(ws, positional, flags) {
       actor: identity(ws),
       dedup_name: `archive-${cr}-${commit}.json`,
     }),
+    // CR-2026-049 TASK-03：trace pending 前置门补发 adapter（复用 TASK-02 的 journal intent 与 dedupName）；
+    // 失败返回 null → archiveCr 抛 ARCHIVE_TRACE_PENDING，零写入保留现场。
+    replayTraceEvent: ({ cr, intent }) => emitOutboxEvent(ws, {
+      event_kind: 'trace',
+      cr_id: cr,
+      commit_sha: intent.commit,
+      actor: identity(ws),
+      payload: intent.payload,
+      dedup_name: intent.dedupName,
+    }),
   }));
   auditLog(ws, { kind: 'archive', cr, txId: result.txId, phase: result.phase, status: result.status, changed: result.changed, actor: identity(ws) });
   ok({ op: 'archive', ...result });
@@ -3169,6 +3230,16 @@ async function cmdWritebackApply(ws, positional, flags, gates) {
     emitAdvanceAudit: ({ from, to, trigger, commit, dedupKey }) => auditLogOnce(ws, {
       kind: 'advance', cr, from, to, trigger, by: identity(ws), commit, result: 'success',
     }, dedupKey),
+    // CR-2026-049 TASK-02：trace 事件发射 adapter（schema v1 + 确定性 dedup 文件名）；
+    // 失败返回 null → applyWritebackAtomic 转为 EMIT_FAILED warning 并保持 journal pending。
+    emitTraceEvent: ({ cr, commit, dedupName, payload }) => emitOutboxEvent(ws, {
+      event_kind: 'trace',
+      cr_id: cr,
+      commit_sha: commit,
+      actor: identity(ws),
+      payload,
+      dedup_name: dedupName,
+    }),
   }));
   auditLog(ws, { kind: 'writeback', cr, txId: result.txId, stage, phase: result.phase, commit: result.commit, changed: result.changed, actor: identity(ws) });
   ok({ op: 'writeback-apply', ...result });

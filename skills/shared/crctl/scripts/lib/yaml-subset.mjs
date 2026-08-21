@@ -78,7 +78,10 @@ function parseMap(lines, idx, indent) {
     const content = lines[i].text.trimStart();
     if (content.startsWith('- ')) break;
     const m = content.match(/^("(?:[^"\\]|\\.)*"|'[^']*'|[^:\s][^:]*?)\s*:(.*)$/);
-    if (!m) { i += 1; continue; }
+    if (!m) {
+      // CR-2026-049 TASK-01：无法解释的结构硬失败（纪律 #1，禁止静默丢行）
+      throw new Error(`YAML_SUBSET_PARSE_FAILED @line ${lines[i].no}: ${content}`);
+    }
     const key = unquote(m[1].trim());
     let rest = m[2].trim();
     if (rest === '' ) {
@@ -98,8 +101,12 @@ function parseMap(lines, idx, indent) {
 
 function parseInline(s) {
   s = s.trim();
-  if (s.startsWith('{')) return parseFlow(s).value;
-  if (s.startsWith('[')) return parseFlow(s).value;
+  const looksLikeFlow = s.startsWith('[') || (s.startsWith('{') && /:/.test(s));
+  if (looksLikeFlow) {
+    const parsed = parseFlow(s);
+    if (parsed.rest.trim() !== '') throw new Error(`YAML_SUBSET_PARSE_FAILED: trailing flow content: ${s}`);
+    return parsed.value;
+  }
   return parseScalar(s);
 }
 
@@ -114,7 +121,9 @@ function parseFlow(s) {
       if (s[i] === '}') { i++; return o; }
       for (;;) {
         ws();
-        const k = flowScalar([':']); i++; // skip ':'
+        const k = flowScalar([':']);
+        if (s[i] !== ':') throw new Error(`flow map key missing ':' @${i}: ${s}`);
+        i++; // skip ':'
         o[unquote(k.trim())] = value();
         ws();
         if (s[i] === ',') { i++; continue; }

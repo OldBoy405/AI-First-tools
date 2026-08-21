@@ -2130,6 +2130,7 @@ export function writebackInputDigest(m) {
     v: m.v, stage: m.stage, cr: m.cr, specId: m.specId, targetVersion: m.targetVersion,
     generator: { id: m.generator.id, sha256: m.generator.sha256 },
     files: m.files.map((f) => ({ path: f.path, beforeSha256: f.beforeSha256 == null ? null : f.beforeSha256, afterSha256: f.afterSha256 })),
+    ...(m.event ? { event: { kind: m.event.kind, payload: m.event.payload, payloadSha256: m.event.payloadSha256 } } : {}),
   });
   return sha256(canon);
 }
@@ -2156,7 +2157,9 @@ export function writebackAllowlist(stage, specId) {
 
 function validateWritebackManifest(m, { cr, stage, specId, targetVersion, candidate, txws }) {
   if (!m || typeof m !== 'object') throw new TxError('WRITEBACK_MANIFEST_INVALID', 'manifest 非对象');
-  if (m.v !== 1) throw new TxError('WRITEBACK_MANIFEST_INVALID', `manifest v=${m.v}（仅支持 v1）`);
+  // CR-2026-049 TASK-02：traceability 必须 v2（含 event），baseline/tasks 保持 v1
+  const wantV = stage === 'traceability' ? 2 : 1;
+  if (m.v !== wantV) throw new TxError('WRITEBACK_MANIFEST_INVALID', `manifest v=${m.v}（${stage} 仅支持 v${wantV}）`);
   if (!WRITEBACK_STAGES.includes(m.stage)) throw new TxError('WRITEBACK_STAGE_INVALID', `manifest stage=${m.stage} 非法`, { stage: m.stage });
   if (m.stage !== stage) throw new TxError('WRITEBACK_MANIFEST_MISMATCH', `manifest stage=${m.stage} 与 --stage ${stage} 不一致`);
   if (m.cr !== cr) throw new TxError('WRITEBACK_MANIFEST_MISMATCH', `manifest cr=${m.cr} 与 CR ${cr} 不一致`);
@@ -2206,6 +2209,32 @@ function validateWritebackManifest(m, { cr, stage, specId, targetVersion, candid
   if (m.inputDigest !== writebackInputDigest(m)) {
     throw new TxError('WRITEBACK_MANIFEST_TAMPERED', 'manifest inputDigest 与 canonical 内容不符（篡改或重放）');
   }
+  // v2 event 校验（TD-B1）：重算 payloadSha256、spec_id 与 traceability['spec-id'] 对齐、kind 固定 trace
+  let event = null;
+  if (m.v === 2) {
+    if (stage !== 'traceability') throw new TxError('WRITEBACK_MANIFEST_INVALID', `v2 manifest 仅限 traceability，当前 stage=${stage}`);
+    const e = m.event;
+    if (!e || typeof e !== 'object' || e.kind !== 'trace') {
+      throw new TxError('WRITEBACK_MANIFEST_INVALID', 'v2 manifest 缺 event.kind=trace');
+    }
+    if (typeof e.payloadSha256 !== 'string' || !HEX64.test(e.payloadSha256)) {
+      throw new TxError('WRITEBACK_MANIFEST_INVALID', 'event.payloadSha256 非法');
+    }
+    if (sha256(JSON.stringify(e.payload)) !== e.payloadSha256) {
+      throw new TxError('WRITEBACK_MANIFEST_INVALID', 'event.payloadSha256 与 payload 重算不符');
+    }
+    const p = e.payload;
+    if (!p || typeof p !== 'object' || typeof p.spec_id !== 'string' || !p.spec_id) {
+      throw new TxError('WRITEBACK_MANIFEST_INVALID', 'event.payload.spec_id 缺失');
+    }
+    if (p.spec_id !== m.specId) throw new TxError('WRITEBACK_MANIFEST_MISMATCH', `event.payload.spec_id=${p.spec_id} 与 manifest specId=${m.specId} 不一致`);
+    const t = p.traceability;
+    if (!t || typeof t !== 'object' || t['spec-id'] !== m.specId) {
+      throw new TxError('WRITEBACK_MANIFEST_INVALID', `event.payload.traceability 非对象或 spec-id 与 ${m.specId} 不一致`);
+    }
+    if (t['cr-ref'] !== cr) throw new TxError('WRITEBACK_MANIFEST_INVALID', `event.payload.traceability.cr-ref=${t['cr-ref']} 与 ${cr} 不一致`);
+    event = { kind: e.kind, payload: e.payload, payloadSha256: e.payloadSha256 };
+  }
   return {
     parsed: m,
     files: m.files.map((f) => ({
@@ -2213,6 +2242,7 @@ function validateWritebackManifest(m, { cr, stage, specId, targetVersion, candid
       afterSha256: f.afterSha256, blobText: f._blobText,
     })),
     plannedExisting: new Set(m.files.map((f) => f.path)),
+    event,
   };
 }
 
@@ -2321,8 +2351,77 @@ function runFixedEvidenceValidator({ editRoot, cr, specId }) {
   throw new TxError(code, e?.message || `证据校验失败（exit=${result.status}）: ${(result.stderr || result.stdout || '').trim()}`, { cr, specId, evidenceCode: e?.code ?? null });
 }
 
+/** CR-2026-049 TASK-03：archive trace pending 前置门（SDD §1.3）。只读 writeback traceability journal：
+ * emitted → 放行；pending → replayTraceEvent 补发（成功把 emitted 事实持久化回原 journal）；
+ * 补发失败 → ARCHIVE_TRACE_PENDING（零 archive 写入，保留现场）；journal 缺失/意图不完整/digest 漂移 →
+ * ARCHIVE_TRACE_FACT_MISSING。两者均硬失败，禁止跳门/手工清 journal。 */
+async function archiveTraceGate(ctx, cr, input) {
+  const wb = loadExistingJournal({ root: ctx.installRoot, op: 'writeback', key: `${cr}-traceability` });
+  const intent = wb?.journal?.writeback?.traceOutbox;
+  if (!intent) {
+    throw new TxError('ARCHIVE_TRACE_FACT_MISSING', `writeback/${cr}-traceability journal 缺失或 traceOutbox 意图缺失（无法证明 trace 事件已发射）`, { cr });
+  }
+  if (intent.state === 'emitted') return;
+  if (intent.state !== 'pending') {
+    throw new TxError('ARCHIVE_TRACE_FACT_MISSING', `traceOutbox.state=${intent.state} 非法（仅 pending/emitted）`, { cr, txId: wb.journal.txId });
+  }
+  if (!intent.commit || !intent.dedupName || intent.payload === undefined || typeof intent.payloadSha256 !== 'string') {
+    throw new TxError('ARCHIVE_TRACE_FACT_MISSING', `traceOutbox 意图不完整（缺 commit/dedupName/payload/payloadSha256）`, { cr, txId: wb.journal.txId });
+  }
+  if (sha256(JSON.stringify(intent.payload)) !== intent.payloadSha256) {
+    throw new TxError('ARCHIVE_TRACE_FACT_MISSING', `traceOutbox payload digest 漂移（${intent.payloadSha256} != 重算）`, { cr, txId: wb.journal.txId });
+  }
+  let name = null;
+  try {
+    if (typeof input.replayTraceEvent !== 'function') throw new Error('replayTraceEvent callback missing');
+    name = input.replayTraceEvent({ cr, intent });
+  } catch { name = null; }
+  if (!name) {
+    throw new TxError('ARCHIVE_TRACE_PENDING', `trace 事件仍 pending 且补发失败：archive 零写入、零 cleanup，现场保留；请重跑同一 archive（禁止跳门/手工清 journal）`, { cr, txId: wb.journal.txId });
+  }
+  wb.journal.writeback.traceOutbox = { ...intent, state: 'emitted' };
+  await saveJournal({ path: wb.journalPath, journal: wb.journal });
+}
+
 async function applyWritebackAtomic(ctx, input) {
   const { cr, stage, specId } = input;
+  // CR-2026-049 TASK-02（TD-B2）：complete replay 前置——在 operational workspace 解析与 candidate 读取之前，
+  // 先查 {cr}-traceability writeback journal；phase=complete && traceOutbox.state=pending 时仅用 journal intent 补发，
+  // 不要求 txws/candidate 仍存在。
+  if (stage === 'traceability') {
+    const traceKey = `${cr}-traceability`;
+    const done = loadExistingJournal({ root: ctx.installRoot, op: 'writeback', key: traceKey });
+    const wb = done?.journal?.writeback;
+    if (wb && wb.phase === 'complete' && wb.traceOutbox && wb.traceOutbox.state === 'pending') {
+      const intent = wb.traceOutbox;
+      if (!intent.commit || !intent.dedupName || intent.payload === undefined || typeof intent.payloadSha256 !== 'string') {
+        throw new TxError('TX_JOURNAL_INVALID', `${traceKey} journal traceOutbox 意图不完整（缺 commit/dedupName/payload/payloadSha256）`, { txId: done.journal.txId });
+      }
+      if (sha256(JSON.stringify(intent.payload)) !== intent.payloadSha256) {
+        throw new TxError('TX_JOURNAL_INVALID', `${traceKey} journal traceOutbox payload digest 漂移`, { txId: done.journal.txId });
+      }
+      let name = null;
+      try {
+        if (typeof input.emitTraceEvent !== 'function') throw new Error('emitTraceEvent callback missing');
+        name = input.emitTraceEvent({ cr, commit: intent.commit, dedupName: intent.dedupName, payload: intent.payload });
+      } catch { name = null; }
+      if (name) {
+        wb.traceOutbox = { ...intent, state: 'emitted' };
+        await saveJournal({ path: done.journalPath, journal: done.journal });
+        return {
+          cr, txId: done.journal.txId, phase: 'complete', changed: false, replayedTrace: true,
+          commit: wb.commit, files: (wb.files || []).map((f) => f.path), warnings: [],
+          recoverCommand: `crctl writeback-apply ${cr} --stage traceability --spec-id ${JSON.stringify(specId)} --target-version ${JSON.stringify(input.targetVersion || '')} --milestone-file ${JSON.stringify(input.milestoneFile || '')} --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`,
+        };
+      }
+      return {
+        cr, txId: done.journal.txId, phase: 'complete', changed: false, replayedTrace: false,
+        commit: wb.commit, files: (wb.files || []).map((f) => f.path),
+        warnings: [{ code: 'EMIT_FAILED', event_kind: 'trace', message: 'trace pending 补发失败，journal 保持 pending（archive 前置门将再次补发）' }],
+        recoverCommand: `crctl writeback-apply ${cr} --stage traceability --spec-id ${JSON.stringify(specId)} --target-version ${JSON.stringify(input.targetVersion || '')} --milestone-file ${JSON.stringify(input.milestoneFile || '')} --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`,
+      };
+    }
+  }
   const opWs = resolveOperationalWorkspace(ctx, cr);
   if (opWs.source !== 'transaction-workspace') {
     throw new TxError('WRITEBACK_STATE_MISMATCH', `writeback-apply 需要 finalize 后 authority（Transaction Workspace），当前 phase=${opWs.phase}（source=${opWs.source}）`, { cr, phase: opWs.phase });
@@ -2402,7 +2501,7 @@ async function applyWritebackAtomic(ctx, input) {
       cr, stage, phase: 'start', specId, targetVersion: business.value.targetVersion,
       businessInputDigest: business.digest, manifestDigest,
       committed: false, commit: null, baseSha: null, pushed: false, files: null,
-      statusTransition: null, outboxEmitted: false, auditEmitted: false,
+      statusTransition: null, outboxEmitted: false, auditEmitted: false, traceOutbox: null,
     };
     journal.writeback = payload;
     const wasComplete = payload.phase === 'complete';
@@ -2523,6 +2622,36 @@ async function applyWritebackAtomic(ctx, input) {
           faultPoint('writeback-after-advance-audit', { cr, stage });
           payload.auditEmitted = true; await save('pushed');
         } catch (e) { if (e instanceof TxError && e.code === 'FAULT_INJECTED') throw e; warnings.push({ code: 'EMIT_FAILED', projection: 'audit', message: e.message }); }
+      }
+    }
+
+    // CR-2026-049 TASK-02（TD-B2）：traceability 阶段 push 确认后，先把完整 canonical payload 持久化为
+    // journal traceOutbox intent，再经 emitTraceEvent 写 outbox；失败只记 warning，保持 pending（补发输入不依赖 txws）。
+    if (stage === 'traceability') {
+      if (!payload.traceOutbox || payload.traceOutbox.state === 'pending') {
+        const eventPayload = snapshot.event?.payload;
+        if (!eventPayload || !snapshot.event?.payloadSha256) {
+          throw new TxError('WRITEBACK_MANIFEST_INVALID', 'traceability v2 manifest 缺 event payload（无法建立 trace intent）');
+        }
+        payload.traceOutbox = {
+          state: 'pending', commit: payload.commit,
+          dedupName: `trace-${cr}-${payload.commit}.json`,
+          payload: eventPayload, payloadSha256: snapshot.event.payloadSha256,
+        };
+        await save('pushed');
+        faultPoint('writeback-after-trace-intent', { cr, stage });
+        let name = null;
+        try {
+          if (typeof input.emitTraceEvent !== 'function') throw new Error('emitTraceEvent callback missing');
+          name = input.emitTraceEvent({ cr, commit: payload.commit, dedupName: payload.traceOutbox.dedupName, payload: eventPayload });
+          faultPoint('writeback-after-trace-outbox', { cr, stage });
+        } catch (e) { if (e instanceof TxError && e.code === 'FAULT_INJECTED') throw e; name = null; }
+        if (name) {
+          payload.traceOutbox.state = 'emitted';
+          await save('pushed');
+        } else {
+          warnings.push({ code: 'EMIT_FAILED', event_kind: 'trace', message: 'trace outbox 写入失败，journal 保持 pending' });
+        }
       }
     }
     await save('complete');
@@ -2722,8 +2851,12 @@ export async function archiveCr(ctx, input) {
       if (opWs0.phase === 'writing-back') {
         if (!specId) throw new TxError('ARCHIVE_SPEC_REQUIRED', 'archive writing-back 路径需要 --spec-id（writeback-spec-id 入账）', { cr });
         runFixedEvidenceValidator({ editRoot: opWs0.path, cr, specId });
+        // CR-2026-049 TASK-03（TD-B2）：trace pending 前置门——在 archive journal 创建、authority commit、
+        // 任何 cleanup 之前读 writeback traceability journal：emitted 放行；pending 用 replayTraceEvent 补发，
+        // 成功持久化后放行；仍失败 ARCHIVE_TRACE_PENDING 零写入保留现场；缺失/意图不完整 ARCHIVE_TRACE_FACT_MISSING。
+        await archiveTraceGate(ctx, cr, input);
       }
-      // rejected/withdrawn：无 writing-back milestone，跳过证据门
+      // rejected/withdrawn：无 writing-back milestone，跳过证据门与 trace 门
     }
     let journal, journalPath;
     ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'archive', key: cr, graphDigest: ctx.graphDigest, inputDigest: sha256(cr + '|' + (specId || '')) }));
