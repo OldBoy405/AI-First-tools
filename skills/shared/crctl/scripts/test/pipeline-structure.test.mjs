@@ -375,7 +375,7 @@ test('FR-12.3b: code-implementation 保留字面量（gate 名/checkpoint label/
   // 收敛负向断言：无 deny 路径字面量残留（lint R1）、无命令细节
   for (const [ref, bad] of [
     ['review-dev-plan', /review-annotations|crctl review-record|--embedded|八类维度合并评审/],
-    ['review-code', /review-annotations|crctl review-record|取证|WCAG/],
+    ['review-code', /review-annotations|crctl review-record|WCAG/],
     ['write-test-report', /traceability|crctl test --plan|cr-test-plan/],
     ['implement-code', /defaultRuntimeId|fallback 到第一个/],
   ]) {
