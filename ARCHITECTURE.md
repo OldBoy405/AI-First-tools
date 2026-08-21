@@ -16,7 +16,7 @@ updated: "2026-08-05T15:10:00+08:00"
 
 ## 1. 鸟瞰（Bird's Eye View）
 
-本包是 `multica-ai` 生态之外的独立方法论层：9 Agent / 59 Skill / 8 Pipeline，驱动使用方仓库（如 AI First Platform）的 CR（Change Request）全流程，配合 `crctl` 状态机 CLI 做状态与账本的单一权威写入。本包自身不含业务代码，只含**提示词合约（Skill）**、**流程编排（Pipeline）**与**一个可执行治理工具（crctl）**。
+本包是 `multica-ai` 生态之外的独立方法论层：9 Agent / 56 Skill / 8 Pipeline，驱动使用方仓库（如 AI First Platform）的 CR（Change Request）全流程，配合 `crctl` 状态机 CLI 做状态与账本的单一权威写入。本包自身不含业务代码，只含**提示词合约（Skill）**、**流程编排（Pipeline）**与**一个可执行治理工具（crctl）**。
 
 核心数据流：`CR 需求输入` → requirement-authoring → architecture-design → code-implementation → feature-writeback（各 Pipeline 依次驱动，状态权威写入 `{workspace}/change-requests/{CR-ID}/cr.md`）→ `specs/ + delivery/` 累积基线
 
