@@ -300,3 +300,37 @@ test('CR-2026-045: emit-registry 残留双花括号 token 硬失败且不输出�
   assert.match(r.stderr, /RUNNER_UNSUPPORTED_PIPELINE/);
   assert.equal(r.stdout, '');
 });
+
+/* ── CR-2026-050 FR-12.2：requirement-authoring 关键顺序、execution_context 输出、auto_push 分支、reviewLoop 字段集 ── */
+
+test('FR-12.2: requirement-authoring 7 节点顺序、execution_context/owners 输出与 auto_push_after_prd 分支保留', () => {
+  const p = readPipeline('requirement-authoring.pipeline.json');
+  const order = p.nodes.map((n) => n.ref || n.kind);
+  assert.deepEqual(order, ['requirement-register', 'write-requirement-prd', 'push-progress', 'review-requirement', 'human_approval', 'approve-requirement', 'push-progress'], 'register → PRD → 草稿ckpt → review → 审批 → approve → 终点ckpt');
+  assert.equal(p.nodes.length, 7, '7 节点不变（FR-12.4 节点数零改动）');
+  const first = p.nodes[0];
+  assert.ok(first.prompt.includes('execution_context:'), 'register 输出机器可读 execution_context');
+  assert.ok(first.prompt.includes('owners:'), 'execution_context 含 owners（SDD §2.4）');
+  assert.ok(first.prompt.includes('knowledge_base_worktree:'), 'execution_context 含 knowledge_base_worktree');
+  assert.ok(!/crctl register/.test(first.prompt), 'register 节点无 crctl register 命令参数序列');
+  assert.ok(!/\/abs\/path/.test(first.prompt), 'register 节点无绝对路径示例');
+  const draft = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_prd/.test(n.prompt));
+  assert.ok(draft && draft.onFail === 'skip', 'PRD 草稿 checkpoint 保留 auto_push_after_prd 分支');
+  const review = p.nodes.find((n) => n.ref === 'review-requirement');
+  assert.ok(review.reviewLoop && review.reviewLoop.repairRef === 'write-requirement-prd', 'reviewLoop 机器字段不变');
+  assert.deepEqual(
+    Object.keys(review.reviewLoop).sort(),
+    ['attemptInput', 'feedbackInput', 'maxAttempts', 'onBlock', 'passCondition', 'repairNodeId', 'repairRef'],
+    'requirement-authoring reviewLoop 字段集不变（无 replayNodes，与 architecture 不同）'
+  );
+});
+
+test('FR-06.1/07.4/07.5: requirement-authoring review/register/PRD 节点收敛负向断言', () => {
+  const p = readPipeline('requirement-authoring.pipeline.json');
+  const review = p.nodes.find((n) => n.ref === 'review-requirement');
+  assert.ok(!/review-annotations/.test(review.prompt), 'review-requirement 不残留 deny 路径字面量（lint R1）');
+  assert.ok(!/crctl review-record/.test(review.prompt), 'review-requirement 无 review-record 命令细节');
+  assert.ok(!/① 完整性|② 可测试性|③ 一致性|④ 边界/.test(review.prompt), 'review-requirement 无评审维度正文');
+  const prd = p.nodes.find((n) => n.ref === 'write-requirement-prd');
+  assert.ok(!/背景与目标|用户故事|功能需求|验收标准/.test(prd.prompt), 'PRD 节点无章节清单副本');
+});
