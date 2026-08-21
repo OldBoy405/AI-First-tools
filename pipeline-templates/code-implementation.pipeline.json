@@ -118,7 +118,7 @@
       "kind": "skill",
       "label": "记录开发启动确认并推进状态",
       "ref": "approve-dev-start",
-      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n在 human_approval 通过后执行 approve-dev-start：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n校验 cr.md 中 owners.development.id 与 assigned-at 均存在，校验 plan.md、tasks/_index.yml 与 TASK-*.md 均存在，经 `crctl approve --stage dev-start`（仅人类交互式终端）完成：校验 plan/tasks、写 approval.yml、级联 advance 到 developing。在 node-5.md 输出审批记录路径、当前 status、开发负责人和下一步 implement-code 指令。",
+      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n在 human_approval 通过后调用 approve-dev-start：\n- cr_id: {{inputs.cr_id}}\n\n只传完整 cr_id，消费结构化审批结果；下一步以 `crctl next {{inputs.cr_id}}` 为准。在 node-5.md 输出审批记录路径、当前 status、开发负责人。",
       "onFail": "abort",
       "timeoutMinutes": 5
     },
@@ -274,7 +274,7 @@
       "id": "00000000-0000-0000-0015-000000000010",
       "kind": "human_approval",
       "label": "代码审查通过",
-      "approvalPrompt": "代码自动评审已完成，且 review-annotations/code.yml 必须满足 verdict=pass、blockers=[]，test-report.md 必须满足 status=pass 后才可进入本节点；当前应为 code-reviewing，且评审后 checkpoint phase=complete。请审查人决定：\n\n✅ 通过：勾选此 Todo，下一节点 approve-code 会记录审批并推进到 code-approved\n❌ 驳回：在评审批注中补充 reject_reason，开发者修复后重新执行 /coding 中的代码编写与 review-code 节点",
+      "approvalPrompt": "代码自动评审已完成，且评审证据须满足 verdict=pass、blockers=[]，test-report.md 须满足 status=pass 后才可进入本节点；当前应为 code-reviewing，且评审后 checkpoint phase=complete。请审查人决定：\n\n✅ 通过：勾选此 Todo，下一节点 approve-code 会记录审批并推进到 code-approved\n❌ 驳回：提交驳回决定及理由，由 approve-code 走 reject 流程记录并回退；开发者修复后重新执行代码编写与 review-code 节点",
       "onFail": "abort",
       "timeoutMinutes": 4320
     },
@@ -283,7 +283,7 @@
       "kind": "skill",
       "label": "记录代码审批并推进状态",
       "ref": "approve-code",
-      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n在 human_approval 通过后执行 approve-code：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n经 `crctl approve --stage code`（仅人类交互式终端）完成校验与写入；调用参数：认 test-report.md 的 tester 与 cr.md owners.test.id 一致或记录偏差原因。写入 approval.yml 的 code 段，并将 CR status 推进到 code-approved。在 node-11.md 输出审批记录路径、当前 status、开发负责人、测试负责人和下一步 writeback pipeline 指令。",
+      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n在 human_approval 通过后调用 approve-code：\n- cr_id: {{inputs.cr_id}}\n\n只传完整 cr_id，消费结构化审批结果；下一步以 `crctl next {{inputs.cr_id}}` 为准。在 node-11.md 输出审批记录路径、当前 status、开发负责人、测试负责人。",
       "onFail": "abort",
       "timeoutMinutes": 5
     },

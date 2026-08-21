@@ -30,12 +30,12 @@ description: 需求审批通过后的收尾动作：在 approval.yml 记录审�
 
 ## 执行步骤
 
-1. 运行 `crctl approve {cr_id} --stage requirement --grant`（平台非 TTY，默认 grant 落点；**仅限 Ed25519 签名授权或人类交互式终端二选一，两者都不可绕过审批本身**）——crctl 自动完成：
+1. 运行 `crctl approve {cr_id} --stage requirement --grant --approver {cr.md owners.requirement.id}`（平台非 TTY，默认 grant 落点；**仅限 Ed25519 签名授权或人类交互式终端二选一，两者都不可绕过审批本身**）——crctl 自动完成：
    - 前置态校验（当前 status=requirement-reviewing）
    - 评审证据校验（review-annotations/requirement.yml verdict=pass 且 blockers 为空）
    - 计算证据摘要并写入 approval.yml#requirement（CAS+审计）
    - 级联 advance 到 requirement-approved
-2. 本地独立 CLI（无 grant）：`crctl approve {cr_id} --stage requirement`，仅限交互式终端；非 TTY 拒绝（APPROVAL_REQUIRES_HUMAN）。
+2. 本地独立 CLI（无 grant）：`crctl approve {cr_id} --stage requirement --approver {cr.md owners.requirement.id}`，仅限交互式终端；非 TTY 拒绝（APPROVAL_REQUIRES_HUMAN）。
 3. **驳回（grant decision=reject）**：crctl 完整验证（schema/归属/状态/evidence digest/Ed25519 签名）后执行状态机既有回退转换，返回结构化非零业务结果 `APPROVAL_DECLINED_ROLLED_BACK`（含 rolledBackTo/trigger/changed）。该结果表示人工决定已捕获且回退成功，**必须中止当前正向 Pipeline**；不得伪装为 `EXEC_FAILED`/`CAS_CONFLICT` 等技术失败，不得输出 rerunHint、下一 Skill 指令或手写 review annotation。
 4. Agent/管道**不得**代写 approval.yml、手写 reject 或推进 status；非 TTY 且无 grant 调用 crctl 一律拒绝（APPROVAL_REQUIRES_HUMAN）。
 5. 输出审批记录路径、当前 status 和下一步：以 `crctl next {cr_id}` 为准（进入架构设计阶段）。

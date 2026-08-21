@@ -116,6 +116,51 @@ test('human_approval(…0010) approvalPrompt 含评审后 checkpoint phase=compl
   assert.ok(n.approvalPrompt.includes('评审后 checkpoint phase=complete'), '审批提示追加 checkpoint 前提');
 });
 
+/* ── CR-2026-050 FR-01：human approval 不再引导直接编辑受保护账本（review-annotations 指引删除） ── */
+
+test('FR-01: 三条 CR Pipeline human approval prompt 删除 review-annotations 编辑指引', () => {
+  for (const [name, suffix] of [
+    ['requirement-authoring.pipeline.json', '000000000005'],
+    ['architecture-design.pipeline.json', '000000000003'],
+    ['code-implementation.pipeline.json', '000000000010'],
+  ]) {
+    const p = readPipeline(name);
+    const n = p.nodes.find((x) => x.id.endsWith(suffix));
+    assert.ok(n, `${name} human_approval 节点存在`);
+    assert.equal(n.kind, 'human_approval');
+    const text = n.approvalPrompt || '';
+    assert.ok(!/review-annotations/.test(text), `${name} approvalPrompt 不得残留 review-annotations 路径`);
+    assert.ok(!/补充 reject_reason|reject_reason/.test(text), `${name} approvalPrompt 不得引导直接补 reject_reason`);
+    assert.ok(/approve|reject/i.test(text), `${name} approvalPrompt 保留 approve/reject 结构化决定`);
+    // FR-01 保留项：code 代码审批节点 …0010 的 checkpoint phase=complete 前提句
+    if (suffix === '000000000010') {
+      assert.ok(text.includes('评审后 checkpoint phase=complete'), '…0010 保留 checkpoint phase=complete 前提');
+    }
+  }
+});
+
+/* ── CR-2026-050 FR-05：四个 approve 节点收敛（传 cr_id、不拼 approver、无命令细节） ── */
+
+test('FR-05: 四个 approve 节点只传 cr_id，无 crctl approve 命令细节/TTY/grant/CAS/owners 拼接', () => {
+  const cases = [
+    ['requirement-authoring.pipeline.json', 'approve-requirement'],
+    ['architecture-design.pipeline.json', 'approve-tech-design'],
+    ['code-implementation.pipeline.json', 'approve-dev-start'],
+    ['code-implementation.pipeline.json', 'approve-code'],
+  ];
+  for (const [name, ref] of cases) {
+    const p = readPipeline(name);
+    const n = p.nodes.find((x) => x.ref === ref);
+    assert.ok(n, `${name}/${ref} 节点存在`);
+    const text = n.prompt || '';
+    assert.ok(/(\(execution_context\.\))?cr_id|\{\{inputs\.cr_id\}\}/.test(text), `${ref} 传完整 cr_id`);
+    assert.ok(!/crctl approve/.test(text), `${ref} 不得含 crctl approve 命令细节`);
+    assert.ok(!/TTY|grant|CAS|approval\.ya?ml|--grant|--stage/.test(text), `${ref} 不得含 TTY/grant/CAS/approval.yml 文本`);
+    assert.ok(!/owners/.test(text), `${ref} 不得在 prompt 解析/拼接 owners`);
+    assert.ok(!/pipeline\s+(指令|流程|阶段)|writeback pipeline|architecture pipeline|coding pipeline/.test(text), `${ref} 不得写死下一 pipeline 名`);
+  }
+});
+
 /* ── CR-2026-044 TASK-05：三条 Pipeline 阶段终点 checkpoint 合同与 operational workspace 传递 ── */
 
 const TOOLS_ROOT_044 = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');

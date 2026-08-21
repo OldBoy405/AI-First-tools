@@ -79,7 +79,7 @@
       "id": "00000000-0000-0000-0016-000000000003",
       "kind": "human_approval",
       "label": "架构设计审批",
-      "approvalPrompt": "架构设计自动评审已完成，且 review-annotations/sdd.yml 必须满足 verdict=pass、blockers=[] 后才可进入本节点；当前仍应为 tech-design-review-pending。请审批人检阅 sdd.md 后决定：\n\n✅ 批准：勾选此 Todo，下一节点 approve-tech-design 会记录审批并推进到 tech-design-reviewed\n❌ 驳回：在 review-annotations/sdd.yml 补充 reject_reason，回到架构设计修订",
+      "approvalPrompt": "架构设计自动评审已完成，且评审证据须满足 verdict=pass、blockers=[] 后才可进入本节点；当前仍应为 tech-design-review-pending。请审批人检阅 sdd.md 后决定：\n\n✅ 批准：勾选此 Todo，下一节点 approve-tech-design 会记录审批并推进到 tech-design-reviewed\n❌ 驳回：提交驳回决定及理由，由 approve-tech-design 走 reject 流程记录并回退；证据与回退由 crctl approve 完成",
       "onFail": "abort",
       "timeoutMinutes": 2880
     },
@@ -88,7 +88,7 @@
       "kind": "skill",
       "label": "记录架构审批并推进状态",
       "ref": "approve-tech-design",
-      "prompt": "先执行一次 `crctl workspace inspect {{inputs.cr_id}}`：要求全部 resources[].classification=healthy，再消费返回的 operationalWorkspace 作为本节点业务权威路径；任一资源非 healthy 或 operationalWorkspace 为空时中止并指向 /resume。\n\n在 human_approval 通过后执行 approve-tech-design：\n- cr_id: {{inputs.cr_id}}\n- approver: {cr.md owners.development.id}\n\n只传递审批决定：平台非 TTY 用默认 grant 落点（`crctl approve {cr_id} --stage tech-design --grant`），本地无 grant 时要求交互式终端（`crctl approve {cr_id} --stage tech-design`）。crctl 完成评审证据校验、写 approval.yml、级联 advance 到 tech-design-reviewed；不复制 grant 路径、CLI 算法或 reject 回退命令。\n\n失败语义：grant 缺失/签名错误/归属不符/证据漂移为技术失败 → 立即 abort；grant decision=reject 返回 `APPROVAL_DECLINED_ROLLED_BACK`（业务结果，回退已完成）→ 中止当前正向 pipeline，不得伪装成技术失败。\n\n在 node-4.md 输出审批记录路径、当前 status、开发负责人和下一步 coding pipeline 指令。",
+      "prompt": "先执行一次 `crctl workspace inspect {{inputs.cr_id}}`：要求全部 resources[].classification=healthy，再消费返回的 operationalWorkspace 作为本节点业务权威路径；任一资源非 healthy 或 operationalWorkspace 为空时中止并指向 /resume。\n\n在 human_approval 通过后调用 approve-tech-design：\n- cr_id: {{inputs.cr_id}}\n\n只传完整 cr_id，消费结构化审批结果；下一步以 `crctl next {{inputs.cr_id}}` 为准。在 node-4.md 输出审批记录路径、当前 status、开发负责人。",
       "onFail": "abort",
       "timeoutMinutes": 5
     },
