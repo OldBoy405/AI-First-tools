@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
@@ -382,4 +382,25 @@ test('FR-12.3b: code-implementation 保留字面量（gate 名/checkpoint label/
     const n = p.nodes.find((x) => x.ref === ref);
     assert.ok(!bad.test(n.prompt), `${ref} 无残留 ${bad}`);
   }
+});
+
+/* ── CR-2026-050 DD-7：SKILL.md Commit：指引前缀必须命中 rules.json commit 白名单 ── */
+
+test('DD-7: 全部 SKILL.md Commit 指引前缀命中 controlled-shell commit 白名单（wip:/[cr]/merge(）', () => {
+  const rules = JSON.parse(readFileSync(RULES_PATH, 'utf8').replace(/\r\n/g, '\n'));
+  const commitShape = rules.git.find((g) => g.sub === 'commit').shapes[0];
+  const commitRe = new RegExp(commitShape.re, commitShape.flags || '');
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(path.join(dir, e.name)) : e.name === 'SKILL.md' ? [path.join(dir, e.name)] : []);
+  const skillFiles = walk(path.join(TOOLS_ROOT, 'skills'));
+  assert.ok(skillFiles.length > 0, '扫描到 SKILL.md 文件');
+  const bad = [];
+  for (const f of skillFiles) {
+    const text = readFileSync(f, 'utf8').replace(/\r\n/g, '\n'); // 纪律 #1：读入先 CRLF 归一
+    for (const m of text.matchAll(/Commit：`([^`]+)`/g)) {
+      const normalized = m[1].replace(/\{[^}]+\}/g, 'X').replace(/\$\{[^}]+\}/g, 'X');
+      if (!commitRe.test('-m ' + normalized)) bad.push(`${path.relative(TOOLS_ROOT, f)}: ${m[1]}`);
+    }
+  }
+  assert.deepEqual(bad, [], 'Commit 指引前缀必须命中白名单（wip: / [cr] / merge(）——匹配失败即硬失败，不静默跳过');
 });
