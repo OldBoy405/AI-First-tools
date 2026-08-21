@@ -17,15 +17,18 @@ description: 读取指定竞品分析报告，结合产品上下文快照生成 
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `reportPath` | 是 | 竞品报告路径，形如 `docs/competitive/reports/{competitor-id}-{YYYY-MM-DD}.md` |
+| `reportPath` | 否（与 reportDraft 二选一） | 竞品报告路径，形如 `docs/competitive/reports/{competitor-id}-{YYYY-MM-DD}.md`；与 `reportDraft` 同时存在时优先 |
+| `reportDraft` | 否（与 reportPath 二选一） | 结构化草稿（node-2 `write-competitive-report(confirmed=false)` 产出，草稿模式不落盘）：`body`（正文 markdown）/ `competitorId` / `reportDate` / `sourceNodeId` / `sourceRef` |
 | `focus` | 否 | 规划焦点提示（如 "v0.16" / "2026-Q3" / "AI 能力"），传给 planning-draft |
+
+`reportPath` 与 `reportDraft` 同时存在时优先 `reportPath`；草稿模式只消费输入生成规划建议，不落盘竞品报告。
 
 ---
 
 ## 前置条件
 
-1. `reportPath` 必须存在，且为 `docs/competitive/reports/` 下的合法报告文件
-2. 报告 frontmatter 必须包含 `competitorId` 与 `reportDate`
+1. `reportPath` 与 `reportDraft` 必须二选一；`reportPath` 模式要求该路径存在且为 `docs/competitive/reports/` 下的合法报告文件，`reportDraft` 模式要求提供 `body`/`competitorId`/`reportDate`（草稿模式不落盘，无需文件存在）
+2. `reportPath` 模式的报告 frontmatter 必须包含 `competitorId` 与 `reportDate`；`reportDraft` 模式由草稿字段承载同等信息
 3. workspace 存在可读的 `docs/product-planning/_index.yml`、`specs/_index.yml` 或 `change-requests/_backlog.yml`（`gather-product-context` 能够产出快照）
 
 ---
@@ -82,7 +85,8 @@ description: 读取指定竞品分析报告，结合产品上下文快照生成 
 ```yaml
 report-to-planning-suggestion:
   read:
-    - docs/competitive/reports/*.md
+    - docs/competitive/reports/*.md     # reportPath 模式
+    - reportDraft.body                  # reportDraft 模式（草稿不落盘）
   write: []
   delegates:
     - gather-product-context
@@ -98,7 +102,9 @@ report-to-planning-suggestion:
 
 | 场景 | 行为 |
 |------|------|
+| `reportPath` 与 `reportDraft` 均未提供 | 中止并提示调用方二选一提供 |
 | `reportPath` 不存在或不在 `docs/competitive/reports/` 下 | 中止并提示用户先用 `write-competitive-report` 生成报告 |
+| `reportDraft` 缺 `body`/`competitorId`/`reportDate` | 中止并提示草稿结构不完整（预期五字段：body/competitorId/reportDate/sourceNodeId/sourceRef） |
 | 报告 frontmatter 缺少 `competitorId` | 中止并提示报告格式异常，建议重新生成 |
 | `gather-product-context` 快照为空 | 降级提示：当前产品上下文为空，规划建议仅基于竞品动向，可能粒度较粗 |
 | `brainstorming` / `planning-draft` 失败 | 透传错误，返回部分产出并注明降级 |
