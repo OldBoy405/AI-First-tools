@@ -39,7 +39,7 @@
       "kind": "skill",
       "label": "展示 CR 当前状态",
       "ref": "cr-show",
-      "prompt": "读取 change-requests/{{inputs.cr_id}}/ 下所有文件与 _backlog.yml 条目，输出：\n- CR 元数据（title、owners.requirement/development/test、status、created-at、target-version）\n- 已产出文件清单（cr.md / prd.md / sdd.md / plan.md / tasks/ / test-report.md / review-annotations/）\n- 最近 3 次 push-progress 记录\n\nCR-2026-021 D8：不再本地维护 status→下一节点硬编码映射表，跑 `crctl next {{inputs.cr_id}}` 取得下一步（其内部已按 status + review-annotations/{requirement,sdd,code}.yml + test-report.md 的评审结论判断，而非只按 status 粗略推荐整条 pipeline）；若需确认主 workspace 视图是否落后于 CR worktree 分支，先跑 `crctl status {{inputs.cr_id}}`（STATUS_DIVERGED 时以其指向的 worktree 为准）。\n\n在 node-3.md 输出上述信息与 `crctl next` 给出的下一步 skill / pipeline 指令。",
+      "prompt": "调用 cr-show 展示 CR 详情并取得下一步：\n- cr-id: {{inputs.cr_id}}\n- section: all\n\nCR 元数据、已产出文件清单、最近三次 checkpoint 与下一步指令由 cr-show 输出契约承载（cr-show 内部调用 crctl next 计算下一步，不再本地维护 status→下一节点映射表）。在 node-3.md 输出 cr-show 的结构化详情摘要与 `crctl next` 给出的下一步指令。",
       "onFail": "abort",
       "timeoutMinutes": 5
     }

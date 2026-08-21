@@ -78,6 +78,11 @@ CR-2026-001  [emergency-fix]  修复协作看板崩溃问题
   branch: requirement/CR-2026-001
   writeback-spec-id: collaboration-dashboard
 
+最近三次 checkpoint（DD-5，CR-2026-050：resume-cr 展示项由 cr-show 输出契约承载）
+  batchId      : 9d989acb29e9125a   @ 2026-08-21T13:00:00+08:00  phase=complete
+  batchId      : 7f1c2aa0d41e8866   @ 2026-08-21T10:30:00+08:00  phase=complete
+  batchId      : 5be3d19c02aa77dd   @ 2026-08-21T08:00:00+08:00  phase=complete
+
 追溯链路
   cr.md → prd.md → sdd.md → tasks/ → specs/collaboration-dashboard/{PRD.md,SDD.md}
   traceability: 已回写 ✅
@@ -87,6 +92,10 @@ CR-2026-001  [emergency-fix]  修复协作看板崩溃问题
   reason     : status=code-reviewing，code.yml verdict=pass 且 test-report.md status=pass，等待 human_approval
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
+
+### Step 3.5 — 展示最近三次 checkpoint（CR-2026-050 DD-5）
+
+在详情视图追加「最近三次 checkpoint」段：读取 `change-requests/{cr-id}/checkpoints.yml`（或 `_backlog.yml#checkpoints` 在途段），展示最近三次的 `batchId` / 时间 / `phase`；无记录时标注"暂无 checkpoint"。该展示项由本 Skill 输出契约承载，resume-cr pipeline 不再自行实现。
 
 ### Step 4 — 生成下一步建议
 
