@@ -67,7 +67,7 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 ### Step 3 — 落盘并 commit
 
 落盘到 `change-requests/{cr_id}/plan.md`。  
-Commit：`feat({cr_id}): draft dev plan`
+Commit：`[cr] draft dev plan {cr_id}`（白名单前缀 `[cr] `）
 
 ### Step 4 — 输出摘要
 

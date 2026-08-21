@@ -334,3 +334,52 @@ test('FR-06.1/07.4/07.5: requirement-authoring review/register/PRD 节点收敛�
   const prd = p.nodes.find((n) => n.ref === 'write-requirement-prd');
   assert.ok(!/背景与目标|用户故事|功能需求|验收标准/.test(prd.prompt), 'PRD 节点无章节清单副本');
 });
+
+/* ── CR-2026-050 FR-12.3：code-implementation 两条关键顺序、replayNodes、保留字面量与收敛负向断言 ── */
+
+test('FR-12.3: code-implementation 16 节点关键顺序与 reviewLoop replayNodes 不变', () => {
+  const p = readPipeline('code-implementation.pipeline.json');
+  assert.equal(p.nodes.length, 16, '16 节点不变');
+  const idx = (s) => p.nodes.findIndex((n) => n.id.endsWith(s));
+  // plan → TASK → review-dev-plan → 审批 → developing
+  assert.ok(idx('000000000001') < idx('000000000002'), 'write-dev-plan < write-dev-tasks');
+  assert.ok(idx('000000000002') < idx('000000000014'), 'write-dev-tasks < review-dev-plan');
+  assert.ok(idx('000000000014') < idx('000000000004'), 'review-dev-plan < human_approval');
+  assert.ok(idx('000000000004') < idx('000000000005'), 'human_approval < approve-dev-start');
+  // implement → test-report → checkpoint → freshness → review-code
+  assert.ok(idx('000000000006') < idx('000000000007'), 'implement < test-report');
+  assert.ok(idx('000000000007') < idx('000000000008'), 'test-report < 统一 checkpoint');
+  assert.ok(idx('000000000008') < idx('000000000017'), 'checkpoint < review-start freshness');
+  assert.ok(idx('000000000017') < idx('000000000009'), 'review-start freshness < review-code');
+  const reviewCode = p.nodes.find((n) => n.id.endsWith('000000000009'));
+  assert.deepEqual(reviewCode.reviewLoop.replayNodes, [
+    { nodeId: '00000000-0000-0000-0015-000000000006', ref: 'implement-code', purpose: 'repair-code' },
+    { nodeId: '00000000-0000-0000-0015-000000000007', ref: 'write-test-report', purpose: 'regenerate-test-evidence' },
+    { nodeId: '00000000-0000-0000-0015-000000000008', ref: 'push-progress', purpose: 'publish-repaired-code-and-evidence-checkpoint' },
+    { nodeId: '00000000-0000-0000-0015-000000000017', ref: 'workspace-freshness', purpose: 're-verify-baseline' },
+    { nodeId: '00000000-0000-0000-0015-000000000009', ref: 'review-code', purpose: 'rerun-current-review' },
+  ], 'review-code replayNodes 5 项不变');
+});
+
+test('FR-12.3b: code-implementation 保留字面量（gate 名/checkpoint label/auto_push/task done）与收敛负向断言', () => {
+  const p = readPipeline('code-implementation.pipeline.json');
+  const implGate = p.nodes.find((n) => n.id.endsWith('000000000016'));
+  const revGate = p.nodes.find((n) => n.id.endsWith('000000000017'));
+  assert.ok(implGate.prompt.includes('implement-start'), '实施前 gate 名 implement-start 保留');
+  assert.ok(revGate.prompt.includes('review-start'), '评审前 gate 名 review-start 保留');
+  const finalCkpt = p.nodes.find((n) => /审批结果/.test(n.label || '') && n.ref === 'push-progress');
+  assert.ok(finalCkpt, '审批结果 checkpoint 存在');
+  assert.equal(finalCkpt.onFail, 'abort', '审批结果 checkpoint onFail=abort');
+  const taskCkpt = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_task/.test(n.prompt));
+  assert.ok(taskCkpt && taskCkpt.onFail === 'skip', 'TASK checkpoint auto_push_after_task 保留');
+  // 收敛负向断言：无 deny 路径字面量残留（lint R1）、无命令细节
+  for (const [ref, bad] of [
+    ['review-dev-plan', /review-annotations|crctl review-record|--embedded|八类维度合并评审/],
+    ['review-code', /review-annotations|crctl review-record|取证|WCAG/],
+    ['write-test-report', /traceability|crctl test --plan|cr-test-plan/],
+    ['implement-code', /defaultRuntimeId|fallback 到第一个/],
+  ]) {
+    const n = p.nodes.find((x) => x.ref === ref);
+    assert.ok(!bad.test(n.prompt), `${ref} 无残留 ${bad}`);
+  }
+});
