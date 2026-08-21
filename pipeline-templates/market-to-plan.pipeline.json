@@ -27,7 +27,13 @@
       "label": "洞察类型",
       "type": "select",
       "required": false,
-      "options": ["用户痛点", "市场机会", "竞品压力", "内部反馈", "综合"],
+      "options": [
+        "用户痛点",
+        "市场机会",
+        "竞品压力",
+        "内部反馈",
+        "综合"
+      ],
       "default": "综合",
       "description": "影响摘要侧重点"
     }
@@ -38,7 +44,7 @@
       "kind": "skill",
       "label": "提取市场洞察关键信号",
       "ref": "extract-market-insight",
-      "prompt": "执行 extract-market-insight：\n- insight_source: {{inputs.insight_source}}\n- insight_type: {{inputs.insight_type}}\n- target_version: {{inputs.target_version}}\n- owner: product-owner\n\n从原始素材中提取关键信号：① 高频痛点 TOP5 ② 机会点列表 ③ 量化数据摘录 ④ 来源可信度评估 ⑤ 待验证假设。写入 docs/market-insights/market-{YYYY-MM-DD}-{slug}.md，并追加/更新 docs/market-insights/_index.yml（status=raw）。在 node-1.md 输出 raw insight 文件路径、机会点数量与待验证问题。",
+      "prompt": "调用 extract-market-insight：\n- insight_source: {{inputs.insight_source}}\n- insight_type: {{inputs.insight_type}}\n- target_version: {{inputs.target_version}}\n- owner: product-owner\n\n关键信号提取、落盘路径与 _index.yml 维护由 extract-market-insight SKILL 负责。在 node-1.md 输出 raw insight 文件路径、机会点数量与待验证问题。",
       "onFail": "abort",
       "timeoutMinutes": 15
     },

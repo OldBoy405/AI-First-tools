@@ -61,7 +61,7 @@ description: 人工审批通过后，将规划报告中的版本节奏建议追�
 
 幂等写回 `docs/product-planning/roadmap.md`。
 
-Commit：`[planning] update roadmap for {topic} (${target_version})`
+Commit：`[cr] update roadmap {topic} ({target_version})`（白名单前缀 `[cr] `）
 
 ### Step 5 — 输出摘要
 
