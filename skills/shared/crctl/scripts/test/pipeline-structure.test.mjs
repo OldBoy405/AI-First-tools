@@ -191,7 +191,12 @@ test('CR-2026-044 AC-14: architecture-design 删除 auto_push_after_sdd，审批
   assert.equal(push[0].onFail, 'abort', '架构终点 checkpoint 必须 abort');
   assert.ok(!/SKIPPED|auto_push/.test(push[0].prompt), 'checkpoint prompt 无 skip 分支');
   assert.doesNotMatch(push[0].prompt, /<[^>]*workspace[^>]*>/i, 'checkpoint prompt 不得含未解析 workspace 占位符');
-  assert.match(push[0].prompt, /crctl checkpoint \{\{inputs\.cr_id\}\} --message/);
+  // CR-2026-044 FR-07 溯源：架构终点 checkpoint 不可跳过、失败只重跑不重审批。
+  // 本断言由 CR-2026-050 FR-07.3 修订：prompt 不再含 `crctl checkpoint` 命令字面量
+  // （命令收敛由 push-progress SKILL 承载），语义改由 onFail=abort + phase 消费 + 阶段终点句断言。
+  assert.ok(!/crctl checkpoint/.test(push[0].prompt), 'checkpoint prompt 不含 crctl checkpoint 命令字面量');
+  assert.ok(/phase/.test(push[0].prompt), 'checkpoint prompt 消费 phase');
+  assert.ok(/阶段终点/.test(push[0].prompt), 'checkpoint prompt 保留阶段终点语义');
   const skill = readFileSync(path.join(TOOLS_ROOT_044, 'skills', 'sync', 'push-progress', 'SKILL.md'), 'utf8');
   assert.doesNotMatch(skill, /<installation-workspace>/, 'push-progress Skill 不得保留可误执行的 workspace token');
   assert.equal(p.nodes.length, 5, '节点数保持 5');
