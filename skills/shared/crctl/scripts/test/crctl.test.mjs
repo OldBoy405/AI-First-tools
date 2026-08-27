@@ -787,6 +787,100 @@ test('gate：检出 EVIDENCE_DRIFT -> outbox 出现 audit 事件（payload 只�
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+// ── CR-2026-052 TASK-09：audit-drift 去重修复（FR-12, SDD §4.4/DD-6）──
+// AC-11：同一漂移连续两次观测 → outbox 文件恰 1；第二次幂等返回，audit.log 无 EMIT_FAILED。
+// AC-12：删除后重观测 → 新文件按窗口计数；不同 CR/不同摘要不误合并；内容真变化仍冲突。
+test('CR-2026-052 AC-11：同一漂移二次观测 → 文件 1、无 EMIT_FAILED（comparable 剥离 detected_at）', () => {
+  const ws = makeWorkspace();
+  const cr = 'CR-TEST-052';
+  try {
+    const original = 'verdict: pass\nblockers: []\n';
+    writeEvidence(ws, cr, 'review-annotations/requirement.yml', original);
+    writeApprovalYml(ws, cr, 'requirement', {
+      approver: 'alice', 'approved-at': '2026-08-27T10:00:00+08:00', via: 'crctl-approve',
+      'evidence-sha256-16': sha16(original), 'target-status': 'requirement-approved',
+    });
+    writeEvidence(ws, cr, 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n# tampered\n');
+
+    const r1 = runCrctl(['gate', cr, '--for', 'requirement-approved', '--workspace', ws]);
+    const r2 = runCrctl(['gate', cr, '--for', 'requirement-approved', '--workspace', ws]); // 第二次观测
+    // 两次观测均不应因去重冲突而静默失败：comparable 剥离 detected_at 后第二次幂等返回 name。
+    assert.ok(r1.stderr === undefined || (r1.rawStderr || '').indexOf('OUTBOX_DEDUP_CONFLICT') === -1,
+      `r1 不应产生 DEDUP 冲突: ${r1.rawStderr || ''}`);
+    assert.ok(r2.stderr === undefined || (r2.rawStderr || '').indexOf('OUTBOX_DEDUP_CONFLICT') === -1,
+      `r2 不应产生 DEDUP 冲突: ${r2.rawStderr || ''}`);
+
+    const outbox = path.join(ws, '.crctl', 'outbox');
+    const files = readdirSync(outbox).filter((f) => f.startsWith('audit-drift-'));
+    assert.equal(files.length, 1, '同一漂移待采集期间只留一份');
+
+    // audit.log 不得含该事件的 EMIT_FAILED 噪声（修复前第二次观测必然冲突→EMIT_FAILED）。
+    const auditPath = path.join(ws, '.crctl', 'audit.log');
+    const lines = existsSync(auditPath) ? readFileSync(auditPath, 'utf8').split(/\r?\n/).filter(Boolean) : [];
+    const failed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((e) => e && e.kind === 'outbox' && e.event_kind === 'audit' && e.result === 'EMIT_FAILED');
+    assert.equal(failed.length, 0, `audit-drift 二次观测不得产生 EMIT_FAILED 噪声: ${JSON.stringify(failed)}`);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-052 AC-12①：删除后重观测 → 新文件按窗口计数（修复不削弱既有语义）', () => {
+  const ws = makeWorkspace();
+  const cr = 'CR-TEST-052B';
+  try {
+    const original = 'verdict: pass\nblockers: []\n';
+    writeEvidence(ws, cr, 'review-annotations/requirement.yml', original);
+    writeApprovalYml(ws, cr, 'requirement', {
+      approver: 'alice', 'approved-at': '2026-08-27T10:00:00+08:00', via: 'crctl-approve',
+      'evidence-sha256-16': sha16(original), 'target-status': 'requirement-approved',
+    });
+    writeEvidence(ws, cr, 'review-annotations/requirement.yml', 'verdict: pass\nblockers: []\n# drifted\n');
+    const outbox = path.join(ws, '.crctl', 'outbox');
+    runCrctl(['gate', cr, '--for', 'requirement-approved', '--workspace', ws]);
+    assert.equal(readdirSync(outbox).filter((f) => f.startsWith('audit-drift-')).length, 1);
+    // 被采集删除后再观测 → 文件不存在 → 走全新写入路径，按窗口再留一份。
+    const driftFiles = readdirSync(outbox).filter((f) => f.startsWith('audit-drift-'));
+    driftFiles.forEach((f) => rmSync(path.join(outbox, f)));
+    runCrctl(['gate', cr, '--for', 'requirement-approved', '--workspace', ws]);
+    assert.equal(readdirSync(outbox).filter((f) => f.startsWith('audit-drift-')).length, 1, '删除后再观测产生新文件');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-052 AC-12②：不同 CR / 不同摘要不误合并；内容真变化仍冲突报错', () => {
+  const ws = makeWorkspace();
+  try {
+    const mk = (cr, suffix) => {
+      const original = 'verdict: pass\nblockers: []\n';
+      writeEvidence(ws, cr, 'review-annotations/requirement.yml', original);
+      writeApprovalYml(ws, cr, 'requirement', {
+        approver: 'alice', 'approved-at': '2026-08-27T10:00:00+08:00', via: 'crctl-approve',
+        'evidence-sha256-16': sha16(original), 'target-status': 'requirement-approved',
+      });
+      writeEvidence(ws, cr, 'review-annotations/requirement.yml', `verdict: pass\nblockers: []\n# ${suffix}\n`);
+      runCrctl(['gate', cr, '--for', 'requirement-approved', '--workspace', ws]);
+    };
+    mk('CR-TEST-052C', 'drift-one');
+    mk('CR-TEST-052D', 'drift-two');
+    const outbox = path.join(ws, '.crctl', 'outbox');
+    const driftFiles = readdirSync(outbox).filter((f) => f.startsWith('audit-drift-'));
+    // 不同 CR + 不同摘要 → 不同 dedup_name → 两个独立文件，不误合并。
+    assert.equal(driftFiles.length, 2, '不同 CR/摘要应各自独立一份');
+
+    // 内容真变化：同一 dedup_name 文件存在但摘要字段变化 → OUTBOX_DEDUP_CONFLICT 仍报错（守卫不削弱）。
+    const target = path.join(outbox, driftFiles[0]);
+    const existing = JSON.parse(readFileSync(target, 'utf8'));
+    existing.payload.actual_digest = 'changed-real-content';
+    existing.payload.detected_at = '2026-08-27T99:99:99Z'; // 即使 detected_at 不同，摘要变化仍须冲突
+    writeFileSync(target, JSON.stringify(existing, null, 2) + '\n');
+    const cr = 'CR-TEST-052C';
+    const r = runCrctl(['gate', cr, '--for', 'requirement-approved', '--workspace', ws]);
+    const auditPath = path.join(ws, '.crctl', 'audit.log');
+    const lines = existsSync(auditPath) ? readFileSync(auditPath, 'utf8').split(/\r?\n/).filter(Boolean) : [];
+    const failed = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((e) => e && e.result === 'EMIT_FAILED' && String(e.why || '').includes('OUTBOX_DEDUP_CONFLICT'));
+    assert.ok(failed.length >= 1, '内容真变化仍须 OUTBOX_DEDUP_CONFLICT（确定性守卫不削弱）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
 // ── CR-2026-003 T01：embedded 占位 sha（幂等键碰撞修复，"pending:" 为跨语言契约字面量）──
 test('advance --embedded：连续两次 embedded 的 outbox 事件 commit_sha 均以 pending: 开头且互不相同；非 embedded 仍为真实 HEAD sha', () => {
   const ws = makeWorkspace();
