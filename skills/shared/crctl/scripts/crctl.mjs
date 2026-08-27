@@ -322,7 +322,16 @@ function emitOutboxEvent(ws, ev) {
         v: value.v, event_kind: value.event_kind, cr_id: value.cr_id,
         from_status: value.from_status, to_status: value.to_status,
         trigger: value.trigger, commit_sha: value.commit_sha,
-        actor: value.actor, evidence: value.evidence, payload: value.payload,
+        actor: value.actor, evidence: value.evidence,
+        // AIFIRST: CR-2026-052 TASK-08 (FR-12, SDD §4.4/DD-6): payload.detected_at
+        // is the sole observation-time volatile field (regenerated per
+        // emitDriftAudit via nowIso()). Excluding it lets the same drift be
+        // observed twice during the pre-collection window without a spurious
+        // OUTBOX_DEDUP_CONFLICT → EMIT_FAILED, matching the "leave one copy
+        // while pending collection" semantics. The digest/summary fields stay
+        // in the comparison so a real content change still conflicts (AC-12
+        // third branch). New volatile time fields must be added here too.
+        payload: (() => { const p = { ...(value.payload || {}) }; delete p.detected_at; return p; })(),
       });
       if (comparable(existing) === comparable(event)) return name;
       throw new Error(`OUTBOX_DEDUP_CONFLICT: ${name}`);
