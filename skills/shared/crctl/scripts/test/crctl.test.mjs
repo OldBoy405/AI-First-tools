@@ -2381,6 +2381,46 @@ test('CR-2026-027 FR-16：post-PASS SDD 修订 + 较新 upstream blocker → tec
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+test('review-record 回归：cycle≥2（非新 cycle）bump-attempt 不误撞 cycle 1 同名 attempt，落盘 cycle=2', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-review-pending');
+    writeEvidence(ws, 'CR-T1', 'sdd.md', '---\nid: CR-T1-sdd\n---\nv1\n');
+    const crDir = path.join(ws, 'change-requests', 'CR-T1');
+    // 复刻 CR-2026-052 现场：cycle 1 三连 block 耗尽 → 人工 reset 到 cycle 2 → cycle 2 attempt 1 已落盘
+    writeFileSync(path.join(crDir, 'review-loop.yml'), [
+      '# 由 crctl attempt 维护，请勿手工编辑', 'loops:', '  review-tech-design:', '    current-cycle: 2', '    current-attempt: 1', '    attempts:',
+      '      - { attempt: 1, at: "2026-08-27T01:53:17+08:00", by: "q", cycle: 1 }',
+      '      - { attempt: 2, at: "2026-08-27T02:25:53+08:00", by: "q", cycle: 1 }',
+      '      - { attempt: 3, at: "2026-08-27T02:54:25+08:00", by: "q", cycle: 1 }',
+      '      - { attempt: 1, at: "2026-08-27T07:40:14+08:00", by: "q", cycle: 2 }',
+    ].join('\n') + '\n', 'utf8');
+    // traceability 投影与 review-loop 一致（cycle 1 attempts 1-3 + cycle 2 attempt 1，均 block）
+    writeFileSync(path.join(crDir, 'traceability.yml'), [
+      'cr-id: CR-T1', 'reviews:', '  tech-design:', '    reviewer: "q"', '    verdict: block', '    reviewed-at: "2026-08-27T07:40:26+08:00"', '    blocker-count: 3', '    annotation: "change-requests/CR-T1/review-annotations/sdd.yml"', '    repair-target: write-tech-design', '    review-loop:', '      current-cycle: 2', '      current-attempt: 1', '      max-attempts: 3', '      attempts:',
+      '        - attempt: 1', '          cycle: 1', '          reviewed-at: "2026-08-27T01:53:50+08:00"', '          result: block', '          blocker-count: 4', '          repair-target: write-tech-design',
+      '        - attempt: 2', '          cycle: 1', '          reviewed-at: "2026-08-27T02:25:53+08:00"', '          result: block', '          blocker-count: 3', '          repair-target: write-tech-design',
+      '        - attempt: 3', '          cycle: 1', '          reviewed-at: "2026-08-27T02:54:25+08:00"', '          result: block', '          blocker-count: 2', '          repair-target: write-tech-design',
+      '        - attempt: 1', '          cycle: 2', '          reviewed-at: "2026-08-27T07:40:26+08:00"', '          result: block', '          blocker-count: 3', '          repair-target: write-tech-design',
+    ].join('\n') + '\n', 'utf8');
+    // cycle 2 bump-attempt（attempt 2）—— 不得与 cycle 1 的 attempt 2 碰撞，落盘 cycle=2
+    writeReviewPayload(ws, 'CR-T1', 'tech-design', 'verdict: pass\nblockers: []\ndimensions:\n  a: b\n');
+    const r = runCrctl(['review-record', 'CR-T1', '--stage', 'tech-design', '--bump-attempt', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.attempt.current, 2, 'cycle 2 内第 2 轮');
+    const loop = readFileSync(path.join(crDir, 'review-loop.yml'), 'utf8');
+    assert.match(loop, /current-cycle: 2/);
+    assert.match(loop, /current-attempt: 2/);
+    assert.equal((loop.match(/cycle: 1 \}/g) || []).length, 3, 'cycle 1 三条 attempt 保留');
+    assert.equal((loop.match(/cycle: 2 \}/g) || []).length, 2, 'cycle 2 两条 attempt（1 旧 + 1 新）');
+    const tr = readTrace(ws, 'CR-T1');
+    assert.match(tr, /current-cycle: 2/);
+    assert.match(tr, /current-attempt: 2/);
+    assert.equal((tr.match(/^ {10}cycle: 1$/gm) || []).length, 3, 'trace cycle 1 三条保留');
+    assert.equal((tr.match(/^ {10}cycle: 2$/gm) || []).length, 2, 'trace cycle 2 两条（1 旧 + 1 新）');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
 // ── CR-2026-027 TASK-07：终态查询 / next 路由 freshness / inbox-emit 校验（FR-12/FR-16/FR-11）──
 test('CR-2026-027 FR-12：终态 CR status/next 只读查询（archived/rejected/withdrawn → terminal + next:null），冲突/缺 final-status 硬失败', () => {
   const ws = makeWorkspace();

@@ -1992,7 +1992,7 @@ async function cmdReviewRecord(ws, cr, gates, flags) {
   // tech-design bump 且满足 detectNewTechDesignCycle 时：current-cycle+1、本 cycle attempt 从 1 重新计；
   // 旧 attempts 仅保留（不删除），legacy 无 cycle 条目按 cycle=1 解释。
   const newCycle = stage === 'tech-design' && bumpFlag ? detectNewTechDesignCycle(ws, cr) : false;
-  const nextCycleNo = newCycle ? (att.data.loops && att.data.loops[loopRef] && att.data.loops[loopRef]['current-cycle'] || 1) + 1 : null;
+  const nextCycleNo = newCycle ? (att.data.loops && att.data.loops[loopRef] && att.data.loops[loopRef]['current-cycle'] || 1) + 1 : att.cycle;
   if (bump && att.exhausted && !newCycle) fail('LOOP_EXHAUSTED', `${loopRef} 已达 maxAttempts=${att.max}，不得继续自修复；请人工处理剩余 blocker`, { current: att.current });
   const recordedAt = nowIso(); // 一次生成，三账本共用（FR-17）
   const reviewer = identity(ws);
