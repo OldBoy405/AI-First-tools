@@ -141,17 +141,18 @@ agents:
     mode: subagent
     consumers: [requirement-authoring.pipeline, architecture-design.pipeline, code-implementation.pipeline, feature-writeback.pipeline]
     brief: >-
-      CR 质量门统一入口。路由到 review-requirement、review-tech-design、review-code、
+      CR 质量门统一入口。路由到 review-requirement、review-tech-design、review-dev-plan、review-code、
       review-alignment，并汇总 blocker 与下一步。
     entry:
       agent-doc: ./quality-reviewer-agent.md
     capabilities:
-      supported: [requirement-review, tech-design-review, code-review, review-alignment]
+      supported: [requirement-review, tech-design-review, dev-plan-review, code-review, review-alignment]
       pending: []
     references:
       - tools/skills/requirement/review-requirement/SKILL.md
       - tools/skills/planning/review-planning-report/SKILL.md
       - tools/skills/develop/review-tech-design/SKILL.md
+      - tools/skills/develop/review-dev-plan/SKILL.md
       - tools/skills/develop/write-test-report/SKILL.md
       - tools/skills/develop/review-code/SKILL.md
       - tools/skills/review/review-alignment/SKILL.md

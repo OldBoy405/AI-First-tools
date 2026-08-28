@@ -55,7 +55,7 @@
       "kind": "skill",
       "label": "开发计划与 TASK 合并评审",
       "ref": "review-dev-plan",
-      "prompt": "读取 node-1.md 的 execution_context 与 node-2.md 的结构化结果。调用 review-dev-plan：\n- cr_id: {execution_context.cr_id}\n- workspace: {execution_context.operational_workspace}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n消费 verdict、route、blockers、repair-target、current-attempt 与评审摘要；route=upstream 时中止当前 pipeline，其余按本节点 reviewLoop 机器字段路由。在 node-3.md 输出结构化评审结果。",
+      "prompt": "评审必须委派给新建的 quality-reviewer-agent task/run，不得在作者会话中直接执行评审；每轮 reviewLoop 都是一次新的 reviewer 执行，不复用作者会话。若当前运行环境不支持创建独立 reviewer task：停在当前 review 节点，提示用户另开独立会话以 quality-reviewer-agent 身份运行同一 review Skill，不得退化为作者自评。\n\n读取 node-1.md 的 execution_context 与 node-2.md 的结构化结果。调用 review-dev-plan：\n- cr_id: {execution_context.cr_id}\n- workspace: {execution_context.operational_workspace}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n消费 verdict、route、blockers、repair-target、current-attempt 与评审摘要；route=upstream 时中止当前 pipeline，其余按本节点 reviewLoop 机器字段路由。在 node-3.md 输出结构化评审结果。",
       "reviewLoop": {
         "repairRef": "write-dev-plan",
         "feedbackInput": "review_feedback",
@@ -205,7 +205,7 @@
       "kind": "skill",
       "label": "代码评审",
       "ref": "review-code",
-      "prompt": "读取 node-1.md 的 execution_context。调用 review-code：\n- cr_id: {execution_context.cr_id}\n- workspace: {execution_context.operational_workspace}\n- resources: {execution_context.resources}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n消费 verdict、blockers、test-report.status、repair-target、current-attempt 与评审摘要；按本节点 reviewLoop 机器字段路由。在 node-9.md 输出结构化评审结果。",
+      "prompt": "评审必须委派给新建的 quality-reviewer-agent task/run，不得在作者会话中直接执行评审；每轮 reviewLoop 都是一次新的 reviewer 执行，不复用作者会话。若当前运行环境不支持创建独立 reviewer task：停在当前 review 节点，提示用户另开独立会话以 quality-reviewer-agent 身份运行同一 review Skill，不得退化为作者自评。\n\n读取 node-1.md 的 execution_context。调用 review-code：\n- cr_id: {execution_context.cr_id}\n- workspace: {execution_context.operational_workspace}\n- resources: {execution_context.resources}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n消费 verdict、blockers、test-report.status、repair-target、current-attempt 与评审摘要；按本节点 reviewLoop 机器字段路由。在 node-9.md 输出结构化评审结果。",
       "reviewLoop": {
         "repairNodeId": "00000000-0000-0000-0015-000000000006",
         "repairRef": "implement-code",

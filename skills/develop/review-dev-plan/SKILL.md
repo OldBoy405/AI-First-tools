@@ -49,8 +49,12 @@ description: 对 change-requests/{CR-ID}/plan.md 与 tasks/ 执行编码前合�
 
 估算一致性：仅在揭示任务拆分、依赖或验收结构性问题时作为 blocker；普通工时口径差异进 suggestions。
 
-### Step 3 — 评审判断与落盘
+### Step 3 — 平台绑定前置步骤 + 评审判断与落盘
 
+0. **平台绑定前置步骤（FR-B7，CR-2026-053）**：若当前运行具有 Multica task-scoped context（`mat_` task token 注入的 task 上下文）：
+   - 先执行 `multica cr bind-current-task {cr_id}`，把当前 reviewer task 绑定到 CR 及其来源 Issue；
+   - 绑定失败（七种错误码）→ 按**技术失败中止**：不写临时 payload、不调用 `review-record`、不写 canonical review（`TASK_ISSUE_REQUIRED` = reviewer task 创建路径未按 FR-B12 携带 Issue 上下文，修复创建路径后重试；禁止静默跳过绑定继续评审）；
+   - 无 Multica task context 的本地执行 → 跳过绑定，继续现有行为（FR-A7）。
 1. 把判断写入非受控临时 payload `.crctl/tmp/review-dev-plan.yml`（已被 .crctl/.gitignore 忽略）：
 
 ```yaml

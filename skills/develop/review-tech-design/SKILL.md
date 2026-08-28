@@ -50,8 +50,12 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 | **可测试性** | 技术方案是否易于单元/集成测试 |
 | **Prompt 采纳影响**（CR-2026-021 FR-25，条件性） | 若本 CR 的 diff 触及 `crctl.mjs` dispatch 或 `rules.json#protectedPaths.deny`，SDD 第 8 节必须存在且列出应改为调用新增/扩展子命令的 skill 清单；缺失记为 blocker（`lint-prompts` 抓不到"新增能力未被采纳"这类漂移，只能由本维度人工兜底）。不触及上述两处则本项跳过 |
 
-### Step 3 — 写评审批注 — 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
+### Step 3 — 平台绑定前置步骤 + 写评审批注 — 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
 
+0. **平台绑定前置步骤（FR-B7，CR-2026-053）**：若当前运行具有 Multica task-scoped context（`mat_` task token 注入的 task 上下文）：
+   - 先执行 `multica cr bind-current-task {cr_id}`，把当前 reviewer task 绑定到 CR 及其来源 Issue；
+   - 绑定失败（七种错误码）→ 按**技术失败中止**：不写临时 payload、不调用 `review-record`、不写 canonical review（`TASK_ISSUE_REQUIRED` = reviewer task 创建路径未按 FR-B12 携带 Issue 上下文，修复创建路径后重试；禁止静默跳过绑定继续评审）；
+   - 无 Multica task context 的本地执行 → 跳过绑定，继续现有行为（FR-A7）。
 1. 完成上述评审后，把**判断**写入非受控临时 payload `.crctl/tmp/review-tech-design.yml`（该路径不在 guard deny 面，且已被 `.crctl/.gitignore` 忽略）：
    ```yaml
    verdict: pass | block
