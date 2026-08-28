@@ -53,9 +53,9 @@ actors:
     owns:
       - requirement-register
       - write-requirement-prd
-      - review-requirement
       - approve-requirement
     can-call:
+      - review-requirement
       - push-progress
       - cr-show
       - cr-query
@@ -73,18 +73,18 @@ actors:
     kind: agent
     owns:
       - write-tech-design
-      - review-tech-design
       - approve-tech-design
       - write-dev-plan
       - write-dev-tasks
-      - review-dev-plan
       - approve-dev-start
       - implement-code
       - write-test-report
-      - review-code
       - approve-code
       - coding-discipline
     can-call:
+      - review-tech-design
+      - review-dev-plan
+      - review-code
       - push-progress
       - pull-progress
       - workspace-freshness
@@ -133,13 +133,13 @@ actors:
     kind: agent
     owns:
       - review-alignment
-    can-call:
-      - review-planning-report
       - review-requirement
       - review-tech-design
       - review-dev-plan
-      - write-test-report
       - review-code
+    can-call:
+      - review-planning-report
+      - write-test-report
       - cr-show
       - coding-discipline
     external: []

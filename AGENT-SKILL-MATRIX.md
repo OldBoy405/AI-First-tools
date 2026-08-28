@@ -22,11 +22,11 @@
 | Actor | 主责 Skill |
 |---|---|
 | `product-planning-agent` | `analyze-user-feedback`, `conduct-market-research`, `analyze-current-product`, `write-planning-report`, `review-planning-report`, `write-roadmap`, `write-planning-entry`, `extract-market-insight`, `gather-product-context`, `planning-draft`, `record-idea`, `focus-briefing` |
-| `requirement-writer` | `requirement-register`, `write-requirement-prd`, `review-requirement`, `approve-requirement` |
-| `dev-agent` | `write-tech-design`, `review-tech-design`, `approve-tech-design`, `write-dev-plan`, `write-dev-tasks`, `review-dev-plan`, `approve-dev-start`, `implement-code`, `write-test-report`, `review-code`, `approve-code`, `coding-discipline` |
+| `requirement-writer` | `requirement-register`, `write-requirement-prd`, `approve-requirement` |
+| `dev-agent` | `write-tech-design`, `approve-tech-design`, `write-dev-plan`, `write-dev-tasks`, `approve-dev-start`, `implement-code`, `write-test-report`, `approve-code`, `coding-discipline` |
 | `spec-agent` | `spec-show`, `spec-query`, `spec-dashboard` |
 | `delivery-agent` | `writeback-tasks` |
-| `quality-reviewer-agent` | `review-alignment` |
+| `quality-reviewer-agent` | `review-alignment`, `review-requirement`, `review-tech-design`, `review-dev-plan`, `review-code` |
 | `competitive-analyst-agent` | `fetch-competitor-updates`, `write-competitive-report`, `report-to-planning-suggestion` |
 | `system-orchestrator` | `merge-feature-branch`, `writeback-prd-sdd`, `writeback-traceability`, `push-progress`, `pull-progress`, `workspace-freshness`, `resume-from-remote`, `list-remote-checkpoints`, `handover-cr`, `validate-doc`, `engineering-docs`, `controlled-shell`, `crctl`, `cr-review-record`, `inbox-emit`, `cr-archive`, `cr-inbox`, `cr-query`, `cr-show`, `cr-dashboard` |
 
