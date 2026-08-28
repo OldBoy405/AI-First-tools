@@ -270,10 +270,10 @@ test('CR-2026-045 AC-03: emit-registry 输出 canonical registry 且 digest 稳�
     assert.equal(p.pipelineOwnerCanCall, true);
   }
   assert.match(reg.digest, /^sha256:[0-9a-f]{64}$/);
-  // 所有 skill 节点 owner 唯一：write/review/approve 归 dev-agent，push-progress 归 system-orchestrator
+  // 所有 skill 节点 owner 唯一：write/approve 归 dev-agent，review-tech-design 归 quality-reviewer-agent（CR-2026-053 FR-A1），push-progress 归 system-orchestrator
   const byRef = Object.fromEntries(reg.nodePermissions.map((p) => [p.ref, p.owner]));
   assert.equal(byRef['write-tech-design'], 'dev-agent');
-  assert.equal(byRef['review-tech-design'], 'dev-agent');
+  assert.equal(byRef['review-tech-design'], 'quality-reviewer-agent');
   assert.equal(byRef['approve-tech-design'], 'dev-agent');
   assert.equal(byRef['push-progress'], 'system-orchestrator');
 });

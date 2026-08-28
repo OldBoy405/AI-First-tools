@@ -104,7 +104,7 @@
       "kind": "skill",
       "label": "需求评审",
       "ref": "review-requirement",
-      "prompt": "读取 node-1.md 的 execution_context。调用 review-requirement：\n- cr_id: {execution_context.cr_id}\n- reviewer: ai-reviewer\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n消费 verdict、blockers、repair-target、current-attempt 与评审摘要；按本节点 reviewLoop 机器字段路由。在 node-4.md 输出结构化评审结果。",
+      "prompt": "评审必须委派给新建的 quality-reviewer-agent task/run，不得在作者会话中直接执行评审；每轮 reviewLoop 都是一次新的 reviewer 执行，不复用作者会话。若当前运行环境不支持创建独立 reviewer task：停在当前 review 节点，提示用户另开独立会话以 quality-reviewer-agent 身份运行同一 review Skill，不得退化为作者自评。\n\n读取 node-1.md 的 execution_context。调用 review-requirement：\n- cr_id: {execution_context.cr_id}\n- reviewer: ai-reviewer\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n消费 verdict、blockers、repair-target、current-attempt 与评审摘要；按本节点 reviewLoop 机器字段路由。在 node-4.md 输出结构化评审结果。",
       "reviewLoop": {
         "repairNodeId": "00000000-0000-0000-0011-000000000002",
         "repairRef": "write-requirement-prd",
