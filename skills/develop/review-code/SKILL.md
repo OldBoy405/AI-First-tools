@@ -51,6 +51,8 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 
 "看起来通过"、"之前跑过"或 implement-code 自报结果均不构成评审证据；证据不可信就 blocker，回到既有闭环，而非在评审阶段自行重跑验证命令。
 
+**共享实例输出与环境中止**：不采信无法可信关联当前变更主体的共享实例输出（任务范围外、可能被其他任务共享的实例）；只有可归因的规范测试证据才能支撑 pass/block。`ENVIRONMENT_MISMATCH` 是技术中止标签而非代码 blocker：不得写入 blockers、不得触发回修，由既有 Pipeline `onFail=abort` 中止。
+
 ### Step 2 — 读取设计文档
 
 - `change-requests/{cr_id}/sdd.md` — 技术设计（接口契约、架构方案）

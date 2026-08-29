@@ -88,3 +88,11 @@ CR 通过状态机推进。每个关键节点都要由明确的 Skill 写入证�
 | 各阶段该做什么 | `skills/{阶段组}/{skill-name}/SKILL.md` |
 
 > 本 README 只做面向人的流程总览，不作为可执行事实源。任何"下一步是什么、状态是否合法、门禁是否满足"的判断，一律以 `crctl status` / `crctl next` 与上述权威文件为准。
+
+## 9. 开发期执行边界（人读原则）
+
+- Agent 只做路由、职责判断与 Skill 委派，不管理任务范围外共享服务的生命周期；技术中止后报告所需平台/人工动作并结束（`agents/dev-agent.md`）。
+- 实现期环境验证有界：一次检查、任务范围内修正后最多重跑一次；不可建立且超出权限时以 `ENVIRONMENT_MISMATCH` 中止（`skills/develop/implement-code/SKILL.md`）。
+- 代码评审只采信可归因的 diff 与规范测试证据，不采信无法关联当前变更的共享实例输出；`ENVIRONMENT_MISMATCH` 是技术中止而非代码 blocker（`skills/develop/review-code/SKILL.md`）。
+
+具体判定与步骤以上述文件为准，本节不复制可执行细节。
