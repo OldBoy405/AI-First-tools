@@ -2712,6 +2712,156 @@ function archiveRecipients(backlogText, cr) {
 }
 
 /** 四账本归档编辑（纯函数，TxError 风格）：backlog 移出 + history 追加（含 notify-log）+ index 终态。 */
+/** archive 候选校验（CR-2026-054 TASK-02，SDD §2.2/§3.2）：严格解析 + 根形状 + 跨文件不变量。
+ * 文件私有，不导出测试接口；任一普通错误规范为有限诊断后抛 TxError('ARCHIVE_YAML_INVALID')，
+ * 详情字段：file / category / line / 适用时 cr / key / firstLine。纯“缺失”不变量返回 line: null。 */
+const ARCHIVE_FINAL_STATUSES = new Set(['archived', 'rejected', 'withdrawn']);
+const ENTRY_ID_RE = /^([ \t]*)- id:[ \t]*["']?([^\s"']+)["']?[ \t]*$/;
+
+function archiveDiag(file, category, line, extra = {}) {
+  throw new TxError('ARCHIVE_YAML_INVALID', `archive 候选校验失败：${file} ${category}${line != null ? ` @line ${line}` : ''}`, { file, category, line, ...extra });
+}
+
+function strictParseCandidate(text, file) {
+  const norm = text.replaceAll('\r\n', '\n');
+  try {
+    return parseYaml(norm, { strict: true });
+  } catch (e) {
+    if (e && typeof e.category === 'string') {
+      archiveDiag(file, e.category, e.line, {
+        ...(e.firstLine != null ? { firstLine: e.firstLine } : {}),
+        ...(e.key != null ? { key: e.key } : {}),
+      });
+    }
+    // 解析器非诊断错误（不应发生）：硬失败，不静默降级（纪律 #1）
+    throw new TxError('ARCHIVE_YAML_INVALID', `archive 候选解析失败：${file} ${e && e.message}`, { file, category: 'invalid-shape', line: null });
+  }
+}
+
+function rootShapeCheck(doc, file, key, text) {
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+    archiveDiag(file, 'invalid-shape', 1, {});
+  }
+  const v = doc[key];
+  if (!(v == null || Array.isArray(v))) {
+    const lines = text.replaceAll('\r\n', '\n').split('\n');
+    const idx = lines.findIndex((l) => l.trimStart().startsWith(`${key}:`));
+    archiveDiag(file, 'invalid-shape', idx === -1 ? 1 : idx + 1, { key });
+  }
+}
+
+function parseCrMdCandidate(text, file) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const fm = matchFrontmatter(norm);
+  if (!fm) archiveDiag(file, 'invalid-shape', null, {});
+  const offset = norm.slice(0, norm.indexOf(fm.match)).split('\n').length; // body 首行对应的完整文件行号偏移
+  try {
+    const doc = parseYaml(fm.body, { strict: true });
+    if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+      archiveDiag(file, 'invalid-shape', offset + 1, {});
+    }
+    return { doc, norm, offset };
+  } catch (e) {
+    if (e && typeof e.category === 'string') {
+      archiveDiag(file, e.category, offset + e.line, {
+        ...(e.firstLine != null ? { firstLine: e.firstLine } : {}),
+        ...(e.key != null ? { key: e.key } : {}),
+      });
+    }
+    throw new TxError('ARCHIVE_YAML_INVALID', `cr.md frontmatter 解析失败：${e && e.message}`, { file, category: 'invalid-shape', line: null });
+  }
+}
+
+function entryLinesOf(text, cr) {
+  const lines = text.replaceAll('\r\n', '\n').split('\n');
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(ENTRY_ID_RE);
+    if (m && m[2] === cr) hits.push(i + 1);
+  }
+  return hits;
+}
+
+function fieldLineInEntry(text, cr, field) {
+  const lines = text.replaceAll('\r\n', '\n').split('\n');
+  let entryIndent = null;
+  for (let i = 0; i < lines.length; i++) {
+    const em = lines[i].match(ENTRY_ID_RE);
+    if (em) {
+      if (entryIndent != null && em[1].length <= entryIndent) return null; // 条目已结束
+      if (em[2] === cr) { entryIndent = em[1].length; continue; }
+    }
+    if (entryIndent != null) {
+      const fm = lines[i].match(new RegExp(`^([ \\t]*)${field}:[ \\t]*(\\S+)[ \\t]*$`));
+      if (fm) return { line: i + 1, value: fm[2] };
+    }
+  }
+  return null;
+}
+
+function validateArchiveCandidates({ cr, finalStatus, candidates }) {
+  const { backlog, history, index, crMd } = candidates;
+  // 1) 严格解析（语法/缩进/重复键/未消费行诊断）
+  const b = strictParseCandidate(backlog, '_backlog.yml');
+  const h = strictParseCandidate(history, '_history.yml');
+  const i = strictParseCandidate(index, '_index.yml');
+  const c = parseCrMdCandidate(crMd, 'cr.md');
+  // 2) 根形状
+  rootShapeCheck(b, '_backlog.yml', 'change-requests', backlog);
+  rootShapeCheck(h, '_history.yml', 'history', history);
+  rootShapeCheck(i, '_index.yml', 'change-requests', index);
+  // 3) 跨文件不变量
+  const inBacklog = entryLinesOf(backlog, cr);
+  if (inBacklog.length > 0) archiveDiag('_backlog.yml', 'archive-invariant', inBacklog[0], { cr });
+  const inHistory = entryLinesOf(history, cr);
+  if (inHistory.length === 0) archiveDiag('_history.yml', 'archive-invariant', null, { cr });
+  if (inHistory.length > 1) archiveDiag('_history.yml', 'archive-invariant', inHistory[1], { cr });
+  // history 全局唯一 + 合法终态
+  {
+    const lines = history.replaceAll('\r\n', '\n').split('\n');
+    const seen = new Map();
+    for (let n = 0; n < lines.length; n++) {
+      const em = lines[n].match(ENTRY_ID_RE);
+      if (em) {
+        if (seen.has(em[2])) archiveDiag('_history.yml', 'archive-invariant', n + 1, { key: em[2], cr: em[2] });
+        seen.set(em[2], n + 1);
+      }
+      const fm = lines[n].match(/^([ \t]*)final-status:[ \t]*(\S+)[ \t]*$/);
+      if (fm && !ARCHIVE_FINAL_STATUSES.has(fm[2])) {
+        archiveDiag('_history.yml', 'archive-invariant', n + 1, { cr, key: 'final-status' });
+      }
+    }
+  }
+  const inIndex = entryLinesOf(index, cr);
+  if (inIndex.length === 0) archiveDiag('_index.yml', 'archive-invariant', null, { cr });
+  if (inIndex.length > 1) archiveDiag('_index.yml', 'archive-invariant', inIndex[1], { cr });
+  {
+    const st = fieldLineInEntry(index, cr, 'status');
+    if (!st) archiveDiag('_index.yml', 'archive-invariant', null, { cr, key: 'status' });
+    if (st.value !== finalStatus) archiveDiag('_index.yml', 'archive-invariant', st.line, { cr, key: 'status' });
+  }
+  // cr.md frontmatter：目标 status 恰好 1 次且等于 finalStatus
+  {
+    const st = fmBodyLines(crMd);
+    if (st.length === 0) archiveDiag('cr.md', 'archive-invariant', null, { cr, key: 'status' });
+    if (st.length > 1) archiveDiag('cr.md', 'archive-invariant', st[1].no, { cr, key: 'status' });
+    if (st[0].value !== finalStatus) archiveDiag('cr.md', 'archive-invariant', st[0].no, { cr, key: 'status' });
+  }
+}
+
+function fmBodyLines(text) {
+  const norm = text.replaceAll('\r\n', '\n');
+  const fm = matchFrontmatter(norm);
+  if (!fm) return [];
+  const offset = norm.slice(0, norm.indexOf(fm.match)).split('\n').length;
+  const hits = [];
+  const body = fm.body.split('\n');
+  for (let n = 0; n < body.length; n++) {
+    if (/^status:[ \t]*\S+/.test(body[n])) hits.push({ no: offset + n + 1, value: body[n].match(/^status:[ \t]*(\S+)/)[1] });
+  }
+  return hits;
+}
+
 export function archiveLedgerEdits({ backlogText, historyText, indexText, cr, finalStatus, specId, reason, now }) {
   const normB = backlogText.replaceAll('\r\n', '\n');
   const blk = matchEntryBlockTx(normB, cr);
@@ -2979,6 +3129,7 @@ export async function archiveCr(ctx, input) {
       const crMdText = readT(crp);
       const nextCrMd = crMdStatusText(crMdText, finalStatus);
       if (!nextCrMd) throw new TxError('ARCHIVE_CRMD_INVALID', `${crp} 无 frontmatter，无法写终态`, { cr });
+      validateArchiveCandidates({ cr, finalStatus, candidates: { backlog: edits.newBacklog, history: edits.newHistory, index: edits.newIndex, crMd: nextCrMd } });
       // before = 磁盘字节哈希（CAS 锚点，Windows autocrlf 不影响一致性）；after = 编辑产物（LF）
       const file = (p, after) => ({ path: p, beforeSha256: readHashRaw(path.join(root, p)), afterSha256: sha256(after), content: after });
       const entries = [
