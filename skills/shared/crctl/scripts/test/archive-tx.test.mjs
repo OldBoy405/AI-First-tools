@@ -603,6 +603,39 @@ test('CR-2026-054 候选校验：首次构建损坏候选 → ARCHIVE_YAML_INVAL
   }
 });
 
+test('CR-2026-054 候选校验：history 缺少必需根键 → ARCHIVE_YAML_INVALID 且零 stage/commit/push', () => {
+  const { base, kb, cr, txws } = makeWritebackFixture();
+  try {
+    // The generated target entry remains a valid list item, but under the wrong root key.
+    corruptAndCommit(txws, 'change-requests/_history.yml', 'legacy-history:\n  - id: OTHER-1\n    final-status: archived\n');
+    const headBefore = git(txws, ['rev-parse', 'HEAD']);
+    const n0 = originMasterCount(base, 'kb');
+    const r = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.notEqual(r.status, 0, '缺少 history 根键必须失败');
+    assert.ok(r.stderr.includes('ARCHIVE_YAML_INVALID'), r.stderr);
+    assert.ok(r.stderr.includes('_history.yml') && r.stderr.includes('invalid-shape'), r.stderr);
+    assert.equal(git(txws, ['rev-parse', 'HEAD']), headBefore);
+    assert.equal(originMasterCount(base, 'kb'), n0);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-054 候选校验：index 缺少必需根键 → ARCHIVE_YAML_INVALID 且零 stage/commit/push', () => {
+  const { base, kb, cr, txws } = makeWritebackFixture();
+  try {
+    const ip = path.join(txws, 'change-requests', '_index.yml');
+    const text = fs.readFileSync(ip, 'utf8').replaceAll('change-requests:', 'legacy-index:');
+    corruptAndCommit(txws, 'change-requests/_index.yml', text);
+    const headBefore = git(txws, ['rev-parse', 'HEAD']);
+    const n0 = originMasterCount(base, 'kb');
+    const r = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.notEqual(r.status, 0, '缺少 change-requests 根键必须失败');
+    assert.ok(r.stderr.includes('ARCHIVE_YAML_INVALID'), r.stderr);
+    assert.ok(r.stderr.includes('_index.yml') && r.stderr.includes('invalid-shape'), r.stderr);
+    assert.equal(git(txws, ['rev-parse', 'HEAD']), headBefore);
+    assert.equal(originMasterCount(base, 'kb'), n0);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
 test('CR-2026-054 候选校验：remote rebuild 损坏基线 → ARCHIVE_YAML_INVALID 且零新增 commit', () => {
   const { base, kb, cr, txws } = makeWritebackFixture();
   try {

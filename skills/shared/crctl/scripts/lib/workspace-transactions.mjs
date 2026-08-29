@@ -2738,12 +2738,14 @@ function strictParseCandidate(text, file) {
   }
 }
 
-function rootShapeCheck(doc, file, key, text) {
+// rootShapeCheck validates the archive-specific root field. Only the backlog
+// permits a null empty value; history and index must contain arrays.
+function rootShapeCheck(doc, file, key, text, allowNull = false) {
   if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
     archiveDiag(file, 'invalid-shape', 1, {});
   }
   const v = doc[key];
-  if (!(v == null || Array.isArray(v))) {
+  if (!Array.isArray(v) && !(allowNull && v === null)) {
     const lines = text.replaceAll('\r\n', '\n').split('\n');
     const idx = lines.findIndex((l) => l.trimStart().startsWith(`${key}:`));
     archiveDiag(file, 'invalid-shape', idx === -1 ? 1 : idx + 1, { key });
@@ -2807,7 +2809,7 @@ function validateArchiveCandidates({ cr, finalStatus, candidates }) {
   const i = strictParseCandidate(index, '_index.yml');
   const c = parseCrMdCandidate(crMd, 'cr.md');
   // 2) 根形状
-  rootShapeCheck(b, '_backlog.yml', 'change-requests', backlog);
+  rootShapeCheck(b, '_backlog.yml', 'change-requests', backlog, true);
   rootShapeCheck(h, '_history.yml', 'history', history);
   rootShapeCheck(i, '_index.yml', 'change-requests', index);
   // 3) 跨文件不变量
