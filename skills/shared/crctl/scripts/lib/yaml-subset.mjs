@@ -2,18 +2,59 @@
  * 支持：块映射、块序列、flow 映射 {k: v}、flow 序列 [a, b]、引号字符串、
  * 注释、多行块标量 | 与 >（保守处理为拼接文本）。
  * 不支持：锚点、别名、tag、多文档。对本包受控文件足够。
+ *
+ * 严格模式（parseYaml(text, {strict:true})，CR-2026-054）：可选能力，只服务
+ * archive 四候选校验；默认 parseYaml(text) 行为不变。严格模式在读入后先将
+ * CRLF 规范化为 LF；诊断通过普通 Error 的自有字段携带（category / line /
+ * firstLine / key），不新增错误类：
+ *   duplicate-key        block/flow map 的等价键重复（unquote 后比较，大小写不折叠）
+ *   unconsumed-line      某层解析未消费属于该层的行
+ *   invalid-indentation  tab、根缩进、非法深度或容器切换
+ *   invalid-shape        裸 '-' 无子节点、无法解释行、trailing flow 内容
  */
 
-function parseYaml(text) {
-  const rawLines = text.split(/\r?\n/);
+function parseYaml(text, options) {
+  const strict = !!(options && options.strict);
+  const rawLines = text.replaceAll('\r\n', '\n').split('\n');
   const lines = [];
   for (let i = 0; i < rawLines.length; i++) {
     const stripped = stripComment(rawLines[i]);
     if (stripped.trim() === '') continue;
     lines.push({ indent: stripped.length - stripped.trimStart().length, text: stripped.trimEnd(), raw: rawLines[i], no: i + 1 });
   }
-  const [value] = parseBlock(lines, 0, 0);
+  if (lines.length === 0) return null;
+  const ctx = { strict, lines, currentLine: 0 };
+  if (strict) {
+    if (lines[0].indent !== 0) throw strictDiag('invalid-indentation', lines[0].no, '根节点必须自第 0 列开始');
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i];
+      if (/^\s*\t/.test(ln.raw)) throw strictDiag('invalid-indentation', ln.no, 'tab 缩进');
+      if (ln.text.trimStart() === '-') {
+        const nxt = lines[i + 1];
+        if (!nxt || nxt.indent <= ln.indent) throw strictDiag('invalid-shape', ln.no, "裸 '-' 必须紧跟实际子节点");
+      }
+    }
+  }
+  const [value, nextIdx] = parseBlock(lines, 0, 0, ctx);
+  if (strict && nextIdx < lines.length) {
+    const ln = lines[nextIdx];
+    throw strictDiag('unconsumed-line', ln.no, `未消费行: ${ln.text.trimStart()}`);
+  }
   return value;
+}
+
+function strictDiag(category, line, detail) {
+  const e = new Error(`YAML_STRICT_PARSE_FAILED ${category} @line ${line}${detail ? `: ${detail}` : ''}`);
+  e.category = category;
+  e.line = line;
+  return e;
+}
+
+function strictDuplicate(line, firstLine, key) {
+  const e = strictDiag('duplicate-key', line, `重复键 "${key}"`);
+  e.firstLine = firstLine;
+  e.key = key;
+  return e;
 }
 
 function stripComment(line) {
@@ -33,27 +74,38 @@ function isEscaped(text, index) {
   return slashes % 2 === 1;
 }
 
-function parseBlock(lines, idx, minIndent) {
+function isMapEntry(content) {
+  return /^[^\s:]+(\s*):(\s|$)/.test(content) || /^["'][^"']*["']\s*:(\s|$)/.test(content);
+}
+
+function parseBlock(lines, idx, minIndent, ctx) {
   if (idx >= lines.length || lines[idx].indent < minIndent) return [null, idx];
   const indent = lines[idx].indent;
   const content = lines[idx].text.trimStart();
-  if (content.startsWith('- ') || content === '-') return parseSeq(lines, idx, indent);
-  return parseMap(lines, idx, indent);
+  if (content.startsWith('- ') || content === '-') return parseSeq(lines, idx, indent, ctx);
+  return parseMap(lines, idx, indent, ctx);
 }
 
-function parseSeq(lines, idx, indent) {
+function parseSeq(lines, idx, indent, ctx) {
   const arr = [];
   let i = idx;
   while (i < lines.length && lines[i].indent === indent) {
     const content = lines[i].text.trimStart();
-    if (!(content.startsWith('- ') || content === '-')) break;
+    if (!(content.startsWith('- ') || content === '-')) {
+      if (ctx.strict) {
+        if (isMapEntry(content)) throw strictDiag('invalid-indentation', lines[i].no, `容器切换：序列中出现映射行 "${content}"`);
+        throw strictDiag('unconsumed-line', lines[i].no, `序列层未消费行: ${content}`);
+      }
+      break;
+    }
     const rest = content === '-' ? '' : content.slice(2).trim();
     if (rest === '') {
-      const [v, ni] = parseBlock(lines, i + 1, indent + 1);
+      const [v, ni] = parseBlock(lines, i + 1, indent + 1, ctx);
       arr.push(v); i = ni;
     } else if (rest.startsWith('{') || rest.startsWith('[')) {
-      arr.push(parseInline(rest)); i += 1;
-    } else if (/^[^\s:]+(\s*):(\s|$)/.test(rest) || /^["'][^"']*["']\s*:(\s|$)/.test(rest)) {
+      ctx.currentLine = lines[i].no;
+      arr.push(parseInline(rest, ctx)); i += 1;
+    } else if (isMapEntry(rest)) {
       // 序列项内联映射："- id: x" 后续行以更深缩进续写同一映射
       const virtualIndent = lines[i].indent + (lines[i].text.trimStart().length - rest.length);
       const fake = { indent: virtualIndent, text: ' '.repeat(virtualIndent) + rest, raw: lines[i].raw, no: lines[i].no };
@@ -62,30 +114,41 @@ function parseSeq(lines, idx, indent) {
       while (j < lines.length && lines[j].indent >= virtualIndent && !(lines[j].indent === indent && /^-(\s|$)/.test(lines[j].text.trimStart()))) {
         sub.push(lines[j]); j++;
       }
-      const [v] = parseMap(sub, 0, virtualIndent);
+      const [v, ni] = parseMap(sub, 0, virtualIndent, ctx);
+      if (ctx.strict && ni < sub.length) throw strictDiag('invalid-indentation', sub[ni].no, '非法深度：序列内联映射的孤儿行');
       arr.push(v); i = j;
     } else {
+      ctx.currentLine = lines[i].no;
       arr.push(parseScalar(rest)); i += 1;
     }
   }
   return [arr, i];
 }
 
-function parseMap(lines, idx, indent) {
+function parseMap(lines, idx, indent, ctx) {
   const obj = {};
+  const keyLines = ctx.strict ? new Map() : null;
   let i = idx;
   while (i < lines.length && lines[i].indent === indent) {
     const content = lines[i].text.trimStart();
-    if (content.startsWith('- ')) break;
+    if (content.startsWith('- ')) {
+      if (ctx.strict) throw strictDiag('invalid-indentation', lines[i].no, `容器切换：映射中出现序列行 "${content}"`);
+      break;
+    }
     const m = content.match(/^("(?:[^"\\]|\\.)*"|'[^']*'|[^:\s][^:]*?)\s*:(.*)$/);
     if (!m) {
+      if (ctx.strict) throw strictDiag('invalid-shape', lines[i].no, `无法解释的行: ${content}`);
       // CR-2026-049 TASK-01：无法解释的结构硬失败（纪律 #1，禁止静默丢行）
       throw new Error(`YAML_SUBSET_PARSE_FAILED @line ${lines[i].no}: ${content}`);
     }
     const key = unquote(m[1].trim());
+    if (ctx.strict && Object.prototype.hasOwnProperty.call(obj, key)) {
+      throw strictDuplicate(lines[i].no, keyLines.get(key), key);
+    }
+    if (ctx.strict) keyLines.set(key, lines[i].no);
     let rest = m[2].trim();
-    if (rest === '' ) {
-      const [v, ni] = parseBlock(lines, i + 1, indent + 1);
+    if (rest === '') {
+      const [v, ni] = parseBlock(lines, i + 1, indent + 1, ctx);
       obj[key] = v; i = ni;
     } else if (rest === '|' || rest === '>' || rest === '|-' || rest === '>-') {
       const parts = [];
@@ -93,24 +156,33 @@ function parseMap(lines, idx, indent) {
       while (j < lines.length && lines[j].indent > indent) { parts.push(lines[j].text.trim()); j++; }
       obj[key] = parts.join('\n'); i = j;
     } else {
-      obj[key] = parseInline(rest); i += 1;
+      ctx.currentLine = lines[i].no;
+      obj[key] = parseInline(rest, ctx); i += 1;
     }
+  }
+  if (ctx.strict && i < lines.length && lines[i].indent > indent) {
+    throw strictDiag('invalid-indentation', lines[i].no, '非法深度：超出当前层且无归属的行');
   }
   return [obj, i];
 }
 
-function parseInline(s) {
+function parseInline(s, ctx) {
   s = s.trim();
   const looksLikeFlow = s.startsWith('[') || (s.startsWith('{') && /:/.test(s));
   if (looksLikeFlow) {
-    const parsed = parseFlow(s);
-    if (parsed.rest.trim() !== '') throw new Error(`YAML_SUBSET_PARSE_FAILED: trailing flow content: ${s}`);
+    const parsed = parseFlow(s, ctx);
+    if (parsed.rest.trim() !== '') {
+      if (ctx && ctx.strict) throw strictDiag('invalid-shape', ctx.currentLine, `trailing flow content: ${s}`);
+      throw new Error(`YAML_SUBSET_PARSE_FAILED: trailing flow content: ${s}`);
+    }
     return parsed.value;
   }
   return parseScalar(s);
 }
 
-function parseFlow(s) {
+function parseFlow(s, ctx) {
+  const strict = !!(ctx && ctx.strict);
+  const lineNo = ctx ? ctx.currentLine : 1;
   let i = 0;
   function ws() { while (i < s.length && /\s/.test(s[i])) i++; }
   function value() {
@@ -124,7 +196,9 @@ function parseFlow(s) {
         const k = flowScalar([':']);
         if (s[i] !== ':') throw new Error(`flow map key missing ':' @${i}: ${s}`);
         i++; // skip ':'
-        o[unquote(k.trim())] = value();
+        const key = unquote(k.trim());
+        if (strict && Object.prototype.hasOwnProperty.call(o, key)) throw strictDuplicate(lineNo, lineNo, key);
+        o[key] = value();
         ws();
         if (s[i] === ',') { i++; continue; }
         if (s[i] === '}') { i++; return o; }
