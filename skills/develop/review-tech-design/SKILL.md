@@ -65,6 +65,8 @@ else: pass with landing + observable + reachability evidence
 
 这是既有「PRD↔SDD 对齐」与「可测试性」维度的细化，不新增 annotation dimension；关键前置条件包括过滤条件、状态门槛、权限判定、事件触发顺序、空值分支和跨仓依赖初始化。
 
+SDD 的既有实现依赖必须来自名为“既有实现依赖与事实”的显式小节。该小节按正文首次依赖出现顺序维护有序清单，每项固定包含 `repo`、`relative path`、`stable symbol/对象` 和“依赖结论”，并可附 `commit SHA`。`sdd.explicit_existing_dependencies` 仅指该清单，不由 reviewer 扫描全仓库或临时猜测；reviewer 还必须交叉检查正文同类事实是否漏列。
+
 只核验 SDD 明确写入且设计成立依赖的既有实现事实，不做全仓库无界扫描：对每项依赖按 `resources` 找到匹配 `repo`，用受控只读取证 `crctl git rev-parse HEAD` 取 commit SHA，并核验文件/稳定符号；事实缺失或行为不符形成业务 blocker（附 repo/SHA/path/symbol/conclusion 证据），资源缺失或不可读为技术失败且不写临时 payload。SDD 正文存在但未列入依赖清单的同类事实引用形成 blocker；只有正文与依赖清单均无依赖时才记录 `N/A（本 CR 无既有实现依赖）`。行号只作辅助，不作唯一证据；评审不执行 lint/build/test。
 
 ### Step 2.2 — 首轮全量汇总与回修复核

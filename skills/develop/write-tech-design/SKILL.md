@@ -106,6 +106,20 @@ AC-xx
 
 涉及既有实现（现有仓库、文件路径、稳定符号、配置键、接口/协议、数据库结构、模块行为、调用顺序或责任边界，且是方案成立前置条件）的断言，必须逐项附证据：`repo`、`commit SHA`、`relative path`、`stable symbol/对象`、`conclusion`；无法绑定这些字段的引用按待核实依赖列出，不得归入 N/A。无既有实现依赖时才明确写 `N/A（本 CR 无既有实现依赖）`，不得用 N/A 掩盖正文中的事实依赖。
 
+### 既有实现依赖与事实
+
+当方案依赖既有实现时，必须在本节按正文首次出现顺序列出每项依赖，使用以下固定结构：
+
+```text
+1. repo: <repository id>
+   relative path: <path from repository root>
+   stable symbol/对象: <symbol, key, interface, module, behavior, or responsibility>
+   commit SHA: <40-character SHA>
+   依赖结论: <why the current behavior is required by this design>
+```
+
+`review-tech-design` 只将本节的有序清单作为 `sdd.explicit_existing_dependencies`，并交叉检查正文是否存在未列出的同类事实引用。无法绑定字段的引用必须列入待核实依赖；只有本节与正文均无既有实现依赖时，才写 `N/A（本 CR 无既有实现依赖）`。
+
 回修模式只按 blocker 和本轮变化定点修订，不无理由重写已确认方案。
 
 ### Step 3 — 落盘并 commit

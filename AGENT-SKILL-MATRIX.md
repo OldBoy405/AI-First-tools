@@ -43,13 +43,15 @@
 | `feature-writeback` | `system-orchestrator` |
 | `resume-cr` | `system-orchestrator` |
 
-## 设计缺口
+## 本 CR 权限变更
 
-| 缺口 | 说明 | 建议 |
+本 CR 的权限变更补充如下，完整机器可读关系仍以 `agent-skill-matrix.yml` 为准：
+
+| Actor | 新增 can-call | 约束 |
 |---|---|---|
-| 回写期没有独立 primary Agent | `feature-writeback` 当前由系统编排器直接编排 writeback / CR / delivery Skill，`spec-agent` 仅做回写后只读核对 | 如需要人工入口，可新增 `writeback-agent`，否则保持系统编排即可 |
+| `quality-reviewer-agent` | `controlled-shell` | 仅用于 `review-tech-design` 与 `review-dev-plan` 的文件和 Git 只读取证，不包含写操作、状态推进或审批 |
 
-## 维护规则
+## 设计缺口
 
 1. 新增 active Skill 时，必须在 `agent-skill-matrix.yml` 中为它指定且只指定一个 `owns` owner。
 2. Agent 正文出现的 active Skill，应出现在该 Agent 的 `owns` 或 `can-call` 中。
