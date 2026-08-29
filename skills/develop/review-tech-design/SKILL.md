@@ -23,8 +23,13 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `cr_id` | string | ✅ | 目标 CR-ID |
+| `workspace` | string | ✅ | 业务权威路径（`crctl workspace inspect` 的 operationalWorkspace 原样值）；用于读取 PRD/SDD/架构文档 |
+| `resources` | array | ✅ | `crctl workspace inspect` 的 resources 原样值，元素含 `repo`、`worktreePath`；代码事实只按 `resources[].worktreePath` 取证，不拼接 `.rayai-worktrees`、不回退主工作区 |
 | `reviewer` | string | ❌ | 评审人 ID；为空则填写 "ai-reviewer" |
+| `review_feedback` | object | ❌ | 当前 reviewLoop 的回修反馈（上一轮 blockers）；存在时进入回修复核 |
 | `self_repair_attempt` | number | ❌ | 当前 reviewLoop 轮次；首次评审为 0，自修复后由 pipeline 注入 |
+
+`workspace` 用于过程文档，`resources[].worktreePath` 用于代码事实，两者不得混用。
 
 ---
 
@@ -32,10 +37,7 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 
 ### Step 1 — 读取输入
 
-读取：
-- `change-requests/{cr_id}/prd.md` — 获取 FR 列表
-- `change-requests/{cr_id}/sdd.md` — 待评审文档
-- `ARCHITECTURE.md` — 架构约束参考（若 `write-tech-design` 本轮标注"新起草"，一并快速核查内容是否贴合仓库实际，视为本轮"架构合理性"维度的一部分，不单独加审批节点）
+以 `workspace` 读取过程文档：`change-requests/{cr_id}/prd.md`（获取 FR 列表）、`change-requests/{cr_id}/sdd.md`（待评审文档）；架构约束参考只从 `resources[]` 中目标仓的 `worktreePath` 读取（若 `write-tech-design` 本轮标注"新起草"，一并快速核查内容是否贴合仓库实际，视为本轮"架构合理性"维度的一部分，不单独加审批节点）。代码事实取证只按 `resources[].worktreePath`，不使用目录命名拼接、主工作区回退或会话记忆替代；`workspace` 与 `resources` 概念不得混用。
 
 ### Step 2 — 评审维度
 
@@ -49,6 +51,27 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 | **性能与安全** | 关键路径是否有性能考量，安全控制点是否完备 |
 | **可测试性** | 技术方案是否易于单元/集成测试 |
 | **Prompt 采纳影响**（CR-2026-021 FR-25，条件性） | 若本 CR 的 diff 触及 `crctl.mjs` dispatch 或 `rules.json#protectedPaths.deny`，SDD 第 8 节必须存在且列出应改为调用新增/扩展子命令的 skill 清单；缺失记为 blocker（`lint-prompts` 抓不到"新增能力未被采纳"这类漂移，只能由本维度人工兜底）。不触及上述两处则本项跳过 |
+
+### Step 2.1 — AC 闭环与既有实现依赖核验
+
+在既有 8 个维度检查过程中，对 PRD 的每条 AC 执行闭环判定：
+
+```text
+if no_design_landing(ac): blocker("缺少设计落点")
+else if landing_cannot_produce_observable_result(ac): blocker("结果不可观察")
+else if prerequisite_filters_required_target(ac): blocker("关键前置条件使 AC 不可达")
+else: pass with landing + observable + reachability evidence
+```
+
+这是既有「PRD↔SDD 对齐」与「可测试性」维度的细化，不新增 annotation dimension；关键前置条件包括过滤条件、状态门槛、权限判定、事件触发顺序、空值分支和跨仓依赖初始化。
+
+SDD 的既有实现依赖必须来自名为“既有实现依赖与事实”的显式小节。该小节按正文首次依赖出现顺序维护有序清单，每项固定包含 `repo`、`relative path`、`stable symbol/对象` 和“依赖结论”，并可附 `commit SHA`。`sdd.explicit_existing_dependencies` 仅指该清单，不由 reviewer 扫描全仓库或临时猜测；reviewer 还必须交叉检查正文同类事实是否漏列。
+
+只核验 SDD 明确写入且设计成立依赖的既有实现事实，不做全仓库无界扫描：对每项依赖按 `resources` 找到匹配 `repo`，用受控只读取证 `crctl git rev-parse HEAD` 取 commit SHA，并核验文件/稳定符号；事实缺失或行为不符形成业务 blocker（附 repo/SHA/path/symbol/conclusion 证据），资源缺失或不可读为技术失败且不写临时 payload。SDD 正文存在但未列入依赖清单的同类事实引用形成 blocker；只有正文与依赖清单均无依赖时才记录 `N/A（本 CR 无既有实现依赖）`。行号只作辅助，不作唯一证据；评审不执行 lint/build/test。
+
+### Step 2.2 — 首轮全量汇总与回修复核
+
+首轮必须完成全部适用维度后再统一生成 verdict，不得在首个 blocker 处提前结束；合并同根因问题、拆分不同根因问题，同一轮 blockers 同时包含独立根因。存在 `review_feedback`、上一轮 `review-annotations/sdd.yml` verdict=block 或 `self_repair_attempt > 0` 时进入回修复核：逐条复核旧 blocker（已解决/部分解决/未解决/需重新判断），本轮变化影响的维度重新核验，未受影响维度给出有依据的快速复核（不无证据继承旧 PASS），新独立 blocker 同轮加入；继续使用既有 `maxAttempts=3`，达到上限停止自动回修且不 reset cycle。review-record 与既有 replayNodes 不改变。
 
 ### Step 3 — 平台绑定前置步骤 + 写评审批注 — 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
 
