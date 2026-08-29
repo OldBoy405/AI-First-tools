@@ -21,6 +21,8 @@ description: 对 change-requests/{CR-ID}/plan.md 与 tasks/ 执行编码前合�
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `cr_id` | string | ✅ | 目标 CR-ID |
+| `workspace` | string | ✅ | 业务权威路径（node-1 execution_context.operational_workspace 原样值）；用于读取 plan.md 与 tasks/ |
+| `resources` | array | ✅ | node-1 execution_context.resources 原样值，元素含 `repo`、`worktreePath`；TASK 新事实只按 `resources[].worktreePath` 取证，不重新 inspect、不拼接路径 |
 | `review_feedback` | object | ❌ | 来自上一轮 review-dev-plan 的 blockers；存在时进入重审模式 |
 | `self_repair_attempt` | number | ❌ | 当前 reviewLoop 轮次；首次为 0，回修后由 pipeline 注入 |
 
@@ -33,6 +35,7 @@ description: 对 change-requests/{CR-ID}/plan.md 与 tasks/ 执行编码前合�
 1. CR status 必须为 `task-breakdown`（普通轨重放时允许 `tech-design-reviewed`）。
 2. 以下输入必须存在：`sdd.md`（已审批技术设计，权威输入）、`plan.md`、`tasks/_index.yml`、至少一个 `TASK-*.md`、`review-annotations/sdd.yml`（技术评审已知风险）。
 3. `prd.md` 仅按 SDD 引用定位抽查，不得全量复审 PRD（D-15）。
+4. `workspace` 用于读取过程文档；代码事实只按 `resources[].worktreePath` 取证，resources 只来自 node-1 execution_context，不重新 inspect、不拼接路径、不回退主工作区。
 
 ### Step 2 — 八类维度评审（FR-3）
 
@@ -48,6 +51,17 @@ description: 对 change-requests/{CR-ID}/plan.md 与 tasks/ 执行编码前合�
 | 风险与回滚 | 高风险变更有验证/开关/迁移/回滚安排 |
 
 估算一致性：仅在揭示任务拆分、依赖或验收结构性问题时作为 blocker；普通工时口径差异进 suggestions。
+
+### 增量职责与事实核验（CR-2026-055）
+
+本评审是「SDD/AC → plan/TASK 的翻译增量」，不无差别重审已审批 SDD 决策。四个增量维度聚焦：
+
+- `sdd-to-plan`：核对每条 AC 设计落点与 SDD 交付物是否在 plan/TASK 有对应，不重新裁决已审批设计；
+- `task-executability`：核对 TASK 新造/细化的目标、输入、输出、文件、完成标志与责任边界；
+- `interface-contracts`：核对 TASK 新造函数、事件、SQL、签名与 nil 责任层事实是否与目标 worktree 相符；
+- `acceptance-verifiability`：核对 TASK 验收步骤是否在真实责任边界组合证明 AC，拒绝无关依赖的假绿短路。
+
+TASK 新事实只能按 `resources[].worktreePath` 取证：事实不存在或与目标 worktree 不符形成 blocker，不得静默记录 N/A；资源缺失或不可读为技术失败，不写临时 payload。若新事实反证 SDD 或 SDD 设计落点本身断裂，`repair-target` 设为 `write-tech-design` 走 UPSTREAM；仅 plan/TASK 翻译问题走 `write-dev-plan` 普通回修轨。
 
 ### Step 3 — 平台绑定前置步骤 + 评审判断与落盘
 

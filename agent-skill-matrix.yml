@@ -142,6 +142,7 @@ actors:
       - write-test-report
       - cr-show
       - coding-discipline
+      - controlled-shell
     external: []
     forbidden:
       - approve-requirement

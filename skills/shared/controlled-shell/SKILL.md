@@ -5,7 +5,7 @@ description: 受控 shell 执行规范（方案 a）。所有 sync/requirement �
 
 # Skill: controlled-shell
 
-**类型**: 基础能力 Skill（shared/ 组，被 requirement-register / push-progress / pull-progress / resume-from-remote / handover-cr / merge-feature-branch / cr-archive / review-code 引用）
+**类型**: 基础能力 Skill（shared/ 组，被 requirement-register / push-progress / pull-progress / resume-from-remote / handover-cr / merge-feature-branch / cr-archive / review-code / review-tech-design / review-dev-plan 引用）
 **版本**: v0.1.0（去 MCP 化，基于 Tauri plugin-shell + opencode SDK session.shell）
 
 ---
@@ -49,6 +49,18 @@ description: 受控 shell 执行规范（方案 a）。所有 sync/requirement �
 | `remote` | `remote -v` | resume-from-remote |
 
 > 超出白名单的命令 **一律禁止执行**；如确有必要，需先扩展本 Skill 的白名单。
+
+---
+
+## Reviewer 只读取证调用者（CR-2026-055）
+
+`review-tech-design` 与 `review-dev-plan` 可调用本 Skill 的既有只读能力做代码事实取证，范围限定为：
+
+- 原生文件读取 `resources[].worktreePath` 下的文件；
+- `crctl git rev-parse HEAD` 获取证据 commit；
+- 必要时使用既有只读 `diff`、`log`、`merge-base` 能力。
+
+两个 reviewer 不新增 Git 子命令、参数形态、protected path 或写操作；不能调用 commit、add、push、merge、approve、advance 或任何账本写入入口。本 CR 不修改 `rules.json`。评审 Skill 的 review-record 与状态路由继续按各自既有合同执行，不属于 reviewer 的事实取证授权。
 
 ---
 

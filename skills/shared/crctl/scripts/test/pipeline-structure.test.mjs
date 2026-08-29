@@ -527,3 +527,53 @@ test('CR-2026-050 AC-12: 8 条 Pipeline 节点数与 UUID 全局唯一保持不�
   }
   assert.equal(new Set(ids).size, ids.length, '8 条 Pipeline UUID 全局唯一');
 });
+
+/* ── CR-2026-055：评审分层最小改造——reviewer 输入/资源/权限/负向断言 ── */
+
+test('CR-2026-055 AC-1/AC-7: 两个 reviewer 节点原样传递 workspace/resources/feedback/attempt', () => {
+  const arch = readPipeline('architecture-design.pipeline.json');
+  const rtd = arch.nodes.find((n) => n.ref === 'review-tech-design');
+  for (const term of ['cr_id', 'workspace', 'resources', 'review_feedback', 'self_repair_attempt']) {
+    assert.ok(rtd.prompt.includes(term), `architecture review-tech-design 传 ${term}`);
+  }
+  assert.ok(/resources: \{workspace inspect\.resources/.test(rtd.prompt), 'architecture resources 来自同次 workspace inspect');
+
+  const code = readPipeline('code-implementation.pipeline.json');
+  const rdp = code.nodes.find((n) => n.ref === 'review-dev-plan');
+  for (const term of ['cr_id', 'workspace', 'resources', 'review_feedback', 'self_repair_attempt']) {
+    assert.ok(rdp.prompt.includes(term), `code review-dev-plan 传 ${term}`);
+  }
+  assert.ok(/resources: \{execution_context\.resources/.test(rdp.prompt), 'code resources 来自 node-1 execution_context');
+  assert.ok(!/resources: \{workspace inspect\.resources/.test(rdp.prompt), 'code review-dev-plan 不重新 inspect');
+});
+
+test('CR-2026-055 AC-1/AC-8: reviewer Skill 输入合同与 controlled-shell 只读权限', () => {
+  for (const rel of ['skills/develop/review-tech-design/SKILL.md', 'skills/develop/review-dev-plan/SKILL.md']) {
+    const text = readFileSync(path.join(TOOLS_ROOT, rel), 'utf8').replaceAll('\r\n', '\n');
+    for (const term of ['`cr_id`', '`workspace`', '`resources`', '`review_feedback`', '`self_repair_attempt`', 'worktreePath']) {
+      assert.ok(text.includes(term), `${rel} 含 ${term}`);
+    }
+  }
+  const matrix = readFileSync(path.join(TOOLS_ROOT, 'agent-skill-matrix.yml'), 'utf8').replaceAll('\r\n', '\n');
+  const qr = matrix.match(/  quality-reviewer-agent:\n(?:.*\n)*?\s*can-call:\n((?:\s+- \S+\n)*)/);
+  assert.ok(qr, 'quality-reviewer-agent.can-call 存在');
+  assert.match(qr[1], /- controlled-shell\n/, 'quality-reviewer-agent.can-call 含 controlled-shell');
+  const cs = readFileSync(path.join(TOOLS_ROOT, 'skills/shared/controlled-shell/SKILL.md'), 'utf8').replaceAll('\r\n', '\n');
+  for (const reviewer of ['review-tech-design', 'review-dev-plan']) {
+    assert.ok(cs.includes(reviewer), `controlled-shell 说明含 ${reviewer}`);
+  }
+});
+
+test('CR-2026-055 AC-8 负向: reviewer 节点 prompt 无 review-record/账本路径/取证命令/测试执行', () => {
+  for (const [name, ref] of [
+    ['architecture-design.pipeline.json', 'review-tech-design'],
+    ['code-implementation.pipeline.json', 'review-dev-plan'],
+  ]) {
+    const n = readPipeline(name).nodes.find((x) => x.ref === ref);
+    const t = n.prompt || '';
+    assert.ok(!/crctl review-record/.test(t), `${ref} prompt 无 review-record 命令细节`);
+    assert.ok(!/review-annotations|review-loop|traceability/.test(t), `${ref} prompt 无账本写入路径`);
+    assert.ok(!/git (diff|log|merge-base|rev-parse)/.test(t), `${ref} prompt 无取证命令细节`);
+    assert.ok(!/node --test|lint|npm test/.test(t), `${ref} prompt 无测试执行要求`);
+  }
+});
