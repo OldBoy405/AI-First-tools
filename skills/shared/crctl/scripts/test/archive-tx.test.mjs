@@ -491,3 +491,171 @@ test('CR-2026-041 证据门：证据缺失 → ARCHIVE_EVIDENCE 硬失败且零 
     assert.equal(fs.existsSync(journalDir), false, '证据门失败零 journal 创建');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
+
+/* ───────────── CR-2026-054 TASK-03 archive 候选校验（ARCHIVE_YAML_INVALID） ───────────── */
+
+/** 在 txws 写入损坏文件并提交（模拟权威基线损坏；不 commit 会留下 dirty 干扰断言） */
+function corruptAndCommit(txws, rel, text) {
+  const p = path.join(txws, rel);
+  fs.writeFileSync(p, text);
+  git(txws, ['add', rel]);
+  git(txws, ['commit', '-q', '-m', 'corrupt candidate']);
+}
+
+test('CR-2026-054 候选校验：首次构建损坏候选 → ARCHIVE_YAML_INVALID 且零 stage/commit/push', () => {
+  const cases = [
+    {
+      label: 'history 根为序列 → 追加 record 无法消费',
+      corrupt: (txws) => corruptAndCommit(txws, 'change-requests/_history.yml', '- not-a-map\n'),
+      expect: { category: 'unconsumed-line', file: '_history.yml' },
+    },
+    {
+      label: 'backlog 根行不可解释',
+      corrupt: (txws) => {
+        const bp = path.join(txws, 'change-requests', '_backlog.yml');
+        const text = fs.readFileSync(bp, 'utf8').replaceAll('\r\n', '\n');
+        corruptAndCommit(txws, 'change-requests/_backlog.yml', text.replace(/^schema:.*\n/, 'just text\n'));
+      },
+      expect: { category: 'invalid-shape', file: '_backlog.yml' },
+    },
+    {
+      label: 'backlog 仍含目标 CR（重复条目）',
+      corrupt: (txws, cr) => {
+        const bp = path.join(txws, 'change-requests', '_backlog.yml');
+        const text = fs.readFileSync(bp, 'utf8').replaceAll('\r\n', '\n');
+        const entry = text.split('\n').filter((l) => l.trimStart().startsWith('- id: '))[0];
+        corruptAndCommit(txws, 'change-requests/_backlog.yml', text.trimEnd() + '\n' + entry + '\n    title: dup\n');
+      },
+      expect: { category: 'archive-invariant', file: '_backlog.yml' },
+    },
+    {
+      label: 'history 全局 id 重复',
+      corrupt: (txws) => {
+        const body = [
+          'history:',
+          '  - id: OTHER-1',
+          '    final-status: archived',
+          '  - id: OTHER-1',
+          '    final-status: archived',
+          '',
+        ].join('\n');
+        corruptAndCommit(txws, 'change-requests/_history.yml', body);
+      },
+      expect: { category: 'archive-invariant', file: '_history.yml' },
+    },
+    {
+      label: 'history final-status 非法',
+      corrupt: (txws) => {
+        const body = [
+          'history:',
+          '  - id: OTHER-1',
+          '    final-status: garbage',
+          '',
+        ].join('\n');
+        corruptAndCommit(txws, 'change-requests/_history.yml', body);
+      },
+      expect: { category: 'archive-invariant', file: '_history.yml' },
+    },
+    {
+      label: 'index 目标 CR 条目重复',
+      corrupt: (txws, cr) => {
+        const ip = path.join(txws, 'change-requests', '_index.yml');
+        const text = fs.readFileSync(ip, 'utf8').replaceAll('\r\n', '\n');
+        const entry = text.split('\n').filter((l) => l.trimStart().startsWith('- id: '))[0];
+        corruptAndCommit(txws, 'change-requests/_index.yml', text.trimEnd() + '\n' + entry + '\n');
+      },
+      expect: { category: 'archive-invariant', file: '_index.yml' },
+    },
+    {
+      label: 'history tab 缩进',
+      corrupt: (txws) => {
+        corruptAndCommit(txws, 'change-requests/_history.yml', 'history:\n\t- id: OTHER-1\n');
+      },
+      expect: { category: 'invalid-indentation', file: '_history.yml' },
+    },
+    {
+      label: 'cr.md frontmatter 重复 id（行号偏移回完整文件）',
+      corrupt: (txws, cr) => {
+        const cp = path.join(txws, 'change-requests', cr, 'cr.md');
+        const text = fs.readFileSync(cp, 'utf8').replaceAll('\r\n', '\n');
+        const norm = text.replace(/^id:.*$/m, (m) => `${m}\nid: ${cr}`);
+        corruptAndCommit(txws, `change-requests/${cr}/cr.md`, norm);
+      },
+      expect: { category: 'duplicate-key', file: 'cr.md' },
+    },
+  ];
+  for (const c of cases) {
+    const { base, kb, cr, txws } = makeWritebackFixture();
+    try {
+      c.corrupt(txws, cr);
+      const headBefore = git(txws, ['rev-parse', 'HEAD']);
+      const n0 = originMasterCount(base, 'kb');
+      const r = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+      assert.notEqual(r.status, 0, `${c.label}：候选校验必须失败`);
+      assert.ok(r.stderr.includes('ARCHIVE_YAML_INVALID'), `${c.label}：错误码 ARCHIVE_YAML_INVALID 缺失：${r.stderr}`);
+      assert.ok(r.stderr.includes(c.expect.category), `${c.label}：category=${c.expect.category} 缺失：${r.stderr}`);
+      assert.ok(r.stderr.includes(c.expect.file), `${c.label}：file=${c.expect.file} 缺失：${r.stderr}`);
+      assert.ok(/@line \d+|archive-invariant/.test(r.stderr), `${c.label}：诊断行号缺失：${r.stderr}`);
+      assert.equal(git(txws, ['status', '--porcelain']), '', `${c.label}：失败后工作区/stage 必须干净`);
+      assert.equal(git(txws, ['rev-parse', 'HEAD']), headBefore, `${c.label}：失败后 HEAD 不得移动`);
+      assert.equal(originMasterCount(base, 'kb'), n0, `${c.label}：失败零 commit/push`);
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-054 候选校验：history 缺少必需根键 → ARCHIVE_YAML_INVALID 且零 stage/commit/push', () => {
+  const { base, kb, cr, txws } = makeWritebackFixture();
+  try {
+    // The generated target entry remains a valid list item, but under the wrong root key.
+    corruptAndCommit(txws, 'change-requests/_history.yml', 'legacy-history:\n  - id: OTHER-1\n    final-status: archived\n');
+    const headBefore = git(txws, ['rev-parse', 'HEAD']);
+    const n0 = originMasterCount(base, 'kb');
+    const r = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.notEqual(r.status, 0, '缺少 history 根键必须失败');
+    assert.ok(r.stderr.includes('ARCHIVE_YAML_INVALID'), r.stderr);
+    assert.ok(r.stderr.includes('_history.yml') && r.stderr.includes('invalid-shape'), r.stderr);
+    assert.equal(git(txws, ['rev-parse', 'HEAD']), headBefore);
+    assert.equal(originMasterCount(base, 'kb'), n0);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-054 候选校验：index 缺少必需根键 → ARCHIVE_YAML_INVALID 且零 stage/commit/push', () => {
+  const { base, kb, cr, txws } = makeWritebackFixture();
+  try {
+    const ip = path.join(txws, 'change-requests', '_index.yml');
+    const text = fs.readFileSync(ip, 'utf8').replaceAll('change-requests:', 'legacy-index:');
+    corruptAndCommit(txws, 'change-requests/_index.yml', text);
+    const headBefore = git(txws, ['rev-parse', 'HEAD']);
+    const n0 = originMasterCount(base, 'kb');
+    const r = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.notEqual(r.status, 0, '缺少 change-requests 根键必须失败');
+    assert.ok(r.stderr.includes('ARCHIVE_YAML_INVALID'), r.stderr);
+    assert.ok(r.stderr.includes('_index.yml') && r.stderr.includes('invalid-shape'), r.stderr);
+    assert.equal(git(txws, ['rev-parse', 'HEAD']), headBefore);
+    assert.equal(originMasterCount(base, 'kb'), n0);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-054 候选校验：remote rebuild 损坏基线 → ARCHIVE_YAML_INVALID 且零新增 commit', () => {
+  const { base, kb, cr, txws } = makeWritebackFixture();
+  try {
+    // r1：archive 本地 commit 后注入 fault（不 push），journal 停在 committed
+    const r1 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb, env: { CRCTL_FAULT_POINT: 'archive-after-commit' } });
+    assert.equal(r1.status, 1, 'fault 注入必须非零退出');
+    // 他人推进 origin trunk 时携带损坏 history（模拟新基线坏账本），本 CR 的 rebuild 路径必须拒绝
+    git(kb, ['fetch', '-q', 'origin']);
+    git(kb, ['reset', '--hard', 'origin/master']);
+    fs.writeFileSync(path.join(kb, 'change-requests', '_history.yml'), 'history:\n  - id: OTHER-1\n    final-status: archived\n  - id: OTHER-1\n    final-status: archived\n');
+    git(kb, ['add', 'change-requests/_history.yml']);
+    git(kb, ['commit', '-q', '-m', 'other progress with corrupt history']);
+    git(kb, ['push', '-q', 'origin', 'HEAD:refs/heads/master']);
+    const n0 = originMasterCount(base, 'kb');
+    const r2 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.notEqual(r2.status, 0, 'rebuild 遇损坏候选必须失败');
+    assert.ok(r2.stderr.includes('ARCHIVE_YAML_INVALID'), '错误码 ARCHIVE_YAML_INVALID 缺失：' + r2.stderr);
+    assert.ok(r2.stderr.includes('_history.yml') && r2.stderr.includes('archive-invariant'), '诊断应指向 _history.yml 全局不变量：' + r2.stderr);
+    assert.equal(originMasterCount(base, 'kb'), n0, 'rebuild 失败零新增 archive commit');
+    assert.equal(git(txws, ['rev-parse', 'HEAD']), git(path.join(base, 'origin-kb.git'), ['rev-parse', 'master']), 'txws 停在他人基线，不产生本地提交');
+    assert.equal(git(txws, ['status', '--porcelain']), '', 'rebuild 失败后 txws 工作区/stage 干净');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});

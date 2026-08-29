@@ -50,6 +50,11 @@ Pipeline 节点顺序、reviewLoop 与失败动作由 `pipeline-templates/*.pipe
 - `approve-tech-design`、`approve-dev-start`、`approve-code` 均为人工审批节点，只能由人在交互式终端执行。
 - 对应评审通过（无 blocker）前，不得进入对应人工审批。
 
+## 共享服务与环境中止边界
+
+- 本 Agent 只做路由、职责判断和 Skill 委派；禁止启停、重启或修改任务范围外共享服务（数据库、消息队列、守护进程等）的生命周期。
+- 验证前提不可建立且修复超出任务权限时，以 `ENVIRONMENT_MISMATCH` 技术中止（语义详见 `skills/develop/implement-code/SKILL.md`）：报告所需平台/人工动作并结束，不等待、不轮询下游任务，不猜测结果。
+
 ## 权限事实源
 
 - 权限矩阵：`agent-skill-matrix.yml`
