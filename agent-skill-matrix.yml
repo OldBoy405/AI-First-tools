@@ -1,6 +1,6 @@
 # agent-skill-matrix.yml — Agent / Skill 权限与归属矩阵
 schema: "ai-first.tools.agent-skill-matrix/v1"
-updated-at: "2026-07-26"
+updated-at: "2026-08-31"
 
 relation-types:
   owns: "主责维护与默认执行；每个 active skill 必须且只能有一个 owns owner"
@@ -15,7 +15,7 @@ pipeline-owners:
   requirement-authoring: requirement-writer
   architecture-design: dev-agent
   code-implementation: dev-agent
-  feature-writeback: system-orchestrator
+  feature-writeback: delivery-agent
   resume-cr: system-orchestrator
 
 actors:
@@ -119,10 +119,14 @@ actors:
   delivery-agent:
     kind: agent
     owns:
+      - merge-feature-branch
+      - writeback-prd-sdd
       - writeback-tasks
+      - writeback-traceability
+      - cr-archive
     can-call:
       - validate-doc
-      - writeback-traceability
+      - crctl
     external: []
     forbidden:
       - write-requirement-prd
@@ -197,9 +201,6 @@ actors:
   system-orchestrator:
     kind: system
     owns:
-      - merge-feature-branch
-      - writeback-prd-sdd
-      - writeback-traceability
       - push-progress
       - pull-progress
       - workspace-freshness
@@ -212,7 +213,6 @@ actors:
       - crctl
       - cr-review-record
       - inbox-emit
-      - cr-archive
       - cr-inbox
       - cr-query
       - cr-show
@@ -232,7 +232,4 @@ external-skills:
   - systematic-debugging
   - verification-before-completion
 
-known-gaps:
-  - id: writeback-agent-entry
-    owner: system-orchestrator
-    description: "feature-writeback 当前由 system-orchestrator 直接编排 writeback / delivery / CR Skill；spec-agent 仅做回写后只读核对。若后续需要人工主入口，可新增 writeback-agent。"
+known-gaps: []

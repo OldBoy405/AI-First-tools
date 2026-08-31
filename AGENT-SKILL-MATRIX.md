@@ -25,10 +25,10 @@
 | `requirement-writer` | `requirement-register`, `write-requirement-prd`, `approve-requirement` |
 | `dev-agent` | `write-tech-design`, `approve-tech-design`, `write-dev-plan`, `write-dev-tasks`, `approve-dev-start`, `implement-code`, `write-test-report`, `approve-code`, `coding-discipline` |
 | `spec-agent` | `spec-show`, `spec-query`, `spec-dashboard` |
-| `delivery-agent` | `writeback-tasks` |
+| `delivery-agent` | `merge-feature-branch`, `writeback-prd-sdd`, `writeback-tasks`, `writeback-traceability`, `cr-archive` |
 | `quality-reviewer-agent` | `review-alignment`, `review-requirement`, `review-tech-design`, `review-dev-plan`, `review-code` |
 | `competitive-analyst-agent` | `fetch-competitor-updates`, `write-competitive-report`, `report-to-planning-suggestion` |
-| `system-orchestrator` | `merge-feature-branch`, `writeback-prd-sdd`, `writeback-traceability`, `push-progress`, `pull-progress`, `workspace-freshness`, `resume-from-remote`, `list-remote-checkpoints`, `handover-cr`, `validate-doc`, `engineering-docs`, `controlled-shell`, `crctl`, `cr-review-record`, `inbox-emit`, `cr-archive`, `cr-inbox`, `cr-query`, `cr-show`, `cr-dashboard` |
+| `system-orchestrator` | `push-progress`, `pull-progress`, `workspace-freshness`, `resume-from-remote`, `list-remote-checkpoints`, `handover-cr`, `validate-doc`, `engineering-docs`, `controlled-shell`, `crctl`, `cr-review-record`, `inbox-emit`, `cr-inbox`, `cr-query`, `cr-show`, `cr-dashboard` |
 
 ## Pipeline Owner
 
@@ -40,7 +40,7 @@
 | `requirement-authoring` | `requirement-writer` |
 | `architecture-design` | `dev-agent` |
 | `code-implementation` | `dev-agent` |
-| `feature-writeback` | `system-orchestrator` |
+| `feature-writeback` | `delivery-agent` |
 | `resume-cr` | `system-orchestrator` |
 
 ## 本 CR 权限变更
