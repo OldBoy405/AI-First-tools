@@ -91,6 +91,7 @@ const regArgs = (kb, overrides = {}) => {
     'owner-requirement': 'Ray',
     'owner-development': 'Ray',
     'owner-test': 'Ray',
+    'target-version': 'unassigned',
     ...overrides,
   };
   const args = ['register', '--workspace', kb];
@@ -523,5 +524,69 @@ test('CR-2026-046 TASK-01 AC-4：healthy / branch-only 分类不触发 fetch（b
     const r = ensureRepoWorkspace(resolveRepositories(kb), kbRepo(kb), crBranchOnly);
     assert.equal(r.action, 'created:from-local-branch', 'branch-only 必须不 fetch 直接挂接');
     assert.ok(fs.existsSync(wtPath(kb, 'knowledge-base', crBranchOnly)));
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── CR-2026-057 FR-12：register --target-version 硬校验 ────────────────────────── */
+
+function assertRegisterZeroWrite(base, kb) {
+  assert.equal(originMasterCount(base, 'kb'), 1, '失败必须零 commit/push');
+  assert.ok(!fs.existsSync(path.join(kb, 'change-requests', `CR-${YEAR}-001`)), '不得创建 CR 目录');
+  assert.ok(!fs.existsSync(path.join(kb, '.rayai-worktrees', 'knowledge-base', 'requirement', `CR-${YEAR}-001`)), '不得创建 worktree');
+  assert.ok(!fs.existsSync(journalDir(kb)), '不得创建 register journal');
+}
+
+test('CR-2026-057 FR-12/AC-12：缺 flag 与 6 类非法输入 → REGISTER_VERSION_INVALID 且零写入', () => {
+  // 缺 flag：不与其它 6 类共用一个 fixture（每次独立，保证零写入断言干净）
+  const f0 = makeFixture();
+  try {
+    const args = ['register', '--workspace', f0.kb];
+    for (const [k, v] of Object.entries({ 'registration-key': 'key-abc-123', title: 'TestCR', 'owner-requirement': 'Ray', 'owner-development': 'Ray', 'owner-test': 'Ray' })) args.push(`--${k}`, v);
+    const r = runCrctl(args, { cwd: f0.kb });
+    assert.notEqual(r.status, 0);
+    assert.equal(r.errJson.error.code, 'REGISTER_VERSION_INVALID');
+    assert.equal(r.errJson.error.reason, 'missing');
+    assertRegisterZeroWrite(f0.base, f0.kb);
+  } finally { fs.rmSync(f0.base, { recursive: true, force: true }); }
+
+  for (const bad of ['', 'tbd', 'TBD', 'n/a', 'pending', '0.29-rc']) {
+    const f = makeFixture();
+    try {
+      const r = runCrctl(regArgs(f.kb, { 'target-version': bad }), { cwd: f.kb });
+      assert.notEqual(r.status, 0, `应拒绝 target-version=${JSON.stringify(bad)}`);
+      assert.equal(r.errJson.error.code, 'REGISTER_VERSION_INVALID', `target-version=${JSON.stringify(bad)}: ${r.stderr}`);
+      assertRegisterZeroWrite(f.base, f.kb);
+    } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-057 FR-12/AC-12：unassigned / 0.30 / v0.30 → 成功且 cr.md 与 JSON targetVersion 为规范化值', () => {
+  for (const [raw, want] of [['unassigned', 'unassigned'], ['0.30', '0.30'], ['v0.30', '0.30'], ['V0.30', '0.30']]) {
+    const { base, kb } = makeFixture();
+    try {
+      const r = runCrctl(regArgs(kb, { 'target-version': raw }), { cwd: kb });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.json.targetVersion, want, `JSON targetVersion 必须是规范化值（${raw} → ${want}）`);
+      assert.match(fs.readFileSync(path.join(kb, 'change-requests', r.json.cr, 'cr.md'), 'utf8'), new RegExp(`^target-version: ${want}$`, 'm'));
+      assert.match(fs.readFileSync(path.join(kb, 'change-requests', '_backlog.yml'), 'utf8'), new RegExp(`^    target-version: ${want}$`, 'm'));
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-057 FR-12/AC-12：同 key 规范化同值续跑；规范化异值 → REGISTRATION_INPUT_MISMATCH', () => {
+  const { base, kb } = makeFixture();
+  try {
+    const r1 = runCrctl(regArgs(kb, { 'target-version': 'v0.30' }), { cwd: kb });
+    assert.equal(r1.status, 0, r1.stderr);
+    assert.equal(r1.json.targetVersion, '0.30');
+    // 同 key 同规范化值（V0.30 → 0.30）续跑：同 CR、零副作用
+    const r2 = runCrctl(regArgs(kb, { 'target-version': 'V0.30' }), { cwd: kb });
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.equal(r2.json.cr, r1.json.cr, '规范化同值必须幂等续跑同 CR');
+    assert.equal(r2.json.changed, false);
+    // 同 key 规范化异值：输入漂移硬阻断
+    const r3 = runCrctl(regArgs(kb, { 'target-version': '0.31' }), { cwd: kb });
+    assert.notEqual(r3.status, 0);
+    assert.equal(r3.errJson.error.code, 'REGISTRATION_INPUT_MISMATCH');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
