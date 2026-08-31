@@ -149,7 +149,7 @@ function makeTestCrFixture() {
   mkdirSync(crDir, { recursive: true });
   const owners = ['requirement', 'development', 'test']
     .flatMap((k) => [`  ${k}:`, `    id: Ray`, `    assigned-at: "2026-08-04T12:00:00+08:00"`]);
-  writeFileSync(path.join(crDir, 'cr.md'), ['---', 'id: CR-TEST-1', 'status: developing', 'owners:', ...owners, '---', ''].join('\n'));
+  writeFileSync(path.join(crDir, 'cr.md'), ['---', 'id: CR-TEST-1', 'status: developing', 'target-version: unassigned', 'owners:', ...owners, '---', ''].join('\n'));
   return { base, ws, crWs };
 }
 
@@ -491,4 +491,75 @@ test('端到端：非法 review-loop 与 pipeline 配置硬失败且不执行命
       (e) => e instanceof TxError && e.code === 'TEST_CONFIG_INVALID');
     assert.ok(!existsSync(sentinel));
   } finally { rmSync(second.base, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── CR-2026-057 FR-16：机器区 skipped 字段 ────────────────────────── */
+
+test('CR-2026-057 FR-16：冻结模式表五条各命中 → skipped:true（含 CRLF 变体）；无模式 exit 0 → false', () => {
+  const modeScripts = [
+    'console.log("# skip remaining")',
+    'console.log("ok 3 # skip")',
+    'console.log("skipped: 2")',
+    'console.log("SKIPPED")',
+    'console.log("no tests to run")',
+  ];
+  for (const script of modeScripts) {
+    const { base, crWs } = makeTestCrFixture();
+    try {
+      const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', script], timeoutSeconds: 30 }] };
+      const r = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(crWs, plan), '--workspace', crWs]);
+      assert.equal(r.code, 0, r.rawStderr);
+      assert.equal(r.stdout.commands[0].skipped, true, `模式 ${script} 必须命中 skipped:true`);
+      const report = readFileSync(path.join(crWs, 'change-requests', 'CR-TEST-1', 'test-report.md'), 'utf8');
+      assert.match(report, /skipped: true/);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  }
+
+  // CRLF 变体：stdout 含 \r\n 行尾时先规范化再匹配（NFR-3）
+  const crlf = makeTestCrFixture();
+  try {
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'process.stdout.write("ok 2 # skip\\r\\n")'], timeoutSeconds: 30 }] };
+    const r = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(crlf.crWs, plan), '--workspace', crlf.crWs]);
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout.commands[0].skipped, true, 'CRLF 输出先 \r\n→\n 后仍须命中');
+  } finally { rmSync(crlf.base, { recursive: true, force: true }); }
+
+  const clean = makeTestCrFixture();
+  try {
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'console.log("all green")'], timeoutSeconds: 30 }] };
+    const r = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(clean.crWs, plan), '--workspace', clean.crWs]);
+    assert.equal(r.stdout.commands[0].skipped, false, '无模式 exit 0 → skipped:false');
+  } finally { rmSync(clean.base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-057 FR-16：non-zero 一律 skipped:false；两域外模式文本不命中（B-SDD-004）', () => {
+  const failCase = makeTestCrFixture();
+  try {
+    // non-zero + 命中模式文本：那是失败不是 skip
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'console.log("skipped: 2"); process.exit(1)'], timeoutSeconds: 30 }] };
+    const r = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(failCase.crWs, plan), '--workspace', failCase.crWs]);
+    assert.equal(r.stdout.commands[0].skipped, false);
+    assert.equal(r.stdout.status, 'block');
+  } finally { rmSync(failCase.base, { recursive: true, force: true }); }
+
+  const metaCase = makeTestCrFixture();
+  try {
+    // 模式文本只出现在命令行参数与 (exit=) 元数据行：两域外不命中
+    const plan = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', '# skip', 'no tests to run', 'console.log("real-output")'], timeoutSeconds: 30 }] };
+    const r = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(metaCase.crWs, plan), '--workspace', metaCase.crWs]);
+    assert.equal(r.code, 0);
+    assert.equal(r.stdout.commands[0].skipped, false, '命令参数行/# skip 文本不得参与匹配（两域外）');
+  } finally { rmSync(metaCase.base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-057 FR-16：标记缺失/重复 → TEST_LOG_MARKER_INVALID 硬失败（NFR-3，不静默降级）', () => {
+  const { base, crWs } = makeTestCrFixture();
+  try {
+    // stdout 本身输出一条 --- stdout --- 标记 → log 中该标记重复 → 硬失败
+    const dup = { schema: 'cr-test-plan/v1', commands: [{ repo: 'ai-first-platform-docs', cwd: '.', executable: 'node', args: ['-e', 'console.log("--- stdout ---")'], timeoutSeconds: 30 }] };
+    const r = runCrctl(['test', 'CR-TEST-1', '--plan', writePlan(crWs, dup), '--workspace', crWs]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stderr.error.code, 'TEST_LOG_MARKER_INVALID');
+    assert.ok(!existsSync(path.join(crWs, 'change-requests', 'CR-TEST-1', 'test-report.md')), '硬失败零 authority');
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });
