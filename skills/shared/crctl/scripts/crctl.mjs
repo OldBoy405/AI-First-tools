@@ -2593,8 +2593,15 @@ function editBacklogTargetVersionLine(text, cr, version) {
   const lines = block.text.split('\n');
   const idx = lines.findIndex((l) => /^[ \t]*target-version:/.test(l));
   if (idx === -1) fail('LEDGER_PARSE_FAILED', `backlog 条目 ${cr} 缺 target-version 行`);
-  lines[idx] = lines[idx].replace(/^([ \t]*)(target-version:).*$/, `$1$2 ${yamlScalar(version)}`);
-  return norm.slice(0, block.start) + lines.join('\n') + norm.slice(block.end);
+  // B-CODE-001：块替换必须基于权威区间 norm.slice(block.start, block.end) 做单行定点替换，
+  // 禁止用 block.text 的 split/join 重建后拼接——matchEntryBlock 的 end 指向后继条目首字符，
+  // 块尾换行不在 block.text 内（末条目时文本与区间还各含一半换行），重建会丢失分隔换行，
+  // 把目标块最后一行与下一条目拼接破坏 YAML。区间文本自带块尾换行，替换后原样保留；
+  // 未命中（区间与 block.text 不一致）一律硬失败，禁止静默返回原文（纪律 #1）。
+  const spanText = norm.slice(block.start, block.end);
+  const replaced = spanText.replace(/^([ \t]*)target-version:.*$/m, (_, ind) => `${ind}target-version: ${yamlScalar(version)}`);
+  if (replaced === spanText) fail('LEDGER_PARSE_FAILED', '_backlog.yml 条目块内 target-version 行替换未命中（块区间与条目文本不一致）');
+  return norm.slice(0, block.start) + replaced + norm.slice(block.end);
 }
 
 /** 提交失败回滚：abort ledger + 撤销暂存 + clean 复核（镜像 rollbackOwnerWrite，错误码 VERSION_SET_COMMIT_*）。 */

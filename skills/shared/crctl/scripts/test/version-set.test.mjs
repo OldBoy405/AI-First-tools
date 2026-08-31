@@ -11,14 +11,15 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { makeFixture, git, runCrctl, sha256, originMasterCount } from './merge-fixture.mjs';
+import { parseYaml, matchEntryBlock } from '../lib/yaml-subset.mjs';
 
 const YEAR = String(new Date().getFullYear());
 
 const kbWt = (kb, cr) => path.join(kb, '.rayai-worktrees', 'knowledge-base', 'requirement', cr);
 const crDirIn = (ws, cr) => path.join(ws, 'change-requests', cr);
 
-function registerUnassigned(kb) {
-  const r = runCrctl(['register', '--registration-key', 'key-abc-123', '--title', 'VersionSetTest',
+function registerUnassigned(kb, key = 'key-abc-123') {
+  const r = runCrctl(['register', '--registration-key', key, '--title', 'VersionSetTest',
     '--owner-requirement', 'Ray', '--owner-development', 'Ray', '--owner-test', 'Ray',
     '--target-version', 'unassigned', '--workspace', kb], { cwd: kb });
   assert.equal(r.status, 0, r.stderr);
@@ -301,4 +302,47 @@ test('CR-2026-057 FR-15/AC-15：允许状态抽样——developing / code-approv
       assert.match(mdAfter, new RegExp(`^status: ${status}$`, 'm'), 'version-set 不改变 status');
     } finally { fs.rmSync(base, { recursive: true, force: true }); }
   }
+});
+
+test('CR-2026-057 B-CODE-001：目标 CR 后仍有 backlog 条目——后继条目字节不变、双投影仍可解析', () => {
+  const { base, kb } = makeFixture();
+  try {
+    const cr1 = registerUnassigned(kb);
+    const cr2 = registerUnassigned(kb, 'key-abc-124'); // 第二个 CR（不同 registration key）使 trunk backlog 在 cr1 条目之后追加
+    addDerived(kb, cr1);
+    const wt1 = kbWt(kb, cr1);
+    // cr1 worktree 分支创建早于 cr2 注册：把 trunk（已含 cr2 条目）合并进 cr1 分支，构造“目标条目非末项”真实路径
+    git(wt1, ['fetch', '-q', 'origin']);
+    git(wt1, ['merge', '--no-edit', 'origin/master']);
+    const bp = path.join(wt1, 'change-requests', '_backlog.yml');
+    const before = fs.readFileSync(bp, 'utf8').replaceAll('\r\n', '\n');
+    const beforeBlk2 = matchEntryBlock(before, cr2);
+    assert.ok(beforeBlk2, '前置：backlog 必须同时存在 cr1 与 cr2 条目');
+    const beforeCount = branchCommitCount(kb, cr1);
+    const r = runCrctl(['version-set', cr1, '--to', '0.30', '--workspace', wt1], { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.json.changed, true);
+    const after = fs.readFileSync(bp, 'utf8').replaceAll('\r\n', '\n');
+    // 后继条目逐字节不变（块文本与缩进均不得变化）
+    const afterBlk2 = matchEntryBlock(after, cr2);
+    assert.ok(afterBlk2, '后继条目必须仍可定位（不得被拼接破坏）');
+    assert.equal(afterBlk2.text, beforeBlk2.text, 'cr2 条目内容必须逐字节不变');
+    assert.equal(afterBlk2.indent, beforeBlk2.indent, 'cr2 条目缩进不变');
+    // 双投影仍可解析：_backlog.yml 整体解析 + cr.md frontmatter 解析
+    const doc = parseYaml(after);
+    assert.ok(Array.isArray(doc['change-requests']), 'backlog 整体必须仍可解析为 change-requests 列表');
+    assert.equal(doc['change-requests'].length, 2, '两个条目都保留');
+    const e1 = doc['change-requests'].find((e) => e.id === cr1);
+    const e2 = doc['change-requests'].find((e) => e.id === cr2);
+    assert.equal(e1['target-version'], 0.3, 'cr1 条目 target-version 同步（yaml-subset 标量解析为 0.3，原文口径见 readVersionOf）');
+    assert.equal(e2['target-version'], 'unassigned', 'cr2 条目 target-version 不受影响');
+    const mdText = fs.readFileSync(crDirIn(wt1, cr1) + path.sep + 'cr.md', 'utf8').replaceAll('\r\n', '\n');
+    const mdBody = mdText.split('---\n')[1];
+    const mdDoc = parseYaml(mdBody);
+    assert.equal(mdDoc['target-version'], 0.3, 'cr.md 投影可解析且同步');
+    assert.equal(mdDoc.status, 'drafting', 'version-set 不改变 status');
+    for (const rel of SIX_CLASSES) assert.equal(readVersionOf(kb, cr1, rel), '0.30', `${rel} 必须同步为 0.30`);
+    assert.equal(readVersionOf(kb, cr2, '_backlog.yml'), 'unassigned', 'cr2 条目版本不变');
+    assert.equal(branchCommitCount(kb, cr1), beforeCount + 1, '恰一个新 commit');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
