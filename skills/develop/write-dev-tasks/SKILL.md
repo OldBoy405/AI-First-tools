@@ -41,6 +41,7 @@ description: 将 change-requests/{CR-ID}/plan.md 拆解为独立可执行的 TAS
 - TASK 粒度：一个模块 / 一类接口 / 一个组件
 - 不得将"整个功能"作为单个 TASK
 - 跨模块依赖必须通过 `depends-on` 字段声明
+- **流程控制 TASK 禁止（CR-2026-057 FR-10）**：不得把 Pipeline 控制步骤 `merge` / `writeback` / `archive` 建成交付 TASK（即 `tasks/TASK-*.md` + `_index.yml` 中的条目）；不得创建完成前置包含 `code-reviewing` / `code-approved` / `merge` / `writeback` / `archive` 的交付 TASK（含标题或正文写成「发布准备」「merge 完成」之类）。`crctl task done` 仅允许 `status=developing`，merge 发生在 `code-approved` 之后，完成于 merge 的 TASK 无法合法标 done，会卡住 `deliveryIndexComplete` 归档门禁。merge / 审批 / checkpoint 的审计事实以既有 `approval.yml`、`merge-commits.yml`、checkpoint 元数据为准，不进 TASK ledger。若需要「实现已就绪、可交评审」类 TASK，完成边界必须是 `developing` 内可被 `crctl task done` 登记的事件（例如实现已落盘、关键测试命令已写入 test plan）。
 
 ### Step 2a — 回修模式（CR-2026-026 FR-8/FR-9）
 
@@ -61,6 +62,7 @@ type: TASK
 cr-ref: {cr_id}
 plan-ref: "change-requests/{cr_id}/plan.md"
 sdd-ref: "change-requests/{cr_id}/sdd.md"
+target-version: {cr.md 的 target-version 值}   # 从 cr.md 继承，禁止 tbd/自行改写（CR-2026-057 FR-13）
 title: {任务标题}
 slug: {任务标题提炼的英文 kebab-case，建议填写但非强制}
 status: pending

@@ -39,6 +39,7 @@ description: 在 requirement/CR-* worktree 内编写 PRD 需求文档，落盘�
 ### Step 2 — 读取上下文
 
 - 读取 `change-requests/{cr_id}/cr.md` 获取 title / summary / target-version / source / owners.requirement
+- **版本继承（CR-2026-057 FR-13）**：PRD frontmatter 的 `target-version` 必须继承 cr.md 值（`unassigned` 或真实版本），禁止写 `tbd`、禁止自行改写；若 cr.md 为 `unassigned` 且本 CR 需要真实版本，必须先经 `crctl version-set {cr_id} --to <real-version>` 更正后再写 PRD（PRD 本身不提供改写入口）
 - `summary` 中已确认的边界（注册阶段拍板或审批确认的范围/排除项）与当前上下文无冲突时优先原样采纳进 PRD 范围与 AC，不以换措辞方式重新定义已拍板事项
 - 若 `source` 指向规划报告路径，读取报告中对应功能的规划建议
 - 若存在 `review_feedback`，读取上一轮 `review-annotations/requirement.yml` 中的 blockers 与 reviewer 摘要
@@ -60,7 +61,7 @@ id: {cr_id}-prd
 type: PRD
 cr-ref: {cr_id}
 title: {cr.md.title}
-target-version: {target_version}
+target-version: {cr.md 的 target-version 值}   # 继承 cr.md，禁止 tbd/自行改写（CR-2026-057 FR-13）
 owner: {cr.md owners.requirement.id}
 owner-role: requirement
 status: draft

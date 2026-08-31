@@ -114,3 +114,4 @@ description: 在同一 CR workspace 内按 prd/sdd/tasks 执行代码编写，�
 - 禁止在平台运行时代码目录或主工作区 `code/` 直接编码。
 - 禁止只提交或只推送文档、只提交或只推送代码。
 - 禁止在缺少任一参与 repo worktree 时继续执行。
+- **范围越界撤回（CR-2026-057 FR-7）**：code 评审 blocker 若涉范围越界（实际 diff 触碰 SDD 批准范围的 `scope_out`、把 `follow_up` 做成当前交付、或改动 `zero_diff` 调用点），implementer 必须撤回越界 diff，不得在实现期扩大范围。

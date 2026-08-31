@@ -60,6 +60,8 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 - `change-requests/{cr_id}/test-report.md` — 测试报告（lint/test/build、TASK 验收覆盖、未覆盖风险）
 - `change-requests/{cr_id}/review-annotations/sdd.yml` — 技术评审记录（了解已知风险点）
 
+> **批准范围前置核对（CR-2026-057 FR-7）**：其余维度之前，先核对 SDD「批准范围」节（`scope_in`/`scope_out`/`zero_diff`/`follow_up`）。实际 diff 触碰 `scope_out`、把 `follow_up` 做成当前交付、或改动 `zero_diff` 调用点 → blocker，`repair-target` 必须是 `implement-code`（既有 `REVIEW_REPAIR_TARGETS.code`）。**禁止把 `repair-target` 写成 `write-tech-design` 或 `write-dev-plan`**（不存在 code→设计 的状态转换）；implementer 必须撤回越界 diff。若批准范围本身错误：code 阶段不可路由回设计，合法出路仅为（1）撤回越界 diff 使本轮 code 评审通过，或（2）人工 `approve-code` reject / `cr-review-record:withdraw`，另开后续 CR 修订 SDD；不得为此新增状态转换。
+
 ### Step 3 — 代码评审
 
 评审维度：
@@ -75,6 +77,32 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 | **前端质量** | 仅 diff 触及 `*.tsx`、`*.vue`、`*.css`、`*.html` 时触发，检查三项：① a11y 对比度达 WCAG AA（破 AA 升 blocker）；② 组件 loading/empty/error 状态完整覆盖；③ 构建体积在预算内。②③ 未达为 minor |
 
 **改进建议处置**：非阻塞发现一律进 `suggestions`，verdict 只判 CR 本身的 pass/block；语义：blockers=本 CR 内要处理的（不论轻重），suggestions=本 CR 内不处理的。
+
+**skip 语义（CR-2026-057 FR-16）**：关键测试 = 覆盖矩阵中作为某关键 AC 唯一验收证据的 `cmd-NN`。只读 `test-report.md` 机器区 `skipped`/`exit-code`/`timed-out` 与 plan 覆盖矩阵的 `cmd-NN`，**不得自行解析各测试框架输出**。关键测试 `skipped: true` 时：
+
+- 摘要必须明确「未执行 / 未测」，不得把单纯 exit 0 叙述成该 AC 已验证；
+- 若该命令是当前 CR 某关键 AC 的唯一验收证据 → 必须 blocker（`repair-target=implement-code`），不得仅凭机器区 `status=pass` 进入代码审批；
+- `ENVIRONMENT_MISMATCH` 保持既有技术中止约定（不是代码 blocker、不触发回修）；环境不满足可作为未覆盖风险记录，但不等于关键验收已完成。
+
+**首轮完整契约域（FR-1）**：检查实际 diff、所有调用者和关键失败路径；区分测试未执行、测试失败与业务缺陷。同一契约域/根因域的独立缺口同轮列出，不得在首个 blocker 处提前结束。
+
+**分级与报告前缀（CR-2026-057 FR-2/FR-3/FR-4，固定句式可机械核对）**
+
+**分级（FR-2）**：影响当前实现唯一性或当前验收可达性 → blocker；只影响表达/未来优化/后续 CR → suggestion；禁止批量升降级。
+
+**前缀（FR-3）**：`blockers[]` 与 `suggestions[]` 每条文本必须使用下列固定前缀之一（ASCII 全角冒号 `：`，前缀后可跟空格与正文；禁止自创同义前缀）：
+
+| 前缀 | 含义 | 写入位置 |
+|---|---|---|
+| `已解决：` | 上一轮某条 blocker 本轮已关闭 | `suggestions`（关闭项不得再进入本轮 `blockers`） |
+| `部分解决：` | 上一轮某条 blocker 仍有残留 | `blockers` |
+| `未解决：` | 上一轮某条 blocker 本轮仍在 | `blockers` |
+| `本轮新增：` | 本轮新发现的 blocker | `blockers` |
+| `范围外：` | 不在本 CR 范围，留给后续 CR | `suggestions` |
+
+机械核对规则：① 上一轮每条 blocker 必须在本轮 `blockers ∪ suggestions` 中恰好出现一次，前缀为 `已解决：` / `部分解决：` / `未解决：` 之一；对照键为上一轮文本的稳定标识（若原文以 `B-` 开头取到第一个空白或 `]`，否则取原文）。② 本轮新 blocker 必须带 `本轮新增：`。③ 首轮（无上一轮 blocker）全部 blocker 使用 `本轮新增：`。④ 范围外发现只进 `suggestions`，前缀 `范围外：`。block 的 `repair-target` 必须为 `implement-code`。
+
+**回修可重验（FR-4）**：逐条给出旧 blocker 的解决状态，禁止只写「已修复」；不得在报告文本或 canonical 字段中重新引入已删除的旧字段名（见 contract-scan 禁止清单）。
 
 ### Step 4 — 平台绑定前置步骤 + 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
 
