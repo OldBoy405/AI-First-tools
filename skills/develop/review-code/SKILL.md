@@ -60,7 +60,9 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 - `change-requests/{cr_id}/test-report.md` — 测试报告（lint/test/build、TASK 验收覆盖、未覆盖风险）
 - `change-requests/{cr_id}/review-annotations/sdd.yml` — 技术评审记录（了解已知风险点）
 
-> **批准范围前置核对（CR-2026-057 FR-7）**：其余维度之前，先核对 SDD「批准范围」节（`scope_in`/`scope_out`/`zero_diff`/`follow_up`）。实际 diff 触碰 `scope_out`、把 `follow_up` 做成当前交付、或改动 `zero_diff` 调用点 → blocker，`repair-target` 必须是 `implement-code`（既有 `REVIEW_REPAIR_TARGETS.code`）。**禁止把 `repair-target` 写成 `write-tech-design` 或 `write-dev-plan`**（不存在 code→设计 的状态转换）；implementer 必须撤回越界 diff。若批准范围本身错误：code 阶段不可路由回设计，合法出路仅为（1）撤回越界 diff 使本轮 code 评审通过，或（2）人工 `approve-code` reject / `cr-review-record:withdraw`，另开后续 CR 修订 SDD；不得为此新增状态转换。
+### Step 2.5 — 批准范围前置核对（CR-2026-057 FR-7）
+
+其余维度之前，先核对 SDD「批准范围」节（`scope_in`/`scope_out`/`zero_diff`/`follow_up`）。实际 diff 触碰 `scope_out`、把 `follow_up` 做成当前交付、或触及 `zero_diff` 调用点 → blocker，`repair-target` 必须是 `implement-code`（既有 `REVIEW_REPAIR_TARGETS.code`）。`repair-target` 不得取 `write-tech-design` 或 `write-dev-plan`（不存在 code→设计 的状态转换）；implementer 必须撤回越界 diff。若批准范围本身错误：code 阶段不可路由回设计，合法出路仅为（1）撤回越界 diff 使本轮 code 评审通过，或（2）人工 `approve-code` reject / `cr-review-record:withdraw`，另开后续 CR 走既有技术设计链路处理；不得为此新增状态转换。
 
 ### Step 3 — 代码评审
 
