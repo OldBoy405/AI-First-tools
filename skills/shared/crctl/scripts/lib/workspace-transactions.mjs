@@ -170,21 +170,30 @@ export function normalizeTargetVersion(raw, { allowUnassigned = true } = {}) {
 }
 
 /**
- * cr.md frontmatter target-version 行级读取器（SDD §2.2）：路径 {ws}/change-requests/{cr}/cr.md；
- * 读入后先 \r\n→\n 规范化（NFR-3），只在 frontmatter 内匹配 ^target-version: 行；
- * 文件不可读 / 无 frontmatter / 缺字段 → { ok:false, reason:'missing' }。纯只读，无任何副作用。
+ * cr.md frontmatter target-version 行级解析器（SDD §2.2）：输入必须已 \r\n→\n 规范化（NFR-3），
+ * 只在 frontmatter 内匹配 ^target-version: 行；无 frontmatter / 缺字段 → { ok:false, reason:'missing' }。
+ * 纯函数，无任何文件副作用。B-CODE-01：单样本语义基元——语义复核必须与锚点（before hash/afterText）
+ * 出自同一份 beforeRaw 文本，禁止对同一文件二次采样。
  */
-export function readCrMdTargetVersion(workspacePath, cr) {
-  const p = path.join(workspacePath, 'change-requests', cr, 'cr.md');
-  let text;
-  try { text = fs.readFileSync(p, 'utf8'); } catch { return { ok: false, reason: 'missing' }; }
-  const norm = text.replaceAll('\r\n', '\n');
+function parseCrMdTargetVersionText(norm) {
   const fm = norm.match(/^---\n([\s\S]*?)\n---/);
   if (!fm) return { ok: false, reason: 'missing' };
   const line = fm[1].split(/\r?\n/).find((l) => /^target-version:/.test(l));
   if (!line) return { ok: false, reason: 'missing' };
   const raw = line.replace(/^target-version:\s*/, '').trim().replace(/^["']|["']$/g, '');
   return { ok: true, raw };
+}
+
+/**
+ * cr.md frontmatter target-version 行级读取器（SDD §2.2）：路径 {ws}/change-requests/{cr}/cr.md；
+ * 读入后先 \r\n→\n 规范化（NFR-3），再委托 parseCrMdTargetVersionText 解析；
+ * 文件不可读 / 无 frontmatter / 缺字段 → { ok:false, reason:'missing' }。纯只读，无任何副作用。
+ */
+export function readCrMdTargetVersion(workspacePath, cr) {
+  const p = path.join(workspacePath, 'change-requests', cr, 'cr.md');
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch { return { ok: false, reason: 'missing' }; }
+  return parseCrMdTargetVersionText(text.replaceAll('\r\n', '\n'));
 }
 
 /**
@@ -2550,12 +2559,14 @@ export function editBacklogEntryTargetVersion(text, cr, version) {
 }
 
 /**
- * 回灌分支唯一计划器（FR-2/FR-2.1，SDD §4.3）：同源绑定（⓪）+ backlog 预检四错误码（①）+
- * cr.md 同源重读语义复核（③）。产物 { inputVersion, crMd: RefillEntry|null, backlog: RefillEntry|null,
+ * 回灌分支唯一计划器（FR-2/FR-2.1，SDD §4.3）：同源绑定（⓪）+ backlog 预检四错误码（①）+ 
+ * cr.md 同源重读语义复核（③，B-CODE-01 单样本：与锚点同一份 beforeRaw，禁止二次采样）。
+ * 产物 { inputVersion, crMd: RefillEntry|null, backlog: RefillEntry|null,
  * crMdBase: {text, sha256}|null }；RefillEntry = { path, beforeSha256, afterSha256, afterText }。
  * 纯读 + 纯文本变换，无任何文件写入；失败路径零写入（先于 candidate/journal，FR-2.1 时序）。
+ * input：原始 --target-version 入参（B-CODE-02：backlog INVALID 信封保留 input/inputReason/crMdReason）。
  */
-export function planVersionRefill({ txws, authority, cr, stage, version }) {
+export function planVersionRefill({ txws, authority, cr, stage, version, input = null }) {
   // ⓪ 同源绑定（B-SDD-02 防御性重申）：调用方已在 applyWritebackAtomic 第 5.5 步校验，此处防未来重构漂移
   if (authority.source !== 'transaction-workspace' || authority.path !== txws) {
     throw new TxError('WRITEBACK_STATE_MISMATCH', `writeback 版本权威与操作工作区不同源：guardSource=${authority.source} guardPath=${authority.path} opPath=${txws}`, { cr, phase: null });
@@ -2576,10 +2587,11 @@ export function planVersionRefill({ txws, authority, cr, stage, version }) {
   const blk = matchEntryBlock(norm, cr);
   if (!blk) throw new TxError('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml（条目块定位失败）`, { cr });
   const tLine = blk.text.split('\n').find((l) => /^[ \t]*target-version:/.test(l));
-  if (!tLine) throw new TxError('WRITEBACK_VERSION_INVALID', `_backlog.yml ${cr} 条目缺少 target-version 行`, { cr, backlogReason: 'missing' });
+  // B-CODE-02：backlog INVALID 信封按 PRD FR-6.2 / SDD §3.2 保留 cr/input/inputReason/crMdReason 并列 backlogReason（扁平，无 details）
+  if (!tLine) throw new TxError('WRITEBACK_VERSION_INVALID', `_backlog.yml ${cr} 条目缺少 target-version 行`, { cr, input: input == null ? null : String(input), inputReason: null, crMdReason: null, backlogReason: 'missing' });
   const tRaw = tLine.replace(/^[ \t]*target-version:\s*/, '').trim().replace(/^["']|["']$/g, '');
   const bv = normalizeTargetVersion(tRaw, { allowUnassigned: true });
-  if (!bv.ok) throw new TxError('WRITEBACK_VERSION_INVALID', `_backlog.yml ${cr} 条目 target-version 规范化失败`, { cr, backlogReason: bv.reason });
+  if (!bv.ok) throw new TxError('WRITEBACK_VERSION_INVALID', `_backlog.yml ${cr} 条目 target-version 规范化失败`, { cr, input: input == null ? null : String(input), inputReason: null, crMdReason: null, backlogReason: bv.reason });
   let backlogEntry = null;
   if (bv.value === 'unassigned') {
     const after = editBacklogEntryTargetVersion(norm, cr, version);
@@ -2589,13 +2601,16 @@ export function planVersionRefill({ txws, authority, cr, stage, version }) {
   } else {
     throw new TxError('WRITEBACK_BACKLOG_VERSION_MISMATCH', `_backlog.yml ${cr} 已是另一真实版本 ${bv.value}，与输入 ${version} 不一致，拒绝回灌`, { cr, crMd: 'unassigned', backlog: bv.value, input: version });
   }
-  // ③ cr.md 同源重读 + 语义复核（B-SDD-02：与 guard 首次采样同一 authority 路径）
+  // ③ cr.md 同源重读 + 语义复核（B-SDD-02：与 guard 首次采样同一 authority 路径；
+  // B-CODE-01 单样本：语义分支必须解析同一份 beforeRaw——before hash/afterText 与语义判定出自同一次读取，
+  // 禁止二次采样（若以第二次读到的 unassigned 放行、却以第一次读到的另一真实版本为 before 锚点，
+  // CAS 会覆盖该真实版本，违反 FR-2.1 零写入）。
   const rel = `change-requests/${cr}/cr.md`;
   let beforeRaw;
   try { beforeRaw = fs.readFileSync(path.join(txws, rel), 'utf8'); }
   catch { throw new TxError('WRITEBACK_VERSION_INVALID', `${cr} cr.md 不可读，无法回灌`, { crMdReason: 'missing' }); }
   const before = beforeRaw.replaceAll('\r\n', '\n');
-  const rvRead = readCrMdTargetVersion(txws, cr);
+  const rvRead = parseCrMdTargetVersionText(before);
   if (!rvRead.ok) throw new TxError('WRITEBACK_VERSION_INVALID', `${cr} cr.md target-version 读取失败`, { crMdReason: rvRead.reason });
   const rv = normalizeTargetVersion(rvRead.raw);
   if (!rv.ok) throw new TxError('WRITEBACK_VERSION_INVALID', `${cr} cr.md target-version 规范化失败`, { crMdReason: rv.reason });
@@ -2628,6 +2643,8 @@ async function applyWritebackAtomic(ctx, input) {
   // B-SDD-002：守卫通过后回灌规范化值——canonicalWritebackBusinessInput/businessInputDigest/manifest/
   // generator --version 全部消费规范化串；既有 startsWith('v') 剥离降为防御性 no-op。
   const versionGuard = guardWritebackVersion(ctx, cr, input.targetVersion);
+  // B-CODE-02：保留原始入参供 backlog INVALID 信封（guard 规范化后 raw 不可再得）
+  const rawTargetInput = input.targetVersion == null ? null : String(input.targetVersion);
   input.targetVersion = versionGuard.value;
   // CR-2026-049 TASK-02（TD-B2）：complete replay 前置——在 operational workspace 解析与 candidate 读取之前，
   // 先查 {cr}-traceability writeback journal；phase=complete && traceOutbox.state=pending 时仅用 journal intent 补发，
@@ -2682,7 +2699,7 @@ async function applyWritebackAtomic(ctx, input) {
   // payload.versionRefill 一旦落盘即冻结（B-SDD-01，见第 9 步）。
   let refillPlan = null;
   if (versionGuard.refill) {
-    refillPlan = planVersionRefill({ txws, authority: versionGuard.authority, cr, stage, version: versionGuard.value });
+    refillPlan = planVersionRefill({ txws, authority: versionGuard.authority, cr, stage, version: versionGuard.value, input: rawTargetInput });
   }
   const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
   const key = `${cr}-${stage}`;

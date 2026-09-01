@@ -363,6 +363,20 @@ function editTxwsBacklogVersion(txws, cr, newLine) {
   fs.writeFileSync(p, lines.join('\n'));
 }
 
+/** 删除 _backlog.yml 中 CR 条目块的 target-version 行（缺失行 → WRITEBACK_VERSION_INVALID backlogReason=missing 向量，B-CODE-02）。 */
+function removeTxwsBacklogVersionLine(txws, cr) {
+  const p = path.join(txws, 'change-requests', '_backlog.yml');
+  const text = fs.readFileSync(p, 'utf8').replaceAll('\r\n', '\n');
+  const lines = text.split('\n');
+  const idRe = new RegExp('^[ \\t]*- id:\\s*["\']?' + cr + '["\']?\\s*$');
+  const idx = lines.findIndex((l) => idRe.test(l));
+  assert.ok(idx >= 0, `_backlog.yml 缺少 ${cr} 条目`);
+  const tIdx = lines.findIndex((l, i) => i > idx && /^[ \t]*target-version:/.test(l));
+  assert.ok(tIdx >= 0, `_backlog.yml ${cr} 条目缺 target-version 行`);
+  lines.splice(tIdx, 1);
+  fs.writeFileSync(p, lines.join('\n'));
+}
+
 /** 删除 _backlog.yml 中 CR 条目块（0 命中 → ENTRY_NOT_IN_BACKLOG 向量）。 */
 function deleteBacklogEntry(txws, cr) {
   const p = path.join(txws, 'change-requests', '_backlog.yml');
@@ -404,6 +418,10 @@ const ledgersOf = (bare, commit, cr) => ({
   crMd: git(bare, ['show', `${commit}:change-requests/${cr}/cr.md`]),
   backlog: git(bare, ['show', `${commit}:change-requests/_backlog.yml`]),
 });
+
+/** B-CODE-03：writeback commit 的变更集（diff-tree vs 父提交）——证明业务文件在本 commit 被实际修改，
+ * 而非 ls-tree 存在性断言（fixture 初始 trunk 已创建 specs 路径，存在性无法证明本 commit 修改了业务文件）。 */
+const changedPathsOf = (bare, commit) => git(bare, ['diff-tree', '--no-commit-id', '--name-only', '-r', commit]).split('\n').filter(Boolean);
 
 // AC-1.1（冻结名，放行向量）：cr.md=unassigned + 输入真实版本 → 放行并回灌，不得为 WRITEBACK_VERSION_UNASSIGNED
 test('CR-2026-058 AC-1.1：merged 夹具 cr.md=unassigned + 0.30 → 放行回灌两账本（含 v0.30 规范化等价）', () => {
@@ -476,9 +494,11 @@ test('CR-2026-058 AC-2.1：成功回灌原子性——两账本同 commit、冻�
     assert.match(crMd, /^target-version: 0\.30$/m);
     assert.match(crMd, /^status: writing-back$/m);
     assert.match(backlog, /^\s*target-version: 0\.30$/m);
-    // baseline status 变迁与版本回灌同一次 commit：specs 三文件同 commit
-    for (const p of ['specs/_index.yml', 'specs/test-spec/PRD.md', 'specs/test-spec/SDD.md']) {
-      assert.ok(git(bare, ['ls-tree', '-r', '--name-only', baselineCommit]).split('\n').includes(p), `${p} 在 baseline commit 内`);
+    // baseline status 变迁与版本回灌同一次 commit（B-CODE-03：diff-tree 变更集断言——
+    // 两账本 + 三项 baseline 业务文件必须在本 commit 被实际修改，ls-tree 存在性不足证）
+    const changed = changedPathsOf(bare, baselineCommit);
+    for (const p of [`change-requests/${cr}/cr.md`, 'change-requests/_backlog.yml', 'specs/_index.yml', 'specs/test-spec/PRD.md', 'specs/test-spec/SDD.md']) {
+      assert.ok(changed.includes(p), `${p} 在 baseline writeback commit 变更集内（diff-tree）`);
     }
     assert.deepEqual(frozenArtifactsHash(txws, cr), frozenBefore, 'prd/sdd/plan/tasks 字节级不变（NFR-6）');
     // tasks/traceability 各跑一次：版本行无新 diff（git log --follow 两账本路径仅首 commit 含版本行变更）
@@ -540,7 +560,7 @@ test('CR-2026-058 AC-2.2：backlog 预检五向量——冲突/缺失/重复/非
       assert.deepEqual(snapshotSixPoints(base, kb, cr, txws), before, '重复拒绝：六项零观察点');
     } finally { fs.rmSync(base, { recursive: true, force: true }); }
   }
-  // 4) 条目 target-version 非法（n/a）→ WRITEBACK_VERSION_INVALID 含 backlogReason
+  // 4) 条目 target-version 非法（n/a）→ WRITEBACK_VERSION_INVALID：扁平信封保留 cr/input/inputReason/crMdReason 并列 backlogReason（B-CODE-02）
   {
     const { base, kb, cr, txws } = makeMergedFixture({ targetVersion: 'unassigned' });
     try {
@@ -549,8 +569,31 @@ test('CR-2026-058 AC-2.2：backlog 预检五向量——冲突/缺失/重复/非
       const r = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', '0.30', '--workspace', kb], { cwd: kb });
       assert.equal(r.status, 1);
       assert.equal(r.errJson.error.code, 'WRITEBACK_VERSION_INVALID', r.stderr);
-      assert.ok(r.errJson.error.backlogReason, `backlogReason=${r.errJson.error.backlogReason}`);
+      assert.equal(r.errJson.error.cr, cr, '扁平信封含 cr');
+      assert.equal(r.errJson.error.input, '0.30', '扁平信封含原始 input');
+      assert.equal(r.errJson.error.inputReason, null, 'input 已过 guard，inputReason=null');
+      assert.equal(r.errJson.error.crMdReason, null, 'cr.md 已过 guard，crMdReason=null');
+      assert.equal(r.errJson.error.backlogReason, 'forbidden', `backlogReason=${r.errJson.error.backlogReason}`);
+      assert.equal(r.errJson.error.details, undefined, '失败信封扁平，无 error.details');
       assert.deepEqual(snapshotSixPoints(base, kb, cr, txws), before, '非法拒绝：六项零观察点');
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  }
+  // 4b) 条目缺少 target-version 行 → WRITEBACK_VERSION_INVALID：同样扁平信封（backlogReason=missing，B-CODE-02）
+  {
+    const { base, kb, cr, txws } = makeMergedFixture({ targetVersion: 'unassigned' });
+    try {
+      removeTxwsBacklogVersionLine(txws, cr);
+      const before = snapshotSixPoints(base, kb, cr, txws);
+      const r = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', '0.30', '--workspace', kb], { cwd: kb });
+      assert.equal(r.status, 1);
+      assert.equal(r.errJson.error.code, 'WRITEBACK_VERSION_INVALID', r.stderr);
+      assert.equal(r.errJson.error.cr, cr, '扁平信封含 cr');
+      assert.equal(r.errJson.error.input, '0.30', '扁平信封含原始 input');
+      assert.equal(r.errJson.error.inputReason, null);
+      assert.equal(r.errJson.error.crMdReason, null);
+      assert.equal(r.errJson.error.backlogReason, 'missing', `backlogReason=${r.errJson.error.backlogReason}`);
+      assert.equal(r.errJson.error.details, undefined, '失败信封扁平，无 error.details');
+      assert.deepEqual(snapshotSixPoints(base, kb, cr, txws), before, '缺失拒绝：六项零观察点');
     } finally { fs.rmSync(base, { recursive: true, force: true }); }
   }
   // 5) 条目已=输入 0.30、cr.md 仍 unassigned → 放行只回灌 cr.md，backlog 版本行无 diff
@@ -606,6 +649,11 @@ test('CR-2026-058 AC-2.3.1：writeback-after-apply 中断重试——direct task
     assert.ok(git(bare, ['ls-tree', '-r', '--name-only', head]).split('\n').some((p) => p.startsWith('delivery/task/')), '重试 commit 含本 stage 业务文件');
     assert.ok(second.json.files.includes(`change-requests/${cr}/cr.md`), 'stdout files 含 cr.md');
     assert.ok(second.json.files.includes('change-requests/_backlog.yml'), 'stdout files 含 _backlog.yml');
+    // B-CODE-03：故障恢复断言同步采用 diff-tree 变更集口径——两账本 + 本 stage 业务文件在本 commit 被实际修改
+    const changed = changedPathsOf(bare, head);
+    assert.ok(changed.includes(`change-requests/${cr}/cr.md`), '重试 commit 变更集含 cr.md（diff-tree）');
+    assert.ok(changed.includes('change-requests/_backlog.yml'), '重试 commit 变更集含 _backlog.yml（diff-tree）');
+    assert.ok(changed.some((p) => p.startsWith('delivery/task/')), '重试 commit 变更集含本 stage 业务文件（diff-tree）');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
@@ -640,6 +688,11 @@ test('CR-2026-058 AC-2.3.1b：tx-apply-between-rename 部分 apply 冻结回归�
     assert.ok(git(bare, ['ls-tree', '-r', '--name-only', head]).split('\n').some((p) => p.startsWith('delivery/task/')), 'commit 含业务文件');
     assert.ok(second.json.files.includes(`change-requests/${cr}/cr.md`), 'stdout files 含 cr.md');
     assert.ok(second.json.files.includes('change-requests/_backlog.yml'), 'stdout files 含 _backlog.yml');
+    // B-CODE-03：diff-tree 变更集口径同步（两账本 + 本 stage 业务文件）
+    const changed = changedPathsOf(bare, head);
+    assert.ok(changed.includes(`change-requests/${cr}/cr.md`), '重试 commit 变更集含 cr.md（diff-tree）');
+    assert.ok(changed.includes('change-requests/_backlog.yml'), '重试 commit 变更集含 _backlog.yml（diff-tree）');
+    assert.ok(changed.some((p) => p.startsWith('delivery/task/')), '重试 commit 变更集含本 stage 业务文件（diff-tree）');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
@@ -659,6 +712,11 @@ test('CR-2026-058 AC-2.3.2：writeback-after-commit 中断重试——不新增 
     const { crMd, backlog } = ledgersOf(bare, second.json.commit, cr);
     assert.match(crMd, /^target-version: 0\.30$/m);
     assert.match(backlog, /^\s*target-version: 0\.30$/m);
+    // B-CODE-03：唯一 commit 的变更集同时含两账本与三项 baseline 业务文件（diff-tree 口径）
+    const changed = changedPathsOf(bare, second.json.commit);
+    for (const p of [`change-requests/${cr}/cr.md`, 'change-requests/_backlog.yml', 'specs/_index.yml', 'specs/test-spec/PRD.md', 'specs/test-spec/SDD.md']) {
+      assert.ok(changed.includes(p), `${p} 在 writeback baseline commit 变更集内（diff-tree）`);
+    }
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
@@ -680,6 +738,12 @@ test('CR-2026-058 AC-2.3.3：writeback-after-push 中断重试——commit 不�
     const { crMd, backlog } = ledgersOf(path.join(base, 'origin-kb.git'), second.json.commit, cr);
     assert.match(crMd, /^target-version: 0\.30$/m);
     assert.match(backlog, /^\s*target-version: 0\.30$/m);
+    // B-CODE-03：diff-tree 变更集口径同步（两账本 + 三项 baseline 业务文件）
+    const bare = path.join(base, 'origin-kb.git');
+    const changed = changedPathsOf(bare, second.json.commit);
+    for (const p of [`change-requests/${cr}/cr.md`, 'change-requests/_backlog.yml', 'specs/_index.yml', 'specs/test-spec/PRD.md', 'specs/test-spec/SDD.md']) {
+      assert.ok(changed.includes(p), `${p} 在 writeback baseline commit 变更集内（diff-tree）`);
+    }
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 

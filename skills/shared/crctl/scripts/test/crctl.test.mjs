@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, realpathSync, chmodSync, appendFileSync } from 'node:fs';
+import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
@@ -27,6 +28,8 @@ function sha16(text) {
   // 与 crctl.mjs 的 evidenceSha16 同口径：行尾规范化后哈希（防 autocrlf 误报）
   return crypto.createHash('sha256').update(text.replaceAll('\r\n', '\n'), 'utf8').digest('hex').slice(0, 16);
 }
+
+const sha256hex = (t) => crypto.createHash('sha256').update(t, 'utf8').digest('hex');
 
 function runCrctl(args, env) {
   const r = spawnSync(process.execPath, [CRCTL, ...args], { encoding: 'utf8', env: env ? { ...process.env, ...env } : process.env });
@@ -4936,6 +4939,51 @@ test('CR-2026-058 TASK-02：planVersionRefill 语义复核四分支 + 同源断�
   }
 });
 
+// B-CODE-01 回归：cr.md 语义复核与锚点必须出自同一份 beforeRaw（单样本，禁止二次采样）。
+// 1) 打桩 fs.readFileSync：cr.md 首次读（唯一样本）= 另一真实版本 0.29；若实现二次采样，第二次读到 unassigned
+//    （往返漂移模拟）。正确实现恰好一次读取、语义按 0.29 → MISMATCH 零写入；二次采样实现会按 unassigned 放行
+//    并以第一次读到的 0.29 为 before 锚点 → 覆盖真实版本，测试失败。
+// 2) 正常调用：beforeSha256 锚定同一份原始字节（CRLF 原样），afterText 由同一份 beforeRaw 规范化生成——锚点与
+//    语义变换同源可核。
+test('CR-2026-058 TASK-02 回归：planVersionRefill 单样本语义——cr.md 恰好一次采样、锚点与语义同源（B-CODE-01）', () => {
+  // 1) 二次采样检测：首次读 0.29、二次读 unassigned → 必须按首次读（唯一样本）抛 MISMATCH，且 cr.md 只读一次
+  {
+    const txws = makePlanTx();
+    try {
+      const crMdPath = path.join(txws, 'change-requests', 'CR-P1', 'cr.md');
+      const origRead = fs.readFileSync;
+      let crMdReads = 0;
+      fs.readFileSync = function (p, ...rest) {
+        const s = String(p);
+        if (path.resolve(s) === path.resolve(crMdPath)) {
+          crMdReads += 1;
+          return crMdReads === 1
+            ? '---\nid: CR-P1\nstatus: merging\ntarget-version: 0.29\nupdated: "2026-09-01T00:00:00+08:00"\n---\n'
+            : '---\nid: CR-P1\nstatus: merging\ntarget-version: unassigned\nupdated: "2026-09-01T00:00:00+08:00"\n---\n';
+        }
+        return origRead.call(this, p, ...rest);
+      };
+      try {
+        assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
+          (e) => e.code === 'WRITEBACK_VERSION_MISMATCH' && e.extra.crMd === '0.29' && e.extra.input === '0.30');
+        assert.equal(crMdReads, 1, 'cr.md 必须恰好一次采样（禁止二次采样）');
+      } finally { fs.readFileSync = origRead; }
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+  // 2) 锚点同源：CRLF 原始字节锚定 beforeSha256；afterText = 同一份 beforeRaw 规范化后的行级编辑结果
+  {
+    const txws = makePlanTx({ crMdText: '---\r\nid: CR-P1\r\nstatus: merging\r\ntarget-version: unassigned\r\nupdated: "2026-09-01T00:00:00+08:00"\r\n---\r\n' });
+    try {
+      const t = planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' });
+      assert.ok(t.crMd, 'unassigned → 放行生成条目');
+      const raw = readFileSync(path.join(txws, 'change-requests', 'CR-P1', 'cr.md'), 'utf8');
+      assert.equal(t.crMd.beforeSha256, sha256hex(raw), 'beforeSha256 锚定同一份 beforeRaw 原始字节（CRLF 原样）');
+      assert.equal(t.crMd.afterText, applyTargetVersionToCrMd(raw.replaceAll('\r\n', '\n'), '0.30'), 'afterText 由同一份 beforeRaw 规范化生成');
+      assert.equal(t.crMd.afterSha256, sha256hex(t.crMd.afterText), 'afterSha256 与 afterText 同源');
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+});
+
 test('CR-2026-058 TASK-02：backlog 预检五向量（unassigned/等值/另一真实/缺失/重复/非法）', () => {
   // 等值 → backlog 条目 null（幂等），cr.md 仍 unassigned 继续回灌
   {
@@ -4970,19 +5018,23 @@ test('CR-2026-058 TASK-02：backlog 预检五向量（unassigned/等值/另一�
         (e) => e.code === 'WRITEBACK_BACKLOG_ENTRY_DUPLICATE' && e.extra.count >= 2);
     } finally { rmSync(txws, { recursive: true, force: true }); }
   }
-  // 缺行/非法 → INVALID（backlogReason）
+  // 缺行/非法 → INVALID（B-CODE-02：扁平信封保留 cr/input/inputReason/crMdReason 并列 backlogReason，无 details）
   {
     const txws = makePlanTx({ backlogBody: 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-P1\n    title: T\n    status: code-approved\n' });
     try {
-      assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
-        (e) => e.code === 'WRITEBACK_VERSION_INVALID' && e.extra.backlogReason === 'missing');
+      assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30', input: '0.30' }),
+        (e) => e.code === 'WRITEBACK_VERSION_INVALID' && e.extra.backlogReason === 'missing'
+          && e.extra.cr === 'CR-P1' && e.extra.input === '0.30' && e.extra.inputReason === null && e.extra.crMdReason === null
+          && e.extra.details === undefined);
     } finally { rmSync(txws, { recursive: true, force: true }); }
   }
   {
     const txws = makePlanTx({ backlogBody: 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-P1\n    title: T\n    status: code-approved\n    target-version: n/a\n' });
     try {
-      assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
-        (e) => e.code === 'WRITEBACK_VERSION_INVALID' && e.extra.backlogReason === 'forbidden');
+      assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30', input: '0.30' }),
+        (e) => e.code === 'WRITEBACK_VERSION_INVALID' && e.extra.backlogReason === 'forbidden'
+          && e.extra.cr === 'CR-P1' && e.extra.input === '0.30' && e.extra.inputReason === null && e.extra.crMdReason === null
+          && e.extra.details === undefined);
     } finally { rmSync(txws, { recursive: true, force: true }); }
   }
 });
