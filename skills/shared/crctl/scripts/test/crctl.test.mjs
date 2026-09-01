@@ -4548,6 +4548,37 @@ test('CR-2026-039 TASK-04 AC-5: KB 白名单后继提交 approve-code 仍可通�
   } finally { rmSync(ws2, { recursive: true, force: true }); }
 });
 
+test('CR-2026-057: KB 白名单新增 _context.md（工作流上下文加速文件）后继提交 approve-code 通过；_context2.md 非白名单仍拒绝', () => {
+  const { ws, privateKey } = makeCodeStageWorkspace();
+  try {
+    runCodeReviewAndAdvance(ws);
+    const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+    const g = (args) => { const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
+    // ① 评审后仅 _context.md 变化（每 run 收尾刷新的工作流上下文加速文件，与 cr.md/traceability.yml 同类）→ 放行
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', '_context.md'), '# context\n');
+    g(['add', '-A']); g(['commit', '-q', '-m', 'kb context successor']);
+    const gp = makeCodeGrant(ws, privateKey);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 0, `_context.md 后继应放行: ${r.rawStderr}`);
+    assert.equal(r.stdout.to, 'code-approved');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+  // ② _context2.md（同类拼写但非白名单）→ post-review-path-drift 拒绝且零写入（独立 fixture）
+  const { ws: ws2, privateKey: pk2 } = makeCodeStageWorkspace();
+  try {
+    runCodeReviewAndAdvance(ws2);
+    const wt = path.join(ws2, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+    const g = (args) => { const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', '_context2.md'), 'non-whitelisted\n');
+    g(['add', '-A']); g(['commit', '-q', '-m', 'kb non-whitelist context2']);
+    const gp = makeCodeGrant(ws2, pk2);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws2]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'RELEASE_SUBJECT_DRIFT');
+    assert.equal(r.stderr.error.reason, 'post-review-path-drift');
+    assert.equal(existsSync(path.join(ws2, 'change-requests', 'CR-D1', 'approval.yml')), false, 'approval.yml 零写入');
+  } finally { rmSync(ws2, { recursive: true, force: true }); }
+});
+
 test('TASK-06 ⑤: release-drift 单一回退转换 code-approved -> developing 合法；状态机口径 28 声明/50 展开（AC-3）', () => {
   const { ws } = makeDevStartWorkspace();
   try {

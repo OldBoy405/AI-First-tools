@@ -1176,6 +1176,8 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
         `change-requests/${cr}/traceability.yml`,
         `change-requests/${cr}/review-loop.yml`,
         'change-requests/_backlog.yml',
+        // _context.md：工作流上下文加速文件（每 run 收尾刷新、随 CR 提交），与 cr.md/traceability.yml 同类，评审后可变更。
+        `change-requests/${cr}/_context.md`,
       ]);
       const reviewPrefix = `change-requests/${cr}/review-annotations/`;
       const changed = gitMust(wt, ['diff', '--name-only', `${repoReviewedSha(r)}..${head}`]).split('\n').filter(Boolean);
