@@ -89,19 +89,21 @@ export function makeFixture() {
 }
 
 /** 手工构造 code-approved 状态（TASK-06 模型）：评审/审批证据写入 CR worktree，
- * reviewed-source-sha 固定其写入前的 feature HEAD。 */
-export function makeCodeApprovedFixture() {
+ * reviewed-source-sha 固定其写入前的 feature HEAD。
+ * CR-2026-058（FR-4）：targetVersion 参数化——cr.md 与 _backlog.yml 条目均写 `target-version: <v>` 行；
+ * 默认 0.2 保持既有行为（既有断言零影响）。 */
+export function makeCodeApprovedFixture({ targetVersion = '0.2' } = {}) {
   const f = makeFixture();
   const { base, kb, others } = f;
   const cr = `CR-${YEAR}-042`;
   // 1) kb master：注册账本 + cr.md(code-approved) + plan/tasks/test-report
   fs.writeFileSync(path.join(kb, 'change-requests', '_backlog.yml'),
-    `schema: cr-backlog/v2\nchange-requests:\n  - id: ${cr}\n    title: Merge Test\n    status: code-approved\n    owner: alice\n`);
+    `schema: cr-backlog/v2\nchange-requests:\n  - id: ${cr}\n    title: Merge Test\n    status: code-approved\n    owner: alice\n    target-version: ${targetVersion}\n`);
   fs.writeFileSync(path.join(kb, 'change-requests', '_index.yml'), `change-requests:\n  - id: ${cr}\n    title: Merge Test\n`);
   let kbCr = path.join(kb, 'change-requests', cr);
   fs.mkdirSync(path.join(kbCr, 'tasks'), { recursive: true });
   fs.writeFileSync(path.join(kbCr, 'cr.md'),
-    `---\nid: ${cr}\nstatus: code-approved\ntarget-version: 0.2\nupdated-at: "2026-08-11T21:00:00+08:00"\n---\n`);
+    `---\nid: ${cr}\nstatus: code-approved\ntarget-version: ${targetVersion}\nupdated-at: "2026-08-11T21:00:00+08:00"\n---\n`);
   fs.writeFileSync(path.join(kbCr, 'prd.md'), '# PRD\n');
   fs.writeFileSync(path.join(kbCr, 'sdd.md'), '# SDD\n');
   fs.writeFileSync(path.join(kbCr, 'plan.md'), '# Plan\n');
