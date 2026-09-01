@@ -148,6 +148,45 @@ function readCrMdStatus(ws, cr) {
   return s ? s[1] : null;
 }
 
+/* ────────────────────────── 版本规范化基元（CR-2026-057 TASK-01） ──────────────────────────
+ * normalizeTargetVersion：register/writeback-apply/version-set 三命令共用的版本值域与规范化纯函数
+ * （SDD §2.1/§4.1）。禁止同义值集合冻结 11 项；v/V 前缀在大小写折叠前对 trim 串剥离恰好一个。
+ * 纯 string→result，禁止抛异常（错误码映射由调用方完成）。 */
+const FORBIDDEN_VERSION_SYNONYMS = new Set(['tbd', 'n/a', 'na', 'n.a.', 'pending', 'none', 'unknown', 'todo', 'wip', 'null', 'undefined']);
+const REAL_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)(\.(0|[1-9]\d*))?$/;
+
+export function normalizeTargetVersion(raw, { allowUnassigned = true } = {}) {
+  if (raw == null || typeof raw !== 'string') return { ok: false, reason: 'missing' };
+  const trimmed = raw.trim();
+  if (trimmed === '') return { ok: false, reason: 'empty' };
+  const token = trimmed.toLowerCase();
+  if (FORBIDDEN_VERSION_SYNONYMS.has(token)) return { ok: false, reason: 'forbidden' };
+  if (token === 'unassigned') {
+    return allowUnassigned ? { ok: true, value: 'unassigned' } : { ok: false, reason: 'unassigned-not-allowed' };
+  }
+  const candidate = (trimmed.startsWith('v') || trimmed.startsWith('V')) ? trimmed.slice(1) : trimmed;
+  if (!REAL_VERSION_RE.test(candidate)) return { ok: false, reason: 'malformed' };
+  return { ok: true, value: candidate };
+}
+
+/**
+ * cr.md frontmatter target-version 行级读取器（SDD §2.2）：路径 {ws}/change-requests/{cr}/cr.md；
+ * 读入后先 \r\n→\n 规范化（NFR-3），只在 frontmatter 内匹配 ^target-version: 行；
+ * 文件不可读 / 无 frontmatter / 缺字段 → { ok:false, reason:'missing' }。纯只读，无任何副作用。
+ */
+export function readCrMdTargetVersion(workspacePath, cr) {
+  const p = path.join(workspacePath, 'change-requests', cr, 'cr.md');
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch { return { ok: false, reason: 'missing' }; }
+  const norm = text.replaceAll('\r\n', '\n');
+  const fm = norm.match(/^---\n([\s\S]*?)\n---/);
+  if (!fm) return { ok: false, reason: 'missing' };
+  const line = fm[1].split(/\r?\n/).find((l) => /^target-version:/.test(l));
+  if (!line) return { ok: false, reason: 'missing' };
+  const raw = line.replace(/^target-version:\s*/, '').trim().replace(/^["']|["']$/g, '');
+  return { ok: true, raw };
+}
+
 /**
  * phase authority resolver（SDD §1.3）：
  * - register～code-approved：authority = CR requirement worktree（source 'cr-worktree'）；
@@ -586,7 +625,13 @@ export async function registerCr(ctx, input) {
   if (origin && !/^CR-\d{4}-\d{3}$/.test(origin)) {
     throw new TxError('REGISTER_INPUT_INVALID', `register --origin 非法：${origin}（须为 CR-YYYY-NNN，留空表示非修复类 CR）`, { origin });
   }
-  const targetVersion = input.targetVersion ?? 'tbd';
+  // FR-12（CR-2026-057）：--target-version 必填硬校验——位于锁/journal/fetch/账本写之前，失败零写入。
+  // 缺 flag 不进 cmdRegister 的 BAD_ARGS 循环，由本规范化层返回 REGISTER_VERSION_INVALID（SDD §3.1）。
+  const tv = normalizeTargetVersion(input.targetVersion);
+  if (!tv.ok) {
+    throw new TxError('REGISTER_VERSION_INVALID', `register --target-version 非法：${String(input.targetVersion ?? '') || '(缺失)'}（reason=${tv.reason}；合法值 = 真实版本 MAJOR.MINOR[.PATCH] 或 unassigned）`, { reason: tv.reason, raw: input.targetVersion == null ? null : String(input.targetVersion) });
+  }
+  const targetVersion = tv.value;
   const keyHash = sha256(String(input.registrationKey));
   const inputDigest = sha256(JSON.stringify({
     title: input.title, summary, source, origin, targetVersion, year,
@@ -715,7 +760,7 @@ export async function registerCr(ctx, input) {
       faultPoint('register-between-worktrees', { repo: repo.id });
     }
     await save('complete');
-    return { cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete, sideEffects: buildSideEffects(payload), recoverCommand };
+    return { cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete, sideEffects: buildSideEffects(payload), targetVersion, recoverCommand };
   } finally {
     await lock.release();
   }
@@ -1131,6 +1176,8 @@ export async function verifyReleaseSubjects(ctx, cr, snapshot) {
         `change-requests/${cr}/traceability.yml`,
         `change-requests/${cr}/review-loop.yml`,
         'change-requests/_backlog.yml',
+        // _context.md：工作流上下文加速文件（每 run 收尾刷新、随 CR 提交），与 cr.md/traceability.yml 同类，评审后可变更。
+        `change-requests/${cr}/_context.md`,
       ]);
       const reviewPrefix = `change-requests/${cr}/review-annotations/`;
       const changed = gitMust(wt, ['diff', '--name-only', `${repoReviewedSha(r)}..${head}`]).split('\n').filter(Boolean);
@@ -2383,8 +2430,41 @@ async function archiveTraceGate(ctx, cr, input) {
   await saveJournal({ path: wb.journalPath, journal: wb.journal });
 }
 
+/**
+ * FR-14（CR-2026-057）writeback-apply 入口版本守卫（SDD §2.2/§4.3）：
+ * - 不调用 resolveOperationalWorkspace（B-SDD-001）：cr.md 侧经 crWorktreePath（repositories graph 纯路径反解）
+ *   + readCrMdTargetVersion（单文件行级读取）；authority/merge journal/txws 异常不可能抢先于 WRITEBACK_VERSION_*；
+ * - cr.md 侧缺失/无 frontmatter/缺字段 → 规范化失败 → WRITEBACK_VERSION_INVALID（PRD FR-14「任一侧规范化失败」口径）；
+ * - 错误优先级：版本错误 > WRITEBACK_STATE_MISMATCH > 其它后续错误（AC-14.6）。
+ * 返回 { ok:true, value } 的 value 为规范化串（B-SDD-002 回灌源）。
+ */
+export function guardWritebackVersion(ctx, cr, inputTargetRaw) {
+  const b = normalizeTargetVersion(inputTargetRaw);
+  const a = (() => {
+    const r = readCrMdTargetVersion(crWorktreePath(ctx, cr), cr);
+    return r.ok ? normalizeTargetVersion(r.raw) : { ok: false, reason: 'missing' };
+  })();
+  if (!a.ok || !b.ok) {
+    throw new TxError('WRITEBACK_VERSION_INVALID', `writeback --target-version 任一侧规范化失败：输入 ${JSON.stringify(inputTargetRaw == null ? null : String(inputTargetRaw))}（${b.ok ? 'ok' : b.reason}）/ cr.md（${a.ok ? 'ok' : a.reason}）`, { cr, input: inputTargetRaw == null ? null : String(inputTargetRaw), inputReason: b.ok ? null : b.reason, crMdReason: a.ok ? null : a.reason });
+  }
+  if (a.value === 'unassigned' || b.value === 'unassigned') {
+    throw new TxError('WRITEBACK_VERSION_UNASSIGNED', `writeback 需要两侧均为真实版本：cr.md=${a.value}，输入=${b.value}`, { cr, crMd: a.value, input: b.value });
+  }
+  if (a.value !== b.value) {
+    throw new TxError('WRITEBACK_VERSION_MISMATCH', `--target-version ${b.value} 与 cr.md ${a.value} 不一致`, { cr, crMd: a.value, input: b.value });
+  }
+  return { ok: true, value: a.value };
+}
+
 async function applyWritebackAtomic(ctx, input) {
   const { cr, stage, specId } = input;
+  // FR-14（CR-2026-057）：版本守卫最先执行——先于 traceability complete-replay 分支、
+  // resolveOperationalWorkspace、prepareWritebackCandidate 与 loadOrCreateJournal（版本错误优先于
+  // WRITEBACK_STATE_MISMATCH，失败路径零 candidate/journal/authority 痕迹）。
+  // B-SDD-002：守卫通过后回灌规范化值——canonicalWritebackBusinessInput/businessInputDigest/manifest/
+  // generator --version 全部消费规范化串；既有 startsWith('v') 剥离降为防御性 no-op。
+  const versionGuard = guardWritebackVersion(ctx, cr, input.targetVersion);
+  input.targetVersion = versionGuard.value;
   // CR-2026-049 TASK-02（TD-B2）：complete replay 前置——在 operational workspace 解析与 candidate 读取之前，
   // 先查 {cr}-traceability writeback journal；phase=complete && traceOutbox.state=pending 时仅用 journal intent 补发，
   // 不要求 txws/candidate 仍存在。
@@ -3517,6 +3597,39 @@ export function canonicalCommandSubject(plan) {
   return { subject, digest: sha256(JSON.stringify(subject)) };
 }
 
+/** FR-16（CR-2026-057）skip 模式表（冻结，实施期不得增删；均为字面量 RegExp + i flag）。 */
+const FROZEN_SKIP_PATTERNS = [
+  /(^|\n)# skip\b/i,
+  /(^|\n)ok \d+ # skip\b/i,
+  /\bskipped:\s*[1-9]\d*/i,
+  /\bSKIPPED\b/i,
+  /\bno tests to run\b/i,
+];
+
+/**
+ * FR-16（CR-2026-057，SDD §2.4/§4.5）log 两段提取（B-SDD-004）：
+ * 先 \r\n→\n 规范化（NFR-3），定位 --- stdout --- 与 --- stderr --- 标记行各恰好 1 次；
+ * 缺失/重复 → TEST_LOG_MARKER_INVALID 硬失败（禁止静默降级）；
+ * stdout 域 = 两标记行之间的行；stderr 域 = --- stderr --- 之后到文件末尾。
+ */
+export function extractStdioSections(normalizedLogText) {
+  const norm = String(normalizedLogText).replaceAll('\r\n', '\n');
+  const lines = norm.split(/\r?\n/);
+  const stdoutIdx = lines.findIndex((l) => l === '--- stdout ---');
+  const stderrIdx = lines.findIndex((l) => l === '--- stderr ---');
+  const countOf = (marker) => lines.filter((l) => l === marker).length;
+  if (stdoutIdx === -1 || stderrIdx === -1) {
+    throw new TxError('TEST_LOG_MARKER_INVALID', 'cmd log 缺少 --- stdout --- / --- stderr --- 标记段（禁止静默降级）');
+  }
+  if (countOf('--- stdout ---') !== 1 || countOf('--- stderr ---') !== 1) {
+    throw new TxError('TEST_LOG_MARKER_INVALID', 'cmd log 的 --- stdout --- / --- stderr --- 标记重复（必须各恰好 1 次）');
+  }
+  return {
+    stdout: lines.slice(stdoutIdx + 1, stderrIdx).join('\n'),
+    stderr: lines.slice(stderrIdx + 1).join('\n'),
+  };
+}
+
 /** shell:false 执行计划，日志落临时目录；已启动 non-zero/timeout 记业务 block 并继续，启动失败技术中止。 */
 export function runTestPlan(plan, ctx, cr) {
   const tempRoot = path.join(crWorktreePath(ctx, cr), '.crctl', 'tmp', 'test', cr, `${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
@@ -3549,6 +3662,11 @@ export function runTestPlan(plan, ctx, cr) {
       r.stderr || '',
     ].join('\n');
     fs.writeFileSync(logAbs, logContent, 'utf8');
+    // FR-16（CR-2026-057）：skipped 只在 stdout/stderr 两段匹配域上计算（B-SDD-004）——
+    // `$ <cmd> <args>` 与 (exit=...) 元数据行不参与；non-zero/timeout 一律 false（那是失败不是 skip）。
+    const normLog = logContent.replaceAll('\r\n', '\n');
+    const secs = extractStdioSections(normLog);
+    const skipped = r.status === 0 && FROZEN_SKIP_PATTERNS.some((re) => re.test(secs.stdout + '\n' + secs.stderr));
     const result = {
       repo: cmd.repo,
       cwd: cmd.cwd,
@@ -3559,6 +3677,7 @@ export function runTestPlan(plan, ctx, cr) {
       signal: r.signal || null,
       timedOut,
       started,
+      skipped,
       log: logRel,
     };
     results.push(result);
@@ -3610,6 +3729,7 @@ export function renderTestMachineReport(input) {
     lines.push(`    signal: ${c.signal == null ? 'null' : yamlScalarLib(c.signal)}`);
     lines.push(`    timed-out: ${c.timedOut}`);
     lines.push(`    started: ${c.started}`);
+    lines.push(`    skipped: ${c.skipped}`);
     lines.push(`    log: ${yamlScalarLib(c.log)}`);
   }
   lines.push('---', '', `# 测试报告 · ${input.cr}`);

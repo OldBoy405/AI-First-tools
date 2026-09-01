@@ -47,6 +47,9 @@ export function makeFixture() {
   fs.copyFileSync(path.join(realTools, 'skills', 'shared', 'crctl', 'gates.json'), path.join(pkg, 'skills', 'shared', 'crctl', 'gates.json'));
   fs.copyFileSync(path.join(realTools, 'pipeline-templates', 'code-implementation.pipeline.json'), path.join(pkg, 'pipeline-templates', 'code-implementation.pipeline.json'));
   fs.copyFileSync(path.join(realTools, 'dir-graph.yaml'), path.join(pkg, 'dir-graph.yaml'));
+  // CR-2026-057：受控 shell 规则（version-set/owner-set 的 tracked-clean 前置与受控 add/commit 消费）
+  fs.mkdirSync(path.join(pkg, 'skills', 'shared', 'controlled-shell'), { recursive: true });
+  fs.copyFileSync(path.join(realTools, 'skills', 'shared', 'controlled-shell', 'rules.json'), path.join(pkg, 'skills', 'shared', 'controlled-shell', 'rules.json'));
   fs.writeFileSync(path.join(pkg, 'AGENTS.md'), '');
   fs.writeFileSync(path.join(pkg, 'skills', '_index.yml'), '');
   fs.writeFileSync(path.join(pkg, 'skills', 'shared', 'crctl', 'scripts', 'crctl.mjs'), '');
@@ -98,7 +101,7 @@ export function makeCodeApprovedFixture() {
   let kbCr = path.join(kb, 'change-requests', cr);
   fs.mkdirSync(path.join(kbCr, 'tasks'), { recursive: true });
   fs.writeFileSync(path.join(kbCr, 'cr.md'),
-    `---\nid: ${cr}\nstatus: code-approved\nupdated-at: "2026-08-11T21:00:00+08:00"\n---\n`);
+    `---\nid: ${cr}\nstatus: code-approved\ntarget-version: 0.2\nupdated-at: "2026-08-11T21:00:00+08:00"\n---\n`);
   fs.writeFileSync(path.join(kbCr, 'prd.md'), '# PRD\n');
   fs.writeFileSync(path.join(kbCr, 'sdd.md'), '# SDD\n');
   fs.writeFileSync(path.join(kbCr, 'plan.md'), '# Plan\n');

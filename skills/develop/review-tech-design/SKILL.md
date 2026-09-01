@@ -41,6 +41,8 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 
 ### Step 2 — 评审维度
 
+> **批准范围前置（CR-2026-057 FR-5/AC-5）**：其余维度之前，先核对 SDD「批准范围」固定章节——必须存在且承载四字段 `scope_in` / `scope_out` / `zero_diff` / `follow_up`（空字段须显式写 `无` 或 `N/A` 加理由）。缺章节或缺字段 → blocker（`本轮新增：`），本轮仍继续完成其余维度后统一生成 verdict。
+
 | 维度 | 检查项 |
 |------|-------|
 | **PRD↔SDD 对齐** | 每条 FR-* 是否有对应技术方案；无遗漏 |
@@ -72,6 +74,24 @@ SDD 的既有实现依赖必须来自名为“既有实现依赖与事实”的�
 ### Step 2.2 — 首轮全量汇总与回修复核
 
 首轮必须完成全部适用维度后再统一生成 verdict，不得在首个 blocker 处提前结束；合并同根因问题、拆分不同根因问题，同一轮 blockers 同时包含独立根因。存在 `review_feedback`、上一轮 `review-annotations/sdd.yml` verdict=block 或 `self_repair_attempt > 0` 时进入回修复核：逐条复核旧 blocker（已解决/部分解决/未解决/需重新判断），本轮变化影响的维度重新核验，未受影响维度给出有依据的快速复核（不无证据继承旧 PASS），新独立 blocker 同轮加入；继续使用既有 `maxAttempts=3`，达到上限停止自动回修且不 reset cycle。review-record 与既有 replayNodes 不改变。
+
+### Step 2.3 — 分级与报告前缀（CR-2026-057 FR-2/FR-3/FR-4，固定句式可机械核对）
+
+**分级（FR-2）**：影响当前实现唯一性或当前验收可达性的缺口 → blocker；只影响表达/未来优化/后续 CR → suggestion；禁止批量升降级。
+
+**前缀（FR-3）**：`blockers[]` 与 `suggestions[]` 每条文本必须使用下列固定前缀之一（ASCII 全角冒号 `：`，前缀后可跟空格与正文；禁止自创同义前缀）：
+
+| 前缀 | 含义 | 写入位置 |
+|---|---|---|
+| `已解决：` | 上一轮某条 blocker 本轮已关闭 | `suggestions`（关闭项不得再进入本轮 `blockers`） |
+| `部分解决：` | 上一轮某条 blocker 仍有残留 | `blockers` |
+| `未解决：` | 上一轮某条 blocker 本轮仍在 | `blockers` |
+| `本轮新增：` | 本轮新发现的 blocker | `blockers` |
+| `范围外：` | 不在本 CR 范围，留给后续 CR | `suggestions` |
+
+机械核对规则：① 上一轮每条 blocker 必须在本轮 `blockers ∪ suggestions` 中恰好出现一次，前缀为 `已解决：` / `部分解决：` / `未解决：` 之一；对照键为上一轮文本的稳定标识（若原文以 `B-` 开头取到第一个空白或 `]`，否则取原文）。② 本轮新 blocker 必须带 `本轮新增：`。③ 首轮（无上一轮 blocker）全部 blocker 使用 `本轮新增：`。④ 范围外发现只进 `suggestions`，前缀 `范围外：`。
+
+**回修可重验（FR-4）**：逐条给出旧 blocker 的解决状态，禁止只写「已修复」；不得在报告文本或 canonical 字段中重新引入已删除的旧字段名（见 contract-scan 禁止清单）。
 
 ### Step 3 — 平台绑定前置步骤 + 写评审批注 — 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
 

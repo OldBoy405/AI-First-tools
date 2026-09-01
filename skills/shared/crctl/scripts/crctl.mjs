@@ -28,6 +28,7 @@ import {
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
   matchFrontmatter, crMdStatusText, refreshCrMdUpdated, mergeCr, mergeStatus, resolveOperationalWorkspace,
   applyWriteback, archiveCr, checkUpgrade, checkpointCr, renderLoopText, testCr,
+  normalizeTargetVersion, readCrMdTargetVersion,
 } from './lib/workspace-transactions.mjs';
 import {
   FAULT_POINTS, faultPoint, nowIso,
@@ -2538,6 +2539,197 @@ async function cmdOwnerSet(ws, cr, gates, flags) {
   await rollbackOwnerWrite(ws, ledgerTx, rels);
 }
 
+/* ────────────────────────── version-set（CR-2026-057 TASK-04，SDD §4.4） ──────────────────────────
+ * 版本事实唯一更正入口：unassigned → 真实版本，原子同步 cr.md/_backlog/已存在派生产物，幂等短路，
+ * 零状态副作用。同构复用 owner-set 的 durable ledger 事务骨架，但恢复时点按 B-SDD-005 定稿：
+ * 允许状态校验（步骤 3）→ recoverLedgerCommand（步骤 4）→ tracked-clean（步骤 5）→ 漂移检查（步骤 6）。
+ */
+
+/** 已允许状态核验后才执行的可恢复优先路径说明见 cmdVersionSet 步骤注释。 */
+function failVersionSetLedger(e) {
+  return `ledger 事务失败：${String(e && e.message || e)}`;
+}
+
+/** 行级读取 frontmatter 内 ^target-version: 行（cr.md/prd/sdd/plan/TASK-* 共用；无 frontmatter/缺行 → null）。 */
+function readTargetVersionField(text) {
+  const norm = String(text).replaceAll('\r\n', '\n');
+  const m = matchFrontmatter(norm);
+  if (!m) return null;
+  const line = m.body.split('\n').find((l) => /^target-version:/.test(l));
+  if (!line) return null;
+  return line.replace(/^target-version:\s*/, '').trim().replace(/^["']|["']$/g, '');
+}
+
+/** 行级读取 _backlog.yml 条目块内 target-version（缺块/缺行 → null）。 */
+function readBacklogTargetVersionField(text, cr) {
+  const norm = String(text).replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, cr);
+  if (!block) return null;
+  const line = block.text.split('\n').find((l) => /^[ \t]*target-version:/.test(l));
+  if (!line) return null;
+  return line.replace(/^[ \t]*target-version:\s*/, '').trim().replace(/^["']|["']$/g, '');
+}
+
+/**
+ * frontmatter 内 ^target-version: 行替换（行级纯函数）：先 \r\n→\n（NFR-3）；
+ * 无 frontmatter / 缺行 → LEDGER_PARSE_FAILED 硬失败，禁止静默返回原文（纪律 #1）。
+ */
+function editTargetVersionLine(text, version) {
+  const norm = String(text).replaceAll('\r\n', '\n');
+  const m = matchFrontmatter(norm);
+  if (!m) fail('LEDGER_PARSE_FAILED', '文件无 frontmatter（target-version 行替换失败）');
+  const lines = m.body.split('\n');
+  const idx = lines.findIndex((l) => /^target-version:/.test(l));
+  if (idx === -1) fail('LEDGER_PARSE_FAILED', 'frontmatter 缺 target-version 行');
+  lines[idx] = lines[idx].replace(/^(target-version:).*$/, `$1 ${yamlScalar(version)}`);
+  return norm.replace(m.match, '---\n' + lines.join('\n') + '\n---');
+}
+
+/** _backlog.yml 条目块内 target-version 行替换（同 editBacklogSet 的行级模式；缺块/缺行 → 硬失败）。 */
+function editBacklogTargetVersionLine(text, cr, version) {
+  const norm = String(text).replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, cr);
+  if (!block) fail('ENTRY_NOT_IN_BACKLOG', `${cr} 不在 _backlog.yml`);
+  const lines = block.text.split('\n');
+  const idx = lines.findIndex((l) => /^[ \t]*target-version:/.test(l));
+  if (idx === -1) fail('LEDGER_PARSE_FAILED', `backlog 条目 ${cr} 缺 target-version 行`);
+  // B-CODE-001：块替换必须基于权威区间 norm.slice(block.start, block.end) 做单行定点替换，
+  // 禁止用 block.text 的 split/join 重建后拼接——matchEntryBlock 的 end 指向后继条目首字符，
+  // 块尾换行不在 block.text 内（末条目时文本与区间还各含一半换行），重建会丢失分隔换行，
+  // 把目标块最后一行与下一条目拼接破坏 YAML。区间文本自带块尾换行，替换后原样保留；
+  // 未命中（区间与 block.text 不一致）一律硬失败，禁止静默返回原文（纪律 #1）。
+  const spanText = norm.slice(block.start, block.end);
+  const replaced = spanText.replace(/^([ \t]*)target-version:.*$/m, (_, ind) => `${ind}target-version: ${yamlScalar(version)}`);
+  if (replaced === spanText) fail('LEDGER_PARSE_FAILED', '_backlog.yml 条目块内 target-version 行替换未命中（块区间与条目文本不一致）');
+  return norm.slice(0, block.start) + replaced + norm.slice(block.end);
+}
+
+/** 提交失败回滚：abort ledger + 撤销暂存 + clean 复核（镜像 rollbackOwnerWrite，错误码 VERSION_SET_COMMIT_*）。 */
+async function rollbackVersionWrite(ws, ledgerTx, rels) {
+  try {
+    await runTxAsync(abortLedgerTransaction(ledgerTx));
+    const unR = controlledGit(ws, 'add', rels, ws, 'crctl-version-set');
+    if (!unR.ok) throw new Error(`撤销本次暂存失败: git add ${rels.join(' ')}`);
+    const clean = queryTrackedChanges(ws, { audit: true });
+    if (!clean.ok || clean.staged.length || clean.unstaged.length) {
+      throw new Error(`clean baseline 复核失败 staged=[${(clean.staged || []).join(',')}] unstaged=[${(clean.unstaged || []).join(',')}]`);
+    }
+  } catch (e) {
+    fail('VERSION_SET_COMMIT_ROLLBACK_FAILED', `version-set 提交失败后的恢复未完成：${failVersionSetLedger(e)}`, { affected: rels });
+  }
+  fail('VERSION_SET_COMMIT_FAILED', 'version-set 提交失败，已由 durable transaction 恢复原始快照并撤销暂存', { changed: false, rolled_back: true });
+}
+
+async function cmdVersionSet(ws, cr, gates, flags) {
+  if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'version-set 需要 CR-ID');
+  // 步骤 1：缺 --to（未提供或无值）→ BAD_ARGS（与既有命令口径一致）
+  if (flags.to === undefined || flags.to === true || typeof flags.to !== 'string') {
+    fail('BAD_ARGS', 'version-set 需要 --to <real-version>（真实版本 MAJOR.MINOR[.PATCH]；unassigned → 真实版本 的唯一更正入口）');
+  }
+  // 步骤 2：--to 共用规范化且必须是真实版本（allowUnassigned=false）；失败零写入
+  const to = normalizeTargetVersion(flags.to, { allowUnassigned: false });
+  if (!to.ok) {
+    fail('VERSION_SET_INVALID', `version-set --to 非法：${JSON.stringify(flags.to)}（reason=${to.reason}；必须为真实版本，禁止 unassigned/同义值/畸形）`, { reason: to.reason, raw: flags.to });
+  }
+  // 步骤 3：允许状态校验（禁止状态在恢复之前短路 → 零恢复，B-SDD-005）
+  const state = resolveCrState(ws, cr);
+  const { sm } = loadStateMachine(ws);
+  if ((sm.terminal || []).includes(state.status) || state.status === 'merging' || state.status === 'writing-back') {
+    fail('VERSION_SET_STATE_INVALID', `version-set 不允许在 ${state.status}（merge 一旦开始版本冻结，只允许 writeback 消费；终态拒绝）`, { current: state.status });
+  }
+  // 步骤 4：可恢复优先路径——允许状态已核验，先于 tracked-clean 与漂移检查；
+  // 本事务残留（键 version/{cr}）幂等回滚/确认，外部 dirty 不在该键下、不被恢复。
+  await recoverLedgerCommand(ws, ledgerTxKey('version', cr));
+  // 步骤 5：tracked clean 前置（恢复后残留已清，任何 tracked 变更必为外部 dirty）
+  const dirty = queryTrackedChanges(ws, { audit: false });
+  if (!dirty.ok) {
+    fail(dirty.code, '受控 Git 只读查询失败，无法确认 tracked clean 前置', { changed: false, detail: dirty.detail });
+  }
+  if (dirty.staged.length || dirty.unstaged.length) {
+    fail('VERSION_SET_WORKTREE_DIRTY', '仓库存在 tracked 变更：version-set 要求 tracked index 与 tracked working tree 均 clean（untracked 不阻塞）。请先提交、暂存外移或丢弃自己的 tracked 变更', { changed: false, staged: dirty.staged, unstaged: dirty.unstaged });
+  }
+  // 步骤 6：双投影 + 派生产物漂移检查（在恢复后的事务前状态上执行）
+  const crMdPath = path.join(crDir(ws, cr), 'cr.md');
+  const crMdText = readFileChecked(crMdPath);
+  if (crMdText == null) fail('CR_MD_WRITE_FAILED', `cr.md 不存在: ${crMdPath}`);
+  const crMdRead = readCrMdTargetVersion(ws, cr);
+  const crMdNorm = crMdRead.ok ? normalizeTargetVersion(crMdRead.raw) : { ok: false, reason: 'missing' };
+  if (!crMdNorm.ok) {
+    fail('VERSION_SET_DERIVED_DRIFT', `cr.md target-version 缺失或无法规范化（${crMdRead.ok ? crMdRead.raw : '(缺失)'}）`, { cr, field: 'cr.md', reason: crMdNorm.reason });
+  }
+  const snap = loadBacklogEntry(ws, cr);
+  const backlogRaw = readBacklogTargetVersionField(snap.text, cr);
+  const backlogNorm = backlogRaw == null ? { ok: false, reason: 'missing' } : normalizeTargetVersion(backlogRaw);
+  if (!backlogNorm.ok || backlogNorm.value !== crMdNorm.value) {
+    fail('VERSION_SET_DERIVED_DRIFT', `_backlog.yml 条目 target-version 缺失或与 cr.md（${crMdNorm.value}）不一致`, { cr, field: '_backlog.yml' });
+  }
+  const derived = [];
+  for (const name of ['prd.md', 'sdd.md', 'plan.md']) {
+    const p = path.join(crDir(ws, cr), name);
+    if (!fs.existsSync(p)) continue;
+    const text = readFileChecked(p);
+    const raw = readTargetVersionField(text);
+    const n = raw == null ? { ok: false, reason: 'missing' } : normalizeTargetVersion(raw);
+    if (!n.ok || n.value !== crMdNorm.value) {
+      fail('VERSION_SET_DERIVED_DRIFT', `${name} target-version 缺失或与 cr.md（${crMdNorm.value}）不一致`, { cr, field: name });
+    }
+    derived.push({ rel: `change-requests/${cr}/${name}`, path: p, text, hash: sha256(text) });
+  }
+  const tasksDir = path.join(crDir(ws, cr), 'tasks');
+  if (fs.existsSync(tasksDir)) {
+    for (const f of fs.readdirSync(tasksDir).filter((x) => /^TASK-.*\.md$/.test(x)).sort()) {
+      const p = path.join(tasksDir, f);
+      const text = readFileChecked(p);
+      const raw = readTargetVersionField(text);
+      const n = raw == null ? { ok: false, reason: 'missing' } : normalizeTargetVersion(raw);
+      if (!n.ok || n.value !== crMdNorm.value) {
+        fail('VERSION_SET_DERIVED_DRIFT', `${f} target-version 缺失或与 cr.md（${crMdNorm.value}）不一致`, { cr, field: `tasks/${f}` });
+      }
+      derived.push({ rel: `change-requests/${cr}/tasks/${f}`, path: p, text, hash: sha256(text) });
+    }
+  }
+  // 真实版本 → 真实版本 / 真实版本 → unassigned 均不允许（后者由 --to 规范化拦截）
+  if (crMdNorm.value !== 'unassigned' && crMdNorm.value !== to.value) {
+    fail('VERSION_SET_NOT_UNASSIGNED', `cr.md 已是 ${crMdNorm.value}，version-set 只允许 unassigned → 真实版本（不允许真实版本互改）`, { current: crMdNorm.value, to: to.value });
+  }
+  // 幂等短路：全链已等于 to.value → changed=false 零新 commit
+  if (crMdNorm.value === to.value) {
+    ok({ op: 'version-set', cr, from: crMdNorm.value, to: to.value, changed: false, files: [] });
+    return;
+  }
+  // 步骤 7：行级编辑纯函数（匹配不到 LEDGER_PARSE_FAILED 硬失败，纪律 #1）
+  const newCrMd = editTargetVersionLine(crMdText, to.value);
+  const newBacklog = editBacklogTargetVersionLine(snap.text, cr, to.value);
+  const writes = [
+    { path: crMdPath, expectedHash: sha256(crMdText), newText: newCrMd },
+    { path: snap.path, expectedHash: snap.hash, newText: newBacklog },
+  ];
+  for (const d of derived) writes.push({ path: d.path, expectedHash: d.hash, newText: editTargetVersionLine(d.text, to.value) });
+  const rels = writes.map((w) => path.relative(ws, w.path).split(path.sep).join('/'));
+  const expected = [...rels].sort();
+  // 步骤 8：durable ledger transaction（expectedHash 取调用前 SHA；commitRequired=true）
+  const ledgerTx = await beginLedgerCommand(ws, ledgerTxKey('version', cr), writes, true);
+  // 步骤 9：只 add 受控路径，commit 前复核 staged set 恰好等于写入集
+  const addR = controlledGit(ws, 'add', rels, ws, 'crctl-version-set');
+  if (addR.ok) {
+    const iso = queryTrackedChanges(ws, { audit: false });
+    if (iso.ok && iso.unstaged.length === 0 && JSON.stringify(iso.staged) === JSON.stringify(expected)) {
+      const msg = `[cr] version-set ${cr} ${crMdNorm.value} -> ${to.value}`;
+      const commitR = controlledGit(ws, 'commit', ['-m', `${msg}\n\nAI-First-Tx: ${ledgerTx.txId}`], ws, 'crctl-version-set');
+      if (commitR.ok) {
+        await injectLedgerFault('ledger-after-commit');
+        await runTxAsync(finishLedgerTransaction(ledgerTx));
+        const sha = gitHeadSha(ws);
+        auditLog(ws, { kind: 'ledger', op: 'version-set', cr, actor: identity(ws), from: crMdNorm.value, to: to.value, result: 'ok' });
+        ok({ op: 'version-set', cr, from: crMdNorm.value, to: to.value, changed: true, files: rels, commit: { sha, message: msg } });
+        return;
+      }
+    }
+  }
+  // 步骤 10：add/commit/隔离复核失败 → 回滚恢复 clean baseline（VERSION_SET_COMMIT_* 镜像 OWNER_*）
+  await rollbackVersionWrite(ws, ledgerTx, rels);
+}
+
 function cmdBacklogSet(ws, cr, gates, flags) {
   if (!flags.field || flags.value === undefined) fail('BAD_ARGS', 'backlog-set 需要 --field <prd-path|sdd-path> --value <v>');
   if (!BACKLOG_SET_FIELDS.includes(flags.field)) {
@@ -3043,10 +3235,11 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl review-note  <cr_id> [--stage <s>] --note <text>  approval.yml supplemental-reviews[] 追加（不接受 --by，身份 crctl 生成）
   crctl checkpoint <cr_id> [--message <text>]   单一深原语：全仓 source commit → 非 KB lease publish → KB metadata commit 唯一完整批次可见点（非终态）
   crctl owner-set     <cr_id> --role <requirement|development|test> --id <id>   双投影 owners 更新 + 正式移交 commit（非终态）
+  crctl version-set   <cr_id> --to <real-version>   版本事实唯一更正入口：unassigned → 真实版本，原子同步 cr.md/_backlog/已存在派生产物，幂等短路，不改 CR status
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
   crctl register  --registration-key <k> --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
-                        [--summary <s>] [--source <s>] [--origin <CR-ID>] [--target-version <v>] [--year Y]   幂等注册事务：CR-ID+三账本+commit/lease push+worktree ensure（TASK-05，TASK-10 起取代 cr-init）
+                        --target-version <v> [--summary <s>] [--source <s>] [--origin <CR-ID>] [--year Y]   幂等注册事务：CR-ID+三账本+commit/lease push+worktree ensure（--target-version 必填：真实版本 MAJOR.MINOR[.PATCH] 或 unassigned，禁止 tbd）
   crctl workspace inspect <cr_id>                  各 active repo workspace 事实分类（只读）
   crctl workspace ensure  <cr_id> --mode resume    只补齐可证明缺失的 workspace 资源（零删除）
   crctl workspace cleanup <cr_id> --mode partial|archived   只删干净 worktree；dirty/unknown/未合并 ref 保留
@@ -3125,6 +3318,7 @@ async function main() {
     case 'review-note': return cmdReviewNote(ws, requireCr(positional), gates, flags);
     case 'checkpoint': return cmdCheckpoint(ws, requireCr(positional), gates, flags);
     case 'owner-set': return cmdOwnerSet(ws, requireCr(positional), gates, flags);
+    case 'version-set': return cmdVersionSet(ws, requireCr(positional), gates, flags);
     case 'backlog-set': return cmdBacklogSet(ws, requireCr(positional), gates, flags);
     case 'inbox-emit': return cmdInboxEmit(ws, requireCr(positional), gates, flags);
     case 'register': return cmdRegister(ws, flags);
@@ -3216,7 +3410,8 @@ async function cmdWritebackApply(ws, positional, flags, gates) {
   if (!['baseline', 'tasks', 'traceability'].includes(stage)) fail('BAD_ARGS', 'writeback-apply 需要 --stage baseline|tasks|traceability');
   if (flags.candidate || flags['candidate-out'] || flags.generator || flags.manifest) fail('BAD_ARGS', 'writeback-apply 不接受 candidate/generator/manifest 路径；由 crctl 按 stage 内部固定');
   if (!specId) fail('BAD_ARGS', 'writeback-apply 需要 --spec-id <id>');
-  if (!targetVersion) fail('BAD_ARGS', 'writeback-apply 需要 --target-version <version>');
+  // B-SDD-003（CR-2026-057）：按 flag 存在性判定——缺 flag → BAD_ARGS；显式 --target-version "" 放行进共用规范化守卫 → WRITEBACK_VERSION_INVALID
+  if (!('target-version' in flags)) fail('BAD_ARGS', 'writeback-apply 需要 --target-version <version>');
   if (stage === 'baseline' && flags['milestone-file'] != null) fail('BAD_ARGS', 'baseline 不接受 --milestone-file');
   if (stage === 'tasks' && (flags['milestone-name'] != null || flags.brief != null || flags['milestone-file'] != null)) fail('BAD_ARGS', 'tasks 不接受 milestone 参数');
   if (stage === 'traceability' && !flags['milestone-file']) fail('BAD_ARGS', 'traceability 需要 --milestone-file <workspace-relative-path>');

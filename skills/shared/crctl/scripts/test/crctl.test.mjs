@@ -16,7 +16,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 // CR-2026-039 TASK-03：纯函数单测直接 import（与 archive-tx/checkpoint-tx 等测试同模式；不改变 CLI 公开面）
-import { crMdStatusText, refreshCrMdUpdated, classifyRepoWorkspace } from '../lib/workspace-transactions.mjs';
+import { crMdStatusText, refreshCrMdUpdated, classifyRepoWorkspace, normalizeTargetVersion, readCrMdTargetVersion } from '../lib/workspace-transactions.mjs';
 
 const CRCTL = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
 // 真实 tools 包根（test → scripts → crctl → shared → skills → tools 共 5 层）：
@@ -3108,6 +3108,58 @@ test('CR-2026-039 TASK-03 AC-1: refreshCrMdUpdated/crMdStatusText 纯函数—�
     `---\nid: X\nstatus: developing\nupdated: "${at}"\n---\nbody\n`);
 });
 
+// ── CR-2026-057 TASK-01：normalizeTargetVersion / readCrMdTargetVersion 纯函数（SDD §2.1/§2.2） ──
+
+test('CR-2026-057 TASK-01 AC-1: normalizeTargetVersion 全值域表', () => {
+  const good = [
+    ['unassigned', 'unassigned'], ['0.30', '0.30'], ['v0.30', '0.30'], ['V0.30', '0.30'],
+    ['0.1.0', '0.1.0'], [' 0.30 ', '0.30'], ['v0.1.0', '0.1.0'], ['0', undefined],
+  ];
+  for (const [raw, want] of good) {
+    const r = normalizeTargetVersion(raw);
+    if (want === undefined) assert.equal(r.ok, false, `非法 ${JSON.stringify(raw)}`);
+    else assert.deepEqual(r, { ok: true, value: want }, `合法 ${JSON.stringify(raw)}`);
+  }
+  const bad = [
+    [null, 'missing'], [undefined, 'missing'], [42, 'missing'], ['', 'empty'], ['   ', 'empty'],
+    ['tbd', 'forbidden'], ['TBD', 'forbidden'], ['n/a', 'forbidden'], ['n.a.', 'forbidden'], ['na', 'forbidden'],
+    ['pending', 'forbidden'], ['none', 'forbidden'], ['unknown', 'forbidden'], ['todo', 'forbidden'],
+    ['wip', 'forbidden'], ['null', 'forbidden'], ['undefined', 'forbidden'],
+    ['0.29-rc', 'malformed'], ['latest', 'malformed'], ['1', 'malformed'], ['0.30.0.1', 'malformed'],
+    ['vv0.30', 'malformed'], ['v0.30 0', 'malformed'], ['0.30a', 'malformed'], ['01.0', 'malformed'], ['0.01', 'malformed'],
+  ];
+  for (const [raw, reason] of bad) {
+    assert.deepEqual(normalizeTargetVersion(raw), { ok: false, reason }, `非法 ${JSON.stringify(raw)}`);
+  }
+  // allowUnassigned=false：unassigned → unassigned-not-allowed；真实版本不受影响
+  assert.deepEqual(normalizeTargetVersion('unassigned', { allowUnassigned: false }), { ok: false, reason: 'unassigned-not-allowed' });
+  assert.deepEqual(normalizeTargetVersion('0.30', { allowUnassigned: false }), { ok: true, value: '0.30' });
+});
+
+test('CR-2026-057 TASK-01 AC-2: readCrMdTargetVersion 三类夹具与 CRLF 规范化', () => {
+  const base = mkdtempSync(path.join(os.tmpdir(), 'crctl-tv-'));
+  try {
+    const cr = 'CR-T1';
+    const crDir = path.join(base, 'change-requests', cr);
+    mkdirSync(crDir, { recursive: true });
+    // LF 文件 → raw 串
+    writeFileSync(path.join(crDir, 'cr.md'), '---\nid: CR-T1\nstatus: drafting\ntarget-version: 0.30\n---\n');
+    assert.deepEqual(readCrMdTargetVersion(base, cr), { ok: true, raw: '0.30' });
+    // CRLF 文件 → 先 \r\n→\n 再行级匹配
+    writeFileSync(path.join(crDir, 'cr.md'), '---\r\nid: CR-T1\r\ntarget-version: unassigned\r\n---\r\n');
+    assert.deepEqual(readCrMdTargetVersion(base, cr), { ok: true, raw: 'unassigned' });
+    // 缺字段 → missing
+    writeFileSync(path.join(crDir, 'cr.md'), '---\nid: CR-T1\nstatus: drafting\n---\n');
+    assert.deepEqual(readCrMdTargetVersion(base, cr), { ok: false, reason: 'missing' });
+    // 无 frontmatter → missing
+    writeFileSync(path.join(crDir, 'cr.md'), '# no frontmatter\n');
+    assert.deepEqual(readCrMdTargetVersion(base, cr), { ok: false, reason: 'missing' });
+    // 文件缺失 → missing（不抛异常）
+    rmSync(path.join(crDir, 'cr.md'), { force: true });
+    assert.deepEqual(readCrMdTargetVersion(base, cr), { ok: false, reason: 'missing' });
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
 test('CR-2026-039 TASK-03 AC-2: owner-set 后 cr.md updated 刷新为移交时间戳；legacy updated-at 被清除不共存', () => {
   const ws = makeGitWorkspace();
   try {
@@ -4487,6 +4539,37 @@ test('CR-2026-039 TASK-04 AC-5: KB 白名单后继提交 approve-code 仍可通�
     const g = (args) => { const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
     writeFileSync(path.join(wt, 'change-requests', 'CR-D1', 'notes.txt'), 'non-whitelisted\n');
     g(['add', '-A']); g(['commit', '-q', '-m', 'kb non-whitelist change']);
+    const gp = makeCodeGrant(ws2, pk2);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws2]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'RELEASE_SUBJECT_DRIFT');
+    assert.equal(r.stderr.error.reason, 'post-review-path-drift');
+    assert.equal(existsSync(path.join(ws2, 'change-requests', 'CR-D1', 'approval.yml')), false, 'approval.yml 零写入');
+  } finally { rmSync(ws2, { recursive: true, force: true }); }
+});
+
+test('CR-2026-057: KB 白名单新增 _context.md（工作流上下文加速文件）后继提交 approve-code 通过；_context2.md 非白名单仍拒绝', () => {
+  const { ws, privateKey } = makeCodeStageWorkspace();
+  try {
+    runCodeReviewAndAdvance(ws);
+    const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+    const g = (args) => { const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
+    // ① 评审后仅 _context.md 变化（每 run 收尾刷新的工作流上下文加速文件，与 cr.md/traceability.yml 同类）→ 放行
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', '_context.md'), '# context\n');
+    g(['add', '-A']); g(['commit', '-q', '-m', 'kb context successor']);
+    const gp = makeCodeGrant(ws, privateKey);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws]);
+    assert.equal(r.status, 0, `_context.md 后继应放行: ${r.rawStderr}`);
+    assert.equal(r.stdout.to, 'code-approved');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+  // ② _context2.md（同类拼写但非白名单）→ post-review-path-drift 拒绝且零写入（独立 fixture）
+  const { ws: ws2, privateKey: pk2 } = makeCodeStageWorkspace();
+  try {
+    runCodeReviewAndAdvance(ws2);
+    const wt = path.join(ws2, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+    const g = (args) => { const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', '_context2.md'), 'non-whitelisted\n');
+    g(['add', '-A']); g(['commit', '-q', '-m', 'kb non-whitelist context2']);
     const gp = makeCodeGrant(ws2, pk2);
     const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws2]);
     assert.equal(r.status, 1);

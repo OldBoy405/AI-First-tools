@@ -39,6 +39,13 @@ description: 对 change-requests/{CR-ID}/plan.md 与 tasks/ 执行编码前合�
 
 ### Step 2 — 八类维度评审（FR-3）
 
+> **批准范围前置核对（CR-2026-057 FR-7）**：其余维度之前，先核对 SDD「批准范围」节（`scope_in`/`scope_out`/`zero_diff`/`follow_up` 四字段，SDD 已审批后对 PLAN/TASK 只读）。plan/TASK 把批准范围译错、把 `follow_up` 或兼容性背景做成当前 TASK、或扩大 `scope_out`/触碰 `zero_diff` → blocker。路由按下表，不得发明第三值：
+>
+> | 冲突含义 | repair-target | 既有转换 |
+> |---|---|---|
+> | plan/TASK 把批准范围译错，SDD 本身仍正确 | `write-dev-plan` | `review-dev-plan:block -> write-dev-plan` |
+> | 批准范围/SDD 设计本身需改 | `write-tech-design` | `review-dev-plan:upstream-design-blocker`（既有 upstream） |
+
 | 维度 | 必查内容 |
 |------|---------|
 | SDD→plan 覆盖 | SDD 的模块/接口/迁移/验证/回滚/风险是否进入计划 |
@@ -62,6 +69,30 @@ description: 对 change-requests/{CR-ID}/plan.md 与 tasks/ 执行编码前合�
 - `acceptance-verifiability`：核对 TASK 验收步骤是否在真实责任边界组合证明 AC，拒绝无关依赖的假绿短路。
 
 TASK 新事实只能按 `resources[].worktreePath` 取证：事实不存在或与目标 worktree 不符形成 blocker，不得静默记录 N/A；资源缺失或不可读为技术失败，不写临时 payload。若新事实反证 SDD 或 SDD 设计落点本身断裂，`repair-target` 设为 `write-tech-design` 走 UPSTREAM；仅 plan/TASK 翻译问题走 `write-dev-plan` 普通回修轨。
+
+### 覆盖矩阵与流程控制核验（CR-2026-057 FR-8/FR-9/FR-10/FR-11）
+
+- **覆盖链先查（FR-1/FR-8）**：先检查 `FR/AC → SDD 落点 → PLAN → TASK owner → evidence` 覆盖，再检查单个任务细节；覆盖矩阵缺失或关键 AC 无对应行 → blocker。
+- **唯一 TASK owner（FR-9）**：关键 AC（影响主路径验收可达性的 AC，含用户可观察的成功/失败/隔离/幂等）必须有且仅有一个唯一 TASK owner；任一关键 AC 缺少唯一 TASK owner、或矩阵「验收证据」列对关键 AC 不是稳定标识 `cmd-NN`（两位十进制） → blocker。不向 crctl/gates.json 新增静态检查：`approve-dev-start` 继续消费既有 passCondition（verdict=pass 且 blockers 为空），block 后天然不可达。
+- **流程控制 TASK 核验（FR-10/FR-11）**：交付 TASK（`tasks/TASK-*.md` + `_index.yml` 条目）不得以 `merge`/`writeback`/`archive` 或 `code-reviewing`/`code-approved` 为完成前置（含标题或正文写成「发布准备」「merge 完成」之类）——`crctl task done` 仅允许 `status=developing`，完成于 merge 的 TASK 无法合法标 done，会卡住 `deliveryIndexComplete`（该门禁保持不变、不新增豁免）。「实现已就绪、可交评审」类 TASK 的完成边界必须是 developing 内可被 `crctl task done` 登记的事件。违反 → blocker。
+
+### 分级与报告前缀（CR-2026-057 FR-2/FR-3/FR-4，固定句式可机械核对）
+
+**分级（FR-2）**：影响当前实现唯一性或当前验收可达性 → blocker；只影响表达/未来优化/后续 CR → suggestion；禁止批量升降级。
+
+**前缀（FR-3）**：`blockers[]` 与 `suggestions[]` 每条文本必须使用下列固定前缀之一（ASCII 全角冒号 `：`，前缀后可跟空格与正文；禁止自创同义前缀）：
+
+| 前缀 | 含义 | 写入位置 |
+|---|---|---|
+| `已解决：` | 上一轮某条 blocker 本轮已关闭 | `suggestions`（关闭项不得再进入本轮 `blockers`） |
+| `部分解决：` | 上一轮某条 blocker 仍有残留 | `blockers` |
+| `未解决：` | 上一轮某条 blocker 本轮仍在 | `blockers` |
+| `本轮新增：` | 本轮新发现的 blocker | `blockers` |
+| `范围外：` | 不在本 CR 范围，留给后续 CR | `suggestions` |
+
+机械核对规则：① 上一轮每条 blocker 必须在本轮 `blockers ∪ suggestions` 中恰好出现一次，前缀为 `已解决：` / `部分解决：` / `未解决：` 之一；对照键为上一轮文本的稳定标识（若原文以 `B-` 开头取到第一个空白或 `]`，否则取原文）。② 本轮新 blocker 必须带 `本轮新增：`。③ 首轮（无上一轮 blocker）全部 blocker 使用 `本轮新增：`。④ 范围外发现只进 `suggestions`，前缀 `范围外：`。
+
+**回修可重验（FR-4）**：逐条给出旧 blocker 的解决状态，禁止只写「已修复」；不得在报告文本或 canonical 字段中重新引入已删除的旧字段名（见 contract-scan 禁止清单）。
 
 ### Step 3 — 平台绑定前置步骤 + 评审判断与落盘
 

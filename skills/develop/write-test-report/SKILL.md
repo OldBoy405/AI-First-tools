@@ -62,6 +62,8 @@ description: 汇总 implement-code 的验证命令、TASK 验收条件与测试�
 
 2. 运行**一次** `crctl test {cr_id} --plan .crctl/tmp/test-plan.json --workspace <worktree>`：
    - crctl 以 `spawnSync(executable, args, {shell:false})` 执行，按真实退出码生成 `test-report.md` 机器区（frontmatter status/commands + command-digest + marker），并原子更新 `traceability.yml#tests` 与 `review-loop.yml`（write-test-report）。
+   - **机器区每条 command 含 `skipped` 布尔字段（CR-2026-057 FR-16，additive）**：`skipped = (exit-code == 0) && (对应 cmd-NN.log 的 --- stdout --- / --- stderr --- 两段命中冻结模式表任一模式（大小写不敏感）)`；模式表冻结（`# skip` / `ok N # skip` / `skipped: N` / `SKIPPED` / `no tests to run`），`review-code` 只读该字段，不得自行解析各测试框架输出。注意 node 默认 spec reporter 摘要恒含 `skipped` 字样会误命中模式——计划统一使用 `--test-reporter=dot` 保证 `skipped` 恒 false（除非确有真实 skip）。
+   - **`cmd-NN` 稳定关联（CR-2026-057 FR-16）**：NN = 机器区 `commands` 列表的 1-based 下标（两位十进制），与 `test-evidence/cmd-NN.log` 文件名全等，且必须与 `plan.md` 覆盖矩阵「验收证据」列的 `cmd-NN` 全等；关键 AC 的唯一验收证据必须写该标识。
    - **模型不得改写 marker 之前的机器区**（`generated-by: crctl-test` 即防改写标记）；`--cmd`/`--cwd`/`--timeout` 已移除。
 
 3. 模型只在 `<!-- crctl:analysis-below -->` 标记**以下**补充分析段：

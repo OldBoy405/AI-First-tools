@@ -21,7 +21,7 @@ description: 基于 change-requests/{CR-ID}/sdd.md 编写开发计划 plan.md，
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `cr_id` | string | ✅ | 目标 CR-ID |
-| `target_version` | string | ❌ | 目标版本，写入 plan.md frontmatter |
+| `target_version` | string | ❌ | 目标版本（CR-2026-057 FR-13：从 cr.md 读取继承，禁止 tbd/自行改写） |
 | `review_feedback` | object | ❌ | 来自 review-dev-plan 的 blockers；存在时进入自修复模式（CR-2026-026 FR-8） |
 | `self_repair_attempt` | number | ❌ | 当前自动修复轮次，由 pipeline reviewLoop 注入 |
 
@@ -42,7 +42,7 @@ id: {cr_id}-plan
 type: PLAN
 cr-ref: {cr_id}
 sdd-ref: "change-requests/{cr_id}/sdd.md"
-target-version: {target_version 或 tbd}
+target-version: {cr.md 的 target-version 值}   # 从 cr.md 继承，禁止 tbd/自行改写（CR-2026-057 FR-13）
 status: draft
 created: {YYYY-MM-DDTHH:mm:ss+08:00}
 updated: {YYYY-MM-DDTHH:mm:ss+08:00}
@@ -55,6 +55,12 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 3. **资源与分工** — 预计工时分配
 4. **风险与回滚策略** — 技术风险列表及对应回滚方案
 5. **验收与发布策略** — 发布前 checklist / feature-flag 计划
+6. **AC/业务闭环覆盖矩阵**（契约必填节，CR-2026-057 FR-8）——每条关键 AC 或业务闭环一行，表头固定：
+
+   | AC/业务闭环 | SDD 落点 | TASK owner | 验收证据 |
+   |---|---|---|---|
+
+   关键 AC 定义：PRD 中影响主路径验收可达性的 AC（含用户可观察的成功/失败/隔离/幂等）。非关键 AC 可合并行，但必须能从矩阵追溯到至少一条 TASK。「验收证据」列对关键 AC 必须填写稳定标识 `cmd-NN`（NN 为两位十进制，与 `crctl test` 机器区 `commands` 列表 1-based 下标及 `test-evidence/cmd-NN.log` 文件名全等，FR-16），不得只写散文命令。
 
 ### Step 2a — 回修模式（CR-2026-026 FR-8/FR-9）
 

@@ -46,6 +46,43 @@ description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审�
 | **与规划对齐** | 若有 source 规划报告，FR 是否覆盖规划建议的核心诉求 |
 | **依赖识别** | 是否识别了对其他 CR / 特性的依赖 |
 
+#### 首轮完整契约域（CR-2026-057 FR-1）
+
+当 PRD 定义用户可调用契约（HTTP API、CLI 或 Skill 契约）时，首轮必须在生成 verdict 前按下列闭合清单一次检查完该契约域的全部适用项；同一契约域的独立缺口必须出现在同一轮 blockers，不得在首个 blocker 处提前结束、把剩余缺口留给下一轮。缺适用项须显式写 `N/A` 及原因：
+
+| 科目 | 必须一次检查的闭包 |
+|---|---|
+| HTTP API（PRD 新增或修改时） | endpoint、request、response、error、权限、幂等、状态、验收观察点 |
+| crctl / CLI | 命令与 flag、输入约束、JSON/stdout 输出、错误码、调用者约束、幂等、状态副作用、验收观察点 |
+| Skill 契约 | 必填参数、落盘路径、允许的状态转换、失败码、与 `crctl` 的唯一写入边界 |
+
+#### blocker / suggestion 分级（CR-2026-057 FR-2）
+
+影响当前实现唯一性或当前验收可达性的缺口必须是 blocker。只影响表达、未来优化或后续 CR 的内容必须是 suggestion。不得把 suggestion 批量升级为 blocker，也不得把当前验收不可达的问题留作 suggestion。
+
+#### 每轮评审报告前缀（CR-2026-057 FR-3，固定句式，可机械核对）
+
+`blockers[]` 与 `suggestions[]` 每条文本必须使用下列固定前缀之一（ASCII 全角冒号 `：`，前缀后可跟空格与正文；禁止自创同义前缀）：
+
+| 前缀 | 含义 | 写入位置 |
+|---|---|---|
+| `已解决：` | 上一轮某条 blocker 本轮已关闭 | `suggestions`（关闭项不得再进入本轮 `blockers`） |
+| `部分解决：` | 上一轮某条 blocker 仍有残留 | `blockers` |
+| `未解决：` | 上一轮某条 blocker 本轮仍在 | `blockers` |
+| `本轮新增：` | 本轮新发现的 blocker | `blockers` |
+| `范围外：` | 不在本 CR 范围，留给后续 CR | `suggestions` |
+
+机械核对规则：
+
+1. 上一轮每条 blocker 必须在本轮 `blockers ∪ suggestions` 中恰好出现一次，且前缀为 `已解决：` / `部分解决：` / `未解决：` 之一；对照键为上一轮文本的稳定标识（若原文以 `B-` 开头取到第一个空白或 `]`，否则取原文）。
+2. 本轮新 blocker 必须带 `本轮新增：`，不得伪装成旧 blocker 状态。
+3. 首轮（无上一轮 blocker）全部 blocker 使用 `本轮新增：`。
+4. 范围外发现只进 `suggestions`，前缀 `范围外：`。
+
+#### 回修必须可重验（CR-2026-057 FR-4）
+
+回修后再评必须按 FR-3 逐条给出旧 blocker 的解决状态，禁止只写「已修复」；不得在报告文本或 canonical 字段中重新引入已删除的旧字段名（见 contract-scan 禁止清单）。
+
 ### Step 3 — 平台绑定前置步骤 + 写评审批注 — 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
 
 0. **平台绑定前置步骤（FR-B7，CR-2026-053）**：若当前运行具有 Multica task-scoped context（`mat_` task token 注入的 task 上下文）：

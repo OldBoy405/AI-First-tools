@@ -97,7 +97,8 @@ test('TASK-02：journal-created 恢复冻结 transitionAt，业务参数漂移�
     process.env.CRCTL_FAULT_POINT = 'writeback-after-journal-create';
     await assert.rejects(() => applyWriteback(ctx, input), (e) => e.code === 'FAULT_INJECTED');
     delete process.env.CRCTL_FAULT_POINT;
-    await assert.rejects(() => applyWriteback(ctx, { ...input, targetVersion: '0.3' }), (e) => e.code === 'TX_INPUT_CONFLICT');
+    // CR-2026-057 FR-14：新版本守卫先行命中（cr.md=0.2 与输入 0.3 不一致），不再到达既有 journal 的 TX_INPUT_CONFLICT
+    await assert.rejects(() => applyWriteback(ctx, { ...input, targetVersion: '0.3' }), (e) => e.code === 'WRITEBACK_VERSION_MISMATCH');
     const txDir = path.join(kb, '.crctl', 'transactions', 'writeback', `${cr}-baseline`);
     const txId = fs.readdirSync(txDir)[0];
     const before = JSON.parse(fs.readFileSync(path.join(txDir, txId, 'journal.json'), 'utf8'));
@@ -227,5 +228,107 @@ test('TASK-04：traceability 公共业务参数全链路', () => {
     const head = git(path.join(base, 'origin-kb.git'), ['rev-parse', 'master']);
     assert.ok(git(path.join(base, 'origin-kb.git'), ['show', `${head}:specs/test-spec/traceability.yml`]).includes(`- cr: ${cr}`));
     assert.ok(git(path.join(base, 'origin-kb.git'), ['show', `${head}:specs/test-spec/traceability.yml`]).includes('evidence:'));
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── CR-2026-057 FR-14：writeback-apply 版本守卫 ────────────────────────── */
+
+/** 失败观察点快照：specs 哈希 / candidate 目录 / writeback journal / 锁 / cr.md / origin commit 数。 */
+function snapshotSixPoints(base, kb, cr, txws) {
+  const specFiles = ['specs/_index.yml', 'specs/test-spec/PRD.md', 'specs/test-spec/SDD.md'];
+  const specs = specFiles.map((p) => {
+    const f = path.join(txws, ...p.split('/'));
+    return fs.existsSync(f) ? sha256(fs.readFileSync(f, 'utf8')) : null;
+  });
+  const candidates = path.join(txws, '.crctl', 'candidates');
+  const journals = path.join(kb, '.crctl', 'transactions', 'writeback');
+  const locks = path.join(kb, '.crctl', 'locks');
+  const list = (d) => (fs.existsSync(d) ? fs.readdirSync(d, { recursive: true }).sort() : []);
+  return {
+    specs,
+    candidateDirs: list(candidates),
+    journalEntries: list(journals),
+    locks: list(locks),
+    crMdSha: sha256(fs.readFileSync(path.join(txws, 'change-requests', cr, 'cr.md'), 'utf8')),
+    originCount: originMasterCount(base, 'kb'),
+  };
+}
+
+test('CR-2026-057 FR-14/AC-14：三 stage × 三错误码零观察点 + 同参重试同码无增量', () => {
+  const vectors = [
+    { args: ['--target-version', '0.9'], code: 'WRITEBACK_VERSION_MISMATCH' },
+    { args: ['--target-version', 'unassigned'], code: 'WRITEBACK_VERSION_UNASSIGNED' },
+    { args: ['--target-version', 'n/a'], code: 'WRITEBACK_VERSION_INVALID' },
+  ];
+  for (const stage of ['baseline', 'tasks', 'traceability']) {
+    for (const v of vectors) {
+      const { base, kb, cr, txws } = makeMergedFixture();
+      try {
+        const stageArgs = stage === 'traceability' ? ['--milestone-file', 'milestone.yml'] : [];
+        const args = ['writeback-apply', cr, '--stage', stage, '--spec-id', 'test-spec', ...v.args, ...stageArgs, '--workspace', kb];
+        const before = snapshotSixPoints(base, kb, cr, txws);
+        const r = runCrctl(args, { cwd: kb });
+        assert.notEqual(r.status, 0, `${stage} ${v.code} 必须非零退出`);
+        assert.equal(r.errJson.error.code, v.code, `${stage} ${v.code}: ${r.stderr}`);
+        assert.deepEqual(snapshotSixPoints(base, kb, cr, txws), before, `${stage} ${v.code} 失败后六项禁止观察点必须字节级不变`);
+        // 同参重试：同码且无增量痕迹
+        const r2 = runCrctl(args, { cwd: kb });
+        assert.notEqual(r2.status, 0);
+        assert.equal(r2.errJson.error.code, v.code);
+        assert.deepEqual(snapshotSixPoints(base, kb, cr, txws), before, `${stage} ${v.code} 同参重试必须无增量痕迹`);
+      } finally { fs.rmSync(base, { recursive: true, force: true }); }
+    }
+  }
+});
+
+test('CR-2026-057 FR-14/AC-14.6：版本错误优先于 WRITEBACK_STATE_MISMATCH（status=code-approved 未 merge 夹具）', () => {
+  const { base, kb, cr } = makeCodeApprovedFixture();
+  try {
+    // 未 merge：authority 为 cr-worktree（守卫若缺失会得 WRITEBACK_STATE_MISMATCH）；
+    // 版本不一致必须先命中 WRITEBACK_VERSION_MISMATCH
+    const mismatch = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', '0.9', '--workspace', kb], { cwd: kb });
+    assert.notEqual(mismatch.status, 0);
+    assert.equal(mismatch.errJson.error.code, 'WRITEBACK_VERSION_MISMATCH');
+    const invalid = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', 'n/a', '--workspace', kb], { cwd: kb });
+    assert.notEqual(invalid.status, 0);
+    assert.equal(invalid.errJson.error.code, 'WRITEBACK_VERSION_INVALID');
+    // 版本一致且真实 → 守卫放行，随后才得既有 WRITEBACK_STATE_MISMATCH（authority 非 Transaction Workspace）
+    const stateMismatch = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', '0.2', '--workspace', kb], { cwd: kb });
+    assert.notEqual(stateMismatch.status, 0);
+    assert.equal(stateMismatch.errJson.error.code, 'WRITEBACK_STATE_MISMATCH');
+    assert.equal(originMasterCount(base, 'kb'), 2, '全部失败路径不得产生新 commit');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-057 FR-14/B-SDD-003：缺 flag → BAD_ARGS；显式空串 → WRITEBACK_VERSION_INVALID', () => {
+  const { base, kb, cr } = makeCodeApprovedFixture();
+  try {
+    const missing = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.notEqual(missing.status, 0);
+    assert.equal(missing.errJson.error.code, 'BAD_ARGS');
+    const empty = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', '', '--workspace', kb], { cwd: kb });
+    assert.notEqual(empty.status, 0);
+    assert.equal(empty.errJson.error.code, 'WRITEBACK_VERSION_INVALID', '显式空串必须进守卫（与缺 flag 不同码）');
+    assert.equal(originMasterCount(base, 'kb'), 2, '失败路径不得产生新 commit');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-057 FR-14/B-SDD-002：v0.2 输入回灌规范化值——journal businessInputDigest/manifest targetVersion 为 0.2', async () => {
+  const { base, kb, cr, txws } = makeMergedFixture();
+  try {
+    const observed = { status: [], audit: [] };
+    const result = await applyWriteback(resolveRepositories(kb), {
+      cr, stage: 'baseline', specId: 'test-spec', targetVersion: 'v0.2', workspace: kb,
+      ...atomicCallbacks(txws, cr, observed),
+    });
+    assert.equal(result.phase, 'complete');
+    const journalDir = path.join(kb, '.crctl', 'transactions', 'writeback', `${cr}-baseline`);
+    const txId = fs.readdirSync(journalDir)[0];
+    const journal = JSON.parse(fs.readFileSync(path.join(journalDir, txId, 'journal.json'), 'utf8'));
+    const canonical = canonicalWritebackBusinessInput({ cr, stage: 'baseline', specId: 'test-spec', targetVersion: '0.2', milestoneFile: null });
+    assert.equal(journal.writeback.targetVersion, '0.2', 'payload.targetVersion 必须是回灌后的规范化值');
+    assert.equal(journal.writeback.businessInputDigest, canonical.digest, 'businessInputDigest 必须基于规范化值');
+    const manifest = JSON.parse(fs.readFileSync(path.join(txws, '.crctl', 'candidates', cr, 'baseline', 'manifest.json'), 'utf8'));
+    assert.equal(manifest.targetVersion, '0.2', 'generator 消费的 --version 必须是规范化串 0.2');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

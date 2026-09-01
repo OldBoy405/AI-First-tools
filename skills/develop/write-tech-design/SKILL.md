@@ -69,6 +69,7 @@ id: {cr_id}-sdd
 type: SDD
 cr-ref: {cr_id}
 title: {prd.title} 技术设计
+target-version: {cr.md 的 target-version 值}   # 继承 cr.md，禁止 tbd/自行改写（CR-2026-057 FR-13）
 status: draft
 created: {YYYY-MM-DDTHH:mm:ss+08:00}
 updated: {YYYY-MM-DDTHH:mm:ss+08:00}
@@ -84,6 +85,7 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 6. **FR 到技术实现映射** — 每条 FR-* 对应的技术方案条目
 7. **安全与性能考量** — 边界条件、性能目标、安全控制点
 8. **Prompt 采纳影响**（条件性小节，CR-2026-021 FR-25/AC-15）：**若本 CR 的 diff 会触及 `skills/shared/crctl/scripts/crctl.mjs` 的 dispatch 分支或 `skills/shared/controlled-shell/rules.json` 的 `protectedPaths.deny`（= crctl 命令面或 guard deny 面有新增/变更）**，本节为必填，列出应改为调用新增/扩展子命令的 skill 清单（每项含 skill 路径 + 现状 + 应改为的调用方式），供 `review-tech-design` 与人工审批逐条核对；若本 CR 不触及上述两处，本节可省略。`lint-prompts` 只能机械抓到"prompt 还在做 crctl 已接管/已禁止的事"（CONTRADICTS/STALE），抓不到"crctl 新增了能力、某 skill 该采纳却还没采纳"——这一类必须靠本节 + 评审兜底。
+9. **批准范围**（契约必填章节，CR-2026-057 FR-5/FR-6）：承载且仅承载四字段——`scope_in`（当前 CR 必须交付的 FR/AC）、`scope_out`（明确排除的路径和能力）、`zero_diff`（明确不得改动的调用点/签名）、`follow_up`（发现但留给后续 CR 的缺口）；空字段必须显式写 `无` 或 `N/A` 加理由，不得省略章节；不新增独立 ledger 文件、不新增状态。`approve-tech-design` 通过后该节对 PLAN/TASK/code 只读：PLAN/TASK 发现与批准范围冲突时，只能经既有 `review-dev-plan` 双轨回到 `write-tech-design` 或 `write-dev-plan`（不得静默扩大范围、不得把 `follow_up` 或兼容性背景自动转成当前 TASK）；代码阶段发现实际 diff 越界时只回 `implement-code`。
 
 ### Step 2.5 — 设计输出收窄（FR-08，CR-2026-050）
 
