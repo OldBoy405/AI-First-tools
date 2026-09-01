@@ -16,7 +16,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 // CR-2026-039 TASK-03：纯函数单测直接 import（与 archive-tx/checkpoint-tx 等测试同模式；不改变 CLI 公开面）
-import { crMdStatusText, refreshCrMdUpdated, classifyRepoWorkspace, normalizeTargetVersion, readCrMdTargetVersion } from '../lib/workspace-transactions.mjs';
+import { crMdStatusText, refreshCrMdUpdated, classifyRepoWorkspace, normalizeTargetVersion, readCrMdTargetVersion, resolveRepositories, guardWritebackVersion, planVersionRefill, applyTargetVersionToCrMd, editBacklogEntryTargetVersion } from '../lib/workspace-transactions.mjs';
 
 const CRCTL = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
 // 真实 tools 包根（test → scripts → crctl → shared → skills → tools 共 5 层）：
@@ -4804,4 +4804,280 @@ test('CR-2026-042 静态合同：已知 Skill 越界文本零命中', () => {
   assert.equal(/recoverable write-set|三账本（/.test(reg), false, 'requirement-register 不应复述内部 write-set/三账本步骤');
   const writeback = readFileSync(path.join(PACKAGE_ROOT, 'pipeline-templates', 'feature-writeback.pipeline.json'), 'utf8');
   assert.ok(writeback.includes('milestone_file'), 'writeback-traceability 必须保留 milestone_file 业务输入');
+});
+
+/* ────────────────────────── CR-2026-058：guard 判定表与 authority 快照（FR-1/FR-3，TASK-01） ────────────────────────── */
+
+/** 单测 guard 用最小 ctx：临时 workspace + kb knowledge-base repo（resolveRepositories 解析）。 */
+function makeGuardCtx() {
+  const base = mkdtempSync(path.join(os.tmpdir(), 'crctl-grd-'));
+  mkdirSync(path.join(base, 'change-requests'), { recursive: true });
+  writeFileSync(path.join(base, 'dir-graph.yaml'),
+    'workspace:\n  root: "."\n  tools_package_path: ' + JSON.stringify(PACKAGE_ROOT) + '\n' +
+    'repositories:\n  - id: kb\n    path: "."\n    trunk: master\n    role: knowledge-base\n', 'utf8');
+  const ctx = resolveRepositories(base);
+  const crWorktree = path.join(base, '.rayai-worktrees', 'knowledge-base', 'requirement');
+  const txwsRoot = path.join(base, '.crctl', 'transaction-workspaces');
+  return { base, ctx, crWorktree, txwsRoot };
+}
+
+function writeGuardCrMd(wsRoot, cr, { status, tv }) {
+  const p = path.join(wsRoot, 'change-requests', cr, 'cr.md');
+  mkdirSync(path.dirname(p), { recursive: true });
+  writeFileSync(p, `---\nid: ${cr}\nstatus: ${status}\ntarget-version: ${tv}\nupdated: "2026-09-01T00:00:00+08:00"\n---\n`, 'utf8');
+}
+
+test('CR-2026-058 TASK-01：guardWritebackVersion 判定表六行 + authority 快照（txws 回灌 / cr-worktree 回退两分支）', () => {
+  const { base, ctx, crWorktree, txwsRoot } = makeGuardCtx();
+  try {
+    const cr = 'CR-G1';
+    // merged 形态：crWorktree status=merging（POST_FINALIZE）+ txws 存在且 finalize → authority=txws
+    writeGuardCrMd(path.join(crWorktree, cr), cr, { status: 'merging', tv: 'unassigned' });
+    writeGuardCrMd(path.join(txwsRoot, cr), cr, { status: 'merging', tv: 'unassigned' });
+    const txws = path.join(txwsRoot, cr);
+    // 行 1：cr.md=unassigned + 输入真实 + authority=txws → 放行回灌
+    const pass = guardWritebackVersion(ctx, cr, '0.30');
+    assert.deepEqual(pass, { ok: true, value: '0.30', refill: true, authority: { path: txws, source: 'transaction-workspace' } });
+    // 行 6：全等 → 放行不改版本字段（refill=false）
+    writeGuardCrMd(txws, cr, { status: 'merging', tv: '0.2' });
+    assert.deepEqual(guardWritebackVersion(ctx, cr, '0.2'), { ok: true, value: '0.2', refill: false, authority: { path: txws, source: 'transaction-workspace' } });
+    // 行 4：两侧真实不一致 → MISMATCH
+    assert.throws(() => guardWritebackVersion(ctx, cr, '0.9'), (e) => e.code === 'WRITEBACK_VERSION_MISMATCH' && e.extra.crMd === '0.2' && e.extra.input === '0.9');
+    // 行 5：cr.md 真实 + 输入 unassigned → UNASSIGNED（新文案能区分两侧/输入侧 unassigned 与已放行回灌分支）
+    assert.throws(() => guardWritebackVersion(ctx, cr, 'unassigned'), (e) => e.code === 'WRITEBACK_VERSION_UNASSIGNED'
+      && e.message === 'writeback 版本守卫：两侧或输入侧为 unassigned 一律拒绝（cr.md=0.2，输入=unassigned）；仅 cr.md=unassigned 且输入为真实版本时放行并回灌账本');
+    // 行 7：任一侧规范化失败 → INVALID（extra 含 crMdReason/inputReason）
+    assert.throws(() => guardWritebackVersion(ctx, cr, 'n/a'), (e) => e.code === 'WRITEBACK_VERSION_INVALID' && e.extra.inputReason === 'forbidden');
+    writeGuardCrMd(txws, cr, { status: 'merging', tv: 'n/a' });
+    assert.throws(() => guardWritebackVersion(ctx, cr, '0.2'), (e) => e.code === 'WRITEBACK_VERSION_INVALID' && e.extra.crMdReason === 'forbidden');
+    // 行 3：两侧 unassigned → UNASSIGNED
+    writeGuardCrMd(txws, cr, { status: 'merging', tv: 'unassigned' });
+    assert.throws(() => guardWritebackVersion(ctx, cr, 'unassigned'), (e) => e.code === 'WRITEBACK_VERSION_UNASSIGNED');
+    // 行 2：cr-worktree 回退（txws 缺失）→ 放行 refill=false，authority=cr-worktree（回灌禁用，后续落 STATE_MISMATCH）
+    rmSync(txws, { recursive: true, force: true });
+    const fallback = guardWritebackVersion(ctx, cr, '0.30');
+    assert.deepEqual(fallback, { ok: true, value: '0.30', refill: false, authority: { path: path.join(crWorktree, cr), source: 'cr-worktree' } });
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── CR-2026-058：planVersionRefill 与行级编辑（FR-2.1，TASK-02） ────────────────────────── */
+
+function makePlanTx({ backlogBody, crMdText } = {}) {
+  const txws = mkdtempSync(path.join(os.tmpdir(), 'crctl-plan-'));
+  mkdirSync(path.join(txws, 'change-requests', 'CR-P1'), { recursive: true });
+  writeFileSync(path.join(txws, 'change-requests', '_backlog.yml'), backlogBody == null
+    ? 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-P1\n    title: T\n    status: code-approved\n    target-version: unassigned\n'
+    : backlogBody, 'utf8');
+  writeFileSync(path.join(txws, 'change-requests', 'CR-P1', 'cr.md'), crMdText == null
+    ? '---\nid: CR-P1\nstatus: merging\ntarget-version: unassigned\nupdated: "2026-09-01T00:00:00+08:00"\n---\n'
+    : crMdText, 'utf8');
+  return txws;
+}
+
+const planAuth = (txws) => ({ path: txws, source: 'transaction-workspace' });
+
+test('CR-2026-058 TASK-02：planVersionRefill 语义复核四分支 + 同源断言', () => {
+  // ① 仍 unassigned → 放行生成条目（tasks：crMd 条目；baseline：crMdBase）
+  {
+    const txws = makePlanTx();
+    try {
+      const t = planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' });
+      assert.equal(t.inputVersion, '0.30');
+      assert.ok(t.crMd, 'tasks 非 baseline：crMd 条目生成');
+      assert.equal(t.crMd.path, 'change-requests/CR-P1/cr.md');
+      assert.match(t.crMd.afterText, /^target-version: 0\.30$/m);
+      assert.ok(t.backlog, 'backlog unassigned → 回灌条目');
+      assert.equal(t.backlog.path, 'change-requests/_backlog.yml');
+      assert.match(t.backlog.afterText, /^[ \t]*target-version: 0\.30$/m);
+      assert.equal(t.crMdBase, null);
+      const b = planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'baseline', version: '0.30' });
+      assert.equal(b.crMd, null, 'baseline：cr.md 并入 statusTransition，不单独成条目');
+      assert.ok(b.crMdBase && b.crMdBase.text.includes('target-version: unassigned'), 'baseline：crMdBase 记录复核文本');
+      assert.ok(b.crMdBase.sha256.length === 64);
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+  // ② 已=输入 → 幂等 null（baseline 给 crMdBase）
+  {
+    const txws = makePlanTx({ crMdText: '---\nid: CR-P1\nstatus: merging\ntarget-version: 0.30\nupdated: "2026-09-01T00:00:00+08:00"\n---\n' });
+    try {
+      const t = planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' });
+      assert.equal(t.crMd, null, '已=输入 → crMd 幂等 null');
+      assert.equal(t.crMdBase, null);
+      assert.ok(t.backlog, 'backlog 仍 unassigned → 继续回灌 backlog');
+      const b = planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'baseline', version: '0.30' });
+      assert.ok(b.crMdBase, 'baseline：幂等分支仍记录复核文本供合成');
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+  // ③ 已=另一真实版本 → MISMATCH（两次采样间漂移）
+  {
+    const txws = makePlanTx({ crMdText: '---\nid: CR-P1\nstatus: merging\ntarget-version: 0.29\nupdated: "2026-09-01T00:00:00+08:00"\n---\n' });
+    try {
+      assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
+        (e) => e.code === 'WRITEBACK_VERSION_MISMATCH' && e.extra.crMd === '0.29' && e.extra.input === '0.30');
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+  // ④ 非法 → INVALID（crMdReason）
+  {
+    const txws = makePlanTx({ crMdText: '---\nid: CR-P1\nstatus: merging\ntarget-version: n/a\nupdated: "2026-09-01T00:00:00+08:00"\n---\n' });
+    try {
+      assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
+        (e) => e.code === 'WRITEBACK_VERSION_INVALID' && e.extra.crMdReason === 'forbidden');
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+  // ⓪ 同源断言：authority.path ≠ txws 或 source 非 transaction-workspace → 复用既有 WRITEBACK_STATE_MISMATCH（B-SDD-02/B-SDD-04）
+  {
+    const txws = makePlanTx();
+    try {
+      assert.throws(() => planVersionRefill({ txws, authority: { path: path.join(txws, '..', 'elsewhere'), source: 'transaction-workspace' }, cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
+        (e) => e.code === 'WRITEBACK_STATE_MISMATCH' && /guardPath|opPath/.test(e.message));
+      assert.throws(() => planVersionRefill({ txws, authority: { path: txws, source: 'cr-worktree' }, cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
+        (e) => e.code === 'WRITEBACK_STATE_MISMATCH');
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-058 TASK-02：backlog 预检五向量（unassigned/等值/另一真实/缺失/重复/非法）', () => {
+  // 等值 → backlog 条目 null（幂等），cr.md 仍 unassigned 继续回灌
+  {
+    const txws = makePlanTx({ backlogBody: 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-P1\n    title: T\n    status: code-approved\n    target-version: 0.30\n' });
+    try {
+      const t = planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' });
+      assert.equal(t.backlog, null, 'backlog 已=输入 → 幂等 null');
+      assert.ok(t.crMd, 'cr.md 仍 unassigned → 继续回灌 cr.md');
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+  // 另一真实版本 → WRITEBACK_BACKLOG_VERSION_MISMATCH
+  {
+    const txws = makePlanTx({ backlogBody: 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-P1\n    title: T\n    status: code-approved\n    target-version: 0.29\n' });
+    try {
+      assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
+        (e) => e.code === 'WRITEBACK_BACKLOG_VERSION_MISMATCH' && e.extra.crMd === 'unassigned' && e.extra.backlog === '0.29' && e.extra.input === '0.30');
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+  // 缺失条目 → ENTRY_NOT_IN_BACKLOG
+  {
+    const txws = makePlanTx({ backlogBody: 'schema: cr-backlog/v2\nchange-requests:\n' });
+    try {
+      assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
+        (e) => e.code === 'ENTRY_NOT_IN_BACKLOG' && e.extra.cr === 'CR-P1');
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+  // 重复条目 → WRITEBACK_BACKLOG_ENTRY_DUPLICATE（count>=2）
+  {
+    const txws = makePlanTx({ backlogBody: 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-P1\n    title: T\n    status: code-approved\n    target-version: unassigned\n  - id: CR-P1\n    title: T2\n    status: code-approved\n    target-version: unassigned\n' });
+    try {
+      assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
+        (e) => e.code === 'WRITEBACK_BACKLOG_ENTRY_DUPLICATE' && e.extra.count >= 2);
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+  // 缺行/非法 → INVALID（backlogReason）
+  {
+    const txws = makePlanTx({ backlogBody: 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-P1\n    title: T\n    status: code-approved\n' });
+    try {
+      assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
+        (e) => e.code === 'WRITEBACK_VERSION_INVALID' && e.extra.backlogReason === 'missing');
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+  {
+    const txws = makePlanTx({ backlogBody: 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-P1\n    title: T\n    status: code-approved\n    target-version: n/a\n' });
+    try {
+      assert.throws(() => planVersionRefill({ txws, authority: planAuth(txws), cr: 'CR-P1', stage: 'tasks', version: '0.30' }),
+        (e) => e.code === 'WRITEBACK_VERSION_INVALID' && e.extra.backlogReason === 'forbidden');
+    } finally { rmSync(txws, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-058 TASK-02：行级编辑硬失败纪律（NFR-3）——CRLF 等价 / 幂等 / 替换未命中硬失败', () => {
+  const base = mkdtempSync(path.join(os.tmpdir(), 'crctl-edit-'));
+  try {
+    const cr = 'CR-P1';
+    const lf = '---\nid: CR-P1\nstatus: merging\ntarget-version: unassigned\nupdated: "2026-09-01T00:00:00+08:00"\n---\n';
+    // CRLF 输入 → LF 输出等价
+    assert.equal(applyTargetVersionToCrMd(lf.replaceAll('\n', '\r\n'), '0.30'),
+      applyTargetVersionToCrMd(lf, '0.30'));
+    assert.match(applyTargetVersionToCrMd(lf, '0.30'), /^target-version: 0\.30$/m);
+    // 幂等：已等于目标版本 → 返回原文
+    const same = applyTargetVersionToCrMd(lf.replace('target-version: unassigned', 'target-version: 0.30'), '0.30');
+    assert.equal(same, lf.replace('target-version: unassigned', 'target-version: 0.30'));
+    // 缺 target-version 行 → 硬失败 INVALID
+    assert.throws(() => applyTargetVersionToCrMd('---\nid: CR-P1\nstatus: merging\n---\n', '0.30'),
+      (e) => e.code === 'WRITEBACK_VERSION_INVALID' && e.extra.crMdReason === 'missing');
+    // 无 frontmatter → 硬失败 INVALID
+    assert.throws(() => applyTargetVersionToCrMd('# no fm\n', '0.30'), (e) => e.code === 'WRITEBACK_VERSION_INVALID');
+    // editBacklogEntryTargetVersion：区间定点替换（B-CODE-001 口径），块尾换行不破坏 YAML 分隔
+    const backlog = 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-P1\n    title: T\n    status: code-approved\n    target-version: unassigned\n  - id: CR-P2\n    title: T2\n    status: code-approved\n    target-version: unassigned\n';
+    const after = editBacklogEntryTargetVersion(backlog, cr, '0.30');
+    assert.ok(after.includes('    target-version: 0.30'), 'CR-P1 条目版本行已替换');
+    assert.ok(after.includes('  - id: CR-P2'), '下一条目块边界保留（块尾换行不丢）');
+    assert.ok(after.includes('    target-version: unassigned\n'), 'CR-P2 条目版本行不动');
+    // CRLF 等价
+    assert.equal(editBacklogEntryTargetVersion(backlog.replaceAll('\n', '\r\n'), cr, '0.30').replaceAll('\r\n', '\n'), after);
+    // 替换未命中（行已=目标版本）→ 硬失败 INVALID，禁止静默返回原文
+    assert.throws(() => editBacklogEntryTargetVersion(backlog.replace('target-version: unassigned', 'target-version: 0.30'), cr, '0.30'),
+      (e) => e.code === 'WRITEBACK_VERSION_INVALID' && e.extra.backlogReason === 'no-match');
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── CR-2026-058 TASK-05：AC-4 静态核对（B-DP-03 正反语义向量证明 + 错误码收敛） ────────────────────────── */
+
+test('CR-2026-058 TASK-05 AC-4：writeback-tx 改写静态核对——冻结标识正向 + UNASSIGNED 期望收敛反向 + snapshotSixPoints 保留', () => {
+  const wbPath = path.join(PACKAGE_ROOT, 'skills', 'shared', 'crctl', 'scripts', 'test', 'writeback-tx.test.mjs');
+  const src = readFileSync(wbPath, 'utf8');
+  // 正向：冻结标识各 ≥1（放行向量与两条合法负向向量存在且命名可核对）
+  for (const tag of ['AC-1.1', 'AC-1.2', 'AC-1.3']) {
+    assert.ok(src.includes(tag), `冻结标识 ${tag} 至少出现一次`);
+  }
+  // 禁止标识零出现（防命名混淆）
+  assert.equal(src.includes('AC-1.1-OLD'), false, '禁止标识 AC-1.1-OLD 零出现');
+  // 反向：逐 test(...) 块结构化核对——含 WRITEBACK_VERSION_UNASSIGNED 期望的测试块，测试名必须含 AC-1.2 或 AC-1.3
+  const lines = src.split('\n');
+  let blocks = [];
+  let cur = null;
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^test\(\s*'([^']+)'/.exec(lines[i]);
+    if (m) { cur = { name: m[1], body: [] }; blocks.push(cur); continue; }
+    if (cur) {
+      if (/^\}\);$/.test(lines[i].trimEnd())) { cur = null; continue; }
+      cur.body.push(lines[i]);
+    }
+  }
+  const offenders = blocks
+    .filter((b) => b.body.some((l) => l.includes('WRITEBACK_VERSION_UNASSIGNED')))
+    .filter((b) => !b.name.includes('AC-1.2') && !b.name.includes('AC-1.3'))
+    .map((b) => b.name);
+  assert.deepEqual(offenders, [], 'UNASSIGNED 期望只允许存在于 AC-1.2/AC-1.3 冻结负向向量测试内（旧「cr.md=unassigned + 真实输入 → UNASSIGNED」断言零残留可判定）');
+  // 零观察点保持：snapshotSixPoints 类调用保留
+  assert.ok(src.includes('snapshotSixPoints'), 'writeback-tx.test.mjs 保留 snapshotSixPoints 零观察点断言');
+});
+
+test('CR-2026-058 TASK-05 AC-4：错误码收敛静态核对——仅两个新码、WRITEBACK_AUTHORITY_DRIFT 零残留、UNASSIGNED 文案 §4.7', () => {
+  const libPath = path.join(PACKAGE_ROOT, 'skills', 'shared', 'crctl', 'scripts', 'lib', 'workspace-transactions.mjs');
+  const src = readFileSync(libPath, 'utf8');
+  // B-SDD-04：新增公开错误码仅 PRD FR-2.1 允许的两个
+  assert.ok(src.includes('WRITEBACK_BACKLOG_VERSION_MISMATCH'), '新码 1 存在');
+  assert.ok(src.includes('WRITEBACK_BACKLOG_ENTRY_DUPLICATE'), '新码 2 存在');
+  assert.equal(src.includes('WRITEBACK_AUTHORITY_DRIFT'), false, 'WRITEBACK_AUTHORITY_DRIFT 零残留');
+  // FR-5 文案：guard 的 UNASSIGNED 文案能区分两侧/输入侧 unassigned 与已放行回灌分支（SDD §4.7）
+  assert.ok(src.includes('writeback 版本守卫：两侧或输入侧为 unassigned 一律拒绝'), 'UNASSIGNED 文案已按 §4.7 改写');
+  assert.ok(src.includes('仅 cr.md=unassigned 且输入为真实版本时放行并回灌账本'), '文案含回灌分支说明');
+  // 同源硬失败复用既有码
+  assert.ok(src.includes('WRITEBACK_STATE_MISMATCH'), '同源绑定复用既有 WRITEBACK_STATE_MISMATCH');
+});
+
+/* ────────────────────────── CR-2026-058 TASK-06：README 静态文案断言（FR-5/AC-5） ────────────────────────── */
+
+test('CR-2026-058 TASK-06 AC-5：README 行 22/行 76 已按 FR-1 判定表改写——禁止串零命中 + writeback 事务限定', () => {
+  const readme = readFileSync(path.join(PACKAGE_ROOT, 'README.md'), 'utf8');
+  // 禁止串零命中（AC-5）：旧表述不得再作为现行规则出现在人读入口
+  assert.equal(readme.includes('规范化全等才放行'), false, '旧表述「规范化全等才放行」零命中');
+  assert.equal(readme.includes('两侧须为真实版本'), false, '「两侧须为真实版本」零命中');
+  const lines = readme.split('\n');
+  const line22 = lines[21] || '';
+  const line76 = lines[75] || '';
+  assert.ok(line22.includes('writeback-apply'), '行 22 仍描述 writeback-apply 版本守卫');
+  assert.ok(line22.includes('回灌'), '行 22 含回灌语义');
+  assert.ok(line22.includes('writeback 事务'), '行 22 含 writeback 事务限定');
+  assert.ok(line22.includes('unassigned') && line22.includes('真实版本'), '行 22 含 FR-1 判定表语义（unassigned + 真实版本放行回灌）');
+  assert.ok(line76.includes('writeback 事务之外'), '行 76 的「唯一更正入口」带 writeback 事务限定');
+  assert.ok(line76.includes('回灌'), '行 76 含回灌分支说明');
 });

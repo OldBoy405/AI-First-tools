@@ -19,7 +19,7 @@
 
 CR 不是需求单，而是一次变更从想法到回写的工作容器。每个 CR 有自己的目录、分支、worktree、状态、owner 和过程产物，沉淀在 `change-requests/{CR-ID}/` 里：PRD、SDD、任务拆解、测试报告、评审意见、审批记录、traceability。
 
-**目标版本在注册阶段确定**：`crctl register` 的 `--target-version` 必填——真实版本 `MAJOR.MINOR[.PATCH]` 或 `unassigned`（未排期时先向用户确认再写），禁止 `tbd` 及同义值；PRD/SDD/PLAN/TASK 一律继承 `cr.md` 的值。把 `unassigned` 更正为真实版本的唯一入口是 `crctl version-set {cr_id} --to <real-version>`（原子同步 cr.md、`_backlog.yml` 与已存在的 PRD/SDD/PLAN/TASK，不改 status、不允许真实版本互改或改回）；`crctl writeback-apply` 在入口做版本守卫：`--target-version` 与 `cr.md` 规范化全等才放行，版本错误零 candidate/journal 痕迹。
+**目标版本在注册阶段确定**：`crctl register` 的 `--target-version` 必填——真实版本 `MAJOR.MINOR[.PATCH]` 或 `unassigned`（未排期时先向用户确认再写），禁止 `tbd` 及同义值；PRD/SDD/PLAN/TASK 一律继承 `cr.md` 的值。把 `unassigned` 更正为真实版本的唯一入口是 `crctl version-set {cr_id} --to <real-version>`（writeback 事务之外；原子同步 cr.md、`_backlog.yml` 与已存在的 PRD/SDD/PLAN/TASK，不改 status、不允许真实版本互改或改回）；`crctl writeback-apply` 入口版本守卫：cr.md=`unassigned` 且输入为真实版本时放行并在 writeback 事务内原子回灌 authority 的 cr.md/_backlog 该条目的 target-version（冻结的 prd/sdd/plan/tasks 不动）；其余版本错误（两侧/输入侧 unassigned、两侧真实但不一致、任一侧规范化失败）零 candidate/journal 痕迹。
 
 CR 通过状态机推进。每个关键节点都要由明确的 Skill 写入证据并经 `crctl` 推进状态，不是 prompt 里说"通过了"就算通过。自动评审发现 blocker 时，不丢给人工兜底，而是带 `review_feedback` 回到对应节点自修复，直到证据闭环。
 
@@ -73,7 +73,7 @@ CR 通过状态机推进。每个关键节点都要由明确的 Skill 写入证�
 
 - 接手在途 CR：`/resume` 恢复本地 worktree，之后永远以 `crctl status {cr_id}` 看当前状态、以 `crctl next {cr_id}` 看下一步。
 - 中途失败：`crctl` 的深原语（register/checkpoint/merge/writeback-apply/archive）都是事务化且幂等，按输出的 `recoverCommand` 重跑同一条命令即可从断点续跑。
-- 版本更正：`crctl version-set {cr_id} --to <real-version>` 是 `unassigned → 真实版本` 的唯一更正入口（幂等，`changed=false` 零新 commit），其后新写的产物继续从 `cr.md` 继承；`crctl writeback-apply` 的版本守卫保证版本错误在 candidate/journal 之前短路。
+- 版本更正：`crctl version-set {cr_id} --to <real-version>` 是 `unassigned → 真实版本` 的唯一更正入口（writeback 事务之外；幂等，`changed=false` 零新 commit），其后新写的产物继续从 `cr.md` 继承；`crctl writeback-apply` 的版本守卫保证版本错误在 candidate/journal 之前短路，且当 cr.md=`unassigned`、输入为真实版本时在 writeback 事务内原子回灌 authority 的 cr.md/_backlog 该条目的 target-version（冻结产物不动，只碰两账本）。
 - 主工作区与 worktree 视图不一致时，`crctl status` 会给出 `STATUS_DIVERGED` 告警并指向权威 worktree。
 
 ## 8. 权威事实源链接
