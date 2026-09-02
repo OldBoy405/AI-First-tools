@@ -199,7 +199,11 @@ function buildNewMilestone() {
   const planText = readFile(path.join(crDir, 'plan.md'));
   if (planText === null) fail('STRUCTURE_MISMATCH', 'new traceability 需要 plan.md（交付覆盖表 + 证据命令表）', { cr });
   const norm = planText.replaceAll('\r\n', '\n');
-  const frRows = norm.split('\n').filter((l) => /^\s*\|\s*FR-\d+/.test(l));
+  const frRows = norm.split('\n').filter((l) => /^\s*\|\s*FR-\d+/.test(l)).sort((a, b) => {
+    const na = Number(((a.match(/\bFR-(\d+)\b/) || [])[1]));
+    const nb = Number(((b.match(/\bFR-(\d+)\b/) || [])[1]));
+    return na - nb;
+  });
   if (!frRows.length) fail('STRUCTURE_MISMATCH', 'plan.md 交付覆盖表不可解析（无 FR- 行）', { cr });
   const cmdRows = norm.split('\n').filter((l) => /^\s*\|\s*cmd-\d{2}/.test(l));
   const cmdIds = new Set(cmdRows.map((l) => (l.match(/\bcmd-\d{2}\b/) || [])[0]).filter(Boolean));
