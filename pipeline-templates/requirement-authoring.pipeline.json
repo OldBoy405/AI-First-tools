@@ -15,6 +15,14 @@
       "description": "写入 cr.md title 字段"
     },
     {
+      "key": "registration_key",
+      "label": "注册幂等键",
+      "type": "text",
+      "required": true,
+      "placeholder": "例：launch-panel-survey-2026-05",
+      "description": "本次注册意图的唯一稳定标识（同键同输入续跑、输入漂移拒绝）"
+    },
+    {
       "key": "summary",
       "label": "需求摘要",
       "type": "multiline",
@@ -37,6 +45,14 @@
       "required": true,
       "placeholder": "例：v0.16.0",
       "description": "决定 worktree 分支是否关联目标版本"
+    },
+    {
+      "key": "target_spec_id",
+      "label": "目标 spec 标识",
+      "type": "text",
+      "required": true,
+      "placeholder": "例：spec-016",
+      "description": "匹配 ^[a-z0-9][a-z0-9._-]*$，禁止 /、\\、CR、LF；写入 cr.md 与 _backlog.yml 双账本，作为 writeback/archive new 分支的 authority 唯一裁决事实"
     },
     {
       "key": "requirement_owner",
@@ -77,7 +93,7 @@
       "kind": "skill",
       "label": "注册 CR（深原语）",
       "ref": "requirement-register",
-      "prompt": "执行 requirement-register：\n- title: {{inputs.title}}\n- summary: {{inputs.summary}}\n- source: {{inputs.source}}\n- target_version: {{inputs.target_version}}\n- requirement_owner: {{inputs.requirement_owner}}\n- dev_owner: {{inputs.dev_owner}}\n- test_owner: {{inputs.test_owner}}\n\n调用公开的 requirement-register Skill；Pipeline 不展开注册、账本、Git、worktree 或恢复算法\n消费 requirement-register 的结构化结果；失败按 Skill 错误语义中止或重试\n\n在 node-1.md 末尾必须输出机器可读 YAML：\n```yaml\nexecution_context:\n  cr_id: CR-YYYY-NNN\n  branch: requirement/CR-YYYY-NNN\n  owners:\n    requirement:\n      id: {{inputs.requirement_owner}}\n      assigned-at: ISO-8601\n    development:\n      id: {{inputs.dev_owner}}\n      assigned-at: ISO-8601\n    test:\n      id: {{inputs.test_owner}}\n      assigned-at: ISO-8601\n  knowledge_base_worktree: {requirement-register 返回的 knowledge-base worktree 路径}\n  repo_worktrees:\n    - repo: knowledge-base\n      role: knowledge-base\n      path: {同上}\n```\n后续节点只能从 execution_context.cr_id、execution_context.owners 与 knowledge_base_worktree 取值。",
+      "prompt": "执行 requirement-register：\n- title: {{inputs.title}}\n- registration_key: {{inputs.registration_key}}\n- summary: {{inputs.summary}}\n- source: {{inputs.source}}\n- target_version: {{inputs.target_version}}\n- target_spec_id: {{inputs.target_spec_id}}\n- requirement_owner: {{inputs.requirement_owner}}\n- dev_owner: {{inputs.dev_owner}}\n- test_owner: {{inputs.test_owner}}\n\n调用公开的 requirement-register Skill；Pipeline 不展开注册、账本、Git、worktree 或恢复算法\n消费 requirement-register 的结构化结果；失败按 Skill 错误语义中止或重试\n\n在 node-1.md 末尾必须输出机器可读 YAML，只透传 register 返回的 cr_id + operational_workspace（owners 事实从 cr.md 读取，不持有 resources/owners 快照）：\n```yaml\nexecution_context:\n  cr_id: CR-YYYY-NNN\n  operational_workspace: {requirement-register 返回的 operational_workspace}\n```\n后续节点只能从 execution_context.cr_id 与 execution_context.operational_workspace 取值。",
       "onFail": "abort",
       "timeoutMinutes": 10
     },

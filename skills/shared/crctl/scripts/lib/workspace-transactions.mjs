@@ -344,7 +344,7 @@ export function assertSupportedBacklogSchemaText(text) {
 const yamlScalarLib = (v) => (/^[\w./-]+$/.test(String(v)) ? String(v) : `"${String(v).replaceAll('"', '\\"')}"`);
 
 /** 注册三账本条目的唯一模板（原 cmdCrInit 内联模板下沉；cr-init 与 register 共用）。 */
-export function buildRegistrationTexts({ cr, title, summary, source, origin, targetVersion, owners, now }) {
+export function buildRegistrationTexts({ cr, title, summary, source, origin, targetVersion, targetSpecId, owners, now }) {
   const ownerSlot = (id, indent) => [`${' '.repeat(indent)}id: ${id}`, `${' '.repeat(indent)}assigned-at: "${now}"`];
   const { requirement: req, development: dev, test: tst } = owners;
   const crMdText = [
@@ -361,6 +361,7 @@ export function buildRegistrationTexts({ cr, title, summary, source, origin, tar
     '  test:',
     ...ownerSlot(tst, 4),
     `target-version: ${yamlScalarLib(targetVersion)}`,
+    `target-spec-id: ${yamlScalarLib(targetSpecId)}`,
     `source: ${yamlScalarLib(source)}`,
     `origin: ${yamlScalarLib(origin)}`,
     'status: drafting',
@@ -390,6 +391,7 @@ export function buildRegistrationTexts({ cr, title, summary, source, origin, tar
     '      test:',
     ...ownerSlot(tst, 8),
     `    target-version: ${yamlScalarLib(targetVersion)}`,
+    `    target-spec-id: ${yamlScalarLib(targetSpecId)}`,
     `    source: ${yamlScalarLib(source)}`,
     `    origin: ${yamlScalarLib(origin)}`,
     '    prd-path: ""',
@@ -675,9 +677,17 @@ export async function registerCr(ctx, input) {
     throw new TxError('REGISTER_VERSION_INVALID', `register --target-version 非法：${String(input.targetVersion ?? '') || '(缺失)'}（reason=${tv.reason}；合法值 = 真实版本 MAJOR.MINOR[.PATCH] 或 unassigned）`, { reason: tv.reason, raw: input.targetVersion == null ? null : String(input.targetVersion) });
   }
   const targetVersion = tv.value;
+  // CR-2026-060 G1（AC-01/AC-02）：--target-spec-id 防御性复查（与 cmdRegister 同码，先于锁/journal/账本，零写入）。
+  const targetSpecId = input && input.targetSpecId;
+  if (typeof targetSpecId !== 'string' || !targetSpecId) {
+    throw new TxError('REGISTER_TARGET_SPEC_ID_REQUIRED', 'register 需要 --target-spec-id <id>（非空，匹配 ^[a-z0-9][a-z0-9._-]*$，禁止 / \\ CR LF）', { cr: null });
+  }
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(targetSpecId) || /[/\\\r\n]/.test(targetSpecId)) {
+    throw new TxError('REGISTER_TARGET_SPEC_ID_INVALID', `register --target-spec-id 非法: ${JSON.stringify(targetSpecId)}（须匹配 ^[a-z0-9][a-z0-9._-]*$，禁止 / \\ CR LF）`, { targetSpecId });
+  }
   const keyHash = sha256(String(input.registrationKey));
   const inputDigest = sha256(JSON.stringify({
-    title: input.title, summary, source, origin, targetVersion, year,
+    title: input.title, summary, source, origin, targetVersion, year, targetSpecId,
     owners: { requirement: owners.requirement, development: owners.development, test: owners.test },
   }));
   const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
@@ -687,6 +697,7 @@ export async function registerCr(ctx, input) {
     (input.source ? ` --source ${JSON.stringify(input.source)}` : '') +
     (origin ? ` --origin ${origin}` : '') +
     (input.targetVersion ? ` --target-version ${JSON.stringify(input.targetVersion)}` : '') +
+    ` --target-spec-id ${JSON.stringify(targetSpecId)}` +
     ` --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`;
   const lock = await acquireLock({ root: ctx.installRoot, scope: `register-${keyHash.slice(0, 16)}`, op: 'register' });
   try {
@@ -720,6 +731,7 @@ export async function registerCr(ctx, input) {
       gitMust(kb.rootPath, ['fetch', 'origin']);
       payload.baseSha = gitMust(kb.rootPath, ['rev-parse', `refs/remotes/origin/${kb.trunk}`]);
       payload.cr = formatCrId(year, scanMaxCrNumber(kb.rootPath, year) + 1);
+      payload.registrationAt = payload.registrationAt || nowIso();
       did = true;
       await save('allocated');
       faultPoint('register-after-allocate', { cr: payload.cr });
@@ -737,7 +749,7 @@ export async function registerCr(ctx, input) {
         const backlogText = fs.readFileSync(bp, 'utf8');
         assertSupportedBacklogSchemaText(backlogText);
         const indexText = fs.readFileSync(ip, 'utf8');
-        const texts = buildRegistrationTexts({ cr, title: input.title, summary, source, origin, targetVersion, owners, now: nowIso() });
+        const texts = buildRegistrationTexts({ cr, title: input.title, summary, source, origin, targetVersion, targetSpecId, owners, now: payload.registrationAt });
         const newBacklog = backlogText.replaceAll('\r\n', '\n').trimEnd() + '\n' + texts.backlogEntry + '\n';
         const newIndex = indexText.replaceAll('\r\n', '\n').trimEnd() + '\n' + texts.indexEntry + '\n';
         const crMdText = texts.crMdText;
@@ -803,7 +815,7 @@ export async function registerCr(ctx, input) {
       faultPoint('register-between-worktrees', { repo: repo.id });
     }
     await save('complete');
-    return { cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete, sideEffects: buildSideEffects(payload), targetVersion, recoverCommand };
+    return { cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete, sideEffects: buildSideEffects(payload), targetVersion, targetSpecId, registrationAt: payload.registrationAt, recoverCommand };
   } finally {
     await lock.release();
   }

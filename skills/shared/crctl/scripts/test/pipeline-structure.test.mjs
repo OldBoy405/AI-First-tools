@@ -310,8 +310,9 @@ test('FR-12.2: requirement-authoring 7 节点顺序、execution_context/owners �
   assert.equal(p.nodes.length, 7, '7 节点不变（FR-12.4 节点数零改动）');
   const first = p.nodes[0];
   assert.ok(first.prompt.includes('execution_context:'), 'register 输出机器可读 execution_context');
-  assert.ok(first.prompt.includes('owners:'), 'execution_context 含 owners（SDD §2.4）');
-  assert.ok(first.prompt.includes('knowledge_base_worktree:'), 'execution_context 含 knowledge_base_worktree');
+  assert.ok(first.prompt.includes('operational_workspace:'), 'execution_context 含 operational_workspace（snake_case，逐字透传）');
+  assert.ok(!first.prompt.includes('owners:'), 'execution_context 不再持有 owners 快照（CR-2026-060 SDD §8）');
+  assert.ok(!first.prompt.includes('knowledge_base_worktree:'), 'execution_context 不再持有 knowledge_base_worktree 快照');
   assert.ok(!/crctl register/.test(first.prompt), 'register 节点无 crctl register 命令参数序列');
   assert.ok(!/\/abs\/path/.test(first.prompt), 'register 节点无绝对路径示例');
   const draft = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_prd/.test(n.prompt));
