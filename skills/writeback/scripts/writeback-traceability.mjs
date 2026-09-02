@@ -24,6 +24,7 @@ import {
 const args = parseArgs(process.argv.slice(2));
 const { workspace: ws, cr, spec, version, 'candidate-out': candidateOut } = args;
 const milestoneFile = args['milestone-file'];
+const mode = args.mode === 'new' ? 'new' : 'legacy';
 
 const generatorSha = sha256(fs.readFileSync(new URL(import.meta.url), 'utf8'));
 
@@ -57,8 +58,14 @@ if (args['validate-evidence'] === true) {
   process.exit(0);
 }
 
-if (!ws || !cr || !spec || !version || !milestoneFile || !candidateOut) {
-  fail('BAD_ARGS', '缺少必填参数 --workspace / --cr / --spec / --version / --milestone-file / --candidate-out');
+if (!ws || !cr || !spec || !version || !candidateOut) {
+  fail('BAD_ARGS', '缺少必填参数 --workspace / --cr / --spec / --version / --candidate-out');
+}
+if (mode === 'legacy' && !milestoneFile) {
+  fail('BAD_ARGS', 'legacy 模式缺少必填参数 --milestone-file（new 模式传 --mode new，无 --milestone-file）');
+}
+if (mode === 'new' && milestoneFile) {
+  fail('BAD_ARGS', 'new 模式不接受 --milestone-file（生成输入=冻结 PLAN/TASK/test-report/merge facts）');
 }
 // 版本入参归一（CODE-BLOCK-002）：对齐既有基线 target-version: "0.20.1" 裸值惯例
 const verNoV = version.startsWith('v') ? version.slice(1) : version;
@@ -108,25 +115,28 @@ for (const mc of mergeCommits) {
   delete mc.baseSha; delete mc.sourceSha; delete mc.mergeSha;
 }
 
-/* ── milestone-file：结构校验（cr/milestone/target-version/fr-chain[].fr 必填；无 status）── */
-const msText = readFile(milestoneFile);
-if (msText === null) fail('BAD_ARGS', `--milestone-file 不存在：${milestoneFile}`);
-const ms = parseMilestoneFile(msText);
-if (!ms.cr || !ms.milestone || !ms['target-version'] || !Array.isArray(ms['fr-chain']) || ms['fr-chain'].length === 0) {
-  fail('STRUCTURE_MISMATCH', 'milestone-file 结构缺失：cr/milestone/target-version/fr-chain[].fr 必填', { got: { cr: ms.cr, milestone: ms.milestone, tv: ms['target-version'], frs: ms['fr-chain']?.length } });
-}
-if (ms.cr !== cr) fail('STRUCTURE_MISMATCH', `milestone-file 的 cr=${ms.cr} 与入参 ${cr} 不一致`);
-for (const f of ms['fr-chain']) {
-  if (!f.fr) fail('STRUCTURE_MISMATCH', 'fr-chain 条目缺少 fr 字段');
-}
-// 若 milestone-file 自带 merge-commits，与账本提取结果一致性校验（防人工誊抄分叉）
-if (ms['merge-commits']) {
-  const inFile = new Set(ms['merge-commits'].split('\n').filter((l) => l.trimStart().startsWith('- repo:')).map((l) => l.trimStart().slice(7).trim()));
-  const fromMergeCommits = new Set(mergeCommits.map((m) => m.repo));
-  if (inFile.size !== fromMergeCommits.size || [...inFile].some((r) => !fromMergeCommits.has(r))) {
-    fail('STRUCTURE_MISMATCH', 'milestone-file 内 merge-commits 与 merge-commits.yml 提取结果不一致', { inFile: [...inFile], fromMergeCommits: [...fromMergeCommits] });
+/* ── milestone 输入：legacy 用 milestone-file；new 用冻结 PLAN 两张表 + TASK 账本/卡 + test-report + merge facts（SDD §4.8）── */
+const ms = mode === 'new' ? buildNewMilestone() : (() => {
+  const msText = readFile(milestoneFile);
+  if (msText === null) fail('BAD_ARGS', `--milestone-file 不存在：${milestoneFile}`);
+  const parsed = parseMilestoneFile(msText);
+  if (!parsed.cr || !parsed.milestone || !parsed['target-version'] || !Array.isArray(parsed['fr-chain']) || parsed['fr-chain'].length === 0) {
+    fail('STRUCTURE_MISMATCH', 'milestone-file 结构缺失：cr/milestone/target-version/fr-chain[].fr 必填', { got: { cr: parsed.cr, milestone: parsed.milestone, tv: parsed['target-version'], frs: parsed['fr-chain']?.length } });
   }
-}
+  if (parsed.cr !== cr) fail('STRUCTURE_MISMATCH', `milestone-file 的 cr=${parsed.cr} 与入参 ${cr} 不一致`);
+  for (const f of parsed['fr-chain']) {
+    if (!f.fr) fail('STRUCTURE_MISMATCH', 'fr-chain 条目缺少 fr 字段');
+  }
+  // 若 milestone-file 自带 merge-commits，与账本提取结果一致性校验（防人工誊抄分叉）
+  if (parsed['merge-commits']) {
+    const inFile = new Set(parsed['merge-commits'].split('\n').filter((l) => l.trimStart().startsWith('- repo:')).map((l) => l.trimStart().slice(7).trim()));
+    const fromMergeCommits = new Set(mergeCommits.map((m) => m.repo));
+    if (inFile.size !== fromMergeCommits.size || [...inFile].some((r) => !fromMergeCommits.has(r))) {
+      fail('STRUCTURE_MISMATCH', 'milestone-file 内 merge-commits 与 merge-commits.yml 提取结果不一致', { inFile: [...inFile], fromMergeCommits: [...fromMergeCommits] });
+    }
+  }
+  return parsed;
+})();
 
 /* ── 幂等判据：specs 侧已含 - cr: {cr} 段 ── */
 const old = readFile(tracePath);
@@ -181,7 +191,58 @@ function buildFirstHeader() {
   ].join('\n') + '\n';
 }
 
+/**
+ * new traceability 确定性输入构造（SDD §4.8）：从冻结 PLAN 交付覆盖表/证据命令表 + TASK 账本 + test-report + merge facts
+ * 生成 `FR→SDD→TASK→repo@mergeSHA→cmd` 引用链；任一交叉失败 → STRUCTURE_MISMATCH 硬失败（禁止静默降级）。
+ */
+function buildNewMilestone() {
+  const planText = readFile(path.join(crDir, 'plan.md'));
+  if (planText === null) fail('STRUCTURE_MISMATCH', 'new traceability 需要 plan.md（交付覆盖表 + 证据命令表）', { cr });
+  const norm = planText.replaceAll('\r\n', '\n');
+  const frRows = norm.split('\n').filter((l) => /^\s*\|\s*FR-\d+/.test(l));
+  if (!frRows.length) fail('STRUCTURE_MISMATCH', 'plan.md 交付覆盖表不可解析（无 FR- 行）', { cr });
+  const cmdRows = norm.split('\n').filter((l) => /^\s*\|\s*cmd-\d{2}/.test(l));
+  const cmdIds = new Set(cmdRows.map((l) => (l.match(/\bcmd-\d{2}\b/) || [])[0]).filter(Boolean));
+  if (!cmdIds.size) fail('STRUCTURE_MISMATCH', 'plan.md 证据命令表不可解析（无 cmd-NN 行）', { cr });
+  // TASK 账本（§4.6 已保证全 done）
+  const idxText = readFile(path.join(crDir, 'tasks', '_index.yml'));
+  if (idxText === null) fail('STRUCTURE_MISMATCH', 'new traceability 需要 tasks/_index.yml', { cr });
+  const taskIds = new Set([...idxText.replaceAll('\r\n', '\n').matchAll(/^\s*- id:\s*(\S+)$/gm)].map((m) => m[1]));
+  if (!taskIds.size) fail('STRUCTURE_MISMATCH', 'tasks/_index.yml 无 TASK 条目', { cr });
+  // test-report 证据 id（与证据命令表/交付覆盖表交叉）
+  const trText = readFile(path.join(crDir, 'test-report.md'));
+  if (trText === null) fail('STRUCTURE_MISMATCH', 'new traceability 需要 test-report.md', { cr });
+  const testCmdIds = new Set([...trText.replaceAll('\r\n', '\n').matchAll(/\bcmd-\d{2}\b/g)].map((m) => m[0]));
+  const code = mergeCommits.map((m) => `${m.repo}@${m.sha.slice(0, 12)}`);
+  const frChain = [];
+  for (const row of frRows) {
+    const cells = row.split('|').map((c) => c.trim()).filter(Boolean);
+    if (cells.length < 4) fail('STRUCTURE_MISMATCH', `交付覆盖表行结构非法: ${row.trim()}`, { cr });
+    const frM = /^FR-\d+/.exec(cells[0]);
+    if (!frM) fail('STRUCTURE_MISMATCH', `交付覆盖表行缺少 FR id: ${row.trim()}`, { cr });
+    const fr = frM[0];
+    const title = cells[0].slice(frM[0].length).trim();
+    const sdd = cells[1] || undefined;
+    const tasks = [...(cells[2] || '').matchAll(/CR-\d{4}-\d{3}-TASK-\d{2}/g)].map((m) => m[0]);
+    const evidence = [...(cells[3] || '').matchAll(/\bcmd-\d{2}\b/g)].map((m) => m[0]);
+    for (const t of tasks) {
+      if (!taskIds.has(t)) fail('STRUCTURE_MISMATCH', `交付覆盖表 TASK ${t} 不在 tasks/_index.yml`, { cr, fr, task: t });
+    }
+    for (const e of evidence) {
+      if (!cmdIds.has(e)) fail('STRUCTURE_MISMATCH', `交付覆盖表证据 ${e} 不在 plan 证据命令表`, { cr, fr, evidence: e });
+      if (!testCmdIds.has(e)) fail('STRUCTURE_MISMATCH', `交付覆盖表证据 ${e} 不在 test-report.md`, { cr, fr, evidence: e });
+    }
+    frChain.push({ fr, title: title || undefined, sdd, tasks, code, evidence });
+  }
+  return { cr, milestone: verNoV, 'target-version': verNoV, 'fr-chain': frChain };
+}
+
 /* ── milestone 段构造（对齐既有段格式：4 字段 merge-commits + frs + evidence；无 status）── */
+function renderField(v) {
+  if (Array.isArray(v)) return `[${v.join(', ')}]`;
+  return v;
+}
+
 function buildSegment(evidence) {
   const lines = [
     `  - cr: ${ms.cr}`,
@@ -200,9 +261,9 @@ function buildSegment(evidence) {
     lines.push(`      - fr: ${f.fr}`);
     if (f.title !== undefined) lines.push(`        title: ${f.title}`);
     if (f.sdd !== undefined) lines.push(`        sdd: ${f.sdd}`);
-    if (f.tasks !== undefined) lines.push(`        tasks: ${f.tasks}`);
-    if (f.code !== undefined) lines.push(`        code: ${f.code}`);
-    if (f.evidence !== undefined) lines.push(`        evidence: ${f.evidence}`);
+    if (f.tasks !== undefined) lines.push(`        tasks: ${renderField(f.tasks)}`);
+    if (f.code !== undefined) lines.push(`        code: ${renderField(f.code)}`);
+    if (f.evidence !== undefined) lines.push(`        evidence: ${renderField(f.evidence)}`);
   }
   lines.push('    evidence:');
   lines.push(`      test: { status: ${evidence.test.status}, path: ${evidence.test.path}, sha256: ${evidence.test.sha256} }`);

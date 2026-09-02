@@ -21,7 +21,7 @@ const crDirIn = (ws, cr) => path.join(ws, 'change-requests', cr);
 function registerUnassigned(kb, key = 'key-abc-123') {
   const r = runCrctl(['register', '--registration-key', key, '--title', 'VersionSetTest',
     '--owner-requirement', 'Ray', '--owner-development', 'Ray', '--owner-test', 'Ray',
-    '--target-version', 'unassigned', '--workspace', kb], { cwd: kb });
+    '--target-version', 'unassigned', '--target-spec-id', 'spec-vs', '--workspace', kb], { cwd: kb });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.json.targetVersion, 'unassigned');
   return r.json.cr;

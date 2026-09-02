@@ -196,6 +196,89 @@ export function readCrMdTargetVersion(workspacePath, cr) {
   return parseCrMdTargetVersionText(text.replaceAll('\r\n', '\n'));
 }
 
+/* ────────────────────────── CR-2026-060 G1：target-spec-id 模式裁决与 authority（唯一裁决 + 生命周期绑定，SDD §2.2/§4.1） ────────────────────────── */
+
+const TARGET_SPEC_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
+
+/** 行级读取 frontmatter 内 ^target-spec-id: 行（缺 frontmatter/缺行 → null）。 */
+export function readTargetSpecIdField(text) {
+  const norm = String(text).replaceAll('\r\n', '\n');
+  const m = matchFrontmatter(norm);
+  if (!m) return null;
+  const line = m.body.split('\n').find((l) => /^target-spec-id:/.test(l));
+  if (!line) return null;
+  return line.replace(/^target-spec-id:\s*/, '').trim().replace(/^["']|["']$/g, '');
+}
+
+/** 行级读取 _backlog.yml 条目块内 target-spec-id（缺块/缺行 → null）。 */
+export function readBacklogTargetSpecIdField(text, cr) {
+  const norm = String(text).replaceAll('\r\n', '\n');
+  const block = matchEntryBlock(norm, cr);
+  if (!block) return null;
+  const line = block.text.split('\n').find((l) => /^[ \t]*target-spec-id:/.test(l));
+  if (!line) return null;
+  return line.replace(/^[ \t]*target-spec-id:\s*/, '').trim().replace(/^["']|["']$/g, '');
+}
+
+function targetSpecIdValid(v) {
+  return typeof v === 'string' && TARGET_SPEC_ID_RE.test(v) && !/[/\\\r\n]/.test(v);
+}
+
+/**
+ * mode 唯一裁决纯函数（SDD §2.2.1/§4.1）：自身不解析路径，authority 由调用方按生命周期绑定传入。
+ * 失败抛 TxError('TARGET_SPEC_AUTHORITY_DRIFT', ..., { kind: 'missing'|'invalid'|'mismatch' })（AC-02 唯一顶层码）。
+ */
+export function resolveTargetSpecMode(_ctx, cr, { authority }) {
+  let crMdText = null;
+  try { crMdText = fs.readFileSync(path.join(authority.path, 'change-requests', cr, 'cr.md'), 'utf8'); } catch { /* missing */ }
+  const a = crMdText == null ? null : readTargetSpecIdField(crMdText);
+  let backlogText = null;
+  try { backlogText = fs.readFileSync(path.join(authority.path, 'change-requests', '_backlog.yml'), 'utf8'); } catch { /* missing */ }
+  const b = backlogText == null ? null : readBacklogTargetSpecIdField(backlogText, cr);
+  const aMissing = a == null;
+  const bMissing = b == null;
+  if (aMissing && bMissing) return { mode: 'legacy' };
+  if (aMissing !== bMissing) {
+    throw new TxError('TARGET_SPEC_AUTHORITY_DRIFT', `${cr}: target-spec-id 单侧缺失（cr.md=${a == null ? '(缺失)' : JSON.stringify(a)}，_backlog.yml=${b == null ? '(缺失)' : JSON.stringify(b)}）`, { kind: 'missing', crMd: a, backlog: b });
+  }
+  if (!targetSpecIdValid(a) || !targetSpecIdValid(b)) {
+    throw new TxError('TARGET_SPEC_AUTHORITY_DRIFT', `${cr}: target-spec-id 非法（须匹配 ^[a-z0-9][a-z0-9._-]*$，禁止 / \\ CR LF）`, { kind: 'invalid', crMd: a, backlog: b });
+  }
+  if (a !== b) {
+    throw new TxError('TARGET_SPEC_AUTHORITY_DRIFT', `${cr}: target-spec-id 不一致（cr.md=${JSON.stringify(a)}，_backlog.yml=${JSON.stringify(b)}）`, { kind: 'mismatch', crMd: a, backlog: b });
+  }
+  return { mode: 'new', targetSpecId: a };
+}
+
+/**
+ * strict writeback authority 解析器（SDD §2.2.3）：只读、永不回退 cr-worktree；txws 缺失/不自洽 → WRITEBACK_SPEC_REQUIRED；
+ * 非 post-finalize 且 merge journal 无 complete 事实 → 既有 WRITEBACK_STATE_MISMATCH。禁止 new-mode 消费 resolveWritebackAuthorityPath 回退值。
+ */
+export function resolveWritebackAuthorityStrict(ctx, cr) {
+  const crWorktree = crWorktreePath(ctx, cr);
+  const status = readCrMdStatus(crWorktree, cr);
+  if (status != null && POST_FINALIZE_STATUSES.has(status)) {
+    const txws = txWorkspacePath(ctx, cr);
+    if (!fs.existsSync(txws)) {
+      throw new TxError('WRITEBACK_SPEC_REQUIRED', `${cr}: status=${status} 属 finalize 后阶段，但 Transaction Workspace 不存在: ${txws}（new authority 缺失，禁止回退 cr-worktree）`, { cr, status, txws });
+    }
+    const txStatus = readCrMdStatus(txws, cr);
+    if (txStatus == null || !POST_FINALIZE_STATUSES.has(txStatus)) {
+      throw new TxError('WRITEBACK_SPEC_REQUIRED', `${cr}: Transaction Workspace cr.md status=${txStatus}，与 finalize 后阶段不符`, { cr, crWorktreeStatus: status, txStatus });
+    }
+    return { path: txws, source: 'transaction-workspace' };
+  }
+  const ms = mergeStatus(ctx, cr);
+  if (ms.phase === 'complete' && ms.operationalWorkspace) {
+    const txStatus = readCrMdStatus(ms.operationalWorkspace, cr);
+    if (txStatus != null && POST_FINALIZE_STATUSES.has(txStatus)) {
+      return { path: ms.operationalWorkspace, source: 'transaction-workspace' };
+    }
+    throw new TxError('WRITEBACK_SPEC_REQUIRED', `${cr}: merge journal 指向 txws 但 cr.md status=${txStatus}，与 finalize 后阶段不符`, { cr, crWorktreeStatus: status, txStatus });
+  }
+  throw new TxError('WRITEBACK_STATE_MISMATCH', `writeback 需要 finalize 后 authority（Transaction Workspace），当前 status=${status}（merge journal phase=${ms.phase}）`, { cr, phase: status });
+}
+
 /**
  * phase authority resolver（SDD §1.3）：
  * - register～code-approved：authority = CR requirement worktree（source 'cr-worktree'）；
@@ -2383,6 +2466,7 @@ function readPreparedCandidate({ txws, candidate, cr, stage, specId, targetVersi
 export function prepareWritebackCandidate(input) {
   const business = canonicalWritebackBusinessInput(input);
   const { cr, stage, specId } = business.value;
+  const mode = input.mode === 'new' ? 'new' : 'legacy';
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) throw new TxError('WRITEBACK_CR_INVALID', `writeback 需要合法 CR-ID，收到 ${cr}`, { cr });
   if (!WRITEBACK_STAGES.includes(stage)) throw new TxError('WRITEBACK_STAGE_INVALID', `stage 非法: ${stage}`, { stage });
   if (typeof specId !== 'string' || !specId) throw new TxError('WRITEBACK_SPEC_INVALID', 'writeback 需要 specId');
@@ -2391,7 +2475,8 @@ export function prepareWritebackCandidate(input) {
   if (stage === 'tasks' && (business.value.milestoneName != null || business.value.brief != null || business.value.milestoneFile != null)) {
     throw new TxError('WRITEBACK_STAGE_ARGS_INVALID', 'tasks 不接受 milestone 参数');
   }
-  if (stage === 'traceability' && !business.value.milestoneFile) throw new TxError('WRITEBACK_MILESTONE_PATH_INVALID', 'traceability 需要 milestoneFile');
+  if (stage === 'traceability' && mode === 'legacy' && !business.value.milestoneFile) throw new TxError('WRITEBACK_MILESTONE_PATH_INVALID', 'traceability（legacy）需要 milestoneFile');
+  if (stage === 'traceability' && mode === 'new' && business.value.milestoneFile != null) throw new TxError('WRITEBACK_STAGE_ARGS_INVALID', 'traceability（new）不接受 milestoneFile（生成输入=冻结 PLAN/TASK/test-report/merge facts）');
   if (stage === 'traceability' && (business.value.milestoneName != null || business.value.brief != null)) {
     throw new TxError('WRITEBACK_STAGE_ARGS_INVALID', 'traceability 不接受 milestoneName/brief');
   }
@@ -2405,6 +2490,7 @@ export function prepareWritebackCandidate(input) {
   }
   const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'writeback', 'scripts', WRITEBACK_GENERATORS[stage]);
   const args = [script, '--workspace', txws, '--cr', cr, '--spec', specId, '--version', business.value.targetVersion, '--candidate-out', candidate.dir];
+  if (stage === 'traceability' && mode === 'new') args.push('--mode', 'new');
   if (business.value.milestoneName != null) args.push('--milestone-name', String(business.value.milestoneName));
   if (business.value.brief != null) args.push('--brief', String(business.value.brief));
   if (business.value.milestoneFile != null) args.push('--milestone-file', path.join(txws, ...business.value.milestoneFile.split('/')));
@@ -2647,6 +2733,44 @@ export function planVersionRefill({ txws, authority, cr, stage, version, input =
   return { inputVersion: version, crMd: crMdEntry, backlog: backlogEntry, crMdBase };
 }
 
+/**
+ * CR-2026-060 G4（SDD §4.6，AC-12）：stage=tasks 的 pending-task preflight。
+ * 单一码 `WRITEBACK_TASKS_PENDING` 覆盖三类（extra.reason）：
+ * - index-missing：tasks/_index.yml 缺失/空；
+ * - index-invalid：畸形 YAML / 重复 id / 未知 status（硬失败，禁止静默降级）；
+ * - pending：存在任一 status != done（extra.pending 列 id）。
+ * 只读、幂等，位于 prepareWritebackCandidate/journal/lock 之前，零写入零发布。
+ */
+export function preflightTasksAllDone(txws, cr) {
+  const p = path.join(txws, 'change-requests', cr, 'tasks', '_index.yml');
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch {
+    throw new TxError('WRITEBACK_TASKS_PENDING', `tasks/_index.yml 缺失或不可读: ${p}`, { cr, reason: 'index-missing' });
+  }
+  const norm = text.replaceAll('\r\n', '\n');
+  if (!norm.trim()) throw new TxError('WRITEBACK_TASKS_PENDING', 'tasks/_index.yml 为空', { cr, reason: 'index-missing' });
+  let doc;
+  try { doc = parseYaml(norm); } catch {
+    throw new TxError('WRITEBACK_TASKS_PENDING', 'tasks/_index.yml 畸形 YAML，无法证明全部 TASK done', { cr, reason: 'index-invalid' });
+  }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc) || !Array.isArray(doc.tasks) || !doc.tasks.length) {
+    throw new TxError('WRITEBACK_TASKS_PENDING', 'tasks/_index.yml 结构非法（缺 tasks 数组或为空）', { cr, reason: 'index-invalid' });
+  }
+  const seen = new Set();
+  const pending = [];
+  for (const t of doc.tasks) {
+    if (!t || typeof t !== 'object' || Array.isArray(t) || typeof t.id !== 'string' || typeof t.status !== 'string') {
+      throw new TxError('WRITEBACK_TASKS_PENDING', 'tasks/_index.yml 条目结构非法（id/status 非字符串）', { cr, reason: 'index-invalid' });
+    }
+    if (seen.has(t.id)) throw new TxError('WRITEBACK_TASKS_PENDING', `tasks/_index.yml 重复 id: ${t.id}`, { cr, reason: 'index-invalid' });
+    seen.add(t.id);
+    if (t.status !== 'done') pending.push(t.id);
+  }
+  if (pending.length) {
+    throw new TxError('WRITEBACK_TASKS_PENDING', `无法证明全部 TASK done：仍有 ${pending.length} 个非 done 任务: ${pending.join(', ')}`, { cr, reason: 'pending', pending });
+  }
+}
+
 async function applyWritebackAtomic(ctx, input) {
   const { cr, stage, specId } = input;
   // FR-14（CR-2026-057）：版本守卫最先执行——先于 traceability complete-replay 分支、
@@ -2684,14 +2808,14 @@ async function applyWritebackAtomic(ctx, input) {
         return {
           cr, txId: done.journal.txId, phase: 'complete', changed: false, replayedTrace: true,
           commit: wb.commit, files: (wb.files || []).map((f) => f.path), warnings: [],
-          recoverCommand: `crctl writeback-apply ${cr} --stage traceability --spec-id ${JSON.stringify(specId)} --target-version ${JSON.stringify(input.targetVersion || '')} --milestone-file ${JSON.stringify(input.milestoneFile || '')} --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`,
+          recoverCommand: `crctl writeback-apply ${cr} --stage traceability --spec-id ${JSON.stringify(specId)} --target-version ${JSON.stringify(input.targetVersion || '')}${input.mode === 'new' ? '' : ` --milestone-file ${JSON.stringify(input.milestoneFile || '')}`} --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`,
         };
       }
       return {
         cr, txId: done.journal.txId, phase: 'complete', changed: false, replayedTrace: false,
         commit: wb.commit, files: (wb.files || []).map((f) => f.path),
         warnings: [{ code: 'EMIT_FAILED', event_kind: 'trace', message: 'trace pending 补发失败，journal 保持 pending（archive 前置门将再次补发）' }],
-        recoverCommand: `crctl writeback-apply ${cr} --stage traceability --spec-id ${JSON.stringify(specId)} --target-version ${JSON.stringify(input.targetVersion || '')} --milestone-file ${JSON.stringify(input.milestoneFile || '')} --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`,
+        recoverCommand: `crctl writeback-apply ${cr} --stage traceability --spec-id ${JSON.stringify(specId)} --target-version ${JSON.stringify(input.targetVersion || '')}${input.mode === 'new' ? '' : ` --milestone-file ${JSON.stringify(input.milestoneFile || '')}`} --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`,
       };
     }
   }
@@ -2705,6 +2829,11 @@ async function applyWritebackAtomic(ctx, input) {
   // 该检查先于 business/candidate/journal/lock，失败零写入（不新增公开错误码——B-SDD-04）。
   if (versionGuard.authority.source !== 'transaction-workspace' || versionGuard.authority.path !== opWs.path) {
     throw new TxError('WRITEBACK_STATE_MISMATCH', `writeback 版本守卫采样的 authority 与操作工作区不同源：guardSource=${versionGuard.authority.source} guardPath=${versionGuard.authority.path} opPath=${opWs.path}`, { cr, phase: opWs.phase });
+  }
+  // CR-2026-060 G4（SDD §4.6，AC-12）：new mode stage=tasks 的 pending-task preflight——
+  // 位于 prepareWritebackCandidate/journal/lock 之前，失败零 candidate/journal/账本/发布；legacy 不引入。
+  if (input.mode === 'new' && stage === 'tasks') {
+    preflightTasksAllDone(txws, cr);
   }
   // CR-2026-058 第 7 步：回灌计划（FR-2.1 时序——同源绑定/backlog 预检/语义复核在 candidate 生成与 journal 创建之前）。
   // found 重试（journal 已存在）时本步重算的 refillPlan 仅作纯读 fail-fast（零写入），不落入 payload——
@@ -3337,8 +3466,9 @@ export async function archiveCr(ctx, input) {
     if (needsEvidence) {
       const opWs0 = resolveOperationalWorkspace(ctx, cr); // 只读
       if (opWs0.phase === 'writing-back') {
-        if (!specId) throw new TxError('ARCHIVE_SPEC_REQUIRED', 'archive writing-back 路径需要 --spec-id（writeback-spec-id 入账）', { cr });
-        runFixedEvidenceValidator({ editRoot: opWs0.path, cr, specId });
+        const effSpec0 = specId ?? p0?.specId ?? null;
+        if (!effSpec0) throw new TxError('ARCHIVE_SPEC_REQUIRED', 'archive writing-back 路径需要 --spec-id（writeback-spec-id 入账；new mode 可省略由 strict authority 解析或 journal payload 重放）', { cr });
+        runFixedEvidenceValidator({ editRoot: opWs0.path, cr, specId: effSpec0 });
         // CR-2026-049 TASK-03（TD-B2）：trace pending 前置门——在 archive journal 创建、authority commit、
         // 任何 cleanup 之前读 writeback traceability journal：emitted 放行；pending 用 replayTraceEvent 补发，
         // 成功持久化后放行；仍失败 ARCHIVE_TRACE_PENDING 零写入保留现场；缺失/意图不完整 ARCHIVE_TRACE_FACT_MISSING。
@@ -3348,8 +3478,10 @@ export async function archiveCr(ctx, input) {
     }
     let journal, journalPath;
     ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'archive', key: cr, graphDigest: ctx.graphDigest, inputDigest: sha256(cr + '|' + (specId || '')) }));
-    const payload = journal.archive || { cr, phase: 'start', status: null, committed: false, commit: null, baseSha: null, pushed: false, cleanupDone: null, preservedRefs: [], remaining: [] };
+    const payload = journal.archive || { cr, phase: 'start', status: null, committed: false, commit: null, baseSha: null, pushed: false, cleanupDone: null, preservedRefs: [], remaining: [], mode: input.mode || 'legacy', specId: input.specId ?? null, targetSpecId: input.targetSpecId ?? null };
     journal.archive = payload;
+    // CR-2026-060 G4（AC-13）：new 可省 --spec-id 时，首跑 specId 已在 cmdArchive 解析；清理后重放只读 journal payload（不重新解析已删除路径）。
+    const effSpecId = specId ?? payload.specId ?? null;
     const wasComplete = payload.phase === 'complete';
     let did = false;
     const save = async (phase) => { payload.phase = phase; journal.phase = phase; await saveJournal({ path: journalPath, journal }); };
@@ -3417,7 +3549,7 @@ export async function archiveCr(ctx, input) {
       status = opWs.phase;
       if (opWs.source === 'transaction-workspace') {
         if (status !== 'writing-back') throw new TxError('ARCHIVE_STATE_MISMATCH', `archive 需要 writing-back（authority=txws），当前 ${status}`, { cr, status });
-        if (!specId) throw new TxError('ARCHIVE_SPEC_REQUIRED', 'archive writing-back 路径需要 --spec-id（writeback-spec-id 入账）', { cr });
+        if (!effSpecId) throw new TxError('ARCHIVE_SPEC_REQUIRED', 'archive writing-back 路径需要 --spec-id（writeback-spec-id 入账；new mode 可省略由 strict authority 解析或 journal payload 重放）', { cr });
         editRoot = opWs.path;
       } else {
         // rejected/withdrawn 的事实来自 CR worktree；归档提交在 detached origin trunk 上生成，绝不改用户主 checkout。
@@ -3444,8 +3576,8 @@ export async function archiveCr(ctx, input) {
         const idxText = fs.readFileSync(tasksIdx, 'utf8').replaceAll('\r\n', '\n');
         const pending = [...idxText.matchAll(/^([ \t]*)status:\s*(\S+)/gm)].filter((m) => m[2] !== 'done').map((m) => m[0].trim());
         if (pending.length) throw new TxError('ARCHIVE_TASKS_PENDING', `archive 前置：tasks/_index.yml 仍有非 done 任务`, { cr, pending });
-        const traceP = path.join(editRoot, 'specs', specId, 'traceability.yml');
-        if (!fs.existsSync(traceP)) throw new TxError('ARCHIVE_TRACEABILITY_MISSING', `archive 前置：specs/${specId}/traceability.yml 不存在（traceability 回写未完成）`, { cr, specId });
+        const traceP = path.join(editRoot, 'specs', effSpecId, 'traceability.yml');
+        if (!fs.existsSync(traceP)) throw new TxError('ARCHIVE_TRACEABILITY_MISSING', `archive 前置：specs/${effSpecId}/traceability.yml 不存在（traceability 回写未完成）`, { cr, specId: effSpecId });
         const approvalP = path.join(editRoot, 'change-requests', cr, 'approval.yml');
         if (!fs.existsSync(approvalP)) throw new TxError('ARCHIVE_APPROVAL_MISSING', `archive 前置：approval.yml 缺失`, { cr });
       }
@@ -3462,7 +3594,7 @@ export async function archiveCr(ctx, input) {
       const crp = path.join(root, 'change-requests', cr, 'cr.md');
       const edits = archiveLedgerEdits({
         backlogText: readT(bp), historyText: fs.existsSync(hp) ? readT(hp) : null,
-        indexText: readT(ip), cr, finalStatus, specId, reason: 'cr-archive', now,
+        indexText: readT(ip), cr, finalStatus, specId: effSpecId, reason: 'cr-archive', now,
       });
       const crMdText = readT(crp);
       const nextCrMd = crMdStatusText(crMdText, finalStatus);

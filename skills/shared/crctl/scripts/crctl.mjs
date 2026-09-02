@@ -29,6 +29,7 @@ import {
   matchFrontmatter, crMdStatusText, refreshCrMdUpdated, mergeCr, mergeStatus, resolveOperationalWorkspace,
   applyWriteback, archiveCr, checkUpgrade, checkpointCr, renderLoopText, testCr,
   normalizeTargetVersion, readCrMdTargetVersion, crWorktreePath, txWorkspacePath,
+  resolveTargetSpecMode, resolveWritebackAuthorityStrict,
 } from './lib/workspace-transactions.mjs';
 import {
   FAULT_POINTS, faultPoint, nowIso,
@@ -2605,98 +2606,8 @@ function readBacklogTargetVersionField(text, cr) {
   return line.replace(/^[ \t]*target-version:\s*/, '').trim().replace(/^["']|["']$/g, '');
 }
 
-/* ────────────────────────── CR-2026-060 G1：target-spec-id 模式裁决与 authority（唯一裁决 + 生命周期绑定，SDD §2.2/§4.1） ────────────────────────── */
-
-const TARGET_SPEC_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
-const CRCTL_POST_FINALIZE_STATUSES = new Set(['merging', 'writing-back', 'archived']);
-
-/** 行级读取 frontmatter 内 ^target-spec-id: 行（缺 frontmatter/缺行 → null）。 */
-function readTargetSpecIdField(text) {
-  const norm = String(text).replaceAll('\r\n', '\n');
-  const m = matchFrontmatter(norm);
-  if (!m) return null;
-  const line = m.body.split('\n').find((l) => /^target-spec-id:/.test(l));
-  if (!line) return null;
-  return line.replace(/^target-spec-id:\s*/, '').trim().replace(/^["']|["']$/g, '');
-}
-
-/** 行级读取 _backlog.yml 条目块内 target-spec-id（缺块/缺行 → null）。 */
-function readBacklogTargetSpecIdField(text, cr) {
-  const norm = String(text).replaceAll('\r\n', '\n');
-  const block = matchEntryBlock(norm, cr);
-  if (!block) return null;
-  const line = block.text.split('\n').find((l) => /^[ \t]*target-spec-id:/.test(l));
-  if (!line) return null;
-  return line.replace(/^[ \t]*target-spec-id:\s*/, '').trim().replace(/^["']|["']$/g, '');
-}
-
-function targetSpecIdValid(v) {
-  return typeof v === 'string' && TARGET_SPEC_ID_RE.test(v) && !/[/\\\r\n]/.test(v);
-}
-
-/**
- * mode 唯一裁决纯函数（SDD §2.2.1/§4.1）：自身不解析路径，authority 由调用方按生命周期绑定传入。
- * 失败抛 TxError('TARGET_SPEC_AUTHORITY_DRIFT', ..., { kind: 'missing'|'invalid'|'mismatch' })（AC-02 唯一顶层码）。
- */
-function resolveTargetSpecMode(ctx, cr, { authority }) {
-  const crMdText = readFileChecked(path.join(authority.path, 'change-requests', cr, 'cr.md'));
-  const a = crMdText == null ? null : readTargetSpecIdField(crMdText);
-  const backlogText = readFileChecked(path.join(authority.path, 'change-requests', '_backlog.yml'));
-  const b = backlogText == null ? null : readBacklogTargetSpecIdField(backlogText, cr);
-  const aMissing = a == null;
-  const bMissing = b == null;
-  if (aMissing && bMissing) return { mode: 'legacy' };
-  if (aMissing !== bMissing) {
-    throw new TxError('TARGET_SPEC_AUTHORITY_DRIFT', `${cr}: target-spec-id 单侧缺失（cr.md=${a == null ? '(缺失)' : JSON.stringify(a)}，_backlog.yml=${b == null ? '(缺失)' : JSON.stringify(b)}）`, { kind: 'missing', crMd: a, backlog: b });
-  }
-  if (!targetSpecIdValid(a) || !targetSpecIdValid(b)) {
-    throw new TxError('TARGET_SPEC_AUTHORITY_DRIFT', `${cr}: target-spec-id 非法（须匹配 ^[a-z0-9][a-z0-9._-]*$，禁止 / \\ CR LF）`, { kind: 'invalid', crMd: a, backlog: b });
-  }
-  if (a !== b) {
-    throw new TxError('TARGET_SPEC_AUTHORITY_DRIFT', `${cr}: target-spec-id 不一致（cr.md=${JSON.stringify(a)}，_backlog.yml=${JSON.stringify(b)}）`, { kind: 'mismatch', crMd: a, backlog: b });
-  }
-  return { mode: 'new', targetSpecId: a };
-}
-
-/** cr.md status 行级只读（无 frontmatter/缺 status → null）。 */
-function crMdStatusAt(ws, cr) {
-  const text = readFileChecked(path.join(crDir(ws, cr), 'cr.md'));
-  if (text == null) return null;
-  const m = matchFrontmatter(text);
-  if (!m) return null;
-  const line = m.body.split('\n').find((l) => /^status:/.test(l));
-  if (!line) return null;
-  return line.replace(/^status:\s*/, '').trim().replace(/^["']|["']$/g, '');
-}
-
-/**
- * strict writeback authority 解析器（SDD §2.2.3）：只读、永不回退 cr-worktree；txws 缺失/不自洽 → WRITEBACK_SPEC_REQUIRED；
- * 非 post-finalize 且 merge journal 无 complete 事实 → 既有 WRITEBACK_STATE_MISMATCH。禁止 new-mode 消费 resolveWritebackAuthorityPath 回退值。
- */
-function resolveWritebackAuthorityStrict(ctx, cr) {
-  const crWorktree = crWorktreePath(ctx, cr);
-  const status = crMdStatusAt(crWorktree, cr);
-  if (status != null && CRCTL_POST_FINALIZE_STATUSES.has(status)) {
-    const txws = txWorkspacePath(ctx, cr);
-    if (!fs.existsSync(txws)) {
-      throw new TxError('WRITEBACK_SPEC_REQUIRED', `${cr}: status=${status} 属 finalize 后阶段，但 Transaction Workspace 不存在: ${txws}（new authority 缺失，禁止回退 cr-worktree）`, { cr, status, txws });
-    }
-    const txStatus = crMdStatusAt(txws, cr);
-    if (txStatus == null || !CRCTL_POST_FINALIZE_STATUSES.has(txStatus)) {
-      throw new TxError('WRITEBACK_SPEC_REQUIRED', `${cr}: Transaction Workspace cr.md status=${txStatus}，与 finalize 后阶段不符`, { cr, crWorktreeStatus: status, txStatus });
-    }
-    return { path: txws, source: 'transaction-workspace' };
-  }
-  const ms = mergeStatus(ctx, cr);
-  if (ms.phase === 'complete' && ms.operationalWorkspace) {
-    const txStatus = crMdStatusAt(ms.operationalWorkspace, cr);
-    if (txStatus != null && CRCTL_POST_FINALIZE_STATUSES.has(txStatus)) {
-      return { path: ms.operationalWorkspace, source: 'transaction-workspace' };
-    }
-    throw new TxError('WRITEBACK_SPEC_REQUIRED', `${cr}: merge journal 指向 txws 但 cr.md status=${txStatus}，与 finalize 后阶段不符`, { cr, crWorktreeStatus: status, txStatus });
-  }
-  throw new TxError('WRITEBACK_STATE_MISMATCH', `writeback 需要 finalize 后 authority（Transaction Workspace），当前 status=${status}（merge journal phase=${ms.phase}）`, { cr, phase: status });
-}
+/* ────────────────────────── CR-2026-060 G1：target-spec-id 模式裁决与 authority（唯一裁决 + 生命周期绑定，SDD §2.2/§4.1） ──────────────────────────
+ * 模式裁决与 strict authority 解析器已收敛至 lib/workspace-transactions.mjs（单一实现），本文件 re-import 消费。 */
 
 const PRE_REVIEW_KIND_CHECK_CODES = { missing: 'TARGET_SPEC_AUTHORITY_MISSING', invalid: 'TARGET_SPEC_AUTHORITY_INVALID', mismatch: 'TARGET_SPEC_AUTHORITY_DRIFT' };
 
@@ -3600,10 +3511,38 @@ function cmdUpgradeCheck(ws, flags) {
 async function cmdArchive(ws, positional, flags) {
   const cr = positional[0];
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'archive 需要 CR-ID');
-  const specId = flags['spec-id'] == null ? undefined : String(flags['spec-id']);
+  let specId = flags['spec-id'] == null ? undefined : String(flags['spec-id']);
   const ctx = resolveRepositories(ws);
+  // CR-2026-060 G4（AC-13）：new mode 可省 --spec-id（writing-back 首跑从 strict authority 解析并持久化 payload；清理后重放读 journal）。
+  let mode = 'legacy';
+  let targetSpecId;
+  try {
+    mode = resolveTargetSpecMode(ctx, cr, { authority: { path: crWorktreePath(ctx, cr), source: 'cr-worktree' } }).mode;
+  } catch (e) {
+    if (e instanceof TxError) fail(e.code, e.message, e.extra);
+    throw e;
+  }
+  if (mode === 'new') {
+    if (specId == null || specId === '') {
+      let strictAuth;
+      try {
+        strictAuth = resolveWritebackAuthorityStrict(ctx, cr);
+      } catch (e) {
+        if (e instanceof TxError && e.code === 'WRITEBACK_SPEC_REQUIRED') fail('ARCHIVE_SPEC_REQUIRED', e.message, e.extra);
+        if (e instanceof TxError) fail(e.code, e.message, e.extra);
+        throw e;
+      }
+      let m;
+      try { m = resolveTargetSpecMode(ctx, cr, { authority: strictAuth }); }
+      catch (e) { if (e instanceof TxError) fail(e.code, e.message, e.extra); throw e; }
+      specId = m.targetSpecId;
+      targetSpecId = m.targetSpecId;
+    } else {
+      targetSpecId = specId;
+    }
+  }
   const result = await runTxAsync(archiveCr(ctx, {
-    cr, specId, workspace: ws,
+    cr, specId, mode, targetSpecId, workspace: ws,
     // FR-03：唯一生产 adapter——schema v1 archive 事件 + 确定性 dedup 文件名；
     // 发送失败由 emitOutboxEvent 返回 null，archiveCr 转为 EMIT_FAILED warning（不阻断归档）。
     emitArchiveEvent: ({ cr, commit }) => emitOutboxEvent(ws, {
@@ -3637,20 +3576,53 @@ async function cmdWritebackApply(ws, positional, flags, gates) {
   const unknownFlags = Object.keys(flags).filter((key) => !allowedFlags.has(key));
   if (unknownFlags.length) fail('BAD_ARGS', `writeback-apply 不接受参数: ${unknownFlags.map((x) => `--${x}`).join(', ')}`);
   const stage = flags.stage;
-  const specId = flags['spec-id'];
-  const targetVersion = flags['target-version'];
   if (!['baseline', 'tasks', 'traceability'].includes(stage)) fail('BAD_ARGS', 'writeback-apply 需要 --stage baseline|tasks|traceability');
   if (flags.candidate || flags['candidate-out'] || flags.generator || flags.manifest) fail('BAD_ARGS', 'writeback-apply 不接受 candidate/generator/manifest 路径；由 crctl 按 stage 内部固定');
-  if (!specId) fail('BAD_ARGS', 'writeback-apply 需要 --spec-id <id>');
-  // B-SDD-003（CR-2026-057）：按 flag 存在性判定——缺 flag → BAD_ARGS；显式 --target-version "" 放行进共用规范化守卫 → WRITEBACK_VERSION_INVALID
-  if (!('target-version' in flags)) fail('BAD_ARGS', 'writeback-apply 需要 --target-version <version>');
-  if (stage === 'baseline' && flags['milestone-file'] != null) fail('BAD_ARGS', 'baseline 不接受 --milestone-file');
-  if (stage === 'tasks' && (flags['milestone-name'] != null || flags.brief != null || flags['milestone-file'] != null)) fail('BAD_ARGS', 'tasks 不接受 milestone 参数');
-  if (stage === 'traceability' && !flags['milestone-file']) fail('BAD_ARGS', 'traceability 需要 --milestone-file <workspace-relative-path>');
-  if (stage === 'traceability' && (flags['milestone-name'] != null || flags.brief != null)) fail('BAD_ARGS', 'traceability 不接受 --milestone-name/--brief');
   const ctx = resolveRepositories(ws);
+  // CR-2026-060 G4（SDD §4.4）：mode 唯一裁决——authority 按 §2.2.2 生命周期绑定；
+  // 预检用 CR worktree（永不抛）；new 分支的实际 spec/version 权威走 strict txws（无回退）。
+  let mode;
+  try {
+    mode = resolveTargetSpecMode(ctx, cr, { authority: { path: crWorktreePath(ctx, cr), source: 'cr-worktree' } });
+  } catch (e) {
+    if (e instanceof TxError) fail(e.code, e.message, e.extra);
+    throw e;
+  }
+  let specId = flags['spec-id'];
+  let targetVersion = flags['target-version'];
+  if (mode.mode === 'legacy') {
+    // legacy：现行路径，spec/version 必填=BAD_ARGS；traceability milestone-file 必填=BAD_ARGS；其余 milestone 限制既有。
+    if (!specId) fail('BAD_ARGS', 'writeback-apply 需要 --spec-id <id>');
+    // B-SDD-003（CR-2026-057）：按 flag 存在性判定——缺 flag → BAD_ARGS；显式 --target-version "" 放行进共用规范化守卫 → WRITEBACK_VERSION_INVALID
+    if (!('target-version' in flags)) fail('BAD_ARGS', 'writeback-apply 需要 --target-version <version>');
+    if (stage === 'baseline' && flags['milestone-file'] != null) fail('BAD_ARGS', 'baseline 不接受 --milestone-file');
+    if (stage === 'tasks' && (flags['milestone-name'] != null || flags.brief != null || flags['milestone-file'] != null)) fail('BAD_ARGS', 'tasks 不接受 milestone 参数');
+    if (stage === 'traceability' && !flags['milestone-file']) fail('BAD_ARGS', 'traceability 需要 --milestone-file <workspace-relative-path>');
+    if (stage === 'traceability' && (flags['milestone-name'] != null || flags.brief != null)) fail('BAD_ARGS', 'traceability 不接受 --milestone-name/--brief');
+  } else {
+    // new：milestone 任一 flag 传入 → BAD_ARGS（N/A）；spec/version 可省略，从 strict txws authority 补全；显式只做相等校验。
+    if (flags['milestone-file'] != null || flags['milestone-name'] != null || flags.brief != null) fail('BAD_ARGS', 'new mode 不接受 milestone 参数（milestone=N/A）');
+    let strictAuth;
+    try {
+      strictAuth = resolveWritebackAuthorityStrict(ctx, cr);
+    } catch (e) {
+      if (e instanceof TxError) fail(e.code, e.message, e.extra);
+      throw e;
+    }
+    if (specId == null || specId === '') {
+      specId = mode.targetSpecId;
+    } else if (String(specId) !== mode.targetSpecId) {
+      fail('WRITEBACK_SPEC_MISMATCH', `new mode 显式 --spec-id ${JSON.stringify(specId)} 与 authority target-spec-id ${JSON.stringify(mode.targetSpecId)} 不一致`, { cr, specId, targetSpecId: mode.targetSpecId });
+    }
+    if (!('target-version' in flags)) {
+      const r = readCrMdTargetVersion(strictAuth.path, cr);
+      const n = r.ok ? normalizeTargetVersion(r.raw) : { ok: false, reason: r.reason };
+      if (!n.ok) fail('WRITEBACK_VERSION_INVALID', `new mode 省略 --target-version 时从 strict authority 读取失败（${n.reason}）`, { cr, reason: n.reason });
+      targetVersion = n.value;
+    }
+  }
   const result = await runTxAsync(applyWriteback(ctx, {
-    cr, stage, specId, targetVersion, workspace: ws,
+    cr, stage, specId, targetVersion, workspace: ws, mode: mode.mode,
     milestoneName: flags['milestone-name'], brief: flags.brief, milestoneFile: flags['milestone-file'],
     validateBaselineAdvance: ({ workspace, plannedExisting }) => preflightAdvance(workspace, cr, gates, {
       to: 'writing-back', trigger: 'writeback-prd-sdd', expect: 'merging', specId, plannedExisting,
