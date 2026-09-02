@@ -23,7 +23,7 @@ description: 将 change-requests/{CR-ID}/plan.md 拆解为独立可执行的 TAS
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `cr_id` | string | ✅ | 目标 CR-ID |
-| `task_count_hint` | integer | ❌ | 预期任务数量（Agent 参考用，实际由 plan 决定） |
+| `task_count_hint` | integer | ✅ | 预期任务数量（本 CR 固定 4）；`crctl task init --count-hint` 写入前校验用，缺省/不符 → `TASK_COUNT_MISMATCH`（CR-2026-060 AC-08） |
 | `review_feedback` | object | ❌ | 来自 review-dev-plan 的 blockers；存在时进入自修复模式（CR-2026-026 FR-8） |
 | `self_repair_attempt` | number | ❌ | 当前自动修复轮次，由 pipeline reviewLoop 注入 |
 
@@ -82,13 +82,26 @@ created: {YYYY-MM-DDTHH:mm:ss+08:00}
 5. **完成标志** — 定义"完成"的明确状态（如"单元测试通过 + lint 零报错"）
 6. **接口契约** — 消费：本 TASK 使用哪些上游 TASK 产出的精确函数名/参数/返回类型；产出：本 TASK 暴露给下游 TASK 的精确签名
 
-### Step 4 — 初始化或追加 TASK 索引
+### Step 4 — TASK 数量三步断言与索引初始化（CR-2026-060 AC-08）
 
-初次拆分时，TASK 卡全部写完后执行：
+`task_count_hint` 必传（本 CR 固定 4；其它 CR 按 plan 预分配组数）。执行 SDD §4.5 三步断言，失败码字面 `TASK_COUNT_MISMATCH`：
+
+**[1] 写入前组映射 preflight（Skill 内，零 crctl 调用）**：
+- 解析 plan.md 交付覆盖表 → 组映射：每个变更组 G 恰一个 TASK、每个 TASK 恰属一组；
+- 生成 `tasks/TASK-*.md` 草稿后校验文件集：恰 4 个文件、frontmatter `id = {cr_id}-TASK-01`..`04` 连续无重复、组映射与 plan.md 一致；
+- 失败 → abort `TASK_COUNT_MISMATCH`：删除本轮生成的草稿 `TASK-*.md`（非受控草稿回滚），未调用任何 crctl，零账本/零状态推进；报错输出草稿路径清单与四组映射核对表。
+
+**[2] `crctl task init --count-hint 4` 写入前校验**：
 
 ```bash
-crctl task init {cr_id} --workspace <knowledge-base CR worktree>
+crctl task init {cr_id} --count-hint 4 --workspace <knowledge-base CR worktree>
 ```
+
+`cmdTaskInit` 在 renderTaskIndex/CAS/createFileExclusive/audit **之前**校验卡片数==4 且 id 与 `{cr_id}-TASK-01`..`04` 一一对应（缺号/重号/第五个/越界 → `TASK_COUNT_MISMATCH` 零写入）；`--count-hint` 缺省时行为与现行完全一致。
+
+**[3] init 后防并发复核（Skill）**：
+- 以 init 返回 `taskCount==4` 为准；对磁盘 TASK 文件集重跑 [1] 的组映射 preflight（防 preflight 与 init 之间被并发增删文件）；
+- 任一不一致 → `TASK_COUNT_MISMATCH` abort，保留现场：不手工删除/编辑 `tasks/_index.yml`（受控账本）；修正 `tasks/` 文件集后重跑同一 `crctl task init --count-hint 4`（CAS 幂等刷新）；复核通过前不得 `advance --to task-breakdown`。
 
 `tasks/_index.yml` 是受控账本，禁止 Agent/Skill 手写。若 CR 已进入 `developing` 且需要追加更大编号的 hardening TASK，执行：
 

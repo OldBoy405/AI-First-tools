@@ -72,6 +72,7 @@ TASK 新事实只能按 `resources[].worktreePath` 取证：事实不存在或�
 
 ### 覆盖矩阵与流程控制核验（CR-2026-057 FR-8/FR-9/FR-10/FR-11）
 
+- **两张稳定表同口径复核（CR-2026-060 AC-07）**：plan.md 必须恰含交付覆盖表（`FR/关键AC | SDD交付项 | 主责/关联TASK | 验收证据 | 回滚`）与证据命令表（`证据ID | repo | cwd | executable | args | timeout`）两张表；交付覆盖表每个 in-scope FR 只出现一次且「验收证据」列全为稳定 `cmd-NN`，并与证据命令表的 `证据ID` 双向唯一映射；`tasks/_index.yml` 的 id 集与交付覆盖表「主责/关联TASK」列双向核对（表内引用不到账本、或账本存在表内不引用的 TASK → blocker）。
 - **覆盖链先查（FR-1/FR-8）**：先检查 `FR/AC → SDD 落点 → PLAN → TASK owner → evidence` 覆盖，再检查单个任务细节；覆盖矩阵缺失或关键 AC 无对应行 → blocker。
 - **唯一 TASK owner（FR-9）**：关键 AC（影响主路径验收可达性的 AC，含用户可观察的成功/失败/隔离/幂等）必须有且仅有一个唯一 TASK owner；任一关键 AC 缺少唯一 TASK owner、或矩阵「验收证据」列对关键 AC 不是稳定标识 `cmd-NN`（两位十进制） → blocker。不向 crctl/gates.json 新增静态检查：`approve-dev-start` 继续消费既有 passCondition（verdict=pass 且 blockers 为空），block 后天然不可达。
 - **流程控制 TASK 核验（FR-10/FR-11）**：交付 TASK（`tasks/TASK-*.md` + `_index.yml` 条目）不得以 `merge`/`writeback`/`archive` 或 `code-reviewing`/`code-approved` 为完成前置（含标题或正文写成「发布准备」「merge 完成」之类）——`crctl task done` 仅允许 `status=developing`，完成于 merge 的 TASK 无法合法标 done，会卡住 `deliveryIndexComplete`（该门禁保持不变、不新增豁免）。「实现已就绪、可交评审」类 TASK 的完成边界必须是 developing 内可被 `crctl task done` 登记的事件。违反 → blocker。

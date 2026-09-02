@@ -5236,3 +5236,74 @@ test('CR-2026-060 AC-02：pre-review 单侧缺失 / 不一致 / 非法 → check
     } finally { rmSync(ws, { recursive: true, force: true }); }
   }
 });
+
+/* ────────────────────────── CR-2026-060 G3：task init --count-hint 写入前校验（AC-08） ────────────────────────── */
+
+test('CR-2026-060 AC-08：--count-hint 4 恰 4 卡（01..04）→ 成功；缺号/重号/第五个/非法 → TASK_COUNT_MISMATCH 或 BAD_ARGS 零写入', () => {
+  // 合法：恰 4 卡
+  const okWs = makeWorkspace();
+  try {
+    writeCrEntry(okWs, 'CR-T1', 'tech-design-reviewed');
+    for (let i = 1; i <= 4; i++) writeTaskCard(okWs, 'CR-T1', i, { title: `t${i}` });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--count-hint', '4', '--workspace', okWs]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.taskCount, 4);
+  } finally { rmSync(okWs, { recursive: true, force: true }); }
+
+  // 数量不符（3 卡）
+  const fewWs = makeWorkspace();
+  try {
+    writeCrEntry(fewWs, 'CR-T1', 'tech-design-reviewed');
+    for (let i = 1; i <= 3; i++) writeTaskCard(fewWs, 'CR-T1', i, { title: `t${i}` });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--count-hint', '4', '--workspace', fewWs]);
+    assert.equal(r.status, 1, r.rawStderr);
+    assert.equal(r.stderr.error.code, 'TASK_COUNT_MISMATCH');
+    assert.equal(existsSync(path.join(fewWs, 'change-requests', 'CR-T1', 'tasks', '_index.yml')), false, '零写入');
+  } finally { rmSync(fewWs, { recursive: true, force: true }); }
+
+  // 第五个（5 卡）
+  const fiveWs = makeWorkspace();
+  try {
+    writeCrEntry(fiveWs, 'CR-T1', 'tech-design-reviewed');
+    for (let i = 1; i <= 5; i++) writeTaskCard(fiveWs, 'CR-T1', i, { title: `t${i}` });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--count-hint', '4', '--workspace', fiveWs]);
+    assert.equal(r.status, 1, r.rawStderr);
+    assert.equal(r.stderr.error.code, 'TASK_COUNT_MISMATCH');
+    assert.equal(existsSync(path.join(fiveWs, 'change-requests', 'CR-T1', 'tasks', '_index.yml')), false);
+  } finally { rmSync(fiveWs, { recursive: true, force: true }); }
+
+  // 缺号（01/03/04，缺 02）
+  const gapWs = makeWorkspace();
+  try {
+    writeCrEntry(gapWs, 'CR-T1', 'tech-design-reviewed');
+    for (const n of [1, 3, 4]) writeTaskCard(gapWs, 'CR-T1', n, { title: `t${n}` });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--count-hint', '4', '--workspace', gapWs]);
+    assert.equal(r.status, 1, r.rawStderr);
+    assert.equal(r.stderr.error.code, 'TASK_COUNT_MISMATCH');
+    assert.equal(existsSync(path.join(gapWs, 'change-requests', 'CR-T1', 'tasks', '_index.yml')), false);
+  } finally { rmSync(gapWs, { recursive: true, force: true }); }
+
+  // 非法 count-hint
+  const badWs = makeWorkspace();
+  try {
+    writeCrEntry(badWs, 'CR-T1', 'tech-design-reviewed');
+    writeTaskCard(badWs, 'CR-T1', 1, { title: 'x' });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--count-hint', 'abc', '--workspace', badWs]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'BAD_ARGS');
+    assert.equal(existsSync(path.join(badWs, 'change-requests', 'CR-T1', 'tasks', '_index.yml')), false);
+  } finally { rmSync(badWs, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-08：--count-hint 缺省时既有 task init 行为不变（回归）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-reviewed');
+    writeTaskCard(ws, 'CR-T1', 1, { title: 'x' });
+    writeTaskCard(ws, 'CR-T1', 2, { title: 'y', dependsOn: ['CR-T1-TASK-01'] });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.taskCount, 2);
+    assert.equal(r.stdout.changed, true);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

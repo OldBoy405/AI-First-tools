@@ -1745,11 +1745,30 @@ function cmdTaskAppend(ws, cr) {
     totalEstimateHours: set.cards.reduce((sum, card) => sum + Number.parseInt(card.estimate, 10), 0), changed: true });
 }
 
-function cmdTaskInit(ws, cr) {
+/** `--count-hint N` 写入前校验（CR-2026-060 G3/AC-08）：在 render/casWrite/createFileExclusive/audit 之前校验卡片集 id 集合恰为 {cr}-TASK-01..{cr}-TASK-{pad2(N)}，失败 TASK_COUNT_MISMATCH 零写入；缺省行为与现行完全一致。 */
+function assertCountHint(cr, cards, hint) {
+  if (hint === undefined || hint === null || hint === true) return;
+  const n = Number(hint);
+  if (!Number.isInteger(n) || n <= 0) fail('BAD_ARGS', 'task init --count-hint 必须是正整数（N >= 1）');
+  const expected = [];
+  for (let i = 1; i <= n; i++) expected.push(`${cr}-TASK-${String(i).padStart(2, '0')}`);
+  const actual = cards.map((c) => c.id);
+  const expectedSet = new Set(expected);
+  const ok = cards.length === n
+    && actual.every((id) => expectedSet.has(id))
+    && new Set(actual).size === n;
+  if (!ok) {
+    fail('TASK_COUNT_MISMATCH', `task init --count-hint ${n} 写入前校验失败：期望 TASK 集 = [${expected.join(', ')}]，实际 = [${actual.join(', ')}]（数量/缺号/重号/越界），零写入`, { expected, actual });
+  }
+}
+
+function cmdTaskInit(ws, cr, flags) {
   const state = resolveCrState(ws, cr);
   const legal = ['tech-design-reviewed', 'task-breakdown'];
   if (!legal.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `task init 仅允许在前置态 ${legal.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: legal });
   const set = loadTaskCards(ws, cr);
+  // CR-2026-060 G3（AC-08）：--count-hint 写入前校验，位于 render/CAS/audit 之前，失败零写入。
+  assertCountHint(cr, set.cards, flags && flags['count-hint']);
   const canonical = renderTaskIndex(cr, set.cards);
   const p = path.join(set.dir, '_index.yml');
   const current = readFileChecked(p);
@@ -3468,7 +3487,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl test    <cr_id> --plan <temp-json>      结构化测试闭环：读 cr-test-plan/v1，shell:false 执行，原子发布机器证据/traceability tests/review-loop
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
   crctl git     <sub> [args...] [--cwd <p>]      controlled-shell 白名单执行（只读/安全面；写路径一律走深原语）
-  crctl task init <cr_id>                       从 TASK-NN.md 确定性创建/刷新 tasks/_index.yml（开发启动前，CAS+审计）
+  crctl task init <cr_id> [--count-hint <N>]   从 TASK-NN.md 确定性创建/刷新 tasks/_index.yml（开发启动前，CAS+审计）；--count-hint 写入前校验 TASK 集恰为 {cr}-TASK-01..{pad2(N)}（失败 TASK_COUNT_MISMATCH 零写入）
   crctl task append <cr_id>                     developing 期只追加更大编号 TASK，保留既有 done/done-at（CAS+审计）
   crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
 
@@ -3543,8 +3562,8 @@ async function main() {
     case 'report': return cmdReport(ws, gates, flags);
     case 'task': {
       if (positional[0] === 'init') {
-        if (positional.length !== 2) fail('BAD_ARGS', 'task init 用法：crctl task init <CR-ID>');
-        return cmdTaskInit(ws, requireCr(positional.slice(1)));
+        if (positional.length !== 2) fail('BAD_ARGS', 'task init 用法：crctl task init <CR-ID> [--count-hint <N>]');
+        return cmdTaskInit(ws, requireCr(positional.slice(1)), flags);
       }
       if (positional[0] === 'append') {
         if (positional.length !== 2) fail('BAD_ARGS', 'task append 用法：crctl task append <CR-ID>');
