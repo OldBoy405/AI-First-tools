@@ -12,10 +12,12 @@ description: feature-writeback baseline 节点：只传业务输入，一次 crc
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `cr_id` | 是 | CR-ID |
-| `spec_id` | 是 | specs 目标 ID |
-| `target_version` | 是 | 目标版本 |
+| `spec_id` | legacy 必填；new 可省略 | specs 目标 ID（new 省略时由 `crctl` 从 strict authority 读取，显式传值仅做相等校验） |
+| `target_version` | legacy 必填；new 可省略 | 目标版本（new 省略时由 `crctl` 从 strict authority 读取） |
 | `milestone_name` | 否 | baseline 里程碑标题 |
 | `brief` | 否 | specs 索引 brief |
+
+mode 判定由 `crctl writeback-apply` 内部完成（`target-spec-id` 两处均缺 = legacy；均合法且全等 = new）。**Skill 不自行判定 mode、不自行回退 authority**。
 
 ## 执行
 
@@ -23,10 +25,13 @@ description: feature-writeback baseline 节点：只传业务输入，一次 crc
 
 ```text
 crctl writeback-apply {cr_id} --stage baseline
-  --spec-id {spec_id} --target-version {target_version}
+  [--spec-id {spec_id}] [--target-version {target_version}]
   [--milestone-name {milestone_name}] [--brief {brief}]
   --workspace {knowledge-base installation workspace}
 ```
+
+- **legacy**：`--spec-id`/`--target-version` 必填（缺一即 BAD_ARGS）。
+- **new**：两者均可省略（从 strict authority 读取）；显式传值仅做相等校验（不一致在 candidate/journal 前失败，零写入）。
 
 `crctl` 内部固定 generator 与 `.crctl/candidates/{CR-ID}/baseline`。Skill 不生成 candidate、不传 manifest/generator 路径、不独立执行 `advance writing-back`，也不写 Git/账本算法。
 

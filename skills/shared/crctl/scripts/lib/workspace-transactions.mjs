@@ -2764,6 +2764,9 @@ export function preflightTasksAllDone(txws, cr) {
     }
     if (seen.has(t.id)) throw new TxError('WRITEBACK_TASKS_PENDING', `tasks/_index.yml 重复 id: ${t.id}`, { cr, reason: 'index-invalid' });
     seen.add(t.id);
+    if (t.status !== 'done' && t.status !== 'pending') {
+      throw new TxError('WRITEBACK_TASKS_PENDING', `tasks/_index.yml 未知 status: ${t.id}=${JSON.stringify(t.status)}（仅允许 done|pending，未知值按 index-invalid 硬失败）`, { cr, reason: 'index-invalid', task: t.id, status: t.status });
+    }
     if (t.status !== 'done') pending.push(t.id);
   }
   if (pending.length) {
@@ -3455,11 +3458,13 @@ export async function archiveCr(ctx, input) {
   }
   const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
   const recoverCommand = `crctl archive ${cr}${specId ? ` --spec-id ${JSON.stringify(specId)}` : ''} --workspace ${JSON.stringify((input && input.workspace) || ctx.installRoot)}`;
+  // CR-2026-060 G4（SDD §2.2.4）：幂等键不编入可省 spec-id（new mode 首跑解析值、清理后重放省略值，两态必须命中同一 journal）。
+  const inputDigest = sha256(`archive:${cr}`);
   const lock = await acquireLock({ root: ctx.installRoot, scope: `archive-${cr}`, op: 'archive', cr });
   try {
     // pre-authority 证据门（CR-2026-041 FR-04）：只读分流，journal 创建前校验，失败零 journal/authority 写入。
     // 先 loadExistingJournal（只读）判 needsEvidence；已 commit/push 或 cleanup-pending/complete 的恢复路径跳过。
-    const existing = loadExistingJournal({ root: ctx.installRoot, op: 'archive', cr, key: cr, inputDigest: sha256(cr + '|' + (specId || '')) });
+    const existing = loadExistingJournal({ root: ctx.installRoot, op: 'archive', cr, key: cr, inputDigest });
     const p0 = existing?.journal?.archive;
     const needsEvidence = !existing
       || !(p0 && (p0.committed || p0.pushed || p0.phase === 'cleanup-pending' || p0.phase === 'complete'));
@@ -3477,7 +3482,7 @@ export async function archiveCr(ctx, input) {
       // rejected/withdrawn：无 writing-back milestone，跳过证据门与 trace 门
     }
     let journal, journalPath;
-    ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'archive', key: cr, graphDigest: ctx.graphDigest, inputDigest: sha256(cr + '|' + (specId || '')) }));
+    ({ journal, journalPath } = await loadOrCreateJournal({ root: ctx.installRoot, op: 'archive', key: cr, graphDigest: ctx.graphDigest, inputDigest }));
     const payload = journal.archive || { cr, phase: 'start', status: null, committed: false, commit: null, baseSha: null, pushed: false, cleanupDone: null, preservedRefs: [], remaining: [], mode: input.mode || 'legacy', specId: input.specId ?? null, targetSpecId: input.targetSpecId ?? null };
     journal.archive = payload;
     // CR-2026-060 G4（AC-13）：new 可省 --spec-id 时，首跑 specId 已在 cmdArchive 解析；清理后重放只读 journal payload（不重新解析已删除路径）。

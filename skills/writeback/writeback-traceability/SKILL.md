@@ -12,14 +12,17 @@ description: writing-back 阶段起草 milestone 业务内容后，一次 crctl 
 | 参数 | 必填 | 说明 |
 |---|---|---|
 | `cr_id` | 是 | CR-ID |
-| `spec_id` | 是 | 关联 spec ID |
-| `target_version` | 是 | 目标版本 |
-| `milestone_file` | 是 | operational-workspace-relative POSIX 路径 |
+| `spec_id` | legacy 必填；new 可省略 | 关联 spec ID（new 省略时由 `crctl` 从 strict authority 读取） |
+| `target_version` | legacy 必填；new 可省略 | 目标版本（new 省略时由 `crctl` 从 strict authority 读取） |
+| `milestone_file` | legacy 必填；new = N/A | operational-workspace-relative POSIX 路径；**new 模式不传**（生成输入 = 冻结 PLAN 两张表 + TASK 账本/卡 + test-report + merge facts，SDD §4.8） |
+
+mode 判定由 `crctl writeback-apply` 内部完成；Skill 不自行判定 mode、不自行回退 authority。
 
 ## 业务步骤
 
-1. 在 operational workspace 起草 milestone 文件，至少含 `cr`、`milestone`、`target-version` 和非空 `fr-chain`（新 milestone 不写 `status`，CR 状态只由 `cr.md`/`_history.yml` 表达）。`merge-commits` 不手工誊抄，由 `crctl` 从 `change-requests/{cr_id}/merge-commits.yml` 注入。
-2. 调用一次：
+- **legacy**：
+  1. 在 operational workspace 起草 milestone 文件，至少含 `cr`、`milestone`、`target-version` 和非空 `fr-chain`（新 milestone 不写 `status`，CR 状态只由 `cr.md`/`_history.yml` 表达）。`merge-commits` 不手工誊抄，由 `crctl` 从 `change-requests/{cr_id}/merge-commits.yml` 注入。
+  2. 调用一次：
 
 ```text
 crctl writeback-apply {cr_id} --stage traceability
@@ -27,6 +30,16 @@ crctl writeback-apply {cr_id} --stage traceability
   --milestone-file {workspace-relative-path}
   --workspace {knowledge-base installation workspace}
 ```
+
+- **new（不起草 milestone 文件，不传 milestone 参数）**：
+
+```text
+crctl writeback-apply {cr_id} --stage traceability
+  [--spec-id {spec_id}] [--target-version {target_version}]
+  --workspace {knowledge-base installation workspace}
+```
+
+`crctl` 内部 generator 的 new 分支从冻结 PLAN 交付覆盖表/证据命令表 + TASK 账本/卡 + test-report + merge facts 确定性生成 `FR→SDD→TASK→repo@mergeSHA→cmd` 引用链（按 FR id 升序）；任一交叉失败 → `STRUCTURE_MISMATCH` 硬失败（禁止静默降级）。重复生成 noop，legacy 夹具逐字节不变。
 
 `crctl` 内部固定 generator/candidate 并执行 manifest 校验、精确 staged set、commit 与 lease push。Skill 不传 candidate/manifest/generator 路径，不写 Git/账本算法。
 

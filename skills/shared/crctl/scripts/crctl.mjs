@@ -32,7 +32,7 @@ import {
   resolveTargetSpecMode, resolveWritebackAuthorityStrict,
 } from './lib/workspace-transactions.mjs';
 import {
-  FAULT_POINTS, faultPoint, nowIso,
+  FAULT_POINTS, faultPoint, nowIso, loadExistingJournal,
   hasLedgerTransaction, recoverLedgerTransaction, beginLedgerTransaction, abortLedgerTransaction, finishLedgerTransaction,
 } from './lib/durable-tx.mjs';
 
@@ -3511,34 +3511,49 @@ function cmdUpgradeCheck(ws, flags) {
 async function cmdArchive(ws, positional, flags) {
   const cr = positional[0];
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'archive 需要 CR-ID');
-  let specId = flags['spec-id'] == null ? undefined : String(flags['spec-id']);
+  const explicitSpecId = flags['spec-id'] == null ? undefined : String(flags['spec-id']);
   const ctx = resolveRepositories(ws);
-  // CR-2026-060 G4（AC-13）：new mode 可省 --spec-id（writing-back 首跑从 strict authority 解析并持久化 payload；清理后重放读 journal）。
-  let mode = 'legacy';
+  // CR-2026-060 G4（AC-13/SDD §2.2.4）：archive 是终态事务，先查既有 journal——
+  // 清理后重放只读 archive journal payload 的 mode/specId/targetSpecId，禁止重新解析已被 cleanup 删除的 CR worktree/txws。
+  const existingArchive = loadExistingJournal({ root: ctx.installRoot, op: 'archive', cr, key: cr });
+  let mode;
+  let specId;
   let targetSpecId;
-  try {
-    mode = resolveTargetSpecMode(ctx, cr, { authority: { path: crWorktreePath(ctx, cr), source: 'cr-worktree' } }).mode;
-  } catch (e) {
-    if (e instanceof TxError) fail(e.code, e.message, e.extra);
-    throw e;
-  }
-  if (mode === 'new') {
-    if (specId == null || specId === '') {
-      let strictAuth;
-      try {
-        strictAuth = resolveWritebackAuthorityStrict(ctx, cr);
-      } catch (e) {
-        if (e instanceof TxError && e.code === 'WRITEBACK_SPEC_REQUIRED') fail('ARCHIVE_SPEC_REQUIRED', e.message, e.extra);
-        if (e instanceof TxError) fail(e.code, e.message, e.extra);
-        throw e;
+  if (existingArchive) {
+    const p = existingArchive.journal && existingArchive.journal.archive;
+    mode = (p && p.mode) || 'legacy';
+    specId = explicitSpecId != null && explicitSpecId !== '' ? explicitSpecId : (p ? p.specId : null);
+    targetSpecId = (p && p.targetSpecId) || null;
+  } else {
+    // 首跑（无 journal）：new mode 可省 --spec-id（从 strict authority 解析并持久化 payload）；legacy 必填（现行）。
+    try {
+      mode = resolveTargetSpecMode(ctx, cr, { authority: { path: crWorktreePath(ctx, cr), source: 'cr-worktree' } }).mode;
+    } catch (e) {
+      if (e instanceof TxError) fail(e.code, e.message, e.extra);
+      throw e;
+    }
+    if (mode === 'new') {
+      if (explicitSpecId == null || explicitSpecId === '') {
+        let strictAuth;
+        try {
+          strictAuth = resolveWritebackAuthorityStrict(ctx, cr);
+        } catch (e) {
+          if (e instanceof TxError && e.code === 'WRITEBACK_SPEC_REQUIRED') fail('ARCHIVE_SPEC_REQUIRED', e.message, e.extra);
+          if (e instanceof TxError) fail(e.code, e.message, e.extra);
+          throw e;
+        }
+        let m;
+        try { m = resolveTargetSpecMode(ctx, cr, { authority: strictAuth }); }
+        catch (e) { if (e instanceof TxError) fail(e.code, e.message, e.extra); throw e; }
+        specId = m.targetSpecId;
+        targetSpecId = m.targetSpecId;
+      } else {
+        specId = explicitSpecId;
+        targetSpecId = explicitSpecId;
       }
-      let m;
-      try { m = resolveTargetSpecMode(ctx, cr, { authority: strictAuth }); }
-      catch (e) { if (e instanceof TxError) fail(e.code, e.message, e.extra); throw e; }
-      specId = m.targetSpecId;
-      targetSpecId = m.targetSpecId;
     } else {
-      targetSpecId = specId;
+      specId = explicitSpecId;
+      targetSpecId = null;
     }
   }
   const result = await runTxAsync(archiveCr(ctx, {
@@ -3579,8 +3594,8 @@ async function cmdWritebackApply(ws, positional, flags, gates) {
   if (!['baseline', 'tasks', 'traceability'].includes(stage)) fail('BAD_ARGS', 'writeback-apply 需要 --stage baseline|tasks|traceability');
   if (flags.candidate || flags['candidate-out'] || flags.generator || flags.manifest) fail('BAD_ARGS', 'writeback-apply 不接受 candidate/generator/manifest 路径；由 crctl 按 stage 内部固定');
   const ctx = resolveRepositories(ws);
-  // CR-2026-060 G4（SDD §4.4）：mode 唯一裁决——authority 按 §2.2.2 生命周期绑定；
-  // 预检用 CR worktree（永不抛）；new 分支的实际 spec/version 权威走 strict txws（无回退）。
+  // CR-2026-060 G4（SDD §4.4）：先以 CR worktree 做初步 mode 路由（legacy 路径保持不变，含 CR-2026-057 版本错误优先）；
+  // new 分支再以 strict authority 重裁 mode/spec/version（txws 缺失/不自洽 → WRITEBACK_SPEC_REQUIRED，禁止回退 cr-worktree）。
   let mode;
   try {
     mode = resolveTargetSpecMode(ctx, cr, { authority: { path: crWorktreePath(ctx, cr), source: 'cr-worktree' } });
@@ -3609,6 +3624,14 @@ async function cmdWritebackApply(ws, positional, flags, gates) {
       if (e instanceof TxError) fail(e.code, e.message, e.extra);
       throw e;
     }
+    // 以 strict authority 重裁 mode（specId 权威来自 txws，而非 CR worktree 初步路由值）
+    try {
+      mode = resolveTargetSpecMode(ctx, cr, { authority: strictAuth });
+    } catch (e) {
+      if (e instanceof TxError) fail(e.code, e.message, e.extra);
+      throw e;
+    }
+    if (mode.mode !== 'new') fail('WRITEBACK_SPEC_REQUIRED', 'strict authority 下目标事实不是 new mode（txws 与 CR worktree 形态漂移）', { cr, mode: mode.mode });
     if (specId == null || specId === '') {
       specId = mode.targetSpecId;
     } else if (String(specId) !== mode.targetSpecId) {

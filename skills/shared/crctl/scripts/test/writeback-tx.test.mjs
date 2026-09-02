@@ -2,12 +2,14 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
   applyWriteback, canonicalWritebackBusinessInput, prepareWritebackCandidate,
-  resolveRepositories, resolveWritebackCandidate,
+  resolveRepositories, resolveWritebackCandidate, preflightTasksAllDone,
+  resolveTargetSpecMode, resolveWritebackAuthorityStrict, TxError,
 } from '../lib/workspace-transactions.mjs';
 import { git, runCrctl, sha256, makeCodeApprovedFixture, originMasterCount } from './merge-fixture.mjs';
 
@@ -18,6 +20,25 @@ function makeMergedFixture({ targetVersion = '0.2' } = {}) {
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.json.phase, 'complete', JSON.stringify(r.json || r.errJson));
   return { base, kb, cr, kbWt, txws: r.json.operationalWorkspace };
+}
+
+/** CR-2026-060 G4：new mode merged fixture（双账本均含 target-spec-id）——txws 由 merge finalize 携带该字段。 */
+function makeNewModeMergedFixture() {
+  const f = makeCodeApprovedFixture({ targetVersion: '0.2', targetSpecId: 'test-spec', enrichedPlan: true });
+  const { base, kb, cr } = f;
+  const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.json.phase, 'complete', JSON.stringify(r.json || r.errJson));
+  return { base, kb, cr, txws: r.json.operationalWorkspace };
+}
+
+/** new mode：merge + baseline writeback（省略 spec/version）→ status=writing-back。 */
+function makeNewModeWritingBackFixture() {
+  const f = makeNewModeMergedFixture();
+  const rb = runCrctl(['writeback-apply', f.cr, '--stage', 'baseline', '--workspace', f.kb], { cwd: f.kb });
+  assert.equal(rb.status, 0, rb.stderr);
+  assert.equal(rb.json.status, 'writing-back');
+  return f;
 }
 
 /** CR-2026-041：补齐 traceability generator 需要的 7 份证据（makeCodeApprovedFixture 仅含 dev-plan/code + development-start/code）。 */
@@ -830,5 +851,117 @@ test('CR-2026-058 AC-6.2：回灌失败信封——exit 1、stdout 无成功对�
     assert.equal(r.errJson.error.backlog, '0.29');
     assert.equal(r.errJson.error.input, '0.30');
     assert.equal(r.errJson.error.details, undefined, '失败信封扁平，无 error.details');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── CR-2026-060 G4：writeback new mode 合同（AC-11/AC-12） ────────────────────────── */
+
+/** 构造 tasks/_index.yml 并返回其目录。 */
+function makeTasksIndex(dir, cr, content) {
+  const tasksDir = path.join(dir, 'change-requests', cr, 'tasks');
+  fs.mkdirSync(tasksDir, { recursive: true });
+  fs.writeFileSync(path.join(tasksDir, '_index.yml'), content);
+  return tasksDir;
+}
+
+test('CR-2026-060 AC-11：preflightTasksAllDone 三类 reason + 未知 status 硬失败 index-invalid', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'crctl-preflight-'));
+  const cr = 'CR-2026-060';
+  try {
+    // index-missing：目录缺失
+    assert.throws(() => preflightTasksAllDone(path.join(base, 'nope'), cr), (e) => e.code === 'WRITEBACK_TASKS_PENDING' && e.extra.reason === 'index-missing');
+    // index-missing：空文件
+    const emptyDir = makeTasksIndex(base, cr, '');
+    assert.throws(() => preflightTasksAllDone(base, cr), (e) => e.code === 'WRITEBACK_TASKS_PENDING' && e.extra.reason === 'index-missing');
+    // index-invalid：结构非法（tasks 非数组）
+    makeTasksIndex(base, cr, 'tasks: 42\n');
+    assert.throws(() => preflightTasksAllDone(base, cr), (e) => e.code === 'WRITEBACK_TASKS_PENDING' && e.extra.reason === 'index-invalid');
+    // index-invalid：重复 id
+    makeTasksIndex(base, cr, `tasks:\n  - id: ${cr}-TASK-01\n    title: t1\n    status: done\n  - id: ${cr}-TASK-01\n    title: t2\n    status: done\n`);
+    assert.throws(() => preflightTasksAllDone(base, cr), (e) => e.code === 'WRITEBACK_TASKS_PENDING' && e.extra.reason === 'index-invalid');
+    // index-invalid：未知 status（非 done|pending）
+    makeTasksIndex(base, cr, `tasks:\n  - id: ${cr}-TASK-01\n    title: t1\n    status: in-progress\n`);
+    assert.throws(() => preflightTasksAllDone(base, cr), (e) => e.code === 'WRITEBACK_TASKS_PENDING' && e.extra.reason === 'index-invalid');
+    // pending：存在非 done 条目
+    makeTasksIndex(base, cr, `tasks:\n  - id: ${cr}-TASK-01\n    title: t1\n    status: done\n  - id: ${cr}-TASK-02\n    title: t2\n    status: pending\n`);
+    assert.throws(() => preflightTasksAllDone(base, cr), (e) => e.code === 'WRITEBACK_TASKS_PENDING' && e.extra.reason === 'pending' && e.extra.pending.length === 1 && e.extra.pending[0] === `${cr}-TASK-02`);
+    // 全部 done → 放行
+    makeTasksIndex(base, cr, `tasks:\n  - id: ${cr}-TASK-01\n    title: t1\n    status: done\n`);
+    assert.doesNotThrow(() => preflightTasksAllDone(base, cr));
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-02：resolveWritebackAuthorityStrict 返回 txws 快照；txws 缺失 → WRITEBACK_SPEC_REQUIRED', () => {
+  const { base, kb, cr, txws } = makeNewModeMergedFixture();
+  try {
+    const ctx = resolveRepositories(kb);
+    const auth = resolveWritebackAuthorityStrict(ctx, cr);
+    assert.equal(auth.source, 'transaction-workspace');
+    assert.equal(auth.path, txws);
+    const mode = resolveTargetSpecMode(ctx, cr, { authority: auth });
+    assert.equal(mode.mode, 'new');
+    assert.equal(mode.targetSpecId, 'test-spec');
+    fs.rmSync(txws, { recursive: true, force: true });
+    assert.throws(() => resolveWritebackAuthorityStrict(ctx, cr), (e) => e instanceof TxError && e.code === 'WRITEBACK_SPEC_REQUIRED');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-11：new mode baseline 省略 --spec-id/--target-version 从 strict authority 补全并发布 writing-back', () => {
+  const { base, kb, cr, txws } = makeNewModeMergedFixture();
+  try {
+    const r = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--workspace', kb], { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.json.status, 'writing-back');
+    assert.equal(r.json.changed, true);
+    assert.ok(fs.existsSync(path.join(txws, 'specs', 'test-spec', 'PRD.md')), 'baseline 生成 specs/test-spec/PRD.md');
+    assert.ok(fs.existsSync(path.join(txws, 'specs', 'test-spec', 'SDD.md')), 'baseline 生成 specs/test-spec/SDD.md');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-11：new mode txws 缺失 → WRITEBACK_SPEC_REQUIRED 零写入（不回退 cr-worktree）', () => {
+  const { base, kb, cr, txws } = makeNewModeMergedFixture();
+  try {
+    fs.rmSync(txws, { recursive: true, force: true });
+    const r = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--workspace', kb], { cwd: kb });
+    assert.notEqual(r.status, 0);
+    assert.equal(r.errJson.error.code, 'WRITEBACK_SPEC_REQUIRED', r.stderr);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-11：new mode stage=tasks 的 pending preflight → WRITEBACK_TASKS_PENDING（pending）零发布', () => {
+  const { base, kb, cr, txws } = makeNewModeWritingBackFixture();
+  try {
+    // 将既有 done 账本改写为存在 pending 条目
+    const idxPath = path.join(txws, 'change-requests', cr, 'tasks', '_index.yml');
+    fs.writeFileSync(idxPath, `tasks:\n  - id: ${cr}-TASK-01\n    title: t1\n    status: pending\n`);
+    const r = runCrctl(['writeback-apply', cr, '--stage', 'tasks', '--workspace', kb], { cwd: kb });
+    assert.notEqual(r.status, 0);
+    assert.equal(r.errJson.error.code, 'WRITEBACK_TASKS_PENDING', r.stderr);
+    assert.equal(r.errJson.error.reason, 'pending');
+    assert.ok(Array.isArray(r.errJson.error.pending) && r.errJson.error.pending.includes(`${cr}-TASK-01`));
+    // 零发布：delivery 目录未被写入
+    assert.ok(!fs.existsSync(path.join(txws, 'delivery', 'task', `${cr}-TASK-01.md`)), 'pending preflight 失败不得发布部分 delivery');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-12：new mode traceability 无 milestone-file 确定性生成 FR→SDD→TASK→code→evidence', () => {
+  const { base, kb, cr, txws } = makeNewModeWritingBackFixture();
+  try {
+    const crDir = path.join(txws, 'change-requests', cr);
+    // 补齐 7 份 canonical 证据中的 requirement/sdd review 与 requirement/tech-design approval（同 legacy 夹具）
+    fs.writeFileSync(path.join(crDir, 'review-annotations', 'requirement.yml'), `cr-id: ${cr}\nreview-type: requirement\nverdict: pass\n`);
+    fs.writeFileSync(path.join(crDir, 'review-annotations', 'sdd.yml'), `cr-id: ${cr}\nreview-type: tech-design\nverdict: pass\n`);
+    fs.writeFileSync(path.join(crDir, 'approval.yml'), `requirement:\n  via: crctl-approve\ntech-design:\n  via: crctl-approve\n` + fs.readFileSync(path.join(crDir, 'approval.yml'), 'utf8'));
+    const r = runCrctl(['writeback-apply', cr, '--stage', 'traceability', '--workspace', kb], { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.json.phase, 'complete', JSON.stringify(r.json || r.errJson));
+    const trace = fs.readFileSync(path.join(txws, 'specs', 'test-spec', 'traceability.yml'), 'utf8');
+    assert.match(trace, /- cr: /);
+    assert.match(trace, /- fr: FR-01/);
+    assert.match(trace, /- fr: FR-02/);
+    assert.match(trace, new RegExp(`tasks: \\[${cr}-TASK-01\\]`));
+    assert.match(trace, /code: \[/);
+    assert.match(trace, /evidence: \[cmd-02\]/);
+    assert.match(trace, /evidence: \[cmd-01\]/);
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

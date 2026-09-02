@@ -92,24 +92,31 @@ export function makeFixture() {
  * reviewed-source-sha 固定其写入前的 feature HEAD。
  * CR-2026-058（FR-4）：targetVersion 参数化——cr.md 与 _backlog.yml 条目均写 `target-version: <v>` 行；
  * 默认 0.2 保持既有行为（既有断言零影响）。 */
-export function makeCodeApprovedFixture({ targetVersion = '0.2' } = {}) {
+export function makeCodeApprovedFixture({ targetVersion = '0.2', targetSpecId, enrichedPlan = false } = {}) {
   const f = makeFixture();
   const { base, kb, others } = f;
   const cr = `CR-${YEAR}-042`;
+  const planText = enrichedPlan
+    ? `---\nid: ${cr}-plan\ntype: PLAN\ncr-ref: ${cr}\ntarget-version: ${targetVersion}\n---\n# Plan\n\n## 交付覆盖表\n\n| FR/关键AC | SDD交付项 | 主责/关联TASK | 验收证据 | 回滚 |\n|---|---|---|---|---|\n| FR-01 注册合同 | §2.1/§2.2 | ${cr}-TASK-01 | cmd-02 | revert |\n| FR-02 writer-reviewer | §3.2 | ${cr}-TASK-01 | cmd-01 | revert |\n\n## 证据命令表\n\n| 证据ID | repo | cwd | executable | args | timeout |\n|---|---|---|---|---|---|\n| cmd-01 | tools | . | node | [--test] | 60 |\n| cmd-02 | tools | . | node | [--test] | 60 |\n`
+    : '# Plan\n';
+  const testReportText = enrichedPlan ? '---\nstatus: pass\n---\n# report\n\ncmd-01 cmd-02\n' : '---\nstatus: pass\n---\n';
   // 1) kb master：注册账本 + cr.md(code-approved) + plan/tasks/test-report
   fs.writeFileSync(path.join(kb, 'change-requests', '_backlog.yml'),
-    `schema: cr-backlog/v2\nchange-requests:\n  - id: ${cr}\n    title: Merge Test\n    status: code-approved\n    owner: alice\n    target-version: ${targetVersion}\n`);
+    `schema: cr-backlog/v2\nchange-requests:\n  - id: ${cr}\n    title: Merge Test\n    status: code-approved\n    owner: alice\n    target-version: ${targetVersion}\n`
+    + (targetSpecId ? `    target-spec-id: ${targetSpecId}\n` : ''));
   fs.writeFileSync(path.join(kb, 'change-requests', '_index.yml'), `change-requests:\n  - id: ${cr}\n    title: Merge Test\n`);
   let kbCr = path.join(kb, 'change-requests', cr);
   fs.mkdirSync(path.join(kbCr, 'tasks'), { recursive: true });
   fs.writeFileSync(path.join(kbCr, 'cr.md'),
-    `---\nid: ${cr}\nstatus: code-approved\ntarget-version: ${targetVersion}\nupdated-at: "2026-08-11T21:00:00+08:00"\n---\n`);
+    `---\nid: ${cr}\nstatus: code-approved\ntarget-version: ${targetVersion}\n`
+    + (targetSpecId ? `target-spec-id: ${targetSpecId}\n` : '')
+    + `updated-at: "2026-08-11T21:00:00+08:00"\n---\n`);
   fs.writeFileSync(path.join(kbCr, 'prd.md'), '# PRD\n');
   fs.writeFileSync(path.join(kbCr, 'sdd.md'), '# SDD\n');
-  fs.writeFileSync(path.join(kbCr, 'plan.md'), '# Plan\n');
+  fs.writeFileSync(path.join(kbCr, 'plan.md'), planText);
   fs.writeFileSync(path.join(kbCr, 'tasks', '_index.yml'), 'tasks:\n  - id: ' + cr + '-TASK-01\n    title: t1\n    status: done\n    estimate: 1h\n');
   fs.writeFileSync(path.join(kbCr, 'tasks', 'TASK-01.md'), '---\nid: ' + cr + '-TASK-01\ntype: TASK\ncr-ref: ' + cr + '\ntitle: t1\nstatus: pending\nslug: task-01\nestimate: 1h\n---\n# TASK-01\n');
-  fs.writeFileSync(path.join(kbCr, 'test-report.md'), '---\nstatus: pass\n---\n');
+  fs.writeFileSync(path.join(kbCr, 'test-report.md'), testReportText);
   git(kb, ['add', '-A']);
   git(kb, ['commit', '-q', '-m', `register ${cr}`]);
   git(kb, ['push', '-q', 'origin', 'HEAD:refs/heads/master']);
