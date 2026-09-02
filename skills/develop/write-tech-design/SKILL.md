@@ -124,6 +124,8 @@ AC-xx
 
 回修模式只按 blocker 和本轮变化定点修订，不无理由重写已确认方案。
 
+**SDD-CLOSE 关闭义务（CR-2026-060 AC-06，与 review-tech-design 成对）**：PRD 中显式延后到 SDD 的设计项（如接口闭包、数据模型、错误码、多仓路径 authority）必须在本 SDD 逐项关闭，并以 `SDD-CLOSE-01` 起编号记录关闭结论；未能关闭的项显式列为待办并在 `review-tech-design` 时标记。与 review-requirement 的七个评审维度使用同一术语集合，不另造同义维度名。
+
 ### Step 3 — 落盘并 commit
 
 落盘到 `operational_workspace` 中 `change-requests/{cr_id}/sdd.md`。

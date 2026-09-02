@@ -56,6 +56,8 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 
 ### Step 2.1 — AC 闭环与既有实现依赖核验
 
+**SDD-CLOSE 关闭义务核验（CR-2026-060 AC-06，与 write-tech-design 成对）**：逐项核对 SDD 正文中的 `SDD-CLOSE-*` 编号关闭项——PRD 显式延后到 SDD 的设计项必须已关闭（有结论且与 PRD 契约一致）；未关闭或关闭结论与 PRD 契约冲突 → blocker。与 review-requirement 的七个评审维度使用同一术语集合，不另造同义维度名。
+
 在既有 8 个维度检查过程中，对 PRD 的每条 AC 执行闭环判定：
 
 ```text

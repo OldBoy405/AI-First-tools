@@ -38,8 +38,9 @@ description: 在 requirement/CR-* worktree 内编写 PRD 需求文档，落盘�
 
 ### Step 2 — 读取上下文
 
-- 读取 `change-requests/{cr_id}/cr.md` 获取 title / summary / target-version / source / owners.requirement
+- 读取 `change-requests/{cr_id}/cr.md` 获取 title / summary / source / target-version / owners.requirement。**这些权威字段只从 cr.md 读，Pipeline 重复字段（如 inputs.title / inputs.summary / inputs.source）不得覆盖 cr.md 值**；两者不一致时以 cr.md 为准并停止提示漂移
 - **版本继承（CR-2026-057 FR-13）**：PRD frontmatter 的 `target-version` 必须继承 cr.md 值（`unassigned` 或真实版本），禁止写 `tbd`、禁止自行改写；若 cr.md 为 `unassigned` 且本 CR 需要真实版本，必须先经 `crctl version-set {cr_id} --to <real-version>` 更正后再写 PRD（PRD 本身不提供改写入口）
+- **source 校验（CR-2026-060 AC-04）**：若 `source` 非空，在 writer 阶段校验其路径 containment 与存在性——必须位于知识库仓 worktree 内（`path.resolve` 后以 worktree 根目录前缀校验）且文件存在；缺失/越界/不存在 → 停止执行，不写 PRD，提示修正 source
 - `summary` 中已确认的边界（注册阶段拍板或审批确认的范围/排除项）与当前上下文无冲突时优先原样采纳进 PRD 范围与 AC，不以换措辞方式重新定义已拍板事项
 - 若 `source` 指向规划报告路径，读取报告中对应功能的规划建议
 - 若存在 `review_feedback`，读取上一轮 `review-annotations/requirement.yml` 中的 blockers 与 reviewer 摘要

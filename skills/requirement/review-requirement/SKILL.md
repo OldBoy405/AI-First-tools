@@ -34,6 +34,19 @@ description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审�
 1. 确认 `change-requests/{cr_id}/prd.md` 存在
 2. CR status 必须为 `drafting` 或 `requirement-reviewing`（允许重审）
 
+### Step 1.5 — pre-review 门禁（固定顺序，Step 1 与 Step 2 之间，不可跳过；CR-2026-060 AC-03）
+
+在开始任何质量评审之前，必须先执行 pre-review 门禁（不读 PRD/annotation/passCondition，只读 mode 判据与 cr.md target-version）：
+
+```text
+crctl gate {cr_id} --for requirement-reviewing --mode pre-review --workspace <worktree>
+```
+
+- **guard pass**：才进入 Step 2 的质量评审，随后写临时 payload → `crctl review-record`；record=pass 才允许 `crctl advance`。
+- **guard block**（含 new mode `unassigned`，check code `TARGET_VERSION_UNASSIGNED`）：→ `route=version-set`，不写临时 payload、不调用 `review-record`、不 `advance`、不改 status、不记录评审。唯一更正入口是 `crctl version-set {cr_id} --to <real-version>`（先版本校正，再重跑本 Skill）。
+- **禁止**先跑无 `--mode` 的完整 `crctl gate`（那是 statusGates 门禁，与 pre-review 的失败语义不同）。
+- 公开 CLI 直连 `crctl advance --to requirement-reviewing --trigger review-requirement` 也已被 crctl 的 advance 层零写入 guard（`assertRequirementReviewAdvanceGuard`）拦截——本 Skill 声明该事实，不复制该算法。
+
 ### Step 2 — PRD 质量评审
 
 评审维度：
@@ -134,5 +147,6 @@ description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审�
 | 错误 | 处理 |
 |------|------|
 | prd.md 不存在 | 停止执行，要求先运行 write-requirement-prd |
+| pre-review guard block（new mode `unassigned` / target-spec-id 单侧缺失/非法/不一致） | 不写临时 payload、不 review-record、不 advance，`route=version-set`；先 `crctl version-set` 校正版本或人工修复 target-spec-id 双账本漂移，再重跑本 Skill |
 | CR status 非预期值 | 输出当前状态，提示是否强制重审 |
 | 达到 reviewLoop.maxAttempts 后仍为 block | 停止进入人工审批，输出剩余 blocker 与最后一次修复记录 |
