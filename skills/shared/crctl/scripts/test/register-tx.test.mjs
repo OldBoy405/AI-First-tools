@@ -92,6 +92,7 @@ const regArgs = (kb, overrides = {}) => {
     'owner-development': 'Ray',
     'owner-test': 'Ray',
     'target-version': 'unassigned',
+    'target-spec-id': 'spec-a',
     ...overrides,
   };
   const args = ['register', '--workspace', kb];
@@ -409,7 +410,8 @@ test('TASK-10：register 成功 → outbox 发 status+owners 事件（同真实 
     const r2 = runCrctl(regArgs(kb), { cwd: kb });
     assert.equal(r2.status, 0, r2.stderr);
     assert.equal(r2.json.changed, false);
-    assert.equal(r2.json.outbox, undefined, '重跑不得重发事件');
+    assert.equal(r2.json.outbox, null, '重跑不得重发事件（outbox=null）');
+    assert.equal(r2.json.warnings.length, 0, '重跑 warnings 为空');
     assert.equal(fs.readdirSync(outDir).length, before);
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
@@ -541,7 +543,7 @@ test('CR-2026-057 FR-12/AC-12：缺 flag 与 6 类非法输入 → REGISTER_VERS
   const f0 = makeFixture();
   try {
     const args = ['register', '--workspace', f0.kb];
-    for (const [k, v] of Object.entries({ 'registration-key': 'key-abc-123', title: 'TestCR', 'owner-requirement': 'Ray', 'owner-development': 'Ray', 'owner-test': 'Ray' })) args.push(`--${k}`, v);
+    for (const [k, v] of Object.entries({ 'registration-key': 'key-abc-123', title: 'TestCR', 'owner-requirement': 'Ray', 'owner-development': 'Ray', 'owner-test': 'Ray', 'target-spec-id': 'spec-a' })) args.push(`--${k}`, v);
     const r = runCrctl(args, { cwd: f0.kb });
     assert.notEqual(r.status, 0);
     assert.equal(r.errJson.error.code, 'REGISTER_VERSION_INVALID');
@@ -557,6 +559,33 @@ test('CR-2026-057 FR-12/AC-12：缺 flag 与 6 类非法输入 → REGISTER_VERS
       assert.equal(r.errJson.error.code, 'REGISTER_VERSION_INVALID', `target-version=${JSON.stringify(bad)}: ${r.stderr}`);
       assertRegisterZeroWrite(f.base, f.kb);
     } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-060 AC-01：缺/空 --target-spec-id → REGISTER_TARGET_SPEC_ID_REQUIRED 且零写入（先于 BAD_ARGS）', () => {
+  for (const bad of [undefined, '', '   ']) {
+    const { base, kb } = makeFixture();
+    try {
+      const args = ['register', '--workspace', kb];
+      for (const [k, v] of Object.entries({ 'registration-key': 'key-abc-123', title: 'TestCR', 'owner-requirement': 'Ray', 'owner-development': 'Ray', 'owner-test': 'Ray', 'target-version': '0.30' })) args.push(`--${k}`, v);
+      if (bad !== undefined) args.push('--target-spec-id', bad);
+      const r = runCrctl(args, { cwd: kb });
+      assert.notEqual(r.status, 0);
+      assert.equal(r.errJson.error.code, 'REGISTER_TARGET_SPEC_ID_REQUIRED', r.stderr);
+      assertRegisterZeroWrite(base, kb);
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
+  }
+});
+
+test('CR-2026-060 AC-01：非法 --target-spec-id → REGISTER_TARGET_SPEC_ID_INVALID 且零写入', () => {
+  for (const bad of ['A-b', 'ab/c', 'ab\\c', 'ab\nc', 'ab\rc', '-ab', 'ab c']) {
+    const { base, kb } = makeFixture();
+    try {
+      const r = runCrctl(regArgs(kb, { 'target-spec-id': bad }), { cwd: kb });
+      assert.notEqual(r.status, 0, `应拒绝 target-spec-id=${JSON.stringify(bad)}`);
+      assert.equal(r.errJson.error.code, 'REGISTER_TARGET_SPEC_ID_INVALID', r.stderr);
+      assertRegisterZeroWrite(base, kb);
+    } finally { fs.rmSync(base, { recursive: true, force: true }); }
   }
 });
 
@@ -588,5 +617,68 @@ test('CR-2026-057 FR-12/AC-12：同 key 规范化同值续跑；规范化异值 
     const r3 = runCrctl(regArgs(kb, { 'target-version': '0.31' }), { cwd: kb });
     assert.notEqual(r3.status, 0);
     assert.equal(r3.errJson.error.code, 'REGISTRATION_INPUT_MISMATCH');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── CR-2026-060 G1：target-spec-id 注册合同（AC-01/AC-02） ────────────────────────── */
+
+test('CR-2026-060 AC-01：成功注册写入双账本 target-spec-id 全等 + snake_case 同构 JSON + registrationAt 三处相等 + recover_command 含 --target-spec-id', () => {
+  const { base, kb } = makeFixture();
+  try {
+    const r1 = runCrctl(regArgs(kb, { 'target-version': '0.33', 'target-spec-id': 'spec-033' }), { cwd: kb });
+    assert.equal(r1.status, 0, r1.stderr);
+    assert.equal(r1.json.changed, true);
+    // snake_case 键
+    assert.equal(r1.json.cr_id, r1.json.cr);
+    assert.equal(r1.json.target_spec_id, 'spec-033');
+    assert.equal(r1.json.target_version, '0.33');
+    assert.equal(r1.json.tx_id, r1.json.txId);
+    assert.ok(typeof r1.json.operational_workspace === 'string' && r1.json.operational_workspace.length);
+    assert.ok(Array.isArray(r1.json.side_effects));
+    assert.match(r1.json.recover_command, /--target-spec-id "spec-033"/);
+    assert.deepEqual(r1.json.warnings, []);
+    // 双账本字段全等
+    const crMd = fs.readFileSync(path.join(kb, 'change-requests', r1.json.cr, 'cr.md'), 'utf8');
+    const backlog = fs.readFileSync(path.join(kb, 'change-requests', '_backlog.yml'), 'utf8');
+    assert.match(crMd, /^target-spec-id: spec-033$/m);
+    assert.match(backlog, /^    target-spec-id: spec-033$/m);
+    // registrationAt：outbox owners assigned-at === result.registration_at（精确字符串相等）
+    const outDir = path.join(kb, '.crctl', 'outbox');
+    const events = fs.readdirSync(outDir).filter((f) => f.endsWith('.json')).map((f) => JSON.parse(fs.readFileSync(path.join(outDir, f), 'utf8')));
+    const ownersEv = events.find((e) => e.event_kind === 'owners');
+    assert.ok(ownersEv, 'owners 事件必须落盘');
+    for (const role of ['requirement', 'development', 'test']) {
+      assert.equal(ownersEv.payload.owners[role]['assigned-at'], r1.json.registration_at, `owners outbox ${role} assigned-at 必须 = registrationAt`);
+    }
+    // 幂等重跑：changed=false 同构（outbox=null/warnings=[]），registrationAt 相等
+    const r2 = runCrctl(regArgs(kb, { 'target-version': '0.33', 'target-spec-id': 'spec-033' }), { cwd: kb });
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.equal(r2.json.changed, false);
+    assert.equal(r2.json.outbox, null);
+    assert.deepEqual(r2.json.warnings, []);
+    assert.equal(r2.json.cr_id, r1.json.cr);
+    assert.equal(r2.json.target_spec_id, 'spec-033');
+    assert.equal(r2.json.registration_at, r1.json.registration_at, '同 key 重试两次 registrationAt 相等');
+    // 同 key 换 spec → REGISTRATION_INPUT_MISMATCH 零写入
+    const r3 = runCrctl(regArgs(kb, { 'target-version': '0.33', 'target-spec-id': 'spec-034' }), { cwd: kb });
+    assert.notEqual(r3.status, 0);
+    assert.equal(r3.errJson.error.code, 'REGISTRATION_INPUT_MISMATCH');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-02：mode 唯一裁决——单侧缺失 → pre-review GATE_BLOCKED/TARGET_SPEC_AUTHORITY_MISSING 零写入', () => {
+  const { base, kb } = makeFixture();
+  try {
+    const r = runCrctl(regArgs(kb, { 'target-version': '0.33', 'target-spec-id': 'spec-033' }), { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    // 权威 = CR worktree（非主 checkout）；删其 cr.md 的 target-spec-id 行 → 单侧缺失
+    const wtCrDir = path.join(wtPath(kb, 'knowledge-base', r.json.cr), 'change-requests', r.json.cr);
+    const crMdPath = path.join(wtCrDir, 'cr.md');
+    const crMd = fs.readFileSync(crMdPath, 'utf8').replaceAll('\r\n', '\n').replace(/^target-spec-id:.*\n/m, '');
+    fs.writeFileSync(crMdPath, crMd);
+    const g1 = runCrctl(['gate', r.json.cr, '--for', 'requirement-reviewing', '--mode', 'pre-review', '--workspace', kb], { cwd: kb });
+    assert.notEqual(g1.status, 0);
+    assert.equal(g1.errJson.error.code, 'GATE_BLOCKED');
+    assert.ok(g1.errJson.error.gate.checks.some((c) => c.code === 'TARGET_SPEC_AUTHORITY_MISSING'), JSON.stringify(g1.errJson));
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

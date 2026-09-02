@@ -5133,3 +5133,177 @@ test('CR-2026-058 TASK-06 AC-5：README 行 22/行 76 已按 FR-1 判定表改�
   assert.ok(line76.includes('writeback 事务之外'), '行 76 的「唯一更正入口」带 writeback 事务限定');
   assert.ok(line76.includes('回灌'), '行 76 含回灌分支说明');
 });
+
+/* ────────────────────────── CR-2026-060 G1：pre-review gate 与 advance 层 guard（AC-03） ────────────────────────── */
+
+/** 带 repositories 声明（单一 knowledge-base role）的 spec-authority workspace。 */
+function makeSpecAuthorityWorkspace() {
+  const ws = makeWorkspace();
+  const kbRepo = path.join(ws, 'kb');
+  mkdirSync(kbRepo, { recursive: true });
+  const graph = [
+    'workspace:',
+    `  tools_package_path: ${JSON.stringify(PACKAGE_ROOT)}`,
+    'repositories:',
+    '  - id: kb',
+    '    path: "./kb"',
+    '    trunk: master',
+    '    role: knowledge-base',
+    '',
+  ].join('\n');
+  writeFileSync(path.join(ws, 'dir-graph.yaml'), graph);
+  return ws;
+}
+
+/** 写 CR worktree 的 cr.md + _backlog.yml（authority 快照），target-spec-id / target-version 可选。 */
+function writeSpecAuthorityWorktree(ws, cr, { crMdTargetSpecId, backlogTargetSpecId, targetVersion = 'unassigned' } = {}) {
+  const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', cr);
+  const crDir = path.join(wt, 'change-requests', cr);
+  mkdirSync(crDir, { recursive: true });
+  const crMdLines = ['---', `id: ${cr}`, 'status: drafting'];
+  if (targetVersion !== undefined) crMdLines.push(`target-version: ${targetVersion}`);
+  if (crMdTargetSpecId !== undefined) crMdLines.push(`target-spec-id: ${crMdTargetSpecId}`);
+  crMdLines.push('---', '');
+  writeFileSync(path.join(crDir, 'cr.md'), crMdLines.join('\n'));
+  const bl = ['schema: cr-backlog/v2', 'change-requests:'];
+  bl.push(`  - id: ${cr}`);
+  if (targetVersion !== undefined) bl.push(`    target-version: ${targetVersion}`);
+  if (backlogTargetSpecId !== undefined) bl.push(`    target-spec-id: ${backlogTargetSpecId}`);
+  writeFileSync(path.join(wt, 'change-requests', '_backlog.yml'), bl.join('\n') + '\n');
+}
+
+test('CR-2026-060 AC-03：new mode unassigned 的 pre-review gate 直连拒绝（GATE_BLOCKED/TARGET_VERSION_UNASSIGNED，exit 1）', () => {
+  const ws = makeSpecAuthorityWorkspace();
+  const cr = 'CR-2026-060';
+  try {
+    writeSpecAuthorityWorktree(ws, cr, { crMdTargetSpecId: 'spec-a', backlogTargetSpecId: 'spec-a', targetVersion: 'unassigned' });
+    const r = runCrctl(['gate', cr, '--for', 'requirement-reviewing', '--mode', 'pre-review', '--workspace', ws]);
+    assert.notEqual(r.status, 0);
+    assert.equal(r.stderr.error.code, 'GATE_BLOCKED');
+    assert.ok(r.stderr.error.gate.checks.some((c) => c.code === 'TARGET_VERSION_UNASSIGNED'), JSON.stringify(r.stderr));
+    assert.equal(r.stderr.error.gate.pass, false);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-03：legacy（两处均缺 target-spec-id）pre-review 通过；--mode pre-review 配其它 --for → BAD_ARGS', () => {
+  const ws = makeSpecAuthorityWorkspace();
+  const cr = 'CR-2026-060';
+  try {
+    writeSpecAuthorityWorktree(ws, cr, { targetVersion: '0.33' });
+    const r = runCrctl(['gate', cr, '--for', 'requirement-reviewing', '--mode', 'pre-review', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.mode, 'pre-review');
+    assert.equal(r.stdout.pass, true);
+    const bad = runCrctl(['gate', cr, '--for', 'requirement-approved', '--mode', 'pre-review', '--workspace', ws]);
+    assert.notEqual(bad.status, 0);
+    assert.equal(bad.stderr.error.code, 'BAD_ARGS');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-03：new mode unassigned 的公开 CLI 直连 advance → GATE_BLOCKED/TARGET_VERSION_UNASSIGNED 零写入（cr.md/attempt/outbox 均不变）', () => {
+  const ws = makeSpecAuthorityWorkspace();
+  const cr = 'CR-2026-060';
+  try {
+    writeCrEntry(ws, cr, 'drafting');
+    writeSpecAuthorityWorktree(ws, cr, { crMdTargetSpecId: 'spec-a', backlogTargetSpecId: 'spec-a', targetVersion: 'unassigned' });
+    const crMdPath = path.join(ws, 'change-requests', cr, 'cr.md');
+    const before = readFileSync(crMdPath, 'utf8');
+    const r = runCrctl(['advance', cr, '--to', 'requirement-reviewing', '--trigger', 'review-requirement', '--workspace', ws]);
+    assert.notEqual(r.status, 0);
+    assert.equal(r.stderr.error.code, 'GATE_BLOCKED');
+    assert.ok(r.stderr.error.gate.checks.some((c) => c.code === 'TARGET_VERSION_UNASSIGNED'), JSON.stringify(r.stderr));
+    assert.equal(readFileSync(crMdPath, 'utf8'), before, 'cr.md 不得被写入');
+    assert.equal(existsSync(path.join(ws, 'change-requests', cr, 'review-loop.yml')), false, 'review-loop 不得创建');
+    assert.equal(existsSync(path.join(ws, '.crctl', 'outbox')), false, 'outbox 不得写入');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-02：pre-review 单侧缺失 / 不一致 / 非法 → check code 一对一映射（_MISSING/_DRIFT/_INVALID）', () => {
+  const cases = [
+    { crMd: 'spec-a', backlog: undefined, code: 'TARGET_SPEC_AUTHORITY_MISSING' },
+    { crMd: 'spec-a', backlog: 'spec-b', code: 'TARGET_SPEC_AUTHORITY_DRIFT' },
+    { crMd: 'A-b', backlog: 'A-b', code: 'TARGET_SPEC_AUTHORITY_INVALID' },
+  ];
+  for (const c of cases) {
+    const ws = makeSpecAuthorityWorkspace();
+    const cr = 'CR-2026-060';
+    try {
+      writeSpecAuthorityWorktree(ws, cr, { crMdTargetSpecId: c.crMd, backlogTargetSpecId: c.backlog, targetVersion: '0.33' });
+      const r = runCrctl(['gate', cr, '--for', 'requirement-reviewing', '--mode', 'pre-review', '--workspace', ws]);
+      assert.notEqual(r.status, 0, `${c.code}: ${r.rawStderr}`);
+      assert.equal(r.stderr.error.code, 'GATE_BLOCKED');
+      assert.ok(r.stderr.error.gate.checks.some((chk) => chk.code === c.code), `${c.code} 未命中: ${JSON.stringify(r.stderr)}`);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
+});
+
+/* ────────────────────────── CR-2026-060 G3：task init --count-hint 写入前校验（AC-08） ────────────────────────── */
+
+test('CR-2026-060 AC-08：--count-hint 4 恰 4 卡（01..04）→ 成功；缺号/重号/第五个/非法 → TASK_COUNT_MISMATCH 或 BAD_ARGS 零写入', () => {
+  // 合法：恰 4 卡
+  const okWs = makeWorkspace();
+  try {
+    writeCrEntry(okWs, 'CR-T1', 'tech-design-reviewed');
+    for (let i = 1; i <= 4; i++) writeTaskCard(okWs, 'CR-T1', i, { title: `t${i}` });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--count-hint', '4', '--workspace', okWs]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.taskCount, 4);
+  } finally { rmSync(okWs, { recursive: true, force: true }); }
+
+  // 数量不符（3 卡）
+  const fewWs = makeWorkspace();
+  try {
+    writeCrEntry(fewWs, 'CR-T1', 'tech-design-reviewed');
+    for (let i = 1; i <= 3; i++) writeTaskCard(fewWs, 'CR-T1', i, { title: `t${i}` });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--count-hint', '4', '--workspace', fewWs]);
+    assert.equal(r.status, 1, r.rawStderr);
+    assert.equal(r.stderr.error.code, 'TASK_COUNT_MISMATCH');
+    assert.equal(existsSync(path.join(fewWs, 'change-requests', 'CR-T1', 'tasks', '_index.yml')), false, '零写入');
+  } finally { rmSync(fewWs, { recursive: true, force: true }); }
+
+  // 第五个（5 卡）
+  const fiveWs = makeWorkspace();
+  try {
+    writeCrEntry(fiveWs, 'CR-T1', 'tech-design-reviewed');
+    for (let i = 1; i <= 5; i++) writeTaskCard(fiveWs, 'CR-T1', i, { title: `t${i}` });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--count-hint', '4', '--workspace', fiveWs]);
+    assert.equal(r.status, 1, r.rawStderr);
+    assert.equal(r.stderr.error.code, 'TASK_COUNT_MISMATCH');
+    assert.equal(existsSync(path.join(fiveWs, 'change-requests', 'CR-T1', 'tasks', '_index.yml')), false);
+  } finally { rmSync(fiveWs, { recursive: true, force: true }); }
+
+  // 缺号（01/03/04，缺 02）
+  const gapWs = makeWorkspace();
+  try {
+    writeCrEntry(gapWs, 'CR-T1', 'tech-design-reviewed');
+    for (const n of [1, 3, 4]) writeTaskCard(gapWs, 'CR-T1', n, { title: `t${n}` });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--count-hint', '4', '--workspace', gapWs]);
+    assert.equal(r.status, 1, r.rawStderr);
+    assert.equal(r.stderr.error.code, 'TASK_COUNT_MISMATCH');
+    assert.equal(existsSync(path.join(gapWs, 'change-requests', 'CR-T1', 'tasks', '_index.yml')), false);
+  } finally { rmSync(gapWs, { recursive: true, force: true }); }
+
+  // 非法 count-hint
+  const badWs = makeWorkspace();
+  try {
+    writeCrEntry(badWs, 'CR-T1', 'tech-design-reviewed');
+    writeTaskCard(badWs, 'CR-T1', 1, { title: 'x' });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--count-hint', 'abc', '--workspace', badWs]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'BAD_ARGS');
+    assert.equal(existsSync(path.join(badWs, 'change-requests', 'CR-T1', 'tasks', '_index.yml')), false);
+  } finally { rmSync(badWs, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-08：--count-hint 缺省时既有 task init 行为不变（回归）', () => {
+  const ws = makeWorkspace();
+  try {
+    writeCrEntry(ws, 'CR-T1', 'tech-design-reviewed');
+    writeTaskCard(ws, 'CR-T1', 1, { title: 'x' });
+    writeTaskCard(ws, 'CR-T1', 2, { title: 'y', dependsOn: ['CR-T1-TASK-01'] });
+    const r = runCrctl(['task', 'init', 'CR-T1', '--workspace', ws]);
+    assert.equal(r.status, 0, r.rawStderr);
+    assert.equal(r.stdout.taskCount, 2);
+    assert.equal(r.stdout.changed, true);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});

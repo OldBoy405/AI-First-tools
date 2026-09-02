@@ -31,7 +31,6 @@ description: 记录代码人工审批结论，校验 change-requests/{CR-ID}/rev
 3. **驳回（grant decision=reject）**：crctl 完整验证（schema/归属/状态/evidence digest/Ed25519 签名）后执行状态机既有回退转换，返回结构化非零业务结果 `APPROVAL_DECLINED_ROLLED_BACK`（含 rolledBackTo/trigger/changed）。该结果表示人工决定已捕获且回退成功，**必须中止当前正向 Pipeline**；不得伪装为 `EXEC_FAILED`/`CAS_CONFLICT` 等技术失败，不得输出 rerunHint、下一 Skill 指令或手写 review annotation。
 4. Agent/管道**不得**代写 approval.yml、手写 reject 或推进 status；非 TTY 且无 grant 调用 crctl 一律拒绝（APPROVAL_REQUIRES_HUMAN）。
 5. 输出审批记录路径、当前 status 和下一步：以 `crctl next {cr_id}` 为准。
-3. 输出审批记录路径、当前 status 和下一步：以 `crctl next {cr_id}` 为准（进入回写阶段）。
 4. **suggestions 承接（可选）**：剩余 `suggestions` 可经 `record-idea`（planning 域 Skill）转入 `docs/ideas/`——必须在 approve-code 期做（CR worktree 内随分支合并进 trunk；feature-writeback 硬边界只写 specs/delivery）；不设默认、不阻塞本 CR；不转则仅留档 review-annotations，无损失。
 
 ## 错误处理

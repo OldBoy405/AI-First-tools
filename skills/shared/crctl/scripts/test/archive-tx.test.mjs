@@ -79,6 +79,26 @@ function writeEvidenceTrace(txws, cr) {
   fs.writeFileSync(path.join(txws, 'specs', 'test-spec', 'traceability.yml'), L.join('\n') + '\n');
 }
 
+/** CR-2026-060 G4：new mode archive 夹具——merge + baseline（省略 spec/version）+ 证据 + new traceability（无 milestone-file）。 */
+function makeNewModeArchiveFixture() {
+  const f = makeCodeApprovedFixture({ targetVersion: '0.2', targetSpecId: 'test-spec', enrichedPlan: true });
+  const { base, kb, cr } = f;
+  const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.json.phase, 'complete', JSON.stringify(r.json || r.errJson));
+  const txws = r.json.operationalWorkspace;
+  const rb = runCrctl(['writeback-apply', cr, '--stage', 'baseline', '--workspace', kb], { cwd: kb });
+  assert.equal(rb.status, 0, rb.stderr);
+  assert.equal(rb.json.status, 'writing-back');
+  addEvidenceFiles(txws, cr);
+  const rt = runCrctl(['writeback-apply', cr, '--stage', 'traceability', '--workspace', kb], { cwd: kb });
+  assert.equal(rt.status, 0, rt.stderr);
+  assert.equal(rt.json.phase, 'complete', JSON.stringify(rt.json || rt.errJson));
+  git(txws, ['add', '-A']);
+  git(txws, ['commit', '-q', '-m', 'evidence fixture']);
+  return { base, kb, cr, txws };
+}
+
 test('TASK-09 AC-1：happy path — 四账本同批 + trailer + cleanup 全清 + 幂等重放', () => {
   const { base, kb, cr, txws } = makeWritebackFixture();
   try {
@@ -657,5 +677,45 @@ test('CR-2026-054 候选校验：remote rebuild 损坏基线 → ARCHIVE_YAML_IN
     assert.equal(originMasterCount(base, 'kb'), n0, 'rebuild 失败零新增 archive commit');
     assert.equal(git(txws, ['rev-parse', 'HEAD']), git(path.join(base, 'origin-kb.git'), ['rev-parse', 'master']), 'txws 停在他人基线，不产生本地提交');
     assert.equal(git(txws, ['status', '--porcelain']), '', 'rebuild 失败后 txws 工作区/stage 干净');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── CR-2026-060 G4：archive new mode journal 重放（AC-13） ────────────────────────── */
+
+test('CR-2026-060 AC-13：new mode archive 省略 --spec-id 首跑持久化 payload；清理后重放只读 journal（无需 spec-id）', () => {
+  const { base, kb, cr, txws } = makeNewModeArchiveFixture();
+  try {
+    const r1 = runCrctl(['archive', cr, '--workspace', kb], { cwd: kb });
+    assert.equal(r1.status, 0, r1.stderr);
+    assert.equal(r1.json.phase, 'complete', JSON.stringify(r1.json || r1.errJson));
+    assert.equal(r1.json.status, 'archived');
+    assert.equal(r1.json.changed, true);
+    assert.ok(!fs.existsSync(txws), 'txws 已清理');
+    // journal payload 持久化 mode/specId/targetSpecId（重放事实源）
+    const journalDir = path.join(kb, '.crctl', 'transactions', 'archive', cr);
+    const txId = fs.readdirSync(journalDir)[0];
+    const j = JSON.parse(fs.readFileSync(path.join(journalDir, txId, 'journal.json'), 'utf8'));
+    assert.equal(j.archive.mode, 'new');
+    assert.equal(j.archive.specId, 'test-spec');
+    assert.equal(j.archive.targetSpecId, 'test-spec');
+    // 清理后重放：不传 --spec-id，只读 journal payload，不重新解析已删除的 CR worktree/txws
+    const r2 = runCrctl(['archive', cr, '--workspace', kb], { cwd: kb });
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.equal(r2.json.phase, 'complete', JSON.stringify(r2.json || r2.errJson));
+    assert.equal(r2.json.changed, false);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-060 AC-13：new mode 首跑 txws 缺失 → ARCHIVE_SPEC_REQUIRED（映射 WRITEBACK_SPEC_REQUIRED，不回退 cr-worktree）', () => {
+  const f = makeCodeApprovedFixture({ targetVersion: '0.2', targetSpecId: 'test-spec', enrichedPlan: true });
+  const { base, kb, cr } = f;
+  try {
+    const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.json.phase, 'complete', JSON.stringify(r.json || r.errJson));
+    fs.rmSync(r.json.operationalWorkspace, { recursive: true, force: true });
+    const a = runCrctl(['archive', cr, '--workspace', kb], { cwd: kb });
+    assert.notEqual(a.status, 0);
+    assert.equal(a.errJson.error.code, 'ARCHIVE_SPEC_REQUIRED', a.stderr);
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

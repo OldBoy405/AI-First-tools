@@ -28,10 +28,11 @@ import {
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
   matchFrontmatter, crMdStatusText, refreshCrMdUpdated, mergeCr, mergeStatus, resolveOperationalWorkspace,
   applyWriteback, archiveCr, checkUpgrade, checkpointCr, renderLoopText, testCr,
-  normalizeTargetVersion, readCrMdTargetVersion,
+  normalizeTargetVersion, readCrMdTargetVersion, crWorktreePath, txWorkspacePath,
+  resolveTargetSpecMode, resolveWritebackAuthorityStrict,
 } from './lib/workspace-transactions.mjs';
 import {
-  FAULT_POINTS, faultPoint, nowIso,
+  FAULT_POINTS, faultPoint, nowIso, loadExistingJournal,
   hasLedgerTransaction, recoverLedgerTransaction, beginLedgerTransaction, abortLedgerTransaction, finishLedgerTransaction,
 } from './lib/durable-tx.mjs';
 
@@ -955,6 +956,17 @@ function cmdStatus(ws, cr, gates, flags) {
 
 function cmdGate(ws, cr, gates, flags) {
   if (!flags.for) fail('BAD_ARGS', 'gate 需要 --for <target-status>');
+  if (flags.mode === 'pre-review') {
+    if (flags.for !== 'requirement-reviewing') fail('BAD_ARGS', '--mode pre-review 仅支持 --for requirement-reviewing');
+    const result = runPreReviewGateChecks(ws, cr);
+    ok(result);
+    if (!result.pass) {
+      const why = result.checks.filter((c) => !c.ok).map((c) => c.why).filter(Boolean).join('；');
+      process.stderr.write(JSON.stringify({ error: { code: 'GATE_BLOCKED', message: `pre-review 门禁未通过${why ? '：' + why : ''}`, gate: result } }, null, 2) + '\n');
+      process.exit(1);
+    }
+    return;
+  }
   const result = runGateChecks(ws, cr, flags.for, gates, flags);
   ok(result);
   if (!result.pass) process.exit(1);
@@ -974,6 +986,11 @@ function preflightAdvance(ws, cr, gates, flags) {
     fail('CR_STATUS_TRANSITION_NOT_ALLOWED', `状态机中不存在 (${current} → ${flags.to}) @ trigger=${flags.trigger} 的合法转换`, {
       legalNext: legalTransitions(sm, current).map((x) => ({ to: x.to, trigger: x.trigger })),
     });
+  }
+  // CR-2026-060 G1（SDD §4.7）：advance 层零写入 guard——runGateChecks 之前，仅 requirement-reviewing；
+  // new mode + unassigned → GATE_BLOCKED/TARGET_VERSION_UNASSIGNED，preflightAdvance 自身无写入。
+  if (flags.to === 'requirement-reviewing') {
+    assertRequirementReviewAdvanceGuard(ws, cr);
   }
   // FR-4（CR-2026-020 复盘）：目标态门禁需校验 specs 落点（path 含 {spec}）却缺 --spec-id 时，
   // 命令入口即 fail-fast，不埋进 GATE_BLOCKED.checks[].why（--spec-id 曾同坑犯两次）。
@@ -1729,11 +1746,30 @@ function cmdTaskAppend(ws, cr) {
     totalEstimateHours: set.cards.reduce((sum, card) => sum + Number.parseInt(card.estimate, 10), 0), changed: true });
 }
 
-function cmdTaskInit(ws, cr) {
+/** `--count-hint N` 写入前校验（CR-2026-060 G3/AC-08）：在 render/casWrite/createFileExclusive/audit 之前校验卡片集 id 集合恰为 {cr}-TASK-01..{cr}-TASK-{pad2(N)}，失败 TASK_COUNT_MISMATCH 零写入；缺省行为与现行完全一致。 */
+function assertCountHint(cr, cards, hint) {
+  if (hint === undefined || hint === null || hint === true) return;
+  const n = Number(hint);
+  if (!Number.isInteger(n) || n <= 0) fail('BAD_ARGS', 'task init --count-hint 必须是正整数（N >= 1）');
+  const expected = [];
+  for (let i = 1; i <= n; i++) expected.push(`${cr}-TASK-${String(i).padStart(2, '0')}`);
+  const actual = cards.map((c) => c.id);
+  const expectedSet = new Set(expected);
+  const ok = cards.length === n
+    && actual.every((id) => expectedSet.has(id))
+    && new Set(actual).size === n;
+  if (!ok) {
+    fail('TASK_COUNT_MISMATCH', `task init --count-hint ${n} 写入前校验失败：期望 TASK 集 = [${expected.join(', ')}]，实际 = [${actual.join(', ')}]（数量/缺号/重号/越界），零写入`, { expected, actual });
+  }
+}
+
+function cmdTaskInit(ws, cr, flags) {
   const state = resolveCrState(ws, cr);
   const legal = ['tech-design-reviewed', 'task-breakdown'];
   if (!legal.includes(state.status)) fail('ILLEGAL_LEDGER_STATE', `task init 仅允许在前置态 ${legal.join('/')} 执行，当前 ${state.status}`, { current: state.status, expect: legal });
   const set = loadTaskCards(ws, cr);
+  // CR-2026-060 G3（AC-08）：--count-hint 写入前校验，位于 render/CAS/audit 之前，失败零写入。
+  assertCountHint(cr, set.cards, flags && flags['count-hint']);
   const canonical = renderTaskIndex(cr, set.cards);
   const p = path.join(set.dir, '_index.yml');
   const current = readFileChecked(p);
@@ -2570,6 +2606,87 @@ function readBacklogTargetVersionField(text, cr) {
   return line.replace(/^[ \t]*target-version:\s*/, '').trim().replace(/^["']|["']$/g, '');
 }
 
+/* ────────────────────────── CR-2026-060 G1：target-spec-id 模式裁决与 authority（唯一裁决 + 生命周期绑定，SDD §2.2/§4.1） ──────────────────────────
+ * 模式裁决与 strict authority 解析器已收敛至 lib/workspace-transactions.mjs（单一实现），本文件 re-import 消费。 */
+
+const PRE_REVIEW_KIND_CHECK_CODES = { missing: 'TARGET_SPEC_AUTHORITY_MISSING', invalid: 'TARGET_SPEC_AUTHORITY_INVALID', mismatch: 'TARGET_SPEC_AUTHORITY_DRIFT' };
+
+/** spec-authority 路径快照：优先 CR worktree；单仓 legacy fixture（无 repositories 声明）回退主 workspace（仅旧测试/旧布局，new mode 不存在该形态）。 */
+function specAuthorityPath(ws, cr) {
+  try {
+    const ctx = resolveRepositories(ws);
+    return { path: crWorktreePath(ctx, cr), source: 'cr-worktree' };
+  } catch (e) {
+    if (e instanceof TxError && (e.code === 'REPO_GRAPH_INVALID' || e.code === 'REPO_GRAPH_NOT_FOUND' || e.code === 'REPO_PATH_NOT_FOUND')) {
+      return { path: ws, source: 'cr-worktree' };
+    }
+    throw e;
+  }
+}
+
+/** pre-review 检查序列（SDD §4.2）：authority=CR worktree；kind→check code 一对一映射；new+unassigned → TARGET_VERSION_UNASSIGNED。 */
+function runPreReviewGateChecks(ws, cr) {
+  const authority = specAuthorityPath(ws, cr);
+  const checks = [];
+  let mode = null;
+  try {
+    mode = resolveTargetSpecMode({}, cr, { authority });
+  } catch (e) {
+    if (e instanceof TxError && e.code === 'TARGET_SPEC_AUTHORITY_DRIFT') {
+      const code = PRE_REVIEW_KIND_CHECK_CODES[e.extra && e.extra.kind] || 'TARGET_SPEC_AUTHORITY_DRIFT';
+      checks.push({ type: 'target-spec-authority', code, ok: false, why: e.message });
+    } else {
+      throw e;
+    }
+  }
+  if (mode && mode.mode === 'new') {
+    const r = readCrMdTargetVersion(authority.path, cr);
+    if (!r.ok) {
+      checks.push({ type: 'target-version', code: 'TARGET_VERSION_MISSING', ok: false, why: `cr.md target-version ${r.reason}` });
+    } else {
+      const n = normalizeTargetVersion(r.raw);
+      if (!n.ok) {
+        checks.push({ type: 'target-version', code: 'TARGET_VERSION_INVALID', ok: false, why: `cr.md target-version 非法（reason=${n.reason}）` });
+      } else if (n.value === 'unassigned') {
+        checks.push({ type: 'target-version', code: 'TARGET_VERSION_UNASSIGNED', ok: false, why: 'new mode 且 target-version=unassigned，禁止 requirement-reviewing（先 version-set）' });
+      }
+    }
+  }
+  const pass = checks.every((c) => c.ok);
+  return { cr, for: 'requirement-reviewing', mode: 'pre-review', pass, checks };
+}
+
+/** advance 层零写入 guard（SDD §4.7）：仅 flags.to==='requirement-reviewing'；new+unassigned → GATE_BLOCKED/TARGET_VERSION_UNASSIGNED 零写入。 */
+function assertRequirementReviewAdvanceGuard(ws, cr) {
+  const authority = specAuthorityPath(ws, cr);
+  let mode;
+  try {
+    mode = resolveTargetSpecMode({}, cr, { authority });
+  } catch (e) {
+    if (e instanceof TxError) fail(e.code, e.message, e.extra);
+    throw e;
+  }
+  if (!mode || mode.mode !== 'new') return; // legacy 零改动
+  const r = readCrMdTargetVersion(authority.path, cr);
+  if (!r.ok) return; // version 缺失由既有 gate/version-set 消费，guard 只阻断 unassigned
+  const n = normalizeTargetVersion(r.raw);
+  if (n.ok && n.value === 'unassigned') {
+    fail('GATE_BLOCKED', 'new mode unassigned 禁止直接 advance 到 requirement-reviewing（先 version-set）', {
+      gate: { target: 'requirement-reviewing', pass: false, checks: [{ type: 'target-version', code: 'TARGET_VERSION_UNASSIGNED', ok: false, why: 'new mode 且 target-version=unassigned' }] },
+    });
+  }
+}
+
+/** 统一结果 builder（SDD §4.3.2）：成功/幂等/恢复共用；operationalWorkspace 由既有 resolver 生产。 */
+function buildRegisterResult(ctx, r) {
+  const operationalWorkspace = resolveOperationalWorkspace(ctx, r.cr).path;
+  return {
+    cr: r.cr, txId: r.txId, phase: r.phase, changed: r.changed,
+    targetVersion: r.targetVersion, targetSpecId: r.targetSpecId, registrationAt: r.registrationAt,
+    sideEffects: r.sideEffects, recoverCommand: r.recoverCommand, operationalWorkspace,
+  };
+}
+
 /**
  * frontmatter 内 ^target-version: 行替换（行级纯函数）：先 \r\n→\n（NFR-3）；
  * 无 frontmatter / 缺行 → LEDGER_PARSE_FAILED 硬失败，禁止静默返回原文（纪律 #1）。
@@ -3078,6 +3195,15 @@ async function runTxAsync(promise) {
 }
 
 async function cmdRegister(ws, flags) {
+  // CR-2026-060 G1（AC-01）：--target-spec-id 校验在既有必填 flag 循环之前（优先且唯一，不落 BAD_ARGS）。
+  const rawSpecId = flags['target-spec-id'];
+  if (rawSpecId === undefined || rawSpecId === true || String(rawSpecId).trim() === '') {
+    fail('REGISTER_TARGET_SPEC_ID_REQUIRED', 'register 需要 --target-spec-id <id>（非空，匹配 ^[a-z0-9][a-z0-9._-]*$，禁止 / \\ CR LF）');
+  }
+  const targetSpecId = String(rawSpecId);
+  if (!/^[a-z0-9][a-z0-9._-]*$/.test(targetSpecId) || /[/\\\r\n]/.test(targetSpecId)) {
+    fail('REGISTER_TARGET_SPEC_ID_INVALID', `register --target-spec-id 非法: ${JSON.stringify(targetSpecId)}（须匹配 ^[a-z0-9][a-z0-9._-]*$，禁止 / \\ CR LF）`);
+  }
   for (const f of ['registration-key', 'title', 'owner-requirement', 'owner-development', 'owner-test']) {
     if (!flags[f]) fail('BAD_ARGS', `register 需要 --${f} <v>`);
   }
@@ -3088,6 +3214,7 @@ async function cmdRegister(ws, flags) {
     source: flags.source == null ? undefined : String(flags.source),
     origin: flags.origin == null ? undefined : String(flags.origin),
     targetVersion: flags['target-version'] == null ? undefined : String(flags['target-version']),
+    targetSpecId,
     year: flags.year ? String(flags.year) : undefined,
     workspace: ws,
     owners: { requirement: String(flags['owner-requirement']), development: String(flags['owner-development']), test: String(flags['owner-test']) },
@@ -3095,12 +3222,27 @@ async function cmdRegister(ws, flags) {
   const ctx = resolveRepositories(ws);
   const result = await runTxAsync(registerCr(ctx, input));
   auditLog(ws, { kind: 'ledger', op: 'register', cr: result.cr, txId: result.txId, actor: identity(ws), title: input.title, phase: result.phase, changed: result.changed });
-  if (!result.changed) return ok({ op: 'register', ...result });
-  // 注册事件（TASK-10：语义自原 cmdGit --template register 分支迁移至此）：register commit 落盘后以真实 SHA 发 status + owners 事件；
-  // 单个 outbox 写出失败对应 null + warnings EMIT_FAILED，事务不回滚（Git 是权威）。
-  const commitSe = (result.sideEffects || []).find((s) => s.kind === 'commit');
+  // 统一结果 builder（成功/幂等/恢复共用；删除 :3098 早退，changed=false 同构输出 outbox=null/warnings=[]）。
+  // 输出同时保留历史 camelCase 键（既有消费方）与新增 snake_case 键（PRD §3.3 命名矩阵）。
+  const r = buildRegisterResult(ctx, result);
+  const out = {
+    op: 'register',
+    cr: r.cr, cr_id: r.cr,
+    txId: r.txId, tx_id: r.txId,
+    phase: r.phase, changed: r.changed,
+    targetVersion: r.targetVersion, target_version: r.targetVersion,
+    targetSpecId: r.targetSpecId, target_spec_id: r.targetSpecId,
+    registrationAt: r.registrationAt, registration_at: r.registrationAt,
+    sideEffects: r.sideEffects, side_effects: r.sideEffects,
+    recoverCommand: r.recoverCommand, recover_command: r.recoverCommand,
+    operationalWorkspace: r.operationalWorkspace, operational_workspace: r.operationalWorkspace,
+    outbox: null, warnings: [],
+  };
+  if (!r.changed) { ok(out); return; }
+  // 注册事件：register commit 落盘后以真实 SHA 发 status + owners 事件；全部时间字段原样消费单一 registrationAt（删除第二个 nowIso）。
+  const commitSe = (r.sideEffects || []).find((s) => s.kind === 'commit');
   const commitSha = commitSe ? commitSe.sha : null;
-  const now = nowIso();
+  const now = r.registrationAt;
   const owners = {
     requirement: { id: input.owners.requirement, 'assigned-at': now },
     development: { id: input.owners.development, 'assigned-at': now },
@@ -3109,11 +3251,12 @@ async function cmdRegister(ws, flags) {
   const changes = ['requirement', 'development', 'test'].map((role) => ({ role, from: '', to: owners[role].id, at: now, reason: 'initial-assignment' }));
   const warnings = [];
   const emit = (ev) => { const name = emitOutboxEvent(ws, ev); if (!name) warnings.push({ code: 'EMIT_FAILED', event_kind: ev.event_kind }); return name; };
-  const outbox = {
-    status: emit({ event_kind: 'status', cr_id: result.cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: commitSha, actor: identity(ws) }),
-    owners: emit({ event_kind: 'owners', cr_id: result.cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: commitSha, actor: identity(ws), payload: { owners, changes } }),
+  out.outbox = {
+    status: emit({ event_kind: 'status', cr_id: r.cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: commitSha, actor: identity(ws) }),
+    owners: emit({ event_kind: 'owners', cr_id: r.cr, from_status: '(new)', to_status: 'drafting', trigger: 'requirement-register', commit_sha: commitSha, actor: identity(ws), payload: { owners, changes } }),
   };
-  ok({ op: 'register', ...result, outbox, warnings });
+  out.warnings = warnings;
+  ok(out);
 }
 
 /* CR-2026-043 TASK-01/02：freshness/sync 不走 runTxAsync 全局错误路径（其失败直接 fail，
@@ -3239,7 +3382,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl backlog-set   <cr_id> --field <prd-path|sdd-path> --value <v>    _backlog 白名单标量字段（硬拒 status 等受控字段）
   crctl inbox-emit   <cr_id> --event <e> [--to <a,b>] [--payload <json>]   _backlog notify-log 事件追加 + notify-pending 合并（非终态）
   crctl register  --registration-key <k> --title <t> --owner-requirement <id> --owner-development <id> --owner-test <id>
-                        --target-version <v> [--summary <s>] [--source <s>] [--origin <CR-ID>] [--year Y]   幂等注册事务：CR-ID+三账本+commit/lease push+worktree ensure（--target-version 必填：真实版本 MAJOR.MINOR[.PATCH] 或 unassigned，禁止 tbd）
+                        --target-version <v> --target-spec-id <id> [--summary <s>] [--source <s>] [--origin <CR-ID>] [--year Y]   幂等注册事务：CR-ID+三账本+commit/lease push+worktree ensure（--target-version 必填：真实版本 MAJOR.MINOR[.PATCH] 或 unassigned，禁止 tbd；--target-spec-id 必填：匹配 ^[a-z0-9][a-z0-9._-]*$，禁止 / \\ CR LF）
   crctl workspace inspect <cr_id>                  各 active repo workspace 事实分类（只读）
   crctl workspace ensure  <cr_id> --mode resume    只补齐可证明缺失的 workspace 资源（零删除）
   crctl workspace cleanup <cr_id> --mode partial|archived   只删干净 worktree；dirty/unknown/未合并 ref 保留
@@ -3255,7 +3398,7 @@ const HELP = `crctl — CR 状态机 gate CLI（漂移治理 v2 组件 A）
   crctl test    <cr_id> --plan <temp-json>      结构化测试闭环：读 cr-test-plan/v1，shell:false 执行，原子发布机器证据/traceability tests/review-loop
   crctl next    <cr_id>                          输出下一个该跑的节点（blocker 未清空绝不给 human_approval）
   crctl git     <sub> [args...] [--cwd <p>]      controlled-shell 白名单执行（只读/安全面；写路径一律走深原语）
-  crctl task init <cr_id>                       从 TASK-NN.md 确定性创建/刷新 tasks/_index.yml（开发启动前，CAS+审计）
+  crctl task init <cr_id> [--count-hint <N>]   从 TASK-NN.md 确定性创建/刷新 tasks/_index.yml（开发启动前，CAS+审计）；--count-hint 写入前校验 TASK 集恰为 {cr}-TASK-01..{pad2(N)}（失败 TASK_COUNT_MISMATCH 零写入）
   crctl task append <cr_id>                     developing 期只追加更大编号 TASK，保留既有 done/done-at（CAS+审计）
   crctl task done <cr_id> --task <task_id>      tasks/_index.yml 标 done（developing 态，CAS+审计）
 
@@ -3330,8 +3473,8 @@ async function main() {
     case 'report': return cmdReport(ws, gates, flags);
     case 'task': {
       if (positional[0] === 'init') {
-        if (positional.length !== 2) fail('BAD_ARGS', 'task init 用法：crctl task init <CR-ID>');
-        return cmdTaskInit(ws, requireCr(positional.slice(1)));
+        if (positional.length !== 2) fail('BAD_ARGS', 'task init 用法：crctl task init <CR-ID> [--count-hint <N>]');
+        return cmdTaskInit(ws, requireCr(positional.slice(1)), flags);
       }
       if (positional[0] === 'append') {
         if (positional.length !== 2) fail('BAD_ARGS', 'task append 用法：crctl task append <CR-ID>');
@@ -3368,10 +3511,53 @@ function cmdUpgradeCheck(ws, flags) {
 async function cmdArchive(ws, positional, flags) {
   const cr = positional[0];
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) fail('BAD_ARGS', 'archive 需要 CR-ID');
-  const specId = flags['spec-id'] == null ? undefined : String(flags['spec-id']);
+  const explicitSpecId = flags['spec-id'] == null ? undefined : String(flags['spec-id']);
   const ctx = resolveRepositories(ws);
+  // CR-2026-060 G4（AC-13/SDD §2.2.4）：archive 是终态事务，先查既有 journal——
+  // 清理后重放只读 archive journal payload 的 mode/specId/targetSpecId，禁止重新解析已被 cleanup 删除的 CR worktree/txws。
+  const existingArchive = loadExistingJournal({ root: ctx.installRoot, op: 'archive', cr, key: cr });
+  let mode;
+  let specId;
+  let targetSpecId;
+  if (existingArchive) {
+    const p = existingArchive.journal && existingArchive.journal.archive;
+    mode = (p && p.mode) || 'legacy';
+    specId = explicitSpecId != null && explicitSpecId !== '' ? explicitSpecId : (p ? p.specId : null);
+    targetSpecId = (p && p.targetSpecId) || null;
+  } else {
+    // 首跑（无 journal）：new mode 可省 --spec-id（从 strict authority 解析并持久化 payload）；legacy 必填（现行）。
+    try {
+      mode = resolveTargetSpecMode(ctx, cr, { authority: { path: crWorktreePath(ctx, cr), source: 'cr-worktree' } }).mode;
+    } catch (e) {
+      if (e instanceof TxError) fail(e.code, e.message, e.extra);
+      throw e;
+    }
+    if (mode === 'new') {
+      if (explicitSpecId == null || explicitSpecId === '') {
+        let strictAuth;
+        try {
+          strictAuth = resolveWritebackAuthorityStrict(ctx, cr);
+        } catch (e) {
+          if (e instanceof TxError && e.code === 'WRITEBACK_SPEC_REQUIRED') fail('ARCHIVE_SPEC_REQUIRED', e.message, e.extra);
+          if (e instanceof TxError) fail(e.code, e.message, e.extra);
+          throw e;
+        }
+        let m;
+        try { m = resolveTargetSpecMode(ctx, cr, { authority: strictAuth }); }
+        catch (e) { if (e instanceof TxError) fail(e.code, e.message, e.extra); throw e; }
+        specId = m.targetSpecId;
+        targetSpecId = m.targetSpecId;
+      } else {
+        specId = explicitSpecId;
+        targetSpecId = explicitSpecId;
+      }
+    } else {
+      specId = explicitSpecId;
+      targetSpecId = null;
+    }
+  }
   const result = await runTxAsync(archiveCr(ctx, {
-    cr, specId, workspace: ws,
+    cr, specId, mode, targetSpecId, workspace: ws,
     // FR-03：唯一生产 adapter——schema v1 archive 事件 + 确定性 dedup 文件名；
     // 发送失败由 emitOutboxEvent 返回 null，archiveCr 转为 EMIT_FAILED warning（不阻断归档）。
     emitArchiveEvent: ({ cr, commit }) => emitOutboxEvent(ws, {
@@ -3405,20 +3591,61 @@ async function cmdWritebackApply(ws, positional, flags, gates) {
   const unknownFlags = Object.keys(flags).filter((key) => !allowedFlags.has(key));
   if (unknownFlags.length) fail('BAD_ARGS', `writeback-apply 不接受参数: ${unknownFlags.map((x) => `--${x}`).join(', ')}`);
   const stage = flags.stage;
-  const specId = flags['spec-id'];
-  const targetVersion = flags['target-version'];
   if (!['baseline', 'tasks', 'traceability'].includes(stage)) fail('BAD_ARGS', 'writeback-apply 需要 --stage baseline|tasks|traceability');
   if (flags.candidate || flags['candidate-out'] || flags.generator || flags.manifest) fail('BAD_ARGS', 'writeback-apply 不接受 candidate/generator/manifest 路径；由 crctl 按 stage 内部固定');
-  if (!specId) fail('BAD_ARGS', 'writeback-apply 需要 --spec-id <id>');
-  // B-SDD-003（CR-2026-057）：按 flag 存在性判定——缺 flag → BAD_ARGS；显式 --target-version "" 放行进共用规范化守卫 → WRITEBACK_VERSION_INVALID
-  if (!('target-version' in flags)) fail('BAD_ARGS', 'writeback-apply 需要 --target-version <version>');
-  if (stage === 'baseline' && flags['milestone-file'] != null) fail('BAD_ARGS', 'baseline 不接受 --milestone-file');
-  if (stage === 'tasks' && (flags['milestone-name'] != null || flags.brief != null || flags['milestone-file'] != null)) fail('BAD_ARGS', 'tasks 不接受 milestone 参数');
-  if (stage === 'traceability' && !flags['milestone-file']) fail('BAD_ARGS', 'traceability 需要 --milestone-file <workspace-relative-path>');
-  if (stage === 'traceability' && (flags['milestone-name'] != null || flags.brief != null)) fail('BAD_ARGS', 'traceability 不接受 --milestone-name/--brief');
   const ctx = resolveRepositories(ws);
+  // CR-2026-060 G4（SDD §4.4）：先以 CR worktree 做初步 mode 路由（legacy 路径保持不变，含 CR-2026-057 版本错误优先）；
+  // new 分支再以 strict authority 重裁 mode/spec/version（txws 缺失/不自洽 → WRITEBACK_SPEC_REQUIRED，禁止回退 cr-worktree）。
+  let mode;
+  try {
+    mode = resolveTargetSpecMode(ctx, cr, { authority: { path: crWorktreePath(ctx, cr), source: 'cr-worktree' } });
+  } catch (e) {
+    if (e instanceof TxError) fail(e.code, e.message, e.extra);
+    throw e;
+  }
+  let specId = flags['spec-id'];
+  let targetVersion = flags['target-version'];
+  if (mode.mode === 'legacy') {
+    // legacy：现行路径，spec/version 必填=BAD_ARGS；traceability milestone-file 必填=BAD_ARGS；其余 milestone 限制既有。
+    if (!specId) fail('BAD_ARGS', 'writeback-apply 需要 --spec-id <id>');
+    // B-SDD-003（CR-2026-057）：按 flag 存在性判定——缺 flag → BAD_ARGS；显式 --target-version "" 放行进共用规范化守卫 → WRITEBACK_VERSION_INVALID
+    if (!('target-version' in flags)) fail('BAD_ARGS', 'writeback-apply 需要 --target-version <version>');
+    if (stage === 'baseline' && flags['milestone-file'] != null) fail('BAD_ARGS', 'baseline 不接受 --milestone-file');
+    if (stage === 'tasks' && (flags['milestone-name'] != null || flags.brief != null || flags['milestone-file'] != null)) fail('BAD_ARGS', 'tasks 不接受 milestone 参数');
+    if (stage === 'traceability' && !flags['milestone-file']) fail('BAD_ARGS', 'traceability 需要 --milestone-file <workspace-relative-path>');
+    if (stage === 'traceability' && (flags['milestone-name'] != null || flags.brief != null)) fail('BAD_ARGS', 'traceability 不接受 --milestone-name/--brief');
+  } else {
+    // new：milestone 任一 flag 传入 → BAD_ARGS（N/A）；spec/version 可省略，从 strict txws authority 补全；显式只做相等校验。
+    if (flags['milestone-file'] != null || flags['milestone-name'] != null || flags.brief != null) fail('BAD_ARGS', 'new mode 不接受 milestone 参数（milestone=N/A）');
+    let strictAuth;
+    try {
+      strictAuth = resolveWritebackAuthorityStrict(ctx, cr);
+    } catch (e) {
+      if (e instanceof TxError) fail(e.code, e.message, e.extra);
+      throw e;
+    }
+    // 以 strict authority 重裁 mode（specId 权威来自 txws，而非 CR worktree 初步路由值）
+    try {
+      mode = resolveTargetSpecMode(ctx, cr, { authority: strictAuth });
+    } catch (e) {
+      if (e instanceof TxError) fail(e.code, e.message, e.extra);
+      throw e;
+    }
+    if (mode.mode !== 'new') fail('WRITEBACK_SPEC_REQUIRED', 'strict authority 下目标事实不是 new mode（txws 与 CR worktree 形态漂移）', { cr, mode: mode.mode });
+    if (specId == null || specId === '') {
+      specId = mode.targetSpecId;
+    } else if (String(specId) !== mode.targetSpecId) {
+      fail('WRITEBACK_SPEC_MISMATCH', `new mode 显式 --spec-id ${JSON.stringify(specId)} 与 authority target-spec-id ${JSON.stringify(mode.targetSpecId)} 不一致`, { cr, specId, targetSpecId: mode.targetSpecId });
+    }
+    if (!('target-version' in flags)) {
+      const r = readCrMdTargetVersion(strictAuth.path, cr);
+      const n = r.ok ? normalizeTargetVersion(r.raw) : { ok: false, reason: r.reason };
+      if (!n.ok) fail('WRITEBACK_VERSION_INVALID', `new mode 省略 --target-version 时从 strict authority 读取失败（${n.reason}）`, { cr, reason: n.reason });
+      targetVersion = n.value;
+    }
+  }
   const result = await runTxAsync(applyWriteback(ctx, {
-    cr, stage, specId, targetVersion, workspace: ws,
+    cr, stage, specId, targetVersion, workspace: ws, mode: mode.mode,
     milestoneName: flags['milestone-name'], brief: flags.brief, milestoneFile: flags['milestone-file'],
     validateBaselineAdvance: ({ workspace, plannedExisting }) => preflightAdvance(workspace, cr, gates, {
       to: 'writing-back', trigger: 'writeback-prd-sdd', expect: 'merging', specId, plannedExisting,

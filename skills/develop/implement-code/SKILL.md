@@ -41,9 +41,11 @@ description: 在同一 CR workspace 内按 prd/sdd/tasks 执行代码编写，�
 
 从 CR worktree 读取：
 
-- `{crWorkspaceDocsRoot}/change-requests/{cr_id}/prd.md`
 - `{crWorkspaceDocsRoot}/change-requests/{cr_id}/sdd.md`
+- `{crWorkspaceDocsRoot}/change-requests/{cr_id}/plan.md`
 - `{crWorkspaceDocsRoot}/change-requests/{cr_id}/tasks/TASK-*.md`
+
+**实现依据只取 SDD/PLAN/TASK/目标仓规范/`resources[].worktreePath`（PRD 非并列合同，CR-2026-060 AC-09）**：`prd.md` 仅经 SDD 引用定位抽查，不得作为实现合同并列输入；实现与 PRD 的映射以 SDD/PLAN/TASK 为准。
 
 缺少任一文件或任一 active repo worktree 不存在时，立即停止并返回结构化错误。
 

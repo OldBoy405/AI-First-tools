@@ -33,7 +33,7 @@ description: "归档终态 CR：一次调用 crctl archive 深原语完成归档
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `cr_id` | string | ✅ | 要归档的 CR 标识符（如 `CR-2026-001`） |
-| `spec_id` | string | writing-back 路径必填 | 回写目标 spec id（入账 `writeback-spec-id`） |
+| `spec_id` | string | legacy writing-back 必填；new 可省略 | 回写目标 spec id（入账 `writeback-spec-id`）。new mode 首跑省略时由 `crctl` 从 strict authority 解析并持久化进 archive journal；清理后重跑无需再传（journal 重放） |
 
 ---
 
@@ -50,6 +50,8 @@ crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 chec
 ```
 
 深原语内部完成归档与清理（Skill 不重复、不干预）。
+
+**new mode 的 spec-id 语义**：首跑（archive journal 不存在）省略 `--spec-id` 时由 `crctl` 从 strict authority 解析并持久化；**清理后重跑（cleanup-pending/complete）只读 journal payload，不重新解析已删除的 CR worktree/txws**——省略 `--spec-id` 直接重跑 `recoverCommand` 即可。
 
 ### Step 3 — 结果分类（只透传深原语 JSON，不发明第二套字段）
 

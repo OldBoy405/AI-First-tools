@@ -20,21 +20,23 @@ readonly: true
 ## 触发方式
 
 - `quality-reviewer-agent` 路由（显式"对齐检查 / drift 检查"意图）
-- `feature-writeback.pipeline` 合并前或回写后检查
 - owner 手动调用
 - 每日定时任务 / PR 合入前
+- **不进入 `feature-writeback` Pipeline**（CR-2026-060 AC-13：对齐巡检不参与回写流程）
 
 ## 读取契约（启动序）
 
+本 Skill **任意状态只读**：不落盘、不写 traceability/status/annotation/review-loop/Git、不调用任何 crctl 写命令。仅读以下事实：
+
 1. 读 `dir-graph.yaml#agent_hints.skill_context.review-alignment`
 <!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用
-2. 读 `change-requests/{cr_id}/cr.md` frontmatter — 取目标 CR 的 `status`；读 `change-requests/_backlog.yml` — 取单一 `latest-checkpoint`；合并事实读 `change-requests/{cr_id}/merge-commits.yml`
-3. 对 in-flight CR：读 knowledge-base CR worktree 中 `change-requests/{cr_id}/{prd.md,sdd.md,plan.md,tasks/,traceability.yml}`
+2. 读 `change-requests/{cr_id}/cr.md` frontmatter — 取目标 CR 的 `status`；读 `change-requests/_backlog.yml` — 取条目基本信息（不读 mtime/merge-commit/fingerprint）
+3. 对 in-flight CR：读 knowledge-base CR worktree 中 `change-requests/{cr_id}/{prd.md,sdd.md,plan.md,tasks/}`
 4. 对已 writeback 的 CR：读 `specs/{spec_id}/{PRD.md,SDD.md,traceability.yml}` 与 `delivery/task/_index.yaml`
 <!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用
-5. 代码证据仅来自 `review-code` 写入的 `review-annotations/code.yml`、`traceability.yml` 和 `_backlog.yml.merge-commits[]`；不得直接读取主工作区代码目录或旧 `feature/*` 分支
+5. 代码证据仅来自 `review-code` 写入的 `review-annotations/code.yml`；不得直接读取主工作区代码目录或旧 `feature/*` 分支
 
-> 本 Skill **只读 + 写 traceability.yml**，不修改 PRD/SDD/TASK/代码。
+> 本 Skill **只读**：不修改 PRD/SDD/TASK/代码，不写 traceability.yml（与历史版本不同，CR-2026-060 起只读化）。
 
 ## 输入参数
 
@@ -46,21 +48,23 @@ readonly: true
 
 ## 检查清单
 
+> 不读 mtime/merge-commit/fingerprint：同步判定只基于可观测字段（status/评审 verdict/reviewed-at）与内容一致。
+
 | 项 | 通过标准 |
 |---|---|
 <!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用
-| AL-01 PRD→SDD 同步 | `prd.md` 或 `PRD.md` 更新时间 ≤ 最近 `review-annotations/sdd.yml.reviewed-at` |
-| AL-02 SDD→TASK 同步 | `sdd.md` 或 `SDD.md` 更新时间 ≤ `tasks/_index.yml` 或 `delivery/task/_index.yaml` 对应条目的生成时间 |
+| AL-01 PRD→SDD 同步 | `sdd.md` 的 `cr-ref` 指向 `cr_id`，且 `review-annotations/sdd.yml` verdict=pass |
+| AL-02 SDD→TASK 同步 | `plan.md` 存在且 `tasks/_index.yml` 条目 id 与 plan 交付覆盖表「主责/关联TASK」列一致 |
 <!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用
-| AL-03 TASK→代码 同步 | CR TASK 更新时间 ≤ `review-annotations/code.yml.reviewed-at`，且 code evidence 覆盖所有 TASK |
+| AL-03 TASK→代码 同步 | `review-annotations/code.yml` verdict=pass 且 release-subjects 覆盖全部 TASK 落点仓 |
 <!-- lint-prompts:ignore --> 描述性：对齐巡检只读引用
-| AL-04 代码→writeback 同步 | `_backlog.yml.merge-commits[]` 中每个 active repo 均出现在 `traceability.yml.code.repos[]` |
-| AL-05 requirements 指纹 | PRD.md 中 RQ/FR 条目的文本指纹未变更（检测需求文本改写但未重审） |
-| AL-06 contracts 同步 | `contracts/` 下文件 mtime ≤ `traceability.reviews.sdd.contracts-completeness.at` |
+| AL-04 代码→writeback 同步 | `specs/{spec_id}/traceability.yml` 含 `- cr: {cr_id}` 段（已回写 CR） |
+| AL-05 契约闭包 | 评审记录 dimensions 覆盖 PRD 声明的契约域（HTTP/CLI/Skill），缺适用项显式 N/A |
+| AL-06 批准范围 | SDD「批准范围」四字段存在且 PLAN/TASK 未触碰 scope_out/zero_diff |
 
-## 对齐矩阵（写入 traceability.yml）
+## 对齐矩阵（仅输出，不落盘）
 
-检测到 drift 时追加到 `traceability.yml#drift` 数组：
+检测到 drift 时仅在本次输出中列出，不写 traceability.yml：
 
 ```yaml
 drift:
@@ -100,9 +104,7 @@ summary:
 
 ## 写入
 
-- in-flight CR：`change-requests/{cr_id}/traceability.yml#drift`（追加）
-- 已回写 CR：`specs/{spec_id}/traceability.yml#drift`（追加）
-- 同步更新对应 `traceability.yml#summary.stale`（重算）
+**不写入**：不写 traceability.yml / status / annotation / review-loop / Git；不调用任何 crctl 写命令（`review-record`/`advance`/`backlog-set` 等一律禁止）。
 
 ## 与其他 Skill 的关系
 

@@ -118,7 +118,10 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
    blockers: []          # block 时列出 blocker（字符串列表）
    dimensions: {评审维度: 结论, ...}   # 该 stage 门禁要求的维度齐全
    suggestions: []       # 可选
+   repair-target: implement-code   # block 时固定为 implement-code
    ```
+
+   **输出固定五字段（CR-2026-060 AC-09）**：评审结论 canonical 输出只含 `verdict` / `blockers` / `suggestions` / `dimensions` / `repair-target` 五字段，不新增 aggregate digest（不自行汇总 hash）；不重跑测试（测试执行已收敛 `crctl test --plan` 单入口，评审只读取证）；源码/日志/命令漂移（`test-report.md` 引用的 `cmd-NN` 与 `test-evidence/cmd-NN.log`、`sourceRevision`、`command-digest` 任一漂移）→ block。
 2. 运行 `crctl review-record {cr_id} --stage code --bump-attempt --workspace <worktree>`（`--from` 缺省即 `.crctl/tmp/review-code.yml`，无需显式指定），crctl 自动完成**确定性部分**：
    - schema 校验（verdict 枚举/blockers 列表/dimensions 齐全；失败 `SCHEMA_INVALID` 不写）
    - stage→文件名显式映射（code→code.yml）
