@@ -117,7 +117,7 @@ The [Agent/Skill permission matrix](/openwiki/architecture/agent-skill-matrix.md
 
 ## Git History
 
-This repository is a fork of `xinyiai0724/tools` with customizations on the `custom/main` branch:
+This repository is a fork of `xinyiai0724/tools` with customizations on the `main` branch:
 - **Commit `a3ca761`**: Initial push to the fork repository with full Phase0 tools content
 - **Commit `40447db`**: Restructured workspace directory, added drift governance v2 and the `crctl` execution layer
 - **Commits `e5746e4`–`be966d4`**: crctl V2 maturity — outbox event channel, unified evidence digest, dual-track approval (TTY + server-approve with ed25519 grants), controlled-shell rules.json single source of truth, skill matrix and agent contract checkers, CI enforcement, delivery index consistency gate, and multiple bug fixes (line ending normalization, RE2 compatibility, Windows outbox, idempotency key collisions)

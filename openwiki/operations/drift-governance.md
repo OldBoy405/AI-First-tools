@@ -202,7 +202,7 @@ To use the Phase0 tools package, a workspace must have:
 
 ## Fork Information
 
-This is a fork of `xinyiai0724/tools` maintained at `OldBoy405/AI-First-tools` on branch `custom/main`. The `CUSTOM.md` file tracks deviations from upstream and provides merge conflict resolution policies. crctl and the drift governance V2 system are custom additions beyond upstream.
+This is a fork of `xinyiai0724/tools` maintained at `OldBoy405/AI-First-tools` on branch `main`. The `CUSTOM.md` file tracks deviations from upstream and provides merge conflict resolution policies. crctl and the drift governance V2 system are custom additions beyond upstream.
 
 ## Key Bug Fixes (Post-V2)
 
