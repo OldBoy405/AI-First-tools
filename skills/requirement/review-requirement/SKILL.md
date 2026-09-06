@@ -102,14 +102,14 @@ crctl gate {cr_id} --for requirement-reviewing --mode pre-review --workspace <wo
    - 先执行 `multica cr bind-current-task {cr_id}`，把当前 reviewer task 绑定到 CR 及其来源 Issue；
    - 绑定失败（七种错误码）→ 按**技术失败中止**：不写临时 payload、不调用 `review-record`、不写 canonical review（`TASK_ISSUE_REQUIRED` = reviewer task 创建路径未按 FR-B12 携带 Issue 上下文，修复创建路径后重试；禁止静默跳过绑定继续评审）；
    - 无 Multica task context 的本地执行 → 跳过绑定，继续现有行为（FR-A7）。
-1. 完成上述评审后，把**判断**写入非受控临时 payload `.crctl/tmp/review-requirement.yml`（该路径不在 guard deny 面，且已被 `.crctl/.gitignore` 忽略）：
+1. 完成上述评审后，把**判断**写入非受控临时 payload `<worktree>/.crctl/tmp/review-requirement.yml`（即 review-record 的 `--workspace` 传入的同一绝对路径，禁止写相对路径 `.crctl/tmp/...`；该路径不在 guard deny 面，且已被 `.crctl/.gitignore` 忽略）：
    ```yaml
    verdict: pass | block
    blockers: []          # block 时列出 blocker（字符串列表）
    dimensions: {评审维度: 结论, ...}   # 该 stage 门禁要求的维度齐全
    suggestions: []       # 可选
    ```
-2. 运行 `crctl review-record {cr_id} --stage requirement --bump-attempt --workspace <worktree>`（`--from` 缺省即 `.crctl/tmp/review-requirement.yml`，无需显式指定），crctl 自动完成**确定性部分**：
+2. 运行 `crctl review-record {cr_id} --stage requirement --bump-attempt --workspace <worktree> --from "<worktree>/.crctl/tmp/review-requirement.yml"`（`--from` 显式锚定到与 `--workspace` 相同的绝对路径，禁止依赖缺省的相对路径），crctl 自动完成**确定性部分**：
    - schema 校验（verdict 枚举/blockers 列表/dimensions 齐全；失败 `SCHEMA_INVALID` 不写）
    - stage→文件名显式映射（requirement→requirement.yml，tech-design→sdd.yml 非同名）
    - 注入 reviewer=identity(ws)/reviewed-at=nowIso()，CAS 写入 canonical `review-annotations/requirement.yml`
@@ -150,3 +150,4 @@ crctl gate {cr_id} --for requirement-reviewing --mode pre-review --workspace <wo
 | pre-review guard block（new mode `unassigned` / target-spec-id 单侧缺失/非法/不一致） | 不写临时 payload、不 review-record、不 advance，`route=version-set`；先 `crctl version-set` 校正版本或人工修复 target-spec-id 双账本漂移，再重跑本 Skill |
 | CR status 非预期值 | 输出当前状态，提示是否强制重审 |
 | 达到 reviewLoop.maxAttempts 后仍为 block | 停止进入人工审批，输出剩余 blocker 与最后一次修复记录 |
+| review-record 返回 `PAYLOAD_NOT_FOUND` | 把 payload 补写到 `<worktree>/.crctl/tmp/review-requirement.yml`（与 `--workspace` 同一绝对路径）后重跑 `crctl review-record`；禁止据此编造 verdict 或中止 |

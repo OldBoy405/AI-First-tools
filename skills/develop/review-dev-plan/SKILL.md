@@ -1,6 +1,6 @@
 ---
 name: review-dev-plan
-description: 对 change-requests/{CR-ID}/plan.md 与 tasks/ 执行编码前合并评审（SDD→plan→TASK 八类维度），判断写 .crctl/tmp/review-dev-plan.yml 并经 crctl review-record --stage dev-plan 落盘；PASS 保持 task-breakdown，BLOCK 按 repair-target 双轨路由。
+description: 对 change-requests/{CR-ID}/plan.md 与 tasks/ 执行编码前合并评审（SDD→plan→TASK 八类维度），判断写 <worktree>/.crctl/tmp/review-dev-plan.yml 并经 crctl review-record --stage dev-plan 落盘；PASS 保持 task-breakdown，BLOCK 按 repair-target 双轨路由。
 ---
 
 # Skill: review-dev-plan
@@ -101,7 +101,7 @@ TASK 新事实只能按 `resources[].worktreePath` 取证：事实不存在或�
    - 先执行 `multica cr bind-current-task {cr_id}`，把当前 reviewer task 绑定到 CR 及其来源 Issue；
    - 绑定失败（七种错误码）→ 按**技术失败中止**：不写临时 payload、不调用 `review-record`、不写 canonical review（`TASK_ISSUE_REQUIRED` = reviewer task 创建路径未按 FR-B12 携带 Issue 上下文，修复创建路径后重试；禁止静默跳过绑定继续评审）；
    - 无 Multica task context 的本地执行 → 跳过绑定，继续现有行为（FR-A7）。
-1. 把判断写入非受控临时 payload `.crctl/tmp/review-dev-plan.yml`（已被 .crctl/.gitignore 忽略）：
+1. 把判断写入非受控临时 payload `<worktree>/.crctl/tmp/review-dev-plan.yml`（即 review-record 的 `--workspace` 传入的同一绝对路径，禁止写相对路径 `.crctl/tmp/...`；已被 .crctl/.gitignore 忽略）：
 
 ```yaml
 verdict: pass | block
@@ -120,7 +120,7 @@ dimensions:                     # 八类维度 + 元信息
 suggestions: []
 ```
 
-2. 运行 `crctl review-record {cr_id} --stage dev-plan --bump-attempt --workspace <worktree>`，crctl 完成确定性部分：schema 校验（含 repair-target 枚举）、bump 前路由判定（upstream 跳过 bump）、注入 reviewer/reviewed-at、CAS 写 canonical `review-annotations/dev-plan.yml`、级联 review-loop 记账与 traceability 投影、删除临时 payload。
+2. 运行 `crctl review-record {cr_id} --stage dev-plan --bump-attempt --workspace <worktree> --from "<worktree>/.crctl/tmp/review-dev-plan.yml"`，crctl 完成确定性部分：schema 校验（含 repair-target 枚举）、bump 前路由判定（upstream 跳过 bump）、注入 reviewer/reviewed-at、CAS 写 canonical `review-annotations/dev-plan.yml`、级联 review-loop 记账与 traceability 投影、删除临时 payload。
 3. 模型不得直接写 `review-annotations/dev-plan.yml` 或手写 review-loop（guard deny + crctl 独占）。
 
 ### Step 4 — 路由处理（双轨，CR-2026-026 FR-6/FR-6a/FR-6b）
@@ -152,3 +152,4 @@ suggestions: []
 | CR status 非 task-breakdown/tech-design-reviewed | 停止执行，展示当前状态 |
 | repair-target 非法值 | crctl review-record 返回 SCHEMA_INVALID，修正 payload 重跑 |
 | 达到 maxAttempts=3 仍 block | LOOP_EXHAUSTED 停止，不进入 human approval |
+| review-record 返回 PAYLOAD_NOT_FOUND | 把 payload 补写到 `<worktree>/.crctl/tmp/review-dev-plan.yml`（与 `--workspace` 同一绝对路径）后重跑 `crctl review-record`；禁止据此编造 verdict 或中止 |

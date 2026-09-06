@@ -112,7 +112,7 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
    - 先执行 `multica cr bind-current-task {cr_id}`，把当前 reviewer task 绑定到 CR 及其来源 Issue；
    - 绑定失败（七种错误码）→ 按**技术失败中止**：不写临时 payload、不调用 `review-record`、不写 canonical review（`TASK_ISSUE_REQUIRED` = reviewer task 创建路径未按 FR-B12 携带 Issue 上下文，修复创建路径后重试；禁止静默跳过绑定继续评审）；
    - 无 Multica task context 的本地执行 → 跳过绑定，继续现有行为（FR-A7）。
-1. 完成上述评审后，把**判断**写入非受控临时 payload `.crctl/tmp/review-code.yml`（不在 guard deny 面，已被 `.crctl/.gitignore` 忽略）：
+1. 完成上述评审后，把**判断**写入非受控临时 payload `<worktree>/.crctl/tmp/review-code.yml`（即 review-record 的 `--workspace` 传入的同一绝对路径，禁止写相对路径 `.crctl/tmp/...`；不在 guard deny 面，已被 `.crctl/.gitignore` 忽略）：
    ```yaml
    verdict: pass | block
    blockers: []          # block 时列出 blocker（字符串列表）
@@ -122,7 +122,7 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
    ```
 
    **输出固定五字段（CR-2026-060 AC-09）**：评审结论 canonical 输出只含 `verdict` / `blockers` / `suggestions` / `dimensions` / `repair-target` 五字段，不新增 aggregate digest（不自行汇总 hash）；不重跑测试（测试执行已收敛 `crctl test --plan` 单入口，评审只读取证）；源码/日志/命令漂移（`test-report.md` 引用的 `cmd-NN` 与 `test-evidence/cmd-NN.log`、`sourceRevision`、`command-digest` 任一漂移）→ block。
-2. 运行 `crctl review-record {cr_id} --stage code --bump-attempt --workspace <worktree>`（`--from` 缺省即 `.crctl/tmp/review-code.yml`，无需显式指定），crctl 自动完成**确定性部分**：
+2. 运行 `crctl review-record {cr_id} --stage code --bump-attempt --workspace <worktree> --from "<worktree>/.crctl/tmp/review-code.yml"`（`--from` 显式锚定到与 `--workspace` 相同的绝对路径，禁止依赖缺省的相对路径），crctl 自动完成**确定性部分**：
    - schema 校验（verdict 枚举/blockers 列表/dimensions 齐全；失败 `SCHEMA_INVALID` 不写）
    - stage→文件名显式映射（code→code.yml）
    - 注入 reviewer=identity(ws)/reviewed-at=nowIso()，CAS 写入 canonical `review-annotations/code.yml`
@@ -161,3 +161,4 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 | test-report.md 不存在或 status 非 pass | 返回 block，repair-target=implement-code，要求补齐测试证据 |
 | diff 或 changed files 证据缺失 | 返回 block，要求补齐可审查代码证据 |
 | 达到 reviewLoop.maxAttempts 后仍为 block | 停止进入人工审批，输出剩余 blocker 与最后一次修复记录 |
+| review-record 返回 `PAYLOAD_NOT_FOUND` | 把 payload 补写到 `<worktree>/.crctl/tmp/review-code.yml`（与 `--workspace` 同一绝对路径）后重跑 `crctl review-record`；禁止据此编造 verdict 或中止 |
