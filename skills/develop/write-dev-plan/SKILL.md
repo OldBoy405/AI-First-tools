@@ -64,8 +64,8 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 
    - `FR/关键AC`：PRD 的 FR 编号（含影响主路径验收可达性的关键 AC）；每个 in-scope FR 只出现一次
    - `SDD交付项`：SDD 中对应设计落点（章节引用）
-   - `主责/关联TASK`：唯一主责 TASK（可并写关联 TASK）
-   - `验收证据`：稳定标识 `cmd-NN`（两位十进制，与 `crctl test` 机器区 `commands` 1-based 下标及 `test-evidence/cmd-NN.log` 全等）
+   - `主责/关联TASK`：唯一主责 TASK（可并写关联 TASK）；必须写 canonical 完整 id `{cr_id}-TASK-NN`（与 `tasks/_index.yml` 的 id 集一致），不得用短名 `TASK-NN`
+   - `验收证据`：稳定标识 `cmd-NN`（两位十进制，与 `crctl test` 机器区 `commands` 1-based 下标及 `test-evidence/cmd-NN.log` 全等）；该命令必须实际覆盖本行所声称的验收面，不得只覆盖其中一部分造成假绿
    - `回滚`：该 FR 的回滚单元（如 revert 某 TASK commit）
 
    **证据命令表（稳定表 2/2）**：每条验证命令一行，列固定为：
@@ -81,7 +81,7 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
    | AC/业务闭环 | SDD 落点 | TASK owner | 验收证据 |
    |---|---|---|---|
 
-   关键 AC 定义：PRD 中影响主路径验收可达性的 AC（含用户可观察的成功/失败/隔离/幂等）。非关键 AC 可合并行，但必须能从矩阵追溯到至少一条 TASK。「验收证据」列对关键 AC 必须填写稳定标识 `cmd-NN`（与交付覆盖表/证据命令表全等），不得只写散文命令。
+   关键 AC 定义：PRD 中影响主路径验收可达性的 AC（含用户可观察的成功/失败/隔离/幂等）。非关键 AC 可合并行，但必须能从矩阵追溯到至少一条 TASK。「验收证据」列对关键 AC 必须填写稳定标识 `cmd-NN`（与交付覆盖表/证据命令表全等），不得只写散文命令。关键 AC 的 TASK owner 必须归属实际产生该结果的责任层/模块，不得把用户可观察结果（如前端展示/接口行为）归给不产生它的 TASK。
 
 ### Step 2a — 回修模式（CR-2026-026 FR-8/FR-9）
 
