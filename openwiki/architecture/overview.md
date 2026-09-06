@@ -17,7 +17,8 @@ Each CR has:
 
 | Aspect | Stored In | Purpose |
 |--------|-----------|---------|
-| Metadata & status | `change-requests/{CR-ID}/cr.md`, `_backlog.yml` | Identity, title, status, owners |
+| Metadata & status | `change-requests/{CR-ID}/cr.md` frontmatter | Identity, title, **status authority**, owners |
+| Registration index | `change-requests/_backlog.yml` | CR registry entries (degraded to index; no longer the status source) |
 | Requirements | `change-requests/{CR-ID}/prd.md` | Product requirements (PRD) |
 | Design | `change-requests/{CR-ID}/sdd.md` | Technical design (SDD) |
 | Plan & tasks | `change-requests/{CR-ID}/plan.md`, `tasks/TASK-NN.md` | Development plan and task breakdown |
@@ -45,35 +46,49 @@ This dual model ensures the team knowledge base (`specs/`, `delivery/`) always r
 
 ## CR State Machine
 
-The CR lifecycle is governed by an explicit state machine with 15 active states and 3 terminal states. All transitions are triggered by named Skills — no implicit or verbal advancement is allowed.
+The CR lifecycle is governed by an explicit state machine defined in `dir-graph.yaml#change-request-track.state_machine`: **15 named states** (12 active + 3 terminal) plus the pre-registration state `(new)`, **28 declared transitions** that expand to **50** via the `any-active` wildcard. All transitions are triggered by named Skills — no implicit or verbal advancement is allowed, and only [`crctl advance`](/openwiki/operations/drift-governance.md) may write `cr.md` status.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> drafting: requirement-register
-    drafting --> requirement_reviewing: review-requirement
+    state "(new)" as pre_registration
+    [*] --> pre_registration
+    pre_registration --> drafting: requirement-register
     drafting --> drafting: review-requirement block
+    drafting --> requirement_reviewing: review-requirement
     requirement_reviewing --> requirement_reviewing: review-requirement
+    requirement_reviewing --> drafting: approve-requirement reject
     requirement_reviewing --> requirement_approved: approve-requirement
     requirement_approved --> tech_designing: write-tech-design
-    tech_designing --> tech_design_review_pending: write-tech-design complete
+    tech_designing --> tech_design_review_pending: write-tech-design-complete
     tech_design_review_pending --> tech_designing: review-tech-design block
-    tech_design_review_pending --> tech_design_reviewed: approve-tech-design
     tech_design_review_pending --> tech_designing: approve-tech-design reject
+    tech_design_review_pending --> tech_design_reviewed: approve-tech-design
     tech_design_reviewed --> task_breakdown: write-dev-tasks
     task_breakdown --> task_breakdown: write-dev-tasks
+    task_breakdown --> tech_design_reviewed: review-dev-plan block
+    task_breakdown --> tech_design_review_pending: review-dev-plan upstream-design-blocker
+    task_breakdown --> tech_design_reviewed: approve-dev-start reject
     task_breakdown --> developing: approve-dev-start
-    developing --> developing: test-report or review-code block
+    developing --> developing: write-test-report block
+    developing --> developing: review-code block
     developing --> code_reviewing: review-code
-    code_reviewing --> code_approved: approve-code
     code_reviewing --> developing: approve-code reject
+    code_reviewing --> code_approved: approve-code
     code_approved --> merging: merge-feature-branch
+    code_approved --> developing: merge-feature-branch release-drift
     merging --> writing_back: writeback-prd-sdd
     writing_back --> archived: cr-archive
 ```
 
-**Terminal states**: `archived`, `rejected`, `withdrawn`. Any active state can transition to `rejected` or `withdrawn` via `cr-review-record reject/withdraw` — the state machine in `dir-graph.yaml` uses wildcard matching for these two transitions rather than listing every active state individually.
+**Terminal states**: `archived`, `rejected`, `withdrawn`. Any active state can transition to `rejected` or `withdrawn` via the `cr-review-record:reject` / `cr-review-record:withdraw` triggers — `dir-graph.yaml` declares these once against the `any-active` wildcard (12 active states × 2 = 24 expanded transitions) rather than listing each active state individually.
 
-The state machine is defined in `dir-graph.yaml#change-request-track.state_machine` and enforced at runtime by either the platform's pipeline execution engine or [`crctl advance`](/openwiki/operations/drift-governance.md) in standalone IDE usage.
+New in the current machine relative to the original CR-2026-001 version:
+
+- **`task-breakdown`** is a first-class state between `tech-design-reviewed` and `developing`, gated by the **`review-dev-plan`** review (SDD→PLAN→TASK merge review) before `approve-dev-start`.
+- **`review-dev-plan` block** routes back to `tech-design-reviewed` (fix PLAN/TASK) or, for an upstream design blocker, back to `tech-design-review-pending` (fix SDD).
+- **`merge-feature-branch:release-drift`** routes `code-approved` back to `developing` when the published release snapshot no longer matches local code (re-run `implement-code`).
+
+The state machine is enforced at runtime by either the platform's pipeline execution engine or [`crctl advance`](/openwiki/operations/drift-governance.md) in standalone IDE usage.
 
 ### The `tech-design-review-pending` Nuance
 
@@ -104,7 +119,7 @@ owners:
 | `development` | SDD, task breakdown, coding, code approval | `/requirement` input `dev_owner` |
 | `test` | Test evidence, test report | `/requirement` input `test_owner` |
 
-Role changes must go through `handover-cr` or `resume-from-remote` and must update `owners.{role}.id`, `owners.{role}.assigned-at`, and append `owner-history`. The top-level `owner` field is only a compatibility view, defaulting to `owners.requirement.id`.
+Role changes go through the formal handoff primitive [`crctl owner-set`](/openwiki/operations/drift-governance.md) (double-projection owners update + formal handoff commit) or the `handover-cr` Skill that wraps it. Each change must update `owners.{role}.id`, `owners.{role}.assigned-at`, and append `owner-history`. The top-level `owner` field is only a compatibility view, defaulting to `owners.requirement.id`.
 
 ## Auto-Review Repair Loops
 
@@ -131,6 +146,7 @@ Key rules:
 | Planning | `review-planning-report` | `write-planning-report` | `approved=true`, blockers empty |
 | PRD | `review-requirement` | `write-requirement-prd` | `verdict=pass`, blockers empty |
 | SDD | `review-tech-design` | `write-tech-design` | `verdict=pass`, blockers empty |
+| Dev-plan | `review-dev-plan` | `write-dev-plan` (or `write-tech-design` on upstream design blocker) | `verdict=pass`, blockers empty |
 | Test | `write-test-report` | `implement-code` | `status=pass`, blockers empty |
 | Code | `review-code` | `implement-code` | `verdict=pass`, blockers empty, `test-report.status=pass` |
 
@@ -138,28 +154,32 @@ Key rules:
 
 The platform is organized into four layers that build on each other:
 
-1. **Agents** — 10 agents with ownership boundaries defined in the [Agent/Skill Matrix](/openwiki/architecture/agent-skill-matrix.md). Each agent owns a set of Skills and may call others within its boundary. Agents are the scheduling and routing layer.
+1. **Agents** — 9 deployable agents (5 primary + 4 sub-agents) plus 2 system actors (`cr-coordinator-agent`, `system-orchestrator`) with ownership boundaries defined in the [Agent/Skill Matrix](/openwiki/architecture/agent-skill-matrix.md). Each agent owns a set of Skills and may call others within its boundary. Agents are the scheduling and routing layer.
 
 2. **Pipelines** — 8 JSON templates in [pipeline-templates/](/openwiki/pipelines/overview.md) that orchestrate multi-step workflows. Each pipeline declares its owner agent, nodes (skill invocations or human approvals), inputs, and review loops.
 
-3. **Skills** — 50+ atomic capabilities across 10 domains (planning, requirement, develop, cr, writeback, sync, spec, competitive, review, shared). Each Skill is a `SKILL.md` file with defined inputs, outputs, state effects, and failure handling.
+3. **Skills** — 56 active atomic capabilities across 10 domains (planning, requirement, develop, writeback, sync, spec, competitive, review, cr, shared). Each Skill is a `SKILL.md` file with defined inputs, outputs, state effects, and failure handling.
 
-4. **Engineering Docs** — Schema-driven documents ([PRD, SDD, PLAN, TASK, etc.](/openwiki/engineering-docs/overview.md)) produced by Skills and archived after writeback. A CLI/MCP toolchain validates conformance.
+4. **Engineering Docs** — Schema-driven documents ([PRD, SDD, PLAN, TASK, etc.](/openwiki/engineering-docs/overview.md)) produced by Skills and archived after writeback. A schema/template layer validates conformance.
 
 Outside the platform's execution layer, the **[drift governance system](/openwiki/operations/drift-governance.md)** (`crctl`) provides code-level enforcement of the same rules for IDE-only usage.
 
 ## Agent Contract Invariants
 
-`dir-graph.yaml#agents.contract` defines four invariants that must hold for the agent/skill system. They are enforced by [CI guards](/openwiki/operations/ci-guards.md) and the pre-commit hook via two zero-dependency Node.js scripts.
+`dir-graph.yaml#agents.contract` defines four invariants that must hold for the agent/skill system. They are enforced by [CI guards](/openwiki/operations/ci-guards.md) and the pre-commit hook via three zero-dependency Node.js scripts.
 
 | # | Invariant | Enforced By |
 |---|-----------|-------------|
 | 1 | Every agent in `agents/_index.yml` must have a corresponding `.md` file, and every `agents/*.md` file must be registered | `check-agents-contract.mjs` |
 | 2 | Every Skill referenced by an agent must be registered as `active` in `skills/_index.yml` (or declared `external`) | `check-agents-contract.mjs` |
 | 3 | Every active Skill appearing in an agent's references must be listed in that agent's `owns`, `can-call`, or `external` in `agent-skill-matrix.yml` | `check-agents-contract.mjs` |
-| 4 | Agents must not bypass Skills to write directly to controlled ledgers or state files | Runtime: `crctl` CAS writes + PreToolUse hook + CI gate |
+| 4 | Agents must not bypass Skills to write directly to controlled ledgers or state files | Runtime: `crctl` durable transactions + CAS writes + PreToolUse hook + CI gate |
 
-Invariants 1-3 are **static** and verified on every commit and CI push. Invariant 4 is **behavioral** and enforced at runtime by [crctl's](/openwiki/operations/drift-governance.md) exclusive write paths (CAS-based `_backlog.yml` and `approval.yml` updates) and the Claude Code PreToolUse guard.
+Invariants 1-3 are **static** and verified on every commit and CI push. Invariant 4 is **behavioral** and enforced at runtime by [crctl's](/openwiki/operations/drift-governance.md) exclusive write paths (now durable transactions and CAS-based ledger writes) and the Claude Code PreToolUse guard. A fifth guard, [`lint-prompts.mjs`](/openwiki/operations/ci-guards.md), separately blocks prompt text that would reintroduce manual ledger writes or stale crctl invocations.
+
+## crctl Layering
+
+`crctl` is no longer a single flat script. Its state machine/gate logic stays in `crctl.mjs`, while cross-file and cross-repo writes are delegated to a transaction layer: `lib/yaml-subset.mjs` (line-oriented YAML editing), `lib/durable-tx.mjs` (journal envelope, directory lock, recoverable write-set), and `lib/workspace-transactions.mjs` (the `register`/`checkpoint`/`merge`/`writeback-apply`/`archive` deep primitives). See [crctl transactions & deep primitives](/openwiki/operations/crctl-transactions.md).
 
 ## Source References
 
@@ -169,7 +189,8 @@ Invariants 1-3 are **static** and verified on every commit and CI push. Invarian
 | Agent contract | `dir-graph.yaml#agents.contract` |
 | Owner model | `dir-graph.yaml#target_workspace_contract.cr_owner_model` |
 | Document facts | `README.md` §文档与事实源模型 |
-| Review loops | `README.md` §自动审查自修复闭环 |
+| Review loops | `README.md` §自动评审与人工审批 |
 | Pipeline contracts | `dir-graph.yaml#pipeline_templates.contract` |
 | CR state constraints | `AGENTS.md` §CR 状态约束 |
+| crctl hard invariants | `ARCHITECTURE.md` §5 |
 | Contract check script | `skills/shared/crctl/scripts/check-agents-contract.mjs` |

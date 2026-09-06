@@ -1,8 +1,19 @@
 ---
 type: Architecture
 title: Pipeline Templates & Workflows
-description: The 8 pipeline templates that orchestrate the full R&D lifecycle — JSON structure, node types, review loops, human approval gates, and how pipelines connect skills and agents.
+description: The 8 pipeline templates that orchestrate the full R&D lifecycle — JSON structure, node types, review loops, human approval gates, dev-plan review, mandatory checkpoints, and how pipelines connect skills and agents.
 tags: [pipelines, workflows, orchestration, review-loop, templates]
+openwiki:
+  roles: [architecture, workflow]
+  change_kinds: [lifecycle, orchestration]
+  source_paths:
+    - pipeline-templates/_index.yml
+    - pipeline-templates/code-implementation.pipeline.json
+  symbols: [PipelineDefinition, reviewLoop, human_approval, review-dev-plan, approve-dev-start]
+  test_paths:
+    - skills/shared/crctl/scripts/test/pipeline-structure.test.mjs
+  validation_commands:
+    - node -e "for (const f of require('fs').readdirSync('pipeline-templates').filter(f=>f.endsWith('.json'))) JSON.parse(require('fs').readFileSync('pipeline-templates/'+f,'utf8')); console.log('json ok')"
 ---
 
 # Pipeline Templates & Workflows
@@ -82,10 +93,10 @@ flowchart LR
 | 0 | `/planning` | `product-planning` | 8 | product-planning-agent | Planning |
 | 0a | `/insight-brief` | `market-to-plan` | 5 | product-planning-agent | Planning |
 | 0b | `/comp-radar` | `competitive-radar` | 5 | competitive-analyst-agent | Planning |
-| 1 | `/requirement` | `requirement-authoring` | 6 | requirement-writer | Requirement |
+| 1 | `/requirement` | `requirement-authoring` | 7 | requirement-writer | Requirement |
 | 2 | `/architecture` | `architecture-design` | 5 | dev-agent | Design |
-| 3 | `/coding` | `code-implementation` | 12 | dev-agent | Coding |
-| 4 | `/writeback` | `feature-writeback` | 5 | system-orchestrator | Writeback |
+| 3 | `/coding` | `code-implementation` | 16 | dev-agent | Coding |
+| 4 | `/writeback` | `feature-writeback` | 5 | delivery-agent | Writeback |
 | R | `/resume` | `resume-cr` | 3 | system-orchestrator | Recovery |
 
 ### Planning Pipelines (Optional)
@@ -100,29 +111,33 @@ The three planning pipelines are optional and do not create CRs:
 
 The four required pipelines form the main delivery chain:
 
-**`/requirement`** — CR registration with worktree creation, PRD writing, requirement review (with auto-repair loop), human approval, `approve-requirement` state advance. Prerequisite: none. Output: `prd.md`, status=`requirement-approved`.
+**`/requirement`** — CR registration with worktree creation, PRD writing, requirement review (with auto-repair loop), human approval, `approve-requirement` state advance, then a **mandatory approval checkpoint**. Prerequisite: none. Output: `prd.md`, status=`requirement-approved`.
 
-**`/architecture`** — SDD writing based on approved PRD, tech design review (with auto-repair loop), human approval, `approve-tech-design` state advance, checkpoint push. Prerequisite: status=`requirement-approved`. Output: `sdd.md`, status=`tech-design-reviewed`.
+**`/architecture`** — SDD writing based on approved PRD (entry reads the authority path via `crctl workspace inspect`), tech design review (with auto-repair loop), human approval, `approve-tech-design` state advance, then a **mandatory checkpoint**. Prerequisite: status=`requirement-approved`. Output: `sdd.md`, status=`tech-design-reviewed`.
 
-**`/coding`** — Development plan → task breakdown → human approval to start → code implementation (via external coding runtime) → test report generation (with auto-fix loop) → code checkpoint → code review (with auto-fix loop) → human approval → `approve-code` state advance. Prerequisite: status=`tech-design-reviewed`. Output: code, `test-report.md`, status=`code-approved`.
+**`/coding`** — Development plan → task breakdown → **dev-plan review** (`review-dev-plan`, the pre-coding SDD→PLAN→TASK quality gate) → human approval to start → code implementation (via external coding runtime) → test report generation (with auto-fix loop) → unified checkpoint → code review (with auto-fix loop) → human approval → `approve-code` state advance → mandatory approval checkpoint. Prerequisite: status=`tech-design-reviewed`. Output: code, `test-report.md`, status=`code-approved`. Entry reads the authority path via `crctl workspace inspect`.
 
 ```mermaid
 flowchart TD
     D1["write-dev-plan"] --> D2["write-dev-tasks"]
-    D2 --> D3["push-progress (checkpoint)"]
-    D3 --> D4["human_approval (dev start)"]
+    D2 --> D3["review-dev-plan (pre-coding gate)"]
+    D3 --> D3G{"pass?"}
+    D3G -- "block" --> D1
+    D3G -- "upstream design" --> D3U["write-tech-design (fix SDD)"]
+    D3U --> D1
+    D3G -- "pass" --> D4["human_approval (dev start)"]
     D4 --> D5["approve-dev-start"]
     D5 --> D6["implement-code"]
     D6 --> D7["write-test-report"]
     D7 --> D7G{"test pass?"}
     D7G -- "no: blocks" --> D6
-    D7G -- "yes" --> D8["push-progress (code checkpoint)"]
+    D7G -- "yes" --> D8["checkpoint"]
     D8 --> D9["review-code"]
     D9 --> D9G{"review pass?"}
     D9G -- "no: blocks" --> D6
     D9G -- "yes" --> D10["human_approval (code)"]
     D10 --> D11["approve-code"]
-    D11 --> D12["push-progress (final)"]
+    D11 --> D12["checkpoint (mandatory)"]
 ```
 
 **`/writeback`** — Merge CR branches to trunk → writeback PRD/SDD to `specs/` → writeback TASKs to `delivery/task/` → generate traceability chain → archive CR (move to `_history.yml`, clean up worktrees). Prerequisite: status=`code-approved`. Output: `specs/{id}/`, `delivery/task/`, `traceability.yml`, status=`archived`.
@@ -153,6 +168,9 @@ When modifying pipelines, observe these rules from `dir-graph.yaml#pipeline_temp
 5. Auto-review nodes must persist `review-loop.current-attempt` and `review-loop.attempts[]`
 6. CR-class loops must sync to `traceability.yml`
 7. `feature-writeback` must require `spec_id` and `target_version` — empty values are not allowed
+8. `review-dev-plan` is the pre-coding quality gate in `task-breakdown` state: a block routes back to `write-dev-plan` (or `write-tech-design` on an upstream design blocker) before `approve-dev-start`
+9. Requirement/architecture/code approval-stage terminal checkpoints are mandatory (CR-2026-044): failure keeps the already-approved status, and re-running the same checkpoint does not re-approve
+10. Pipeline entry nodes that need the authority workspace resolve it via `crctl workspace inspect`, not by assuming a fixed path
 
 ## Source References
 

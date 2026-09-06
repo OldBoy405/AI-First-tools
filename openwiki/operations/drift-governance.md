@@ -1,8 +1,23 @@
 ---
 type: Operations
-title: Drift Governance (crctl V2) & Workspace Setup
-description: Code-level drift governance for standalone IDE usage — the crctl CLI (9 subcommands), outbox event channel, unified evidence digest, dual-track approval (TTY + ed25519 grants), controlled-shell rules.json, IDE adapters, and CI guard layers.
+title: Drift Governance (crctl) & Workspace Setup
+description: Code-level drift governance for standalone IDE usage — the crctl CLI (read/single-file subcommands plus durable deep primitives), outbox event channel, unified evidence digest, dual-track approval (TTY + ed25519 grants), controlled-shell rules.json, IDE adapters, and CI guard layers.
 tags: [operations, drift-governance, crctl, controlled-shell, evidence-digest, approval, outbox, setup]
+openwiki:
+  roles: [operations, architecture]
+  change_kinds: [lifecycle, public-api, governance]
+  source_paths:
+    - skills/shared/crctl/scripts/crctl.mjs
+    - skills/shared/crctl/gates.json
+    - skills/shared/controlled-shell/rules.json
+  symbols: [cmdStatus, cmdAdvance, cmdApprove, cmdReviewRecord, cmdCheckpoint, cmdMerge, cmdWritebackApply, cmdArchive, canonicalEvidenceDigest, controlledGit]
+  test_paths:
+    - skills/shared/crctl/scripts/test/crctl.test.mjs
+  invariants:
+    - CR status is written only through crctl advance into cr.md frontmatter.
+    - Human approval is only via crctl approve (interactive TTY or Ed25519 grant); non-TTY is refused.
+    - git is authoritative; the outbox is a projection that never blocks the main operation.
+  validation_commands: ["node --test skills/shared/crctl/scripts/test/crctl.test.mjs"]
 ---
 
 # Drift Governance (crctl V2) & Workspace Setup
@@ -26,7 +41,7 @@ The root cause is not that the rules are poorly written — it's that **rules la
 
 | # | Drift Point | Manifestation |
 |---|------------|---------------|
-| ① | CR-ID & status pointer loss | Model guesses status from memory instead of reading `_backlog.yml` |
+| ① | CR-ID & status pointer loss | Model guesses status from memory instead of reading `cr.md` frontmatter |
 | ② | Verbal approval (bypassing writes) | Model says "approved" without writing evidence files |
 | ③ | Git outside controlled-shell | Model runs arbitrary git commands, not whitelisted ones |
 | ④ | Missing execution constraint layer | No enforcement of `agent-skill-matrix.yml` boundaries |
@@ -50,29 +65,57 @@ The drift governance system uses a four-layer defense:
 
 Layers 1-3 are code enforcement. Layer 4 is the original prompt-level defense, kept as a fallback for IDEs without hook support.
 
-## The Solution: `crctl` V2
+## The Solution: `crctl`
 
-`crctl` is a ~1,300-line Node.js CLI (`skills/shared/crctl/scripts/crctl.mjs`, requires Node ≥ 18, zero external dependencies) that replaces model self-enforcement with code enforcement. It provides 9 subcommands:
+`crctl` is a zero-dependency Node.js CLI (`skills/shared/crctl/scripts/crctl.mjs`, requires Node ≥ 18, `node:*` built-ins only) that replaces model self-enforcement with code enforcement. The CLI/gate logic stays in `crctl.mjs`, while cross-file and cross-repo writes are delegated to a transaction layer — see [crctl transactions & deep primitives](/openwiki/operations/crctl-transactions.md).
+
+The command surface is grouped into three tiers:
+
+### Tier 1 — Read-only & single-file CAS
 
 | Subcommand | Purpose | Replaces |
 |------------|---------|----------|
-| `status` | Deterministically reads `_backlog.yml` + state machine; outputs current status, legal next steps, and gate gaps | Model-guessed status (drift ①) |
-| `advance` | Validates `(current, next, trigger)` transition + gate checks; writes `_backlog.yml` only if all pass; CAS-based to prevent concurrent overwrite; emits outbox status event | `cr-status-set` (drifts ①②⑧) |
-| `gate` | Validates without writing — for pre-checks and CI; emits EVIDENCE_DRIFT audit events | Pipeline `passCondition` (drift ②) |
-| `approve` | **Dual-track**: TTY interactive (human confirms → writes `approval.yml` → cascading advance) or `--grant` server-signed (ed25519 verification + evidence digest re-computation). Non-TTY without `--grant` returns `APPROVAL_REQUIRES_HUMAN` | `human_approval` + `approve-*` (drift ⑤) |
-| `validate` | Schema validation for `cr.md`, `_backlog.yml`, review annotations, test reports, approvals (including server-approve signature re-verification), traceability; emits EVIDENCE_DRIFT audit events | `validate-doc` (drift ⑨) |
-| `attempt` | The sole counter for review-loop attempts; reads `maxAttempts` from pipeline JSON; returns `LOOP_EXHAUSTED` when exceeded | `reviewLoop.maxAttempts` (drift ⑧) |
-| `test` | Runs lint/test/build commands with real exit codes; generates `test-report.md` skeleton (status/tester/commands are tool-generated, not model-generated); raw output goes to `test-evidence/` | `write-test-report` (drift ②) |
+| `status` | Reads `cr.md` frontmatter (the **status authority**) + state machine; outputs current status, legal next steps, gate gaps, and `STATUS_DIVERGED` when the worktree view disagrees | Model-guessed status (drift ①) |
 | `next` | Reads status + review/test evidence → outputs the next node to run; never returns `human_approval` if blockers remain | Minimal pipeline runner (drift ④) |
-| `git` | Whitelisted git adapter with ternary authorization (subcommand + form + caller) from `rules.json` single source of truth; returns `FORBIDDEN_SUBCOMMAND` / `SHELL_UNAVAILABLE` on violations; full audit log; emits checkpoint outbox events on push | `controlled-shell` (drift ③) |
+| `gate` | Validates without writing — for pre-checks and CI; emits EVIDENCE_DRIFT audit events | Pipeline `passCondition` (drift ②) |
+| `advance` | Validates `(current, next, trigger)` transition + gate checks; writes `cr.md` frontmatter only if all pass; CAS-based; emits outbox status event | `cr-status-set` (drifts ①②⑧) |
+| `attempt` / `review-loop reset` | `attempt` is the sole counter for review-loop attempts (reads `maxAttempts` from pipeline JSON; `LOOP_EXHAUSTED` when exceeded). `review-loop reset` is the TTY-only human reset to the next cycle with audit | `reviewLoop.maxAttempts` (drift ⑧) |
+| `test` | Runs lint/test/build commands with real exit codes; generates `test-report.md` skeleton (status/tester/commands are tool-generated); raw output to `test-evidence/` | `write-test-report` (drift ②) |
+| `validate <file>` | Schema validation for `cr.md`, `_backlog.yml`, `test-report.md`, `approval.yml` (incl. server-approve signature re-verification), `traceability.yml`; emits EVIDENCE_DRIFT audit events | `validate-doc` (drift ⑨) |
+| `git` | Whitelisted git adapter with ternary authorization (subcommand + form + caller) from `rules.json`; `FORBIDDEN_SUBCOMMAND` / `SHELL_UNAVAILABLE` on violations; full audit log; checkpoint outbox events on push | `controlled-shell` (drift ③) |
+| `report` | Read-only CR metrics / aggregation | ad-hoc dashboard scripting |
+
+### Tier 2 — Human approval & review evidence
+
+| Subcommand | Purpose | Replaces |
+|------------|---------|----------|
+| `approve` | **Dual-track**: TTY interactive (human confirms → writes `approval.yml` → cascading advance) or `--grant` server-signed (ed25519 verification + evidence digest re-computation); `--resign` for controlled resign of a prior approval. Non-TTY without `--grant` returns `APPROVAL_REQUIRES_HUMAN` | `human_approval` + `approve-*` (drift ⑤) |
+| `review-record` | Writes canonical review verdict/blockers/suggestions to `review-annotations/{stage}.yml` + `traceability.yml`, with machine-injected `subject-sha256` digest and (for code) `release-subjects`; only `reject`/`withdraw` advance terminal state | hand-written review YAML |
+| `review-note` | Appends supplemental review notes without a write path into the four approval sections | `cr-review-record` legacy notes |
+
+### Tier 3 — Deep primitives & ledger writes
+
+These own cross-file and cross-repo Git/ledger algorithms and are idempotent/recoverable. Detailed in [crctl transactions & deep primitives](/openwiki/operations/crctl-transactions.md):
+
+| Subcommand | Purpose |
+|------------|---------|
+| `register` | Atomic CR registration (`cr.md` + `_backlog.yml` + `_index.yml`, `--target-version`, `--origin`, three-role owners) then per-repo worktree creation |
+| `checkpoint` | Full-repo source commit → non-KB lease publish → KB `latest-checkpoint` + metadata commit (single visibility point) |
+| `workspace inspect\|ensure\|cleanup\|freshness\|sync` | Classify/restore/clean CR worktrees; freshness classification and explicit ff-only sync |
+| `merge [status]` | Per-repo merge-tree + synthetic `_backlog.yml` merge, finalize, establish `operationalWorkspace` |
+| `writeback-apply` | Candidate-only writeback of baseline/tasks/traceability; baseline + `writing-back` published in one batch |
+| `archive` | Move CR to `_history.yml`, update `cr.md` status, clean worktrees/refs |
+| `upgrade-check` | Read-only temporary pre-check for the release-snapshot protocol switch (safe/requiresReapproval/blocksUpgrade) |
+| `task init\|append\|done` | Task index lifecycle: allocate TASK-ID, append, mark done (with `depends-on` guard) |
+| `owner-set` / `version-set` / `backlog-set` / `inbox-emit` | Ledger-transaction field writes (owner handoff, `unassigned → real` version correction, whitelisted backlog fields, inbox events) |
 
 ### Key Design Principles
 
 - **Single source of truth**: `crctl` reads state transitions from `dir-graph.yaml` and pass conditions from pipeline JSON at runtime. Gate mappings are in `gates.json`. Controlled-shell rules are in `rules.json`. No rule duplication.
-- **Authority separation**: The model can generate tokens, but the authoritative state only changes through `crctl` writes.
+- **Authority separation**: The model can generate tokens, but authoritative state only changes through `crctl` writes; `cr.md` frontmatter is the status authority, and `_backlog.yml` is a registration index (no longer the status source).
 - **Timestamps and identity**: All timestamps and executor identities are generated by `crctl` from system clock and configured identity — the model cannot pass them in.
-- **CAS-based writes**: Compare-and-swap on `_backlog.yml` sha256 hashes prevents concurrent overwrites.
-- **Zero external dependencies**: The entire CLI uses only `node:` built-in modules (fs, path, crypto, readline, child_process).
+- **CAS / durable writes**: single-file writes use hash-CAS; multi-file and cross-repo writes use the [durable transaction layer](/openwiki/operations/crctl-transactions.md).
+- **Zero external dependencies**: The entire CLI and its `lib/` use only `node:` built-in modules (fs, path, crypto, readline, child_process).
 
 ### Usage
 
@@ -81,10 +124,11 @@ node tools/skills/shared/crctl/scripts/crctl.mjs status CR-2026-001
 node tools/skills/shared/crctl/scripts/crctl.mjs advance CR-2026-001 --to code-reviewing --trigger review-code
 node tools/skills/shared/crctl/scripts/crctl.mjs approve CR-2026-001 --stage code  # human only, in terminal
 node tools/skills/shared/crctl/scripts/crctl.mjs approve CR-2026-001 --stage code --grant  # server-signed grant
+node tools/skills/shared/crctl/scripts/crctl.mjs register --title "..." --target-version 1.2.0
 node tools/skills/shared/crctl/scripts/crctl.mjs git status --short --cwd <worktree>
 ```
 
-Use `--workspace <path>` for explicit workspace targeting; by default, `crctl` walks up from cwd to find `change-requests/_backlog.yml`.
+Use `--workspace <path>` for explicit workspace targeting; by default, `crctl` resolves the installation root from `dir-graph.yaml#repositories`.
 
 ## Outbox Event Channel
 
@@ -118,7 +162,7 @@ The deprecated `evidence-sha256-16` field (single-file short hash) is still reco
 **Track 1 — TTY Interactive** (`via: crctl-approve`):
 - Detects stdin/stdout TTY; non-TTY returns `APPROVAL_REQUIRES_HUMAN` with no bypass
 - Displays evidence summary (pass/fail per condition, file existence checks)
-- Prompts `[yes/N]` — only `yes` writes `approval.yml`
+- Prompts `[yes/N]` — `y`/`yes` (case-insensitive after trim, CR-2026-044) writes `approval.yml`
 - Computes and stores canonical evidence digest
 - Triggers cascading `advance` to the target status
 
@@ -200,9 +244,9 @@ To use the Phase0 tools package, a workspace must have:
 | Human approvers identified | Names for each of the four human approval gates |
 | `.crctl/` directory | Auto-created by crctl for audit log, outbox, config, grants, and keys |
 
-## Fork Information
+## Fork & Cross-Repo Customization Ledger
 
-This is a fork of `xinyiai0724/tools` maintained at `OldBoy405/AI-First-tools` on branch `main`. The `CUSTOM.md` file tracks deviations from upstream and provides merge conflict resolution policies. crctl and the drift governance V2 system are custom additions beyond upstream.
+This is a fork of `xinyiai0724/tools` maintained at `OldBoy405/AI-First-tools` on branch `main`. crctl and the drift governance system are custom additions beyond upstream. `CUSTOM.md` is the **cross-repo customization ledger**: it records capabilities that depend on external platform (Multica / Pipeline Runner) coordination and are not yet end-to-end deliverable (e.g. reject-reason injection, signed-approval dispatch, owners/inbox outbox consumption, per-repo publish locks). Those `pending` items must not be described as delivered in Skill/Pipeline/README text.
 
 ## Key Bug Fixes (Post-V2)
 
@@ -222,6 +266,7 @@ This is a fork of `xinyiai0724/tools` maintained at `OldBoy405/AI-First-tools` o
 | Drift governance v1 | `docs/漂移治理.md` |
 | crctl Skill | `skills/shared/crctl/SKILL.md` |
 | crctl implementation | `skills/shared/crctl/scripts/crctl.mjs` |
+| crctl transaction layer | `skills/shared/crctl/scripts/lib/durable-tx.mjs`, `lib/workspace-transactions.mjs`, `lib/yaml-subset.mjs` |
 | crctl gates | `skills/shared/crctl/gates.json` |
 | crctl test suite | `skills/shared/crctl/scripts/test/crctl.test.mjs` |
 | Controlled shell rules | `skills/shared/controlled-shell/rules.json` |
@@ -230,4 +275,5 @@ This is a fork of `xinyiai0724/tools` maintained at `OldBoy405/AI-First-tools` o
 | CI guard template | `skills/shared/crctl/adapters/ci/cr-guard.template.yml` |
 | Matrix checker | `skills/shared/crctl/scripts/check-skill-matrix.mjs` |
 | Contract checker | `skills/shared/crctl/scripts/check-agents-contract.mjs` |
-| Fork ledger | `CUSTOM.md` |
+| Prompt-drift lint | `skills/shared/crctl/scripts/lint-prompts.mjs` |
+| Cross-repo customization ledger | `CUSTOM.md` |

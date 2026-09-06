@@ -1,7 +1,7 @@
 ---
 type: Architecture
 title: Engineering Documentation System
-description: Schema-driven engineering documentation for the AI First platform — PRD, SDD, PLAN, TASK, FORM, MODULE, RELEASE schemas, document chain lifecycle, templates, and CLI/MCP validation tools.
+description: "Schema-driven engineering documentation for the AI First platform — PRD, SDD, PLAN, TASK, FORM, MODULE, RELEASE schemas, document chain lifecycle, and templates. Since v0.4.0 the Skill is de-MCP'd; SKILL.md steps + templates + schemas are authoritative, while the legacy scripts/ tree is historical reference only."
 tags: [engineering-docs, schemas, prd, sdd, validation, templates]
 ---
 
@@ -68,33 +68,16 @@ The `templates/` directory provides starter files for each document type:
 
 ## Validation Tools
 
-### CLI
+Since **v0.4.0 the engineering-docs Skill is de-MCP'd**: document generation/validation is done by the calling Agent following the `SKILL.md` steps against the `schemas/` and `templates/`, with no MCP server or CLI dependency. The `scripts/` tree (pnpm TypeScript CLI, validators, generators, MCP server) is **retained for historical reference only and is no longer referenced by the Skill**.
 
-The `scripts/` directory contains a pnpm-based TypeScript CLI (`scripts/src/cli.ts`):
+For reference, the legacy scripts live at:
 
-```bash
-pnpm validate   # Run all validators on documents
-pnpm generate   # Generate documents from templates
-```
+- CLI entry: `scripts/src/cli.ts` (`pnpm validate`, `pnpm generate`)
+- Validators: `scripts/src/validators/{frontmatter,naming,chain,index-sync}.ts`
+- MCP server: `scripts/src/mcp.ts`
+- Generators: `scripts/src/generators/base.ts`, `scripts/src/registry.ts`
 
-### Validators
-
-Located in `scripts/src/validators/`:
-
-| Validator | Checks |
-|-----------|--------|
-| `frontmatter.ts` | YAML frontmatter in documents follows schema |
-| `naming.ts` | File naming matches conventions |
-| `chain.ts` | Document chain references are consistent |
-| `index-sync.ts` | Index files match actual directory contents |
-
-### MCP Server
-
-`scripts/src/mcp.ts` exposes validators and generators as an MCP (Model Context Protocol) server, enabling AI agents to validate documents during pipeline execution. The MCP server is used by the platform's execution layer and can be called by [`crctl validate`](/openwiki/operations/drift-governance.md#crctl-subcommands) in standalone mode.
-
-### Generators
-
-The `scripts/src/generators/base.ts` and `scripts/src/registry.ts` provide template-based document generation with ID assignment and slug creation.
+Note that [`crctl validate`](/openwiki/operations/drift-governance.md) is unrelated to this tree: it validates CR-state files (`cr.md`, `_backlog.yml`, `test-report.md`, `approval.yml`, `traceability.yml`) against crctl's own schemas, not the engineering-docs document schemas.
 
 ## Registration System
 
