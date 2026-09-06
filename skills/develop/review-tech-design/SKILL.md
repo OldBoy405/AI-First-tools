@@ -62,12 +62,13 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 
 ```text
 if no_design_landing(ac): blocker("缺少设计落点")
+else if landing_conflicts_with_prd(ac): blocker("设计结论与 PRD 契约冲突")
 else if landing_cannot_produce_observable_result(ac): blocker("结果不可观察")
 else if prerequisite_filters_required_target(ac): blocker("关键前置条件使 AC 不可达")
 else: pass with landing + observable + reachability evidence
 ```
 
-这是既有「PRD↔SDD 对齐」与「可测试性」维度的细化，不新增 annotation dimension；关键前置条件包括过滤条件、状态门槛、权限判定、事件触发顺序、空值分支和跨仓依赖初始化。
+这是既有「PRD↔SDD 对齐」与「可测试性」维度的细化，不新增 annotation dimension；关键前置条件包括过滤条件、状态门槛、权限判定、事件触发顺序、空值分支和跨仓依赖初始化。`landing_conflicts_with_prd` 判定前，必须先区分 PRD 中的「现有实现基线描述」（当前代码事实引用）与「目标契约」（FR/AC 正文要求），不得把基线描述误读为目标契约。
 
 SDD 的既有实现依赖必须来自名为“既有实现依赖与事实”的显式小节。该小节按正文首次依赖出现顺序维护有序清单，每项固定包含 `repo`、`relative path`、`stable symbol/对象` 和“依赖结论”，并可附 `commit SHA`。`sdd.explicit_existing_dependencies` 仅指该清单，不由 reviewer 扫描全仓库或临时猜测；reviewer 还必须交叉检查正文同类事实是否漏列。
 
@@ -79,7 +80,7 @@ SDD 的既有实现依赖必须来自名为“既有实现依赖与事实”的�
 
 ### Step 2.3 — 分级与报告前缀（CR-2026-057 FR-2/FR-3/FR-4，固定句式可机械核对）
 
-**分级（FR-2）**：影响当前实现唯一性或当前验收可达性的缺口 → blocker；只影响表达/未来优化/后续 CR → suggestion；禁止批量升降级。
+**分级（FR-2）**：影响当前设计唯一性、数据完整性、安全隔离或当前验收可达性的缺口 → blocker；只影响表达/未来优化/后续 CR → suggestion；禁止批量升降级。不得仅因缺少里程碑、TASK owner、任务拆分、工时、完成标志、`cmd-NN`、cwd/timeout、具体测试文件或完整执行命令而形成 blocker——这些是 PLAN/TASK 粒度，SDD 只须明确架构与模块责任、数据模型、接口/事件契约、状态机、关键算法、事务与并发边界、错误语义、安全隔离与兼容策略，以及测试场景与可观测结果。
 
 **前缀（FR-3）**：`blockers[]` 与 `suggestions[]` 每条文本必须使用下列固定前缀之一（ASCII 全角冒号 `：`，前缀后可跟空格与正文；禁止自创同义前缀）：
 

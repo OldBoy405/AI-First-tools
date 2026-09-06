@@ -87,6 +87,8 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 8. **Prompt 采纳影响**（条件性小节，CR-2026-021 FR-25/AC-15）：**若本 CR 的 diff 会触及 `skills/shared/crctl/scripts/crctl.mjs` 的 dispatch 分支或 `skills/shared/controlled-shell/rules.json` 的 `protectedPaths.deny`（= crctl 命令面或 guard deny 面有新增/变更）**，本节为必填，列出应改为调用新增/扩展子命令的 skill 清单（每项含 skill 路径 + 现状 + 应改为的调用方式），供 `review-tech-design` 与人工审批逐条核对；若本 CR 不触及上述两处，本节可省略。`lint-prompts` 只能机械抓到"prompt 还在做 crctl 已接管/已禁止的事"（CONTRADICTS/STALE），抓不到"crctl 新增了能力、某 skill 该采纳却还没采纳"——这一类必须靠本节 + 评审兜底。
 9. **批准范围**（契约必填章节，CR-2026-057 FR-5/FR-6）：承载且仅承载四字段——`scope_in`（当前 CR 必须交付的 FR/AC）、`scope_out`（明确排除的路径和能力）、`zero_diff`（明确不得改动的调用点/签名）、`follow_up`（发现但留给后续 CR 的缺口）；空字段必须显式写 `无` 或 `N/A` 加理由，不得省略章节；不新增独立 ledger 文件、不新增状态。`approve-tech-design` 通过后该节对 PLAN/TASK/code 只读：PLAN/TASK 发现与批准范围冲突时，只能经既有 `review-dev-plan` 双轨回到 `write-tech-design` 或 `write-dev-plan`（不得静默扩大范围、不得把 `follow_up` 或兼容性背景自动转成当前 TASK）；代码阶段发现实际 diff 越界时只回 `implement-code`。
 
+**数据/schema 变更与写路径鉴权完整性（条件触发）**：仅当本 CR 涉及数据库 schema/数据变更或写路径鉴权时，SDD 必须同时给出：每个变更的回滚（down）及回滚的数据依赖/部分状态语义；变更过程不得存在约束缺失窗口；不得以绕过既定 DDL 规范的内联/隐式方式创建约束；写路径的鉴权复核必须在事务内、首次写入前完成，并与并发撤销/变更串行。具体 DDL 规范、锁原语与迁移登记要求以目标仓 `ARCHITECTURE.md`/迁移约束为准，本 Skill 不内置任何产品专属约束。
+
 ### Step 2.5 — 设计输出收窄（FR-08，CR-2026-050）
 
 **术语硬化（收窄范围）**：只处理进入数据模型 / 状态机 / 接口契约、且存在歧义 / 别名 / 边界风险（影响 FR/AC/角色权限/验收语义）的术语；每个风险术语至少验证一个代表性边界场景；已有 `CONTEXT.md` / 术语表只读沿用；命名冲突记录 `PRD canonical term → 代码别名` 映射；语义冲突**不得自行裁决**——在首次 `crctl advance` 前停止并要求需求负责人澄清。术语预检位于首次状态推进之前。
@@ -106,7 +108,9 @@ AC-xx
 可达性说明：关键前置条件不会提前过滤掉目标对象
 ```
 
-涉及既有实现（现有仓库、文件路径、稳定符号、配置键、接口/协议、数据库结构、模块行为、调用顺序或责任边界，且是方案成立前置条件）的断言，必须逐项附证据：`repo`、`commit SHA`、`relative path`、`stable symbol/对象`、`conclusion`；无法绑定这些字段的引用按待核实依赖列出，不得归入 N/A。无既有实现依赖时才明确写 `N/A（本 CR 无既有实现依赖）`，不得用 N/A 掩盖正文中的事实依赖。
+完成映射后必须逐条从 AC 反查 SDD 正文：设计落点确实能够产生所写可观测结果；权限、状态、空值、过滤条件和事件顺序不会使目标场景不可达；正文算法、接口契约与映射结论均不与 PRD 明文要求冲突。仅填写映射行不视为闭环，发现矛盾或不可达时先修订 SDD，不得推进评审。
+
+涉及既有实现（现有仓库、文件路径、稳定符号、配置键、接口/协议、数据库结构、模块行为、调用顺序或责任边界，且是方案成立前置条件）的断言，必须逐项附证据：`repo`、`commit SHA`、`relative path`、`stable symbol/对象`、`conclusion`；无法绑定这些字段的引用按待核实依赖列出，不得归入 N/A。无既有实现依赖时才明确写 `N/A（本 CR 无既有实现依赖）`，不得用 N/A 掩盖正文中的事实依赖。核验必须覆盖正文所声称的实际行为，不以「文件或符号存在」代替行为成立。正文中的「现有、既有、复用、无需新增」等断言若在当前资源 HEAD 上不成立，必须改为新增能力设计或列入待核实依赖，不得继续作为方案前提。
 
 ### 既有实现依赖与事实
 
@@ -124,7 +128,7 @@ AC-xx
 
 回修模式只按 blocker 和本轮变化定点修订，不无理由重写已确认方案。
 
-**SDD-CLOSE 关闭义务（CR-2026-060 AC-06，与 review-tech-design 成对）**：PRD 中显式延后到 SDD 的设计项（如接口闭包、数据模型、错误码、多仓路径 authority）必须在本 SDD 逐项关闭，并以 `SDD-CLOSE-01` 起编号记录关闭结论；未能关闭的项显式列为待办并在 `review-tech-design` 时标记。与 review-requirement 的七个评审维度使用同一术语集合，不另造同义维度名。
+**SDD-CLOSE 关闭义务（CR-2026-060 AC-06，与 review-tech-design 成对）**：PRD 中显式延后到 SDD 的设计项（如接口闭包、数据模型、错误码、多仓路径 authority）必须在本 SDD 逐项关闭，并以 `SDD-CLOSE-01` 起编号记录关闭结论；未能关闭的项显式列为待办并在 `review-tech-design` 时标记。关闭判定必须覆盖该事项实际涉及的数据生产、存储/传输、响应/schema、消费与兼容降级层；只完成其中一层不得声明关闭。与 review-requirement 的七个评审维度使用同一术语集合，不另造同义维度名。
 
 ### Step 3 — 落盘并 commit
 
