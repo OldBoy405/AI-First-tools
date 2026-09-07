@@ -216,6 +216,7 @@ change-request-track:
       - { from: requirement-reviewing, to: requirement-approved, trigger: "approve-requirement" }
       - { from: requirement-reviewing, to: drafting, trigger: "approve-requirement:reject -> write-requirement-prd" }
       - { from: requirement-approved, to: tech-designing, trigger: "write-tech-design" }
+      - { from: requirement-approved, to: drafting, trigger: "write-tech-design:prd-blocker -> write-requirement-prd" }
       - { from: tech-designing, to: tech-design-review-pending, trigger: "write-tech-design-complete" }
       - { from: tech-design-review-pending, to: tech-designing, trigger: "review-tech-design:block -> write-tech-design" }
       - { from: tech-design-review-pending, to: tech-designing, trigger: "approve-tech-design:reject -> write-tech-design" }
