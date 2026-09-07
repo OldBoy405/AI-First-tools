@@ -41,7 +41,7 @@ description: 需求编写期入口：一次调用 crctl register 深原语完成
 ### Step 1 — 前置确认
 
 1. 读取 `AGENTS.md`、`dir-graph.yaml`（只读，解析工作区布局与参与仓）。
-2. 确认 knowledge-base trunk 工作区 clean；存在未提交变更返回 `REGISTRATION_TRUNK_DIRTY`，不得继续。
+2. 确认 knowledge-base 的 `change-requests/` 工作区 clean（无关文件 dirty 不阻塞）；存在未提交变更返回 `REGISTRATION_TRUNK_DIRTY`，不得继续。
 3. 确认 `registration_key` 为本次注册意图的唯一稳定标识（如来源 + 标题摘要）。
 
 ### Step 2 — 一次深原语调用
@@ -69,7 +69,7 @@ crctl register --registration-key {registration_key} --title "{title}"
 | `REGISTER_TARGET_SPEC_ID_REQUIRED` | `--target-spec-id` 缺失/空，零写入（先于 BAD_ARGS）。确认 `target_spec_id` 取值后重试 |
 | `REGISTER_TARGET_SPEC_ID_INVALID` | `--target-spec-id` 非法（不匹配 `^[a-z0-9][a-z0-9._-]*$` 或含 `/`、`\`、CR、LF），零写入。确认后重试 |
 | `CAS_CONFLICT` / `TX_RECOVERY_CONFLICT` | 并发或第三方修改，零写入。重跑同命令自动重分配不撞号 |
-| `REGISTRATION_TRUNK_DIRTY` / `TX_GIT_FAILED` | 前置或 git 失败，按错误信息处理后重跑 |
+| `REGISTRATION_TRUNK_DIRTY` / `TX_GIT_FAILED` | `change-requests/` 工作区前置或 git 失败，按错误信息处理后重跑 |
 | 非零且 journal 有中间态 | 事务已持久化：直接**重跑同一条命令**续跑（幂等恢复），禁止手工清理 |
 
 ### Step 4 — 输出摘要
@@ -90,6 +90,6 @@ crctl register --registration-key {registration_key} --title "{title}"
 
 | 错误 | 处理 |
 |------|------|
-| knowledge-base trunk 不干净 | 返回 `REGISTRATION_TRUNK_DIRTY`，先保存或清理再重跑 |
+| knowledge-base 的 `change-requests/` 工作区不干净（无关文件 dirty 不阻塞） | 返回 `REGISTRATION_TRUNK_DIRTY`，先保存或清理再重跑 |
 | 深原语非零退出 | 按 Step 3 分类表处理；中间态一律重跑同命令续跑，不做手工补偿或回收 CR-ID |
 | 受控 shell 不可用 | 返回 `SHELL_UNAVAILABLE` 结构化错误，不输出手工 git 指令 |

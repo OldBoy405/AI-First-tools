@@ -807,7 +807,7 @@ export async function registerCr(ctx, input) {
     await recoverWriteSet({ txRoot: ctx.installRoot, txId: journal.txId });
 
     if (!payload.cr) {
-      const st = gitRun(kb.rootPath, ['status', '--porcelain']);
+      const st = gitRun(kb.rootPath, ['status', '--porcelain', '--', 'change-requests/']);
       if (st.stdout !== '') {
         throw new TxError('REGISTRATION_TRUNK_DIRTY', 'knowledge-base trunk 工作区有未提交变更，注册无法开始（请先提交或清理）', { dirty: st.stdout.split('\n').slice(0, 5) });
       }
@@ -825,7 +825,7 @@ export async function registerCr(ctx, input) {
     for (let attempt = 0; attempt < 3 && !payload.pushed; attempt++) {
       assertGraph();
       if (!payload.ledgersCommitted) {
-        const st = gitRun(kb.rootPath, ['status', '--porcelain']);
+        const st = gitRun(kb.rootPath, ['status', '--porcelain', '--', 'change-requests/']);
         if (st.stdout !== '') throw new TxError('REGISTRATION_TRUNK_DIRTY', 'knowledge-base trunk 工作区有未提交变更，账本写无法开始', { dirty: st.stdout.split('\n').slice(0, 5) });
         const bp = path.join(kb.rootPath, 'change-requests', '_backlog.yml');
         const ip = path.join(kb.rootPath, 'change-requests', '_index.yml');

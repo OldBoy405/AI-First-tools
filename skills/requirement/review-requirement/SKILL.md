@@ -13,7 +13,7 @@ description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审�
 
 ## 用途
 
-对 PRD 文档执行结构化质量评审：完整性检查、可测试性验证、范围合理性判断。将评审结论记录为 `review-annotations` 评审记录（经 `crctl review-record` 落盘），并更新 `traceability.yml`。只有 `verdict=pass` 且 `blockers=[]` 时，才将 CR status 推进到 `requirement-reviewing` 并允许进入人工审批；有 blocker 时保持或回到 `drafting`，由 pipeline `reviewLoop` 自动回到 `write-requirement-prd` 修复。
+对 PRD 文档执行结构化质量评审：完整性检查、可测试性验证、范围合理性判断。将评审结论记录为 `review-annotations` 评审记录（经 `crctl review-record` 落盘），并更新 `traceability.yml`。评审结论以 `crctl review-record` 落盘为唯一事实源，自然语言评论不是评审证据。只有 `verdict=pass` 且 `blockers=[]` 时，才将 CR status 推进到 `requirement-reviewing` 并允许进入人工审批；有 blocker 时保持或回到 `drafting`，由 pipeline `reviewLoop` 自动回到 `write-requirement-prd` 修复。
 
 ---
 
@@ -61,7 +61,7 @@ crctl gate {cr_id} --for requirement-reviewing --mode pre-review --workspace <wo
 
 #### 首轮完整契约域（CR-2026-057 FR-1）
 
-当 PRD 定义用户可调用契约（HTTP API、CLI 或 Skill 契约）时，首轮必须在生成 verdict 前按下列闭合清单一次检查完该契约域的全部适用项；同一契约域的独立缺口必须出现在同一轮 blockers，不得在首个 blocker 处提前结束、把剩余缺口留给下一轮。缺适用项须显式写 `N/A` 及原因：
+当 PRD 定义用户可调用契约（HTTP API、CLI 或 Skill 契约）时，首轮必须在生成 verdict 前按下列闭合清单一次检查完该契约域的全部适用项；同一契约域的独立缺口必须出现在同一轮 blockers，不得在首个 blocker 处提前结束、把剩余缺口留给下一轮。缺适用项须显式写 `N/A` 及原因。对已有代码库先例（idempotency 唯一键、固定错误体、锁/唯一索引等），评审只要求「引用先例 + 说明差异」，不要求 PRD 重写实现算法；确定性实现细节归开发期 SDD，不在 requirement 期阻塞。
 
 | 科目 | 必须一次检查的闭包 |
 |---|---|
@@ -115,7 +115,7 @@ crctl gate {cr_id} --for requirement-reviewing --mode pre-review --workspace <wo
    - 注入 reviewer=identity(ws)/reviewed-at=nowIso()，CAS 写入 canonical `review-annotations/requirement.yml`
    - `--bump-attempt` 级联 `crctl attempt` 记账（review-loop.yml，crctl 独占）
    - 成功后删除临时 payload（避免残留/跨 CR 串味）
-3. **模型不得直接 Write `review-annotations/requirement.yml` 或手写 review-loop**（guard deny + crctl 独占写）。
+3. **模型不得直接 Write `review-annotations/requirement.yml` 或手写 review-loop**（guard deny + crctl 独占写）。verdict/blockers 只能取落盘结果；落盘成功后才生成评论，且评论必须与落盘一致；未落盘即结束本轮视为失败（不视为「评审完成」）。
 
 ### Step 4 — 按 review-record 输出组织提交与分流（CR-2026-027 FR-13）
 

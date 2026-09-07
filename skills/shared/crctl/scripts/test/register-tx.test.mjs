@@ -209,16 +209,28 @@ test('TASK-05 AC-1：同 key 不同输入返回 REGISTRATION_INPUT_MISMATCH 且�
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
-test('TASK-05 AC-1：dirty trunk 返回 REGISTRATION_TRUNK_DIRTY 且仓库零写入', () => {
+test('TASK-05 AC-1：change-requests dirty 返回 REGISTRATION_TRUNK_DIRTY 且仓库零写入', () => {
   const { base, kb } = makeFixture();
   try {
-    fs.writeFileSync(path.join(kb, 'stray.txt'), 'x');
+    fs.writeFileSync(path.join(kb, 'change-requests', 'stray.txt'), 'x');
     const shaBefore = git(kb, ['rev-parse', 'master']);
     const r = runCrctl(regArgs(kb), { cwd: kb });
     assert.notEqual(r.status, 0);
     assert.equal(r.errJson.error.code, 'REGISTRATION_TRUNK_DIRTY');
     assert.equal(git(kb, ['rev-parse', 'master']), shaBefore);
     assert.equal(originMasterCount(base, 'kb'), 1);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('P2：docs dirty 但 change-requests clean 时允许注册', () => {
+  const { base, kb } = makeFixture();
+  try {
+    fs.mkdirSync(path.join(kb, 'docs'), { recursive: true });
+    fs.writeFileSync(path.join(kb, 'docs', 'unrelated-wip.md'), 'unrelated');
+    const r = runCrctl(regArgs(kb), { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.json.cr, new RegExp(`^CR-${YEAR}-001$`));
+    assert.equal(fs.readFileSync(path.join(kb, 'docs', 'unrelated-wip.md'), 'utf8'), 'unrelated');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
