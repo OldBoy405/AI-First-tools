@@ -3,7 +3,9 @@
  *
  * 用受控夹具（PATH 前置的 fake `multica` 可执行文件）验证
  * requirement-register 绑定步骤的可执行编码（promotion-bind.mjs）：
- * ① promotion 上下文齐备 → 绑定命令被调用且参数为 {cr_id} --run-id {run_id}；
+ * ① promotion 上下文齐备 → 绑定命令被调用且参数为 {cr_id} --run-id {run_id}，且响应
+ *    run_id/issue_id 与 promotion 上下文 fail-closed 全等后才报成功（B-CODE-05）；
+ * ①b 响应 run_id/issue_id 与请求/promotion 上下文错配 → BIND_RESPONSE_MISMATCH 技术失败停止；
  * ② 绑定失败（404/409/401/500 任一）→ 技术失败停止，输出含 registration_key 幂等重试指引；
  * ③ 无 promotion 上下文 → 不调用绑定（由 SKILL.md 条件性 Step 2.5 文本约束）；
  * ④ SKILL.md 含「绑定完成前不得推进 requirement-reviewing」硬不变量。
@@ -27,6 +29,7 @@ const BIND_SCRIPT = path.join(SKILL_DIR, "scripts", "promotion-bind.mjs");
 
 const CR_ID = "CR-2026-061";
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
+const ISSUE_ID = "22222222-2222-4222-8222-222222222222";
 
 const isWin = process.platform === "win32";
 
@@ -144,7 +147,7 @@ function runBind() {
     FAKE_MULTICA_LOG_PATH: logPath,
   };
   delete env.PROMOTION_BIND_MULTICA;
-  return spawnSync(process.execPath, [BIND_SCRIPT, CR_ID, RUN_ID], { encoding: "utf8", env });
+  return spawnSync(process.execPath, [BIND_SCRIPT, CR_ID, RUN_ID, ISSUE_ID], { encoding: "utf8", env });
 }
 
 function invocations() {
@@ -159,34 +162,105 @@ function invocations() {
 
 // ─── 用例 ────────────────────────────────────────────────────────────────
 
-test("① 有 promotion 上下文：绑定命令被调用且参数为 {cr_id} --run-id {run_id}，changed=true 成功", () => {
+test("① 有 promotion 上下文：绑定命令被调用且参数为 {cr_id} --run-id {run_id}，响应上下文全等后成功", () => {
   setScenario(0, {
     stdout: JSON.stringify({
       cr_id: CR_ID,
       run_id: RUN_ID,
-      issue_id: "22222222-2222-4222-8222-222222222222",
+      issue_id: ISSUE_ID,
       changed: true,
     }),
   });
   const res = runBind();
   assert.equal(res.status, 0, `bind 应成功，stderr: ${res.stderr}`);
-  assert.deepEqual(JSON.parse(res.stdout), { cr_id: CR_ID, run_id: RUN_ID, changed: true });
+  assert.deepEqual(JSON.parse(res.stdout), {
+    cr_id: CR_ID,
+    run_id: RUN_ID,
+    issue_id: ISSUE_ID,
+    changed: true,
+  });
+  // promotion_issue_id 只用于 fail-closed 校验，不传给 multica CLI（CLI 无该参数）。
   assert.deepEqual(invocations(), [["cr", "bind-promotion-run", CR_ID, "--run-id", RUN_ID]]);
 });
 
-test("①b 同 run 同 CR 幂等重放：changed=false 同样视为成功", () => {
+test("①b 同 run 同 CR 幂等重放：changed=false 且 issue_id 全等，同样视为成功", () => {
   setScenario(0, {
     stdout: JSON.stringify({
       cr_id: CR_ID,
       run_id: RUN_ID,
-      issue_id: "22222222-2222-4222-8222-222222222222",
+      issue_id: ISSUE_ID,
       changed: false,
     }),
   });
   const res = runBind();
   assert.equal(res.status, 0, `幂等重放应成功，stderr: ${res.stderr}`);
-  assert.equal(JSON.parse(res.stdout).changed, false);
+  const out = JSON.parse(res.stdout);
+  assert.equal(out.changed, false);
+  assert.equal(out.issue_id, ISSUE_ID);
   assert.equal(invocations().length, 1);
+});
+
+test("①c 响应 run_id 与请求 run 错配：BIND_RESPONSE_MISMATCH 技术失败停止（B-CODE-05）", () => {
+  setScenario(0, {
+    stdout: JSON.stringify({
+      cr_id: CR_ID,
+      run_id: "99999999-9999-4999-8999-999999999999",
+      issue_id: ISSUE_ID,
+      changed: true,
+    }),
+  });
+  const res = runBind();
+  assert.notEqual(res.status, 0, "run_id 错配必须非零退出");
+  assert.ok(res.stderr.includes("BIND_RESPONSE_MISMATCH"), res.stderr);
+  assert.ok(res.stderr.includes("run_id 与请求 promotion_run_id 不相等"), res.stderr);
+  assert.ok(
+    res.stderr.includes("registration_key") && res.stderr.includes("幂等重试"),
+    `stderr 应含幂等重试指引: ${res.stderr}`,
+  );
+});
+
+test("①d 响应 issue_id 与 promotion 上下文错配：BIND_RESPONSE_MISMATCH 技术失败停止（B-CODE-05）", () => {
+  setScenario(0, {
+    stdout: JSON.stringify({
+      cr_id: CR_ID,
+      run_id: RUN_ID,
+      issue_id: "99999999-9999-4999-8999-999999999999",
+      changed: true,
+    }),
+  });
+  const res = runBind();
+  assert.notEqual(res.status, 0, "issue_id 错配必须非零退出");
+  assert.ok(res.stderr.includes("BIND_RESPONSE_MISMATCH"), res.stderr);
+  assert.ok(res.stderr.includes("issue_id 与 promotion_issue_id 不相等"), res.stderr);
+  assert.ok(
+    res.stderr.includes("registration_key") && res.stderr.includes("幂等重试"),
+    `stderr 应含幂等重试指引: ${res.stderr}`,
+  );
+});
+
+test("①e 响应缺失 issue_id：视为与 promotion 上下文错配，BIND_RESPONSE_MISMATCH 停止", () => {
+  setScenario(0, {
+    stdout: JSON.stringify({
+      cr_id: CR_ID,
+      run_id: RUN_ID,
+      changed: true,
+    }),
+  });
+  const res = runBind();
+  assert.notEqual(res.status, 0, "缺失 issue_id 必须非零退出");
+  assert.ok(res.stderr.includes("BIND_RESPONSE_MISMATCH"), res.stderr);
+  assert.ok(res.stderr.includes("registration_key"), res.stderr);
+});
+
+test("①f 缺 issue_id 位置参数：usage 失败（绑定步骤只应在 promotion 上下文齐备时执行）", () => {
+  const env = {
+    ...process.env,
+    PATH: `${fakeDir}${path.delimiter}${process.env.PATH ?? ""}`,
+  };
+  delete env.PROMOTION_BIND_MULTICA;
+  const res = spawnSync(process.execPath, [BIND_SCRIPT, CR_ID, RUN_ID], { encoding: "utf8", env });
+  assert.notEqual(res.status, 0);
+  assert.ok(res.stderr.includes("usage:"), res.stderr);
 });
 
 test("② 绑定失败（404/409/401/500）：技术失败停止且输出含幂等重试指引", async (t) => {
@@ -220,7 +294,7 @@ test("②b multica 可执行文件不可用：技术失败停止", () => {
   // PATH 只含一个没有 multica 的目录：spawn 解析不到可执行文件（ENOENT）。
   const env = { ...process.env, PATH: tmpDir };
   delete env.PROMOTION_BIND_MULTICA;
-  const res = spawnSync(process.execPath, [BIND_SCRIPT, CR_ID, RUN_ID], { encoding: "utf8", env });
+  const res = spawnSync(process.execPath, [BIND_SCRIPT, CR_ID, RUN_ID, ISSUE_ID], { encoding: "utf8", env });
   assert.notEqual(res.status, 0);
   assert.ok(res.stderr.includes("MULTICA_UNAVAILABLE"), res.stderr);
 });
@@ -238,6 +312,10 @@ test("③ 无 promotion 上下文：SKILL.md 声明按普通注册处理、不�
   assert.ok(
     skill.includes("仅提供其一 → `PROMOTION_CONTEXT_INCOMPLETE` 技术失败停止"),
     "SKILL.md 应声明半上下文按失败关闭",
+  );
+  assert.ok(
+    skill.includes("BIND_RESPONSE_MISMATCH"),
+    "SKILL.md 应声明响应上下文错配按技术失败停止（B-CODE-05）",
   );
 });
 
