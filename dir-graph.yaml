@@ -236,6 +236,7 @@ change-request-track:
       - { from: code-approved, to: merging, trigger: "merge-feature-branch" }
       - { from: code-approved, to: developing, trigger: "merge-feature-branch:release-drift -> implement-code" }
       - { from: merging, to: writing-back, trigger: "writeback-prd-sdd" }
+      - { from: merging, to: code-approved, trigger: "merge-feature-branch:precondition-fail -> merge-feature-branch" }
       - { from: writing-back, to: archived, trigger: "cr-archive" }
       - { from: any-active, to: rejected, trigger: "cr-review-record:reject" }
       - { from: any-active, to: withdrawn, trigger: "cr-review-record:withdraw" }
