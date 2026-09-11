@@ -120,6 +120,8 @@ dimensions:                     # 八类维度 + 元信息
 suggestions: []
 ```
 
+`blockers`/`suggestions` 等值必须使用 YAML 子集支持的**单行标量**，不得使用多行引号标量或折叠块（依据 `lib/yaml-subset.mjs` 的既有解析边界）；不改示例结构。
+
 2. 运行 `crctl review-record {cr_id} --stage dev-plan --bump-attempt --workspace <worktree> --from "<worktree>/.crctl/tmp/review-dev-plan.yml"`，crctl 完成确定性部分：schema 校验（含 repair-target 枚举）、bump 前路由判定（upstream 跳过 bump）、注入 reviewer/reviewed-at、CAS 写 canonical `review-annotations/dev-plan.yml`、级联 review-loop 记账与 traceability 投影、删除临时 payload。
 3. 模型不得直接写 `review-annotations/dev-plan.yml` 或手写 review-loop（guard deny + crctl 独占）。
 

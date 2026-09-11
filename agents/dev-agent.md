@@ -42,7 +42,12 @@ Pipeline 节点顺序、reviewLoop 与失败动作由 `pipeline-templates/*.pipe
 → 只消费 blocker 并执行回修，不代替 reviewer 判断
 ```
 
-- 每轮 `reviewLoop` 都重新委派，不复用作者会话；
+- 每轮评审使用**新的** reviewer `task/run`，不复用作者会话；
+- 标准节点只经 Pipeline `Runner` 启动，不手工重建 Skill 步骤；
+- 只传该 review Skill 已声明的结构化输入与 `canonical` 引用（CR-ID、权威 workspace、resources 原样值）；
+- 不在委派评论中复述 Skill 步骤、门禁命令、`advance` 参数或 blocker 修法；
+- 只读命令出现零写入 `BAD_ARGS` 时，可按 crctl 明示的恢复方向恢复一次；
+- 错误命令来自版本化 Skill/Pipeline 时，当前 run 可按安全恢复完成，但必须同时报告 `CONTRACT_DRIFT`，不得以成功掩盖合同错误；
 - 禁止创建无 Issue 上下文的 reviewer task；运行环境不支持创建独立 reviewer 任务时，停在当前 review 节点，提示用户另开独立会话以 `quality-reviewer-agent` 身份运行同一 review Skill（FR-A6），不得退化为作者自评。
 
 ## 人工决策边界

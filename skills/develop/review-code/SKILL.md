@@ -121,6 +121,8 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
    repair-target: implement-code   # block 时固定为 implement-code
    ```
 
+   `blockers`/`suggestions` 等值必须使用 YAML 子集支持的**单行标量**，不得使用多行引号标量或折叠块（依据 `lib/yaml-subset.mjs` 的既有解析边界）；不改示例结构。
+
    **输出固定五字段（CR-2026-060 AC-09）**：评审结论 canonical 输出只含 `verdict` / `blockers` / `suggestions` / `dimensions` / `repair-target` 五字段，不新增 aggregate digest（不自行汇总 hash）；不重跑测试（测试执行已收敛 `crctl test --plan` 单入口，评审只读取证）；源码/日志/命令漂移（`test-report.md` 引用的 `cmd-NN` 与 `test-evidence/cmd-NN.log`、`sourceRevision`、`command-digest` 任一漂移）→ block。
 2. 运行 `crctl review-record {cr_id} --stage code --bump-attempt --workspace <worktree> --from "<worktree>/.crctl/tmp/review-code.yml"`（`--from` 显式锚定到与 `--workspace` 相同的绝对路径，禁止依赖缺省的相对路径），crctl 自动完成**确定性部分**：
    - schema 校验（verdict 枚举/blockers 列表/dimensions 齐全；失败 `SCHEMA_INVALID` 不写）
