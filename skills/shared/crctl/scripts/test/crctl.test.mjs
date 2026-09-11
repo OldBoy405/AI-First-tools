@@ -5200,6 +5200,45 @@ test('CR-2026-060 AC-03：legacy（两处均缺 target-spec-id）pre-review 通�
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
+/* ────────────────────────── CR-2026-063 TASK-01：gate 错配可操作化（AC-7） ────────────────────────── */
+
+/** 递归文件哈希集合（相对路径 → sha256），用于"零写入"断言。 */
+function treeHashes(dir) {
+  const out = {};
+  const walk = (d, base) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      const rel = base ? `${base}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(p, rel);
+      else out[rel] = sha256hex(readFileSync(p, 'utf8'));
+    }
+  };
+  walk(dir, '');
+  return out;
+}
+
+test('CR-2026-063 AC-7：gate --mode pre-review 错配 → BAD_ARGS + contractDrift:true + recoverCommand 双向量 + 零写入', () => {
+  const ws = makeWorkspace();
+  try {
+    const before = treeHashes(ws);
+    // 向量①：规范 CR-ID → 内插该 CR（可复制的恢复方向）
+    const r = runCrctl(['gate', 'CR-2026-063', '--for', 'tech-design-review-pending', '--mode', 'pre-review', '--workspace', ws]);
+    assert.equal(r.status, 1, '错配必须非零退出');
+    assert.equal(r.stderr.error.code, 'BAD_ARGS');
+    assert.equal(r.stderr.error.contractDrift, true);
+    assert.equal(r.stderr.error.recoverCommand, 'crctl workspace inspect CR-2026-063');
+    assert.equal(r.stdout, null, '错配路径不输出 stdout JSON');
+    // 向量②：非规范位置参数 → 回退占位符 <CR-ID>（不内插，恢复串不含自由文本）
+    const r2 = runCrctl(['gate', 'CR-X', '--for', 'requirement-approved', '--mode', 'pre-review', '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'BAD_ARGS');
+    assert.equal(r2.stderr.error.contractDrift, true);
+    assert.equal(r2.stderr.error.recoverCommand, 'crctl workspace inspect <CR-ID>');
+    // 零写入：执行前后整棵 workspace 的文件哈希集合零变化
+    assert.deepEqual(treeHashes(ws), before);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
 test('CR-2026-060 AC-03：new mode unassigned 的公开 CLI 直连 advance → GATE_BLOCKED/TARGET_VERSION_UNASSIGNED 零写入（cr.md/attempt/outbox 均不变）', () => {
   const ws = makeSpecAuthorityWorkspace();
   const cr = 'CR-2026-060';

@@ -954,10 +954,26 @@ function cmdStatus(ws, cr, gates, flags) {
   });
 }
 
+/* CR-2026-063 TASK-01（SDD §4.1.1，FR-7/FR-9 共用）：恢复方向里的 CR-ID 片段。
+ * 位置参数形如 CR-YYYY-NNN 时内插（得到可直接复制的恢复方向）；否则回退占位符，
+ * 保证恢复串在任何 argv 下都不含自由文本（NFR-3）。一处定义、两处调用：
+ * cmdGate 的 pre-review 错配分支与 cmdReviewLoopReset 的提交失败分支。
+ * 语法校验形态与既有 archive / version-set / workspace-transactions.mjs 的 CR_DIR_RE 一致。 */
+function crIdForRecover(cr) {
+  return /^CR-\d{4}-\d{3,}$/.test(String(cr)) ? String(cr) : '<CR-ID>';
+}
+
 function cmdGate(ws, cr, gates, flags) {
   if (!flags.for) fail('BAD_ARGS', 'gate 需要 --for <target-status>');
   if (flags.mode === 'pre-review') {
-    if (flags.for !== 'requirement-reviewing') fail('BAD_ARGS', '--mode pre-review 仅支持 --for requirement-reviewing');
+    if (flags.for !== 'requirement-reviewing') {
+      // SDD §3.1：错误码不变（BAD_ARGS）；新增 contractDrift（恒 true 的固定提示，§3.1.1）
+      // 与 recoverCommand（固定形态，无自由文本）。本分支在任何写路径之前，零写入由结构保证。
+      fail('BAD_ARGS', '--mode pre-review 仅支持 --for requirement-reviewing；该调用与版本化 Skill/Pipeline 的声明不一致（contractDrift=true），请复核权威 Skill/Pipeline 中该 stage 的门禁入口，勿继续按当前参数重试', {
+        contractDrift: true,
+        recoverCommand: `crctl workspace inspect ${crIdForRecover(cr)}`,
+      });
+    }
     const result = runPreReviewGateChecks(ws, cr);
     ok(result);
     if (!result.pass) {
