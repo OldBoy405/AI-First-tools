@@ -1833,8 +1833,10 @@ function cmdAttempt(ws, cr, gates, flags) {
 /* ────────────────────────── review-loop reset（CR-2026-049 人工重置）─────────────────────────
  * 唯一受控的人工出口：review-loop 耗尽（maxAttempts）后，由人类在交互式终端确认处理完毕，
  * 开启下一个 review cycle（current-cycle+1、current-attempt 归零、保留 attempts[] 历史）。
- * 与 approve 同强度的人类在环硬检查（非 TTY 一律拒绝，无旁路），写审计留 reason，禁止在未耗尽时调用。 */
-function cmdReviewLoopReset(ws, cr, gates, flags) {
+ * 与 approve 同强度的人类在环硬检查（非 TTY 一律拒绝，无旁路），写审计留 reason，禁止在未耗尽时调用。
+ * CR-2026-063 TASK-02（FR-9，SDD §3.2/§4.2）：写入路径由 fs.writeFileSync 直写改为
+ * 单文件 ledger 事务 + 提交隔离前置 + 进程内失败回滚，两条失败各有唯一产生点。 */
+async function cmdReviewLoopReset(ws, cr, gates, flags) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     fail('NOT_TTY', 'review-loop reset 仅接受交互式 TTY 会话（人类在环），无旁路参数或环境变量');
   }
@@ -1842,11 +1844,19 @@ function cmdReviewLoopReset(ws, cr, gates, flags) {
   if (!loopRef) fail('BAD_ARGS', 'review-loop reset 需要 --loop <review ref>（如 write-test-report / review-code）');
   const reason = flags.reason == null ? '' : String(flags.reason);
   if (!reason.trim()) fail('BAD_ARGS', 'review-loop reset 需要 --reason <人工处理说明>（写入审计，禁止空）');
+  const key = ledgerTxKey('reset', cr, loopRef);
+  // 步骤 4（SDD §4.2.1）：本事务键下的残留恢复必须先于任何状态判断——否则上一轮崩溃留下的
+  // "新内容"会被 readAttempts 误判为"未耗尽"而永久卡住（NFR-2 幂等与可重入）。
+  await recoverLedgerCommand(ws, key);
   const state = readAttempts(ws, cr, loopRef, gates);
   if (!state.exhausted) {
     fail('LOOP_NOT_EXHAUSTED', `${loopRef} 尚未耗尽（current=${state.current}/${state.max}），无需重置`, { current: state.current, max: state.max });
   }
   const p = attemptsFilePath(ws, cr);
+  // 步骤 7：expected hash 取未归一原文的 utf8 sha256（与事务内部 readHash 同源，保证 CAS 判定一致），
+  // 文件不存在传 null（事务按"新建文件"处理），不新造错误分支（SDD-CLOSE-03）。
+  const raw = readFileChecked(p);
+  const expectedHash = raw == null ? null : sha256(raw);
   const all = state.data.loops ? state.data : { loops: {} };
   const prev = all.loops[loopRef] || { 'current-cycle': 1, 'current-attempt': 0, attempts: [] };
   const fromCycle = prev['current-cycle'] || 1;
@@ -1856,9 +1866,50 @@ function cmdReviewLoopReset(ws, cr, gates, flags) {
     'current-attempt': 0,
     attempts: [...(prev.attempts || [])], // 旧轮次保留（cycle 标签不变），审计链不断
   };
-  // review-loop.yml 由 crctl 全量生成（crctl 独占该文件，无 CAS 冲突面），复用同一渲染器
-  fs.writeFileSync(p, renderLoopText(all.loops), 'utf8');
+  const newText = renderLoopText(all.loops); // 既有渲染器（LF-only）
+  const rel = path.relative(ws, p).split(path.sep).join('/');
+  // 步骤 10：单文件 write-set（依赖 lib/durable-tx.mjs 的前置条件放宽）；
+  // commitRequired=true 使"已提交/未提交"的判定口径与 approve 一致。
+  const ledgerTx = await beginLedgerCommand(ws, key, [{ path: p, expectedHash, newText }], true);
+  const addR = controlledGit(ws, 'add', ['-A', '--', rel], ws, 'crctl-review-loop-reset');
+  // 步骤 12：提交隔离前置（镜像 owner-set/version-set）——`git add` 只 stage 一个路径并不保证
+  // commit 的内容（git commit 会提交整个 index）。断言不成立则不 commit，直接进步骤 13；
+  // 因此执行前已存在的 staged 变更永不被夹带，也不被本命令回滚或改写。
+  const iso = queryTrackedChanges(ws, { audit: false });
+  const isolated = addR.ok && iso.ok && iso.unstaged.length === 0 && JSON.stringify(iso.staged) === JSON.stringify([rel]);
+  const commitMsg = `[cr] review-loop reset ${cr} ${loopRef} cycle ${fromCycle} -> ${nextCycle}\n\nAI-First-Tx: ${ledgerTx.txId}`;
+  const commitR = isolated
+    ? controlledGit(ws, 'commit', ['-m', commitMsg], ws, 'crctl-review-loop-reset')
+    : { ok: false, code: 'NOT_ISOLATED' };
+  const success = isolated && commitR.ok;
+  if (!success) {
+    try {
+      // 步骤 13 恢复链：直接 await / 直接调用，**禁止**经 runTxAsync 包装——该 helper 会把 TxError
+      // 交给 fail()→process.exit(1)，本 catch 与审计将永不执行（SDD §4.2.1 步骤 13 / dep-3）。
+      // 恢复链内部的 TX_JOURNAL_INVALID / TX_RECOVERY_CONFLICT / TX_GIT_FAILED 因此一律被本地 catch
+      // 收敛为 REVIEW_LOOP_RESET_COMMIT_ROLLBACK_FAILED，不作为对外错误码出现。
+      const rolled = await abortLedgerTransaction(ledgerTx);
+      if (rolled.paths.length) syncLedgerIndex(ws, rolled.paths, 'crctl-review-loop-reset');
+      const clean = queryTrackedChanges(ws, { audit: true });
+      if (!clean.ok || clean.staged.length || clean.unstaged.length) {
+        throw new Error(`clean baseline 复核失败 staged=[${(clean.staged || []).join(',')}] unstaged=[${(clean.unstaged || []).join(',')}]`);
+      }
+    } catch (e) {
+      // 审计先于 fail（NFR-5）；本码是步骤 13 的唯一产生点。
+      auditLog(ws, { kind: 'review-loop-reset', cr, loop: loopRef, fromCycle, toCycle: nextCycle, reason, by: identity(ws), result: 'commit-failed' });
+      fail('REVIEW_LOOP_RESET_COMMIT_ROLLBACK_FAILED', `提交失败后的恢复未完成：${String((e && e.message) || e)}`, { affected: [rel] });
+    }
+    auditLog(ws, { kind: 'review-loop-reset', cr, loop: loopRef, fromCycle, toCycle: nextCycle, reason, by: identity(ws), result: 'commit-failed' });
+    fail('REVIEW_LOOP_RESET_COMMIT_FAILED', 'review-loop.yml 变更提交失败：已按 journal 还原并撤销暂存（执行前 tracked-clean 时工作区已完全恢复）', {
+      changed: false,
+      rolled_back: true,
+      recoverCommand: `crctl review-loop reset ${crIdForRecover(cr)} --loop ${loopRef} --reason <reason>`,
+    });
+  }
+  await injectLedgerFault('ledger-after-commit'); // 与 approve 同款崩溃窗口挂接
+  await runTxAsync(finishLedgerTransaction(ledgerTx));
   auditLog(ws, { kind: 'review-loop-reset', cr, loop: loopRef, fromCycle, toCycle: nextCycle, reason, by: identity(ws) });
+  // 成功输出字段集与改造前一致（不含 recoverCommand）。
   ok({ op: 'review-loop-reset', cr, loop: loopRef, 'current-cycle': nextCycle, 'current-attempt': 0, file: p, reason });
 }
 

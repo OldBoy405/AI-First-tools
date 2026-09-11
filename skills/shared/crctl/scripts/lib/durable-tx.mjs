@@ -484,7 +484,10 @@ export async function recoverLedgerTransaction({ root, key, currentHead, headMes
 }
 
 export async function beginLedgerTransaction({ root, targetRoot, key, inputDigest, writes, headBefore, commitRequired }) {
-  if (!Array.isArray(writes) || writes.length < 2) throw new TxError('TX_WRITESET_INVALID', 'ledger transaction 至少需要两个文件');
+  // CR-2026-063 TASK-02（FR-9 第 3 条，SDD §3.3 / D-1）：前置条件由「至少两个文件」原位放宽为「至少一个文件」，
+  // 使单文件 write-set（review-loop reset 只写 review-loop.yml）可走同一 prepare/apply/rollback 路径。
+  // 空 write-set 仍被本前置条件与 applyWriteSet 的 entries.length === 0 双重拒绝（行为不变）。
+  if (!Array.isArray(writes) || writes.length < 1) throw new TxError('TX_WRITESET_INVALID', 'ledger transaction 至少需要一个文件');
   const lock = await acquireLock({ root, scope: `ledger-${key}`, op: 'ledger' });
   try {
     const existing = latestLedger(root, key);
