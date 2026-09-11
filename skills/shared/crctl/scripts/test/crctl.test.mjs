@@ -4722,21 +4722,42 @@ test('CR-2026-039 TASK-04 AC-5: KB 白名单后继提交 approve-code 仍可通�
   } finally { rmSync(ws2, { recursive: true, force: true }); }
 });
 
-test('CR-2026-057: KB 白名单新增 _context.md（工作流上下文加速文件）后继提交 approve-code 通过；_context2.md 非白名单仍拒绝', () => {
+test('CR-2026-057/CR-2026-063：_context.md 已从 KB post-review 白名单退役 → 评审后新增一律 post-review-path-drift 拒绝且零写入；_context2.md 非白名单仍拒绝', () => {
+  // CR-2026-063 TASK-03（FR-1④，SDD §6 FR-1④/AC-1④）：同一测试原位改为退役合同测试
+  // （禁止"保留原放行测试 + 旁边新增反向测试"），断言由"放行"改为"拒绝"。
   const { ws, privateKey } = makeCodeStageWorkspace();
   try {
     runCodeReviewAndAdvance(ws);
     const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
     const g = (args) => { const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
-    // ① 评审后仅 _context.md 变化（每 run 收尾刷新的工作流上下文加速文件，与 cr.md/traceability.yml 同类）→ 放行
+    // ① 评审后新增 _context.md（退役后与任意非白名单文件同等处理）→ post-review-path-drift 拒绝
     writeFileSync(path.join(wt, 'change-requests', 'CR-D1', '_context.md'), '# context\n');
     g(['add', '-A']); g(['commit', '-q', '-m', 'kb context successor']);
     const gp = makeCodeGrant(ws, privateKey);
     const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws]);
-    assert.equal(r.status, 0, `_context.md 后继应放行: ${r.rawStderr}`);
-    assert.equal(r.stdout.to, 'code-approved');
+    assert.equal(r.status, 1, `_context.md 退役后不得再放行: ${r.rawStdout}`);
+    assert.equal(r.stderr.error.code, 'RELEASE_SUBJECT_DRIFT');
+    assert.equal(r.stderr.error.reason, 'post-review-path-drift');
+    assert.deepEqual(r.stderr.error.unexpected, ['change-requests/CR-D1/_context.md'], '漂移清单点名该文件');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-D1', 'approval.yml')), false, 'approval.yml 零写入');
   } finally { rmSync(ws, { recursive: true, force: true }); }
-  // ② _context2.md（同类拼写但非白名单）→ post-review-path-drift 拒绝且零写入（独立 fixture）
+  // ② 修改既有 _context.md 同样拒绝（退役后无任何特例）
+  const { ws: ws1b, privateKey: pk1b } = makeCodeStageWorkspace();
+  try {
+    runCodeReviewAndAdvance(ws1b);
+    const wt = path.join(ws1b, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+    const g = (args) => { const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', '_context.md'), '# context v1\n');
+    g(['add', '-A']); g(['commit', '-q', '-m', 'kb context v1']);
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', '_context.md'), '# context v2\n');
+    g(['add', '-A']); g(['commit', '-q', '-m', 'kb context v2']);
+    const gp = makeCodeGrant(ws1b, pk1b);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws1b]);
+    assert.equal(r.status, 1, `_context.md 修改同样拒绝: ${r.rawStdout}`);
+    assert.equal(r.stderr.error.reason, 'post-review-path-drift');
+    assert.equal(existsSync(path.join(ws1b, 'change-requests', 'CR-D1', 'approval.yml')), false, 'approval.yml 零写入');
+  } finally { rmSync(ws1b, { recursive: true, force: true }); }
+  // ③ _context2.md（同类拼写但非白名单）→ post-review-path-drift 拒绝（证明不存在前缀式放宽）
   const { ws: ws2, privateKey: pk2 } = makeCodeStageWorkspace();
   try {
     runCodeReviewAndAdvance(ws2);
