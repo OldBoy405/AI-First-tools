@@ -282,6 +282,13 @@ function runRules(para, ctx) {
         findings.push({ rule: 'R7', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: 'git commit --template 的 -m subject 必须含 CR 编号或显式 --cr（反向解析兜底）' });
       }
     }
+    // CR-2026-063 TASK-01（FR-8，SDD §3.4-A/§4.3）：pre-review 门禁入口的配对子判据。
+    // 真实形态是 `crctl gate <CR-ID> --for <stage> --mode pre-review`（gate 与 --mode 不相邻），
+    // 故用词边界 \bgate\b 而非字面相邻；\b 视 `-` 为非词字符，不会命中 gateway/delegate。
+    // 判定粒度与既有四类子判据同族（行级），finding 仍是 R7（不新增规则编号）。
+    if (/\bgate\b/.test(l) && l.includes('--mode pre-review') && !l.includes('--for requirement-reviewing')) {
+      findings.push({ rule: 'R7', level: 'CONTRADICTS', file: ctx.file, line: para.startLine + li, why: 'gate --mode pre-review 必须同时声明 --for requirement-reviewing' });
+    }
   }
   // R8（FR-24，CR-2026-022）：inbox-emit 接口（函数式违例 + --event 枚举直读）
   for (let li = 0; li < lines.length; li++) {

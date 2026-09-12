@@ -184,6 +184,27 @@ test('R7：backlog-set 字段越白名单 + --template subject 缺 CR 编号 →
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('CR-2026-063 AC-8：R7 配对——gate 与 --mode pre-review 同现但缺 --for requirement-reviewing → CONTRADICTS；两者同现不报', () => {
+  const dir = makeFixture({
+    'skills/x/SKILL.md': '# 门禁\n\n运行 `crctl gate CR-1 --for tech-design-review-pending --mode pre-review` 复核。\n\n# 正确\n\n运行 `crctl gate CR-1 --for requirement-reviewing --mode pre-review` 复核。\n',
+  });
+  try {
+    const r = runLint(['--mode', 'report', '--root', dir]);
+    assert.ok(r.stdout.includes('gate --mode pre-review 必须同时声明 --for requirement-reviewing'), `应命中配对违例: ${r.stdout}`);
+    assert.ok(r.stdout.includes('R7') && r.stdout.includes('CONTRADICTS'), `finding 仍归 R7/CONTRADICTS: ${r.stdout}`);
+    assert.ok(!r.stdout.includes('R14'), '不得新增规则编号');
+    // 负向量：两者同现的行不产生该条 finding（独立 fixture，避免与正向量串扰）
+    const good = makeFixture({
+      'skills/x/SKILL.md': '# 门禁\n\n运行 `crctl gate CR-1 --for requirement-reviewing --mode pre-review` 复核。\n',
+    });
+    try {
+      const r2 = runLint(['--mode', 'report', '--root', good]);
+      assert.ok(!r2.stdout.includes('必须同时声明'), `正确形态不得报: ${r2.stdout}`);
+      assert.equal(r2.status, 0, r2.stderr);
+    } finally { rmSync(good, { recursive: true, force: true }); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('R8：函数式 inbox-emit + 枚举外 event → CONTRADICTS；合法 event 不报', () => {
   const dir = makeFixture({
     'skills/x/SKILL.md': '# 通知\n\ninbox-emit(to: \"a\")\ncrctl inbox-emit CR-1 --event bogus-event --to a\ncrctl inbox-emit CR-1 --event owner-handover --to a\n',

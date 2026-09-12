@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   acquireLock, loadOrCreateJournal, saveJournal, applyWriteSet, recoverWriteSet, cleanupTxBlobs,
-  pidProbe, _setPidProbe, durableWriteFile, nowIso,
+  pidProbe, _setPidProbe, durableWriteFile, nowIso, beginLedgerTransaction, abortLedgerTransaction,
 } from '../lib/durable-tx.mjs';
 import { TxError } from '../lib/durable-tx.mjs';
 
@@ -283,5 +283,34 @@ test('CR-2026-033 T02：checkpoint op/payload slot generic 校验（不涉及业
     // 多个 payload 非空 → generic envelope 拒绝
     journal.ledger = { phase: 'x' };
     await expectTx(saveJournal({ path: path.join(root, '.crctl', 'transactions', 'checkpoint', 'CR-2026-033', journal.txId, 'journal.json'), journal }), 'TX_JOURNAL_INVALID');
+  } finally { rm(root); }
+});
+
+test('CR-2026-063 AC-9⑥：ledger write-set 前置条件放宽——writes.length===1 被接受且可回滚；空 write-set 仍双重拒绝', async () => {
+  const root = mkRoot();
+  try {
+    const rel = 'change-requests/CR-9/review-loop.yml';
+    const abs = path.join(root, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    const before = '# loop\n';
+    fs.writeFileSync(abs, before);
+    const newText = '# loop\nloops: {}\n';
+    // 单文件 write-set：改前必被 `writes.length < 2` 拒绝；改后走同一 prepare/apply/rollback 路径
+    const tx = await beginLedgerTransaction({
+      root, targetRoot: root, key: 'reset-CR-9-review-code', inputDigest: 'd1',
+      writes: [{ path: abs, expectedHash: sha256Hex(before), newText }],
+      headBefore: null, commitRequired: true,
+    });
+    assert.equal(fs.readFileSync(abs, 'utf8'), newText, '单条目 apply 生效');
+    assert.deepEqual(tx.paths, [rel]);
+    const rolled = await abortLedgerTransaction(tx);
+    assert.deepEqual(rolled.paths, [rel]);
+    assert.equal(fs.readFileSync(abs, 'utf8'), before, '单条目可回滚到 beforeText');
+    // 空 write-set：仍被前置条件拒绝（另一重拒绝在 applyWriteSet）
+    await expectTx(beginLedgerTransaction({
+      root, targetRoot: root, key: 'reset-CR-9-empty', inputDigest: 'd2',
+      writes: [], headBefore: null, commitRequired: true,
+    }), 'TX_WRITESET_INVALID');
+    await expectTx(applyWriteSet({ root, txId: 'x'.repeat(32), entries: [] }), 'TX_WRITESET_INVALID');
   } finally { rm(root); }
 });

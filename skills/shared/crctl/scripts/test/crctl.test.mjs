@@ -40,19 +40,21 @@ function runCrctl(args, env) {
   return { status: r.status, stdout, stderr, rawStdout: r.stdout, rawStderr: r.stderr };
 }
 
-function runCrctlWrapped(args, prelude, input = '') {
+function runCrctlWrapped(args, prelude, input = '', env) {
   const script = `${prelude}\nprocess.argv = [process.execPath, ${JSON.stringify(CRCTL)}, ...process.argv.slice(1)];\nawait import(${JSON.stringify(pathToFileURL(CRCTL).href)});`;
-  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script, ...args], { encoding: 'utf8', input });
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script, ...args], { encoding: 'utf8', input, env: env ? { ...process.env, ...env } : process.env });
   let stderr = null;
   try { stderr = JSON.parse(r.stderr); } catch { /* ignore */ }
   return { status: r.status, stderr, rawStdout: r.stdout, rawStderr: r.stderr };
 }
 
-function runCrctlInTty(args, input = 'yes\n') {
+// env 形参向后兼容（CR-2026-063 TASK-02）：W1/W3 等崩溃窗口用例需要给 TTY runner 透传
+// CRCTL_FAULT_POINT；既有调用不传即沿用 process.env，行为不变。
+function runCrctlInTty(args, input = 'yes\n', env) {
   return runCrctlWrapped(args, [
     `Object.defineProperty(process.stdin, 'isTTY', { value: true });`,
     `Object.defineProperty(process.stdout, 'isTTY', { value: true });`,
-  ].join('\n'), input);
+  ].join('\n'), input, env);
 }
 
 /** 建一个一次性临时 workspace；返回目录路径，调用方负责在 test 结束时 rmSync。
@@ -3428,26 +3430,195 @@ test('CR-2026-049：review-loop reset 非交互式调用拒绝（人类在环，
 });
 
 test('CR-2026-049：review-loop reset 耗尽态开启下一 cycle，保留 attempts 历史', () => {
-  const ws = makeWorkspace();
+  // CR-2026-063 TASK-02（SDD dep-14）：夹具由 makeWorkspace() 迁移到 makeGitWorkspace()——
+  // 改造后步骤 11–12 必做 git add / git commit，非 git 夹具必红；断言与断言语义逐字不变。
+  const ws = makeGitWorkspace();
   try {
     const crDir = path.join(ws, 'change-requests', 'CR-TEST-1');
     mkdirSync(crDir, { recursive: true });
-    writeFileSync(path.join(crDir, 'review-loop.yml'), [
-      '# 由 crctl attempt 维护，请勿手工编辑', 'loops:', '  write-test-report:', '    current-cycle: 1', '    current-attempt: 3', '    attempts:',
-      '      - { attempt: 1, at: "2026-08-21T01:00:00+08:00", by: "Ray", cycle: 1 }',
-      '      - { attempt: 2, at: "2026-08-21T02:00:00+08:00", by: "Ray", cycle: 1 }',
-      '      - { attempt: 3, at: "2026-08-21T03:00:00+08:00", by: "Ray", cycle: 1 }',
-    ].join('\n') + '\n', 'utf8');
+    writeFileSync(path.join(crDir, 'review-loop.yml'), resetLoopFixture(), 'utf8');
+    git(ws, ['add', '-A']);
+    git(ws, ['commit', '-q', '-m', '[cr] seed review-loop']);
+    const head0 = git(ws, ['rev-parse', 'HEAD']);
     const r = runCrctlInTty(['review-loop', 'reset', 'CR-TEST-1', '--loop', 'write-test-report', '--reason', 'human processed blockers', '--workspace', ws]);
     assert.equal(r.status, 0, r.rawStderr);
     const out = JSON.parse(r.rawStdout);
     assert.equal(out['current-cycle'], 2);
     assert.equal(out['current-attempt'], 0);
+    // CR-2026-063 AC-9③：成功结果的字段集不变，不含 recoverCommand
+    assert.equal(out.recoverCommand, undefined, '成功结果不含 recoverCommand');
     const text = readFileSync(path.join(crDir, 'review-loop.yml'), 'utf8');
     assert.match(text, /current-cycle: 2/);
     assert.match(text, /current-attempt: 0/);
     // 旧轮次保留且 cycle 标签不变
     assert.equal((text.match(/- \{ attempt:/g) || []).length, 3);
+    // CR-2026-063 AC-9①：变更已被提交，提交只含 review-loop.yml，消息带 [cr] 前缀与 tx trailer；工作区 clean
+    assert.notEqual(git(ws, ['rev-parse', 'HEAD']), head0, 'reset 必须产生提交');
+    assert.equal(git(ws, ['log', '-1', '--format=%s']), '[cr] review-loop reset CR-TEST-1 write-test-report cycle 1 -> 2');
+    assert.match(git(ws, ['log', '-1', '--format=%B']), /AI-First-Tx: \S+/);
+    assert.equal(git(ws, ['show', '--name-only', '--format=', 'HEAD']), 'change-requests/CR-TEST-1/review-loop.yml', '提交只含该文件');
+    assert.equal(git(ws, ['status', '--porcelain']), '', 'reset 成功后无 dirty 中间态');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+/* ──────────── CR-2026-063 TASK-02：reset 原子提交的崩溃/失败窗口真值表（SDD §4.2.2） ──────────── */
+
+/** review-loop.yml 耗尽态夹具（write-test-report：cycle 1 / attempt 3 / 三条历史）。 */
+function resetLoopFixture() {
+  return [
+    '# 由 crctl attempt 维护，请勿手工编辑', 'loops:', '  write-test-report:', '    current-cycle: 1', '    current-attempt: 3', '    attempts:',
+    '      - { attempt: 1, at: "2026-08-21T01:00:00+08:00", by: "Ray", cycle: 1 }',
+    '      - { attempt: 2, at: "2026-08-21T02:00:00+08:00", by: "Ray", cycle: 1 }',
+    '      - { attempt: 3, at: "2026-08-21T03:00:00+08:00", by: "Ray", cycle: 1 }',
+  ].join('\n') + '\n';
+}
+
+/** 建一个已 seed 提交的 reset 夹具仓；返回 { ws, crDir, loopRel }。 */
+function makeResetWorkspace(cr = 'CR-TEST-1') {
+  const ws = makeGitWorkspace();
+  const crDir = path.join(ws, 'change-requests', cr);
+  mkdirSync(crDir, { recursive: true });
+  writeFileSync(path.join(crDir, 'review-loop.yml'), resetLoopFixture(), 'utf8');
+  git(ws, ['add', '-A']);
+  git(ws, ['commit', '-q', '-m', '[cr] seed review-loop']);
+  return { ws, crDir, loopRel: `change-requests/${cr}/review-loop.yml` };
+}
+
+const RESET_ARGS = ['review-loop', 'reset', 'CR-TEST-1', '--loop', 'write-test-report', '--reason', 'human processed blockers'];
+
+/** 装 commit 失败 hook；body 是 hook 除 shebang 外的脚本行。 */
+function installPreCommitHook(ws, body) {
+  mkdirSync(path.join(ws, '.githooks'), { recursive: true });
+  const hook = path.join(ws, '.githooks', 'pre-commit');
+  writeFileSync(hook, ['#!/bin/sh', ...body, 'exit 1', ''].join('\n'));
+  chmodSync(hook, 0o755);
+  git(ws, ['config', 'core.hooksPath', '.githooks']);
+}
+
+test('CR-2026-063 AC-9②W1：tx-apply-before-complete 崩溃 → 同命令下次按 journal 还原后干净执行一次（cycle 只递增一次）', () => {
+  const { ws, crDir } = makeResetWorkspace();
+  try {
+    const loopP = path.join(crDir, 'review-loop.yml');
+    const before = readFileSync(loopP, 'utf8');
+    const head0 = git(ws, ['rev-parse', 'HEAD']);
+    const w1 = runCrctlInTty([...RESET_ARGS, '--workspace', ws], 'yes\n', { CRCTL_FAULT_POINT: 'tx-apply-before-complete' });
+    assert.equal(w1.status, 1);
+    assert.equal(w1.stderr.error.code, 'FAULT_INJECTED');
+    assert.notEqual(readFileSync(loopP, 'utf8'), before, '崩溃时文件已写入新内容（journal 未收敛）');
+    assert.equal(git(ws, ['rev-parse', 'HEAD']), head0, '崩溃时 HEAD 未变');
+    const r2 = runCrctlInTty([...RESET_ARGS, '--workspace', ws]);
+    assert.equal(r2.status, 0, r2.rawStderr);
+    assert.equal(JSON.parse(r2.rawStdout)['current-cycle'], 2, 'cycle 只递增一次');
+    const text = readFileSync(loopP, 'utf8');
+    assert.match(text, /current-cycle: 2/);
+    assert.equal((text.match(/- \{ attempt:/g) || []).length, 3);
+    assert.equal(git(ws, ['status', '--porcelain']), '', '重跑后无 dirty 残留');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-063 AC-9②W2：commit 失败 → REVIEW_LOOP_RESET_COMMIT_FAILED/changed=false/rolled_back=true，文件与 index 回到执行前', () => {
+  // 向量①：非规范位置参数（CR-TEST-1）→ recoverCommand 回退占位符 <CR-ID>（不内插）
+  const { ws, crDir } = makeResetWorkspace();
+  try {
+    installPreCommitHook(ws, []);
+    const loopP = path.join(crDir, 'review-loop.yml');
+    const before = readFileSync(loopP, 'utf8');
+    const head0 = git(ws, ['rev-parse', 'HEAD']);
+    const r = runCrctlInTty([...RESET_ARGS, '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'REVIEW_LOOP_RESET_COMMIT_FAILED');
+    assert.equal(r.stderr.error.changed, false);
+    assert.equal(r.stderr.error.rolled_back, true);
+    assert.equal(r.stderr.error.recoverCommand, 'crctl review-loop reset <CR-ID> --loop write-test-report --reason <reason>');
+    assert.equal(readFileSync(loopP, 'utf8'), before, '文件回到执行前');
+    assert.equal(git(ws, ['status', '--porcelain', '--untracked-files=no']), '', 'tracked clean baseline 恢复');
+    assert.equal(git(ws, ['rev-parse', 'HEAD']), head0, 'HEAD 不变');
+    const audits = auditLines(ws).filter((a) => a.kind === 'review-loop-reset');
+    assert.equal(audits.length, 1, '失败路径同样落审计');
+    assert.equal(audits[0].result, 'commit-failed');
+    assert.equal(audits[0].fromCycle, 1);
+    assert.equal(audits[0].toCycle, 2);
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+  // 向量②：规范 CR-ID（CR-2026-063）→ 内插该 CR；--reason 位置恒为占位符（NFR-3）
+  const f2 = makeResetWorkspace('CR-2026-063');
+  try {
+    installPreCommitHook(f2.ws, []);
+    const r2 = runCrctlInTty([
+      'review-loop', 'reset', 'CR-2026-063', '--loop', 'write-test-report', '--reason', 'human processed blockers', '--workspace', f2.ws,
+    ]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'REVIEW_LOOP_RESET_COMMIT_FAILED');
+    assert.equal(r2.stderr.error.recoverCommand, 'crctl review-loop reset CR-2026-063 --loop write-test-report --reason <reason>');
+    assert.ok(!r2.stderr.error.recoverCommand.includes('human processed blockers'), '用户文本不进恢复串');
+  } finally { rmSync(f2.ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-063 AC-9②W2b：执行前已有 staged 变更 → 不 commit、不夹带；回滚复核失败 → ROLLBACK_FAILED（affected）', () => {
+  const { ws, crDir, loopRel } = makeResetWorkspace();
+  try {
+    writeFileSync(path.join(ws, 'scratch.txt'), 'unrelated\n');
+    git(ws, ['add', 'scratch.txt']); // 执行前已存在的 staged 变更（不属本命令）
+    const loopP = path.join(crDir, 'review-loop.yml');
+    const before = readFileSync(loopP, 'utf8');
+    const head0 = git(ws, ['rev-parse', 'HEAD']);
+    const r = runCrctlInTty([...RESET_ARGS, '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'REVIEW_LOOP_RESET_COMMIT_ROLLBACK_FAILED');
+    assert.deepEqual(r.stderr.error.affected, [loopRel]);
+    assert.equal(r.stderr.error.recoverCommand, undefined, '本码不带 recoverCommand（同族口径）');
+    assert.equal(git(ws, ['rev-parse', 'HEAD']), head0, '不执行 commit（HEAD 不变）');
+    assert.equal(readFileSync(loopP, 'utf8'), before, 'review-loop.yml 已按 journal 还原');
+    assert.equal(git(ws, ['diff', '--name-only', '--cached']), 'scratch.txt', '无关 staged 变更保持原样、未被夹带');
+    const audits = auditLines(ws).filter((a) => a.kind === 'review-loop-reset');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].result, 'commit-failed');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-063 AC-9②W2c：恢复链自身失败（hook 写第三值）→ 收敛为 ROLLBACK_FAILED，不外泄 TX_*', () => {
+  const { ws, crDir, loopRel } = makeResetWorkspace();
+  try {
+    // 同一既有 core.hooksPath + pre-commit 机制（dep-13）：先把 review-loop.yml 写成第三值，再 exit 1。
+    // 于是 abortLedgerTransaction 的 journal 还原遇到"既非 before 也非 after" → TX_RECOVERY_CONFLICT。
+    installPreCommitHook(ws, [
+      'cat > ' + loopRel + " <<'EOF'",
+      'loops:',
+      '  write-test-report:',
+      '    current-cycle: 99',
+      '    current-attempt: 0',
+      '    attempts: []',
+      'EOF',
+    ]);
+    const r = runCrctlInTty([...RESET_ARGS, '--workspace', ws]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr.error.code, 'REVIEW_LOOP_RESET_COMMIT_ROLLBACK_FAILED');
+    assert.deepEqual(r.stderr.error.affected, [loopRel]);
+    assert.ok(!r.rawStderr.includes('TX_'), '恢复链内部 TxError 码不得作为对外错误码出现');
+    assert.match(readFileSync(path.join(crDir, 'review-loop.yml'), 'utf8'), /current-cycle: 99/, '第三值未被覆盖（回滚失败的事实）');
+    const audits = auditLines(ws).filter((a) => a.kind === 'review-loop-reset');
+    assert.equal(audits.length, 1);
+    assert.equal(audits[0].result, 'commit-failed');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-063 AC-9④：reset 三条既有拒绝保持（NOT_TTY / 缺参 BAD_ARGS / LOOP_NOT_EXHAUSTED）', () => {
+  const { ws } = makeResetWorkspace();
+  try {
+    // 非 TTY
+    const notTty = runCrctl([...RESET_ARGS, '--workspace', ws]);
+    assert.equal(notTty.status, 1);
+    assert.equal(notTty.stderr.error.code, 'NOT_TTY');
+    // 缺 --loop / 缺 --reason
+    const noLoop = runCrctlInTty(['review-loop', 'reset', 'CR-TEST-1', '--reason', 'x', '--workspace', ws]);
+    assert.equal(noLoop.status, 1);
+    assert.equal(noLoop.stderr.error.code, 'BAD_ARGS');
+    const noReason = runCrctlInTty(['review-loop', 'reset', 'CR-TEST-1', '--loop', 'write-test-report', '--workspace', ws]);
+    assert.equal(noReason.status, 1);
+    assert.equal(noReason.stderr.error.code, 'BAD_ARGS');
+    // 未耗尽（非规范 CR-ID 的失败向量在 W2 中已覆盖 recoverCommand 占位符面）
+    const notExhausted = runCrctlInTty(['review-loop', 'reset', 'CR-X', '--loop', 'review-code', '--reason', 'x', '--workspace', ws]);
+    assert.equal(notExhausted.status, 1);
+    assert.equal(notExhausted.stderr.error.code, 'LOOP_NOT_EXHAUSTED');
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 
@@ -4551,21 +4722,42 @@ test('CR-2026-039 TASK-04 AC-5: KB 白名单后继提交 approve-code 仍可通�
   } finally { rmSync(ws2, { recursive: true, force: true }); }
 });
 
-test('CR-2026-057: KB 白名单新增 _context.md（工作流上下文加速文件）后继提交 approve-code 通过；_context2.md 非白名单仍拒绝', () => {
+test('CR-2026-057/CR-2026-063：_context.md 已从 KB post-review 白名单退役 → 评审后新增一律 post-review-path-drift 拒绝且零写入；_context2.md 非白名单仍拒绝', () => {
+  // CR-2026-063 TASK-03（FR-1④，SDD §6 FR-1④/AC-1④）：同一测试原位改为退役合同测试
+  // （禁止"保留原放行测试 + 旁边新增反向测试"），断言由"放行"改为"拒绝"。
   const { ws, privateKey } = makeCodeStageWorkspace();
   try {
     runCodeReviewAndAdvance(ws);
     const wt = path.join(ws, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
     const g = (args) => { const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
-    // ① 评审后仅 _context.md 变化（每 run 收尾刷新的工作流上下文加速文件，与 cr.md/traceability.yml 同类）→ 放行
+    // ① 评审后新增 _context.md（退役后与任意非白名单文件同等处理）→ post-review-path-drift 拒绝
     writeFileSync(path.join(wt, 'change-requests', 'CR-D1', '_context.md'), '# context\n');
     g(['add', '-A']); g(['commit', '-q', '-m', 'kb context successor']);
     const gp = makeCodeGrant(ws, privateKey);
     const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws]);
-    assert.equal(r.status, 0, `_context.md 后继应放行: ${r.rawStderr}`);
-    assert.equal(r.stdout.to, 'code-approved');
+    assert.equal(r.status, 1, `_context.md 退役后不得再放行: ${r.rawStdout}`);
+    assert.equal(r.stderr.error.code, 'RELEASE_SUBJECT_DRIFT');
+    assert.equal(r.stderr.error.reason, 'post-review-path-drift');
+    assert.deepEqual(r.stderr.error.unexpected, ['change-requests/CR-D1/_context.md'], '漂移清单点名该文件');
+    assert.equal(existsSync(path.join(ws, 'change-requests', 'CR-D1', 'approval.yml')), false, 'approval.yml 零写入');
   } finally { rmSync(ws, { recursive: true, force: true }); }
-  // ② _context2.md（同类拼写但非白名单）→ post-review-path-drift 拒绝且零写入（独立 fixture）
+  // ② 修改既有 _context.md 同样拒绝（退役后无任何特例）
+  const { ws: ws1b, privateKey: pk1b } = makeCodeStageWorkspace();
+  try {
+    runCodeReviewAndAdvance(ws1b);
+    const wt = path.join(ws1b, '.rayai-worktrees', 'knowledge-base', 'requirement', 'CR-D1');
+    const g = (args) => { const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', shell: false }); if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`); };
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', '_context.md'), '# context v1\n');
+    g(['add', '-A']); g(['commit', '-q', '-m', 'kb context v1']);
+    writeFileSync(path.join(wt, 'change-requests', 'CR-D1', '_context.md'), '# context v2\n');
+    g(['add', '-A']); g(['commit', '-q', '-m', 'kb context v2']);
+    const gp = makeCodeGrant(ws1b, pk1b);
+    const r = runCrctl(['approve', 'CR-D1', '--stage', 'code', '--grant', gp, '--workspace', ws1b]);
+    assert.equal(r.status, 1, `_context.md 修改同样拒绝: ${r.rawStdout}`);
+    assert.equal(r.stderr.error.reason, 'post-review-path-drift');
+    assert.equal(existsSync(path.join(ws1b, 'change-requests', 'CR-D1', 'approval.yml')), false, 'approval.yml 零写入');
+  } finally { rmSync(ws1b, { recursive: true, force: true }); }
+  // ③ _context2.md（同类拼写但非白名单）→ post-review-path-drift 拒绝（证明不存在前缀式放宽）
   const { ws: ws2, privateKey: pk2 } = makeCodeStageWorkspace();
   try {
     runCodeReviewAndAdvance(ws2);
@@ -5197,6 +5389,45 @@ test('CR-2026-060 AC-03：legacy（两处均缺 target-spec-id）pre-review 通�
     const bad = runCrctl(['gate', cr, '--for', 'requirement-approved', '--mode', 'pre-review', '--workspace', ws]);
     assert.notEqual(bad.status, 0);
     assert.equal(bad.stderr.error.code, 'BAD_ARGS');
+  } finally { rmSync(ws, { recursive: true, force: true }); }
+});
+
+/* ────────────────────────── CR-2026-063 TASK-01：gate 错配可操作化（AC-7） ────────────────────────── */
+
+/** 递归文件哈希集合（相对路径 → sha256），用于"零写入"断言。 */
+function treeHashes(dir) {
+  const out = {};
+  const walk = (d, base) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      const rel = base ? `${base}/${e.name}` : e.name;
+      if (e.isDirectory()) walk(p, rel);
+      else out[rel] = sha256hex(readFileSync(p, 'utf8'));
+    }
+  };
+  walk(dir, '');
+  return out;
+}
+
+test('CR-2026-063 AC-7：gate --mode pre-review 错配 → BAD_ARGS + contractDrift:true + recoverCommand 双向量 + 零写入', () => {
+  const ws = makeWorkspace();
+  try {
+    const before = treeHashes(ws);
+    // 向量①：规范 CR-ID → 内插该 CR（可复制的恢复方向）
+    const r = runCrctl(['gate', 'CR-2026-063', '--for', 'tech-design-review-pending', '--mode', 'pre-review', '--workspace', ws]);
+    assert.equal(r.status, 1, '错配必须非零退出');
+    assert.equal(r.stderr.error.code, 'BAD_ARGS');
+    assert.equal(r.stderr.error.contractDrift, true);
+    assert.equal(r.stderr.error.recoverCommand, 'crctl workspace inspect CR-2026-063');
+    assert.equal(r.stdout, null, '错配路径不输出 stdout JSON');
+    // 向量②：非规范位置参数 → 回退占位符 <CR-ID>（不内插，恢复串不含自由文本）
+    const r2 = runCrctl(['gate', 'CR-X', '--for', 'requirement-approved', '--mode', 'pre-review', '--workspace', ws]);
+    assert.equal(r2.status, 1);
+    assert.equal(r2.stderr.error.code, 'BAD_ARGS');
+    assert.equal(r2.stderr.error.contractDrift, true);
+    assert.equal(r2.stderr.error.recoverCommand, 'crctl workspace inspect <CR-ID>');
+    // 零写入：执行前后整棵 workspace 的文件哈希集合零变化
+    assert.deepEqual(treeHashes(ws), before);
   } finally { rmSync(ws, { recursive: true, force: true }); }
 });
 

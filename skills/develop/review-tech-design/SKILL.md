@@ -109,6 +109,7 @@ SDD 的既有实现依赖必须来自名为“既有实现依赖与事实”的�
    dimensions: {评审维度: 结论, ...}   # 该 stage 门禁要求的维度齐全
    suggestions: []       # 可选
    ```
+   `blockers`/`suggestions` 等值必须使用 YAML 子集支持的**单行标量**，不得使用多行引号标量或折叠块（依据 `lib/yaml-subset.mjs` 的既有解析边界）；不改示例结构。
 2. 运行 `crctl review-record {cr_id} --stage tech-design --bump-attempt --workspace <worktree> --from "<worktree>/.crctl/tmp/review-tech-design.yml"`（`--from` 显式锚定到与 `--workspace` 相同的绝对路径，禁止依赖缺省的相对路径），crctl 自动完成**确定性部分**：
    - schema 校验（verdict 枚举/blockers 列表/dimensions 齐全；失败 `SCHEMA_INVALID` 不写）
    - stage→文件名显式映射（tech-design→sdd.yml 非同名）
