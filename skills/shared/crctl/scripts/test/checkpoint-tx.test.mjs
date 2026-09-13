@@ -8,6 +8,7 @@ import path from 'node:path';
 import { git, runCrctl, makeFixture, sha256 } from './merge-fixture.mjs';
 import { loadOrCreateJournal, saveJournal } from '../lib/durable-tx.mjs';
 import { classifyCheckpointRemote, editLatestCheckpoint, resolveRepositories } from '../lib/workspace-transactions.mjs';
+import { readTextNormalized } from './assertion-sources.mjs';
 
 const CR = 'CR-2026-033';
 const TOOLS_ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
@@ -485,9 +486,17 @@ test('checkpoint T05 contract：Pipeline 只编排 Skill，active alignment read
       assert.doesNotMatch(node.prompt, /crctl checkpoint|source commit|lease publish|latest-checkpoint|source-sha|checkpoint-add|git (add|commit|push)/i, `${name}:${node.label}`);
     }
   }
-  const alignment = fs.readFileSync(path.join(TOOLS_ROOT, 'skills', 'review', 'review-alignment', 'SKILL.md'), 'utf8');
-  assert.ok(alignment.includes('latest-checkpoint'));
-  assert.ok(!alignment.includes('checkpoints[]'));
+  // J-2（CR-2026-065）：reader 事实源 = cr.md + _backlog.yml 条目信息；不回写该文件（在 zero_diff 面内）。
+  const alignment = readTextNormalized(path.join(TOOLS_ROOT, 'skills', 'review', 'review-alignment', 'SKILL.md'));
+  assert.ok(alignment.includes('change-requests/_backlog.yml'), 'reader 读取契约应命中 change-requests/_backlog.yml');
+  assert.ok(alignment.includes('cr.md'), 'reader 读取契约应命中 cr.md');
+  assert.equal(alignment.includes('latest-checkpoint'), false, 'review-alignment 不得重新引入 latest-checkpoint（回退事实源即红）');
+  assert.equal(alignment.includes('checkpoints[]'), false, 'review-alignment 不得重新引入 checkpoints[]（回退事实源即红）');
+  // 否定辖域：三词不得作为事实源被读出——每个命中句必须含否定锚点「不读」（零命中同样通过）
+  const sourceSentences = alignment.split(/[。；\n]/).filter((s) => /mtime|merge-commit|fingerprint/.test(s));
+  for (const sentence of sourceSentences) {
+    assert.ok(sentence.includes('不读'), `三词命中句必须含否定锚点「不读」：${sentence.trim()}`);
+  }
 });
 
 test('checkpoint 业务 payload 恢复冲突：损坏 journal（重复 repo）→ TX_RECOVERY_CONFLICT', () => {

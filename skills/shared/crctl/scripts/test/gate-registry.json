@@ -1,0 +1,244 @@
+{
+  "schema": "crctl-suite-gate/v1",
+  "manifest": {
+    "files": [
+      "archive-tx.test.mjs",
+      "check-agents-contract.test.mjs",
+      "check-skill-matrix.test.mjs",
+      "checkpoint-tx.test.mjs",
+      "contract-scan.test.mjs",
+      "crctl.test.mjs",
+      "durable-tx.test.mjs",
+      "fault-harness.test.mjs",
+      "lint-prompts.test.mjs",
+      "merge-tx.test.mjs",
+      "pipeline-structure.test.mjs",
+      "register-tx.test.mjs",
+      "test-cr.test.mjs",
+      "trace-outbox.test.mjs",
+      "trace-semantic.test.mjs",
+      "upgrade-check.test.mjs",
+      "version-set.test.mjs",
+      "workspace-freshness.test.mjs",
+      "workspace-resolver.test.mjs",
+      "writeback-tx.test.mjs",
+      "yaml-subset.test.mjs"
+    ],
+    "cases": {
+      "archive-tx.test.mjs": 1,
+      "check-agents-contract.test.mjs": 1,
+      "check-skill-matrix.test.mjs": 1,
+      "checkpoint-tx.test.mjs": 1,
+      "contract-scan.test.mjs": 1,
+      "crctl.test.mjs": 1,
+      "durable-tx.test.mjs": 1,
+      "fault-harness.test.mjs": 1,
+      "lint-prompts.test.mjs": 1,
+      "merge-tx.test.mjs": 1,
+      "pipeline-structure.test.mjs": 1,
+      "register-tx.test.mjs": 1,
+      "test-cr.test.mjs": 1,
+      "trace-outbox.test.mjs": 1,
+      "trace-semantic.test.mjs": 1,
+      "upgrade-check.test.mjs": 1,
+      "version-set.test.mjs": 1,
+      "workspace-freshness.test.mjs": 1,
+      "workspace-resolver.test.mjs": 1,
+      "writeback-tx.test.mjs": 1,
+      "yaml-subset.test.mjs": 1
+    }
+  },
+  "stateMachine": {
+    "namedStates": [
+      "drafting",
+      "requirement-reviewing",
+      "requirement-approved",
+      "tech-designing",
+      "tech-design-review-pending",
+      "tech-design-reviewed",
+      "task-breakdown",
+      "developing",
+      "code-reviewing",
+      "code-approved",
+      "merging",
+      "writing-back",
+      "archived",
+      "rejected",
+      "withdrawn"
+    ],
+    "wildcards": {
+      "any-active": [
+        "drafting",
+        "requirement-reviewing",
+        "requirement-approved",
+        "tech-designing",
+        "tech-design-review-pending",
+        "tech-design-reviewed",
+        "task-breakdown",
+        "developing",
+        "code-reviewing",
+        "code-approved",
+        "merging",
+        "writing-back"
+      ]
+    },
+    "transitions": [
+      {
+        "from": "(new)",
+        "to": "drafting",
+        "trigger": "requirement-register"
+      },
+      {
+        "from": "drafting",
+        "to": "requirement-reviewing",
+        "trigger": "review-requirement"
+      },
+      {
+        "from": "requirement-reviewing",
+        "to": "requirement-reviewing",
+        "trigger": "review-requirement"
+      },
+      {
+        "from": "drafting",
+        "to": "drafting",
+        "trigger": "review-requirement:block -> write-requirement-prd"
+      },
+      {
+        "from": "requirement-reviewing",
+        "to": "requirement-approved",
+        "trigger": "approve-requirement"
+      },
+      {
+        "from": "requirement-reviewing",
+        "to": "drafting",
+        "trigger": "approve-requirement:reject -> write-requirement-prd"
+      },
+      {
+        "from": "requirement-approved",
+        "to": "tech-designing",
+        "trigger": "write-tech-design"
+      },
+      {
+        "from": "requirement-approved",
+        "to": "drafting",
+        "trigger": "write-tech-design:prd-blocker -> write-requirement-prd"
+      },
+      {
+        "from": "tech-designing",
+        "to": "tech-design-review-pending",
+        "trigger": "write-tech-design-complete"
+      },
+      {
+        "from": "tech-design-review-pending",
+        "to": "tech-designing",
+        "trigger": "review-tech-design:block -> write-tech-design"
+      },
+      {
+        "from": "tech-design-review-pending",
+        "to": "tech-designing",
+        "trigger": "approve-tech-design:reject -> write-tech-design"
+      },
+      {
+        "from": "tech-design-review-pending",
+        "to": "tech-design-reviewed",
+        "trigger": "approve-tech-design"
+      },
+      {
+        "from": "tech-design-reviewed",
+        "to": "task-breakdown",
+        "trigger": "write-dev-tasks"
+      },
+      {
+        "from": "task-breakdown",
+        "to": "task-breakdown",
+        "trigger": "write-dev-tasks"
+      },
+      {
+        "from": "task-breakdown",
+        "to": "tech-design-reviewed",
+        "trigger": "approve-dev-start:reject -> write-dev-plan"
+      },
+      {
+        "from": "task-breakdown",
+        "to": "tech-design-reviewed",
+        "trigger": "review-dev-plan:block -> write-dev-plan"
+      },
+      {
+        "from": "task-breakdown",
+        "to": "tech-design-review-pending",
+        "trigger": "review-dev-plan:upstream-design-blocker"
+      },
+      {
+        "from": "task-breakdown",
+        "to": "developing",
+        "trigger": "approve-dev-start"
+      },
+      {
+        "from": "developing",
+        "to": "developing",
+        "trigger": "write-test-report:block -> implement-code"
+      },
+      {
+        "from": "developing",
+        "to": "developing",
+        "trigger": "review-code:block -> implement-code"
+      },
+      {
+        "from": "developing",
+        "to": "tech-design-reviewed",
+        "trigger": "review-code:plan-blocker -> write-dev-plan"
+      },
+      {
+        "from": "developing",
+        "to": "code-reviewing",
+        "trigger": "review-code"
+      },
+      {
+        "from": "code-reviewing",
+        "to": "developing",
+        "trigger": "approve-code:reject -> implement-code"
+      },
+      {
+        "from": "code-reviewing",
+        "to": "code-approved",
+        "trigger": "approve-code"
+      },
+      {
+        "from": "code-approved",
+        "to": "merging",
+        "trigger": "merge-feature-branch"
+      },
+      {
+        "from": "code-approved",
+        "to": "developing",
+        "trigger": "merge-feature-branch:release-drift -> implement-code"
+      },
+      {
+        "from": "merging",
+        "to": "writing-back",
+        "trigger": "writeback-prd-sdd"
+      },
+      {
+        "from": "merging",
+        "to": "code-approved",
+        "trigger": "merge-feature-branch:precondition-fail -> merge-feature-branch"
+      },
+      {
+        "from": "writing-back",
+        "to": "archived",
+        "trigger": "cr-archive"
+      },
+      {
+        "from": "any-active",
+        "to": "rejected",
+        "trigger": "cr-review-record:reject"
+      },
+      {
+        "from": "any-active",
+        "to": "withdrawn",
+        "trigger": "cr-review-record:withdraw"
+      }
+    ]
+  },
+  "exceptions": []
+}
