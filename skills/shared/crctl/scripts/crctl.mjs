@@ -21,6 +21,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 // CR-2026-031 TASK-03：YAML 子集解析器与 workspace 基础设施同源共享（lib/ 下，禁止在 crctl.mjs 复刻）。
 import { parseYaml, matchEntryBlock } from './lib/yaml-subset.mjs';
+// CR-2026-065 TASK-02（FR-8/FR-10）：outbox 去重比较字段的唯一事实源（字段分类 + 投影）
+import { buildOutboxEvent, buildOutboxComparable } from './lib/outbox-contract.mjs';
 import {
   deriveInstallRoot, TxError, resolveRepositories, registerCr, ensureWorkspace,
   classifyWorkspaceFreshness, syncWorkspaceToTrunk,
@@ -299,19 +301,10 @@ function emitOutboxEvent(ws, ev) {
     fs.mkdirSync(dir, { recursive: true });
     const gi = path.join(installRoot, '.crctl', '.gitignore');
     if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n');
-    const event = {
-      v: 1,
-      event_kind: ev.event_kind,
-      cr_id: ev.cr_id,
-      from_status: ev.from_status ?? '',
-      to_status: ev.to_status ?? '',
-      trigger: ev.trigger ?? '',
-      commit_sha: ev.commit_sha ?? '',
-      actor: ev.actor ?? '',
-      evidence: ev.evidence ?? {},
-      payload: ev.payload ?? {},
-      occurred_at: nowIso(),
-    };
+    // AIFIRST: CR-2026-065 TASK-02 (FR-8/FR-10): 事件对象构造与去重比较投影的唯一事实源
+    // 在 ./lib/outbox-contract.mjs（哪些字段参与比较、哪些 payload 易变键被枚举排除，
+    // 只在那里登记；本文件不得再出现第二份字段枚举或易变键的语义副本）。
+    const event = buildOutboxEvent(ev, nowIso());
     const ts = new Date().toISOString().replace(/[-:.]/g, '');
     // 文件名片段消毒：pending: 占位 sha（CR-2026-003）含冒号，Windows 文件名非法；只影响文件名，事件内容不动
     const shaSlug = (event.commit_sha || 'nosha').replace(/[^A-Za-z0-9]/g, '').slice(0, 8) || 'nosha';
@@ -320,22 +313,7 @@ function emitOutboxEvent(ws, ev) {
     if (ev.dedup_name && fs.existsSync(target)) {
       let existing;
       try { existing = JSON.parse(fs.readFileSync(target, 'utf8')); } catch (e) { throw new Error(`OUTBOX_DEDUP_INVALID: ${name}: ${e.message}`); }
-      const comparable = (value) => JSON.stringify({
-        v: value.v, event_kind: value.event_kind, cr_id: value.cr_id,
-        from_status: value.from_status, to_status: value.to_status,
-        trigger: value.trigger, commit_sha: value.commit_sha,
-        actor: value.actor, evidence: value.evidence,
-        // AIFIRST: CR-2026-052 TASK-08 (FR-12, SDD §4.4/DD-6): payload.detected_at
-        // is the sole observation-time volatile field (regenerated per
-        // emitDriftAudit via nowIso()). Excluding it lets the same drift be
-        // observed twice during the pre-collection window without a spurious
-        // OUTBOX_DEDUP_CONFLICT → EMIT_FAILED, matching the "leave one copy
-        // while pending collection" semantics. The digest/summary fields stay
-        // in the comparison so a real content change still conflicts (AC-12
-        // third branch). New volatile time fields must be added here too.
-        payload: (() => { const p = { ...(value.payload || {}) }; delete p.detected_at; return p; })(),
-      });
-      if (comparable(existing) === comparable(event)) return name;
+      if (JSON.stringify(buildOutboxComparable(existing)) === JSON.stringify(buildOutboxComparable(event))) return name;
       throw new Error(`OUTBOX_DEDUP_CONFLICT: ${name}`);
     }
     const tmp = path.join(dir, `.tmp-${process.pid}-${name}`);

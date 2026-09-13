@@ -227,6 +227,13 @@ test('TASK-09 AC-2：rejected CR — authority 来自 CR worktree，归档在 de
  * outbox 失败 warning/补发、预存 dedup 命中、rejected/withdrawn 零事件、complete 幂等重放、
  * remote rebuild 最终 SHA。断言只读新契约字段与事件内容，不删除/放宽既有 TASK-09 断言。 */
 
+/** archive 事务 journal 路径：<kb>/.crctl/transactions/archive/<cr>/<txId>/journal.json（取最新 txId）。 */
+function archiveJournalPath(kb, cr) {
+  const root = path.join(kb, '.crctl', 'transactions', 'archive', cr);
+  const txIds = fs.readdirSync(root).sort();
+  return path.join(root, txIds[txIds.length - 1], 'journal.json');
+}
+
 /** 过滤 kb installation workspace outbox 中本 CR 的 archive 事件文件名（按确定性 dedup_name 前缀）。 */
 function archiveOutboxFiles(kb, cr) {
   const dir = path.join(kb, '.crctl', 'outbox');
@@ -375,29 +382,76 @@ test('TASK-01 RED-7：预存确定性 dedup 文件 → 命中同名补记，数�
   try {
     const outDir = path.join(kb, '.crctl', 'outbox');
     fs.rmSync(outDir, { recursive: true, force: true }); // baseline status outbox 不属于本 archive dedup 断言
-    fs.writeFileSync(outDir, 'conflict\n');
     const r1 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
     assert.equal(r1.status, 0, r1.stderr);
-    assert.deepEqual(r1.json.warnings, [{ code: 'EMIT_FAILED', event_kind: 'archive' }]);
-    fs.rmSync(outDir);
-    const head = git(path.join(base, 'origin-kb.git'), ['rev-parse', 'master']);
-    fs.mkdirSync(outDir, { recursive: true });
-    const dedupName = `archive-${cr}-${head}.json`;
-    fs.writeFileSync(path.join(outDir, dedupName), '{"placeholder":true}\n'); // 文件写成功但 journal 未标记的崩溃窗
+    assert.deepEqual(r1.json.warnings, [], 'r1 正常归档：archive 事件真实写入');
+    const files1 = archiveOutboxFiles(kb, cr);
+    assert.equal(files1.length, 1, 'r1 恰一个 archive 事件');
+    const dedupName = files1[0];
+    const eventPath = path.join(outDir, dedupName);
+    const bytesBefore = fs.readFileSync(eventPath, 'utf8');
+    // 构造 A（CR-2026-065 TASK-02 / SDD §4.5）：模拟真实崩溃窗口 —— 事件文件已写（内容 = 本次真实事件）、
+    // journal 未标记；把 payload.outboxEmitted 置回 false 后重放，断言原集合全部保留。
+    const journalPath = archiveJournalPath(kb, cr);
+    const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+    assert.equal(journal.archive.outboxEmitted, true, 'r1 发送事实已落 journal');
+    journal.archive.outboxEmitted = false;
+    fs.writeFileSync(journalPath, JSON.stringify(journal, null, 2));
     const n1 = originMasterCount(base, 'kb');
     const r2 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
     assert.equal(r2.status, 0, r2.stderr);
     assert.equal(r2.json.phase, 'complete', JSON.stringify(r2.json || r2.errJson));
     assert.deepEqual(r2.json.warnings, []);
     assert.equal(r2.json.outbox, dedupName, '命中确定性文件即视为已发送');
-    const files = archiveOutboxFiles(kb, cr);
-    assert.equal(files.length, 1, '命中预存文件，数量不增');
-    assert.equal(fs.readFileSync(path.join(outDir, dedupName), 'utf8'), '{"placeholder":true}\n', '不覆盖既有内容');
+    assert.equal(archiveOutboxFiles(kb, cr).length, 1, '命中预存文件，数量不增');
+    assert.equal(fs.readFileSync(eventPath, 'utf8'), bytesBefore, '不覆盖既有内容');
     assert.equal(originMasterCount(base, 'kb'), n1, '零新 commit');
     const r3 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
     assert.equal(r3.status, 0, r3.stderr);
     assert.deepEqual(r3.json.warnings, []);
     assert.equal(archiveOutboxFiles(kb, cr).length, 1, 'complete 重放不再生成事件');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-065 BR-5 同名不同内容：可见信号 + journal pending + 补发成功', () => {
+  const { base, kb, cr, txws } = makeWritebackFixture();
+  try {
+    const outDir = path.join(kb, '.crctl', 'outbox');
+    fs.rmSync(outDir, { recursive: true, force: true });
+    // 步骤 1：r1 正常归档 → 事件文件 E 存在
+    const r1 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.equal(r1.status, 0, r1.stderr);
+    const files1 = archiveOutboxFiles(kb, cr);
+    assert.equal(files1.length, 1, 'r1 恰一个 archive 事件');
+    const name = files1[0];
+    const eventPath = path.join(outDir, name);
+    assert.equal(JSON.parse(fs.readFileSync(eventPath, 'utf8')).event_kind, 'archive');
+    // 步骤 2：把 E 内容替换为不同内容 + journal outboxEmitted 置回 false
+    fs.writeFileSync(eventPath, '{"placeholder":true}\n');
+    const journalPath = archiveJournalPath(kb, cr);
+    const journal0 = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+    journal0.archive.outboxEmitted = false;
+    fs.writeFileSync(journalPath, JSON.stringify(journal0, null, 2));
+    // 步骤 3：重放 → 可见信号（warning + audit）、不覆盖、journal 保持 pending
+    const r2 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.ok(r2.json.warnings.some((w) => w.code === 'EMIT_FAILED' && w.event_kind === 'archive'), 'warnings 含 EMIT_FAILED(archive): ' + JSON.stringify(r2.json.warnings));
+    const audit = fs.readFileSync(path.join(kb, '.crctl', 'audit.log'), 'utf8');
+    assert.ok(audit.includes('OUTBOX_DEDUP_CONFLICT'), 'audit.log 出现 OUTBOX_DEDUP_CONFLICT 可见信号');
+    assert.equal(fs.readFileSync(eventPath, 'utf8'), '{"placeholder":true}\n', 'E 未被覆盖');
+    const journal1 = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+    assert.notEqual(journal1.archive.outboxEmitted, true, 'journal 保持 pending（不可静默视为已发送）');
+    // 步骤 4：删除冲突文件 → 再重放 → 补发成功、零新 commit
+    const n1 = originMasterCount(base, 'kb');
+    fs.rmSync(eventPath, { force: true });
+    const r3 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.deepEqual(r3.json.warnings, [], '补发成功无 warning');
+    assert.equal(r3.json.outbox, name, '补发命中同一确定性文件名');
+    assert.equal(originMasterCount(base, 'kb'), n1, '补发零新 commit');
+    assert.equal(JSON.parse(fs.readFileSync(eventPath, 'utf8')).event_kind, 'archive', 'E 内容为真实 archive 事件');
+    const journal2 = JSON.parse(fs.readFileSync(journalPath, 'utf8'));
+    assert.equal(journal2.archive.outboxEmitted, true, '补发成功后 journal 标记 emitted');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 

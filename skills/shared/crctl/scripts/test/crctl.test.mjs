@@ -18,6 +18,8 @@ import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 // CR-2026-039 TASK-03：纯函数单测直接 import（与 archive-tx/checkpoint-tx 等测试同模式；不改变 CLI 公开面）
 import { crMdStatusText, refreshCrMdUpdated, classifyRepoWorkspace, normalizeTargetVersion, readCrMdTargetVersion, resolveRepositories, guardWritebackVersion, planVersionRefill, applyTargetVersionToCrMd, editBacklogEntryTargetVersion } from '../lib/workspace-transactions.mjs';
+// CR-2026-065 TASK-01（FR-1/FR-3/FR-6）：事实源推导（只读、硬失败）——BR-1/BR-3/BR-4 的推导面
+import { deriveStateMachine, readTextNormalized } from './assertion-sources.mjs';
 
 const CRCTL = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
 // 真实 tools 包根（test → scripts → crctl → shared → skills → tools 共 5 层）：
@@ -1335,17 +1337,31 @@ test('CR-2026-037 task init：读间 TASK 变化与索引 CAS 冲突均零覆盖
 });
 
 test('CR-2026-037 Prompt 采纳：Skill/Pipeline 调 task init 且不指导直写索引', () => {
-  const root = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
-  const skill = readFileSync(path.join(root, 'skills', 'develop', 'write-dev-tasks', 'SKILL.md'), 'utf8');
-  const pipelineText = readFileSync(path.join(root, 'pipeline-templates', 'code-implementation.pipeline.json'), 'utf8');
-  const pipeline = JSON.parse(pipelineText);
+  // J-1（CR-2026-065）：断言落真实载体——指令在 write-dev-tasks/SKILL.md，pipeline 只编排 Skill。
+  const root = PACKAGE_ROOT;
+  const skill = readTextNormalized(path.join(root, 'skills', 'develop', 'write-dev-tasks', 'SKILL.md'));
   assert.match(skill, /crctl task init/);
   assert.match(skill, /禁止 Agent\/Skill 手写/);
   assert.doesNotMatch(skill, /重新生成.*TASK 与 `_index\.yml`/);
-  assert.match(pipelineText, /crctl task init/);
-  assert.match(pipelineText, /不得手写索引/);
-  assert.doesNotMatch(pipelineText, /同时生成 tasks\/_index\.yml/);
-  assert.equal(pipeline.nodes.length, 16); // CR-2026-042：删除 reviewer 选择暂停节点 …0013，17 -> 16
+  // 节点数 = 跨文件投影（pipeline-templates/_index.yml#code-implementation-v1.nodes），不在测试里写第二份 16
+  const pipeline = JSON.parse(readTextNormalized(path.join(root, 'pipeline-templates', 'code-implementation.pipeline.json')));
+  const indexText = readTextNormalized(path.join(root, 'pipeline-templates', '_index.yml'));
+  const projected = indexText.match(/- id: code-implementation-v1\n(?:.*\n)*?\s*nodes:\s*(\d+)/);
+  assert.ok(projected, '_index.yml 必须登记 code-implementation-v1.nodes（跨文件投影的唯一登记处）');
+  assert.equal(pipeline.nodes.length, Number(projected[1]), 'pipeline 节点数 ≡ _index.yml 登记值');
+  // pipeline 节点 prompt 对受治理账本写指令零命中（账本写指令的载体是 Skill，不是 pipeline）
+  const ledgerWrite = /crctl (?:task init|task append|task done|advance|review-record|approve|owner-set|version-set)|_index\.yml|_backlog\.yml/;
+  for (const node of pipeline.nodes) {
+    assert.doesNotMatch(String(node.prompt || ''), ledgerWrite, `${node.label} 不得含受治理账本写指令`);
+  }
+  // 每个 skill 节点的 ref 存在，且在 skills/_index.yml 登记为 active
+  const skillsIndex = readTextNormalized(path.join(root, 'skills', '_index.yml'));
+  for (const node of pipeline.nodes.filter((n) => n.kind === 'skill')) {
+    assert.ok(typeof node.ref === 'string' && node.ref.length > 0, `${node.label} 缺 ref`);
+    const block = skillsIndex.match(new RegExp(`- id: ${node.ref}\n(?:.*\n)*?\\s*status: (\\w+)`));
+    assert.ok(block, `ref ${node.ref} 未在 skills/_index.yml 登记`);
+    assert.equal(block[1], 'active', `ref ${node.ref} 必须 active`);
+  }
 });
 
 test('task done：正常路径 pending→done + done-at + audit 记录（AC-1）', () => {
@@ -4783,13 +4799,25 @@ test('TASK-06 ⑤: release-drift 单一回退转换 code-approved -> developing 
     assert.equal(r.status, 0, r.rawStderr);
     assert.equal(r.stdout.to, 'developing');
   } finally { rmSync(ws, { recursive: true, force: true }); }
-  // 口径断言：唯一事实源 = tools 包 dir-graph.yaml（具名状态 15 不变）
-  const dg = readFileSync(path.join(PACKAGE_ROOT, 'dir-graph.yaml'), 'utf8').replace(/\r\n/g, '\n');
-  const declared = dg.match(/- \{ from: /g) || [];
-  assert.equal(declared.length, 28, 'CR-2026-031 TASK-06 后声明转移 = 28');
-  const anyActiveCount = (dg.match(/any-active:\n((?:        - .*\n)+)/) || ['', ''])[1].split('\n').filter((l) => l.trim()).length;
-  const wildcardTriggers = (dg.match(/from: any-active/g) || []).length;
-  assert.equal(declared.length - wildcardTriggers + anyActiveCount * wildcardTriggers, 50, 'wildcard 展开后 = 50');
+  // J-3（CR-2026-065）：口径断言 = 推导 ≡ 登记（两条独立来源），承重断言只此三条集合/计数等价；
+  // 推导侧结构自检恒真、不计入覆盖（SDD-CLOSE-10）。用例名保留历史口径字样（名字不是断言）。
+  const derived = deriveStateMachine(PACKAGE_ROOT);
+  const registry = JSON.parse(readTextNormalized(path.join(PACKAGE_ROOT, 'skills', 'shared', 'crctl', 'scripts', 'test', 'gate-registry.json')));
+  assert.equal(registry.schema, 'crctl-suite-gate/v1');
+  const sm = registry.stateMachine;
+  const sorted = (xs) => [...xs].sort();
+  assert.deepEqual(sorted(derived.namedStates), sorted(sm.namedStates), '具名状态集合 ≡ 登记集合');
+  assert.deepEqual(sorted(Object.keys(derived.wildcards)), sorted(Object.keys(sm.wildcards)), 'wildcard 名集合 ≡ 登记集合');
+  for (const name of Object.keys(sm.wildcards)) {
+    assert.deepEqual(sorted(derived.wildcards[name] || []), sorted(sm.wildcards[name]), `wildcard ${name} 目标集合双向相等`);
+  }
+  assert.deepEqual(
+    sorted(derived.identifiers),
+    sorted(sm.transitions.map((t) => `${t.from}|${t.to}|${t.trigger}`)),
+    '转换稳定标识集合 ≡ 登记集合',
+  );
+  const expandedFromRegistry = sm.transitions.reduce((n, t) => n + (Array.isArray(sm.wildcards[t.from]) ? sm.wildcards[t.from].length : 1), 0);
+  assert.equal(derived.expandedCount, expandedFromRegistry, '展开数 ≡ 由登记集合自洽推出的值');
 });
 
 
@@ -4987,12 +5015,20 @@ test('CR-2026-042 静态合同：README 8 节 + 权威链接 + 禁止内容零�
 });
 
 test('CR-2026-042 静态合同：已知 Skill 越界文本零命中', () => {
-  const prd = readFileSync(path.join(PACKAGE_ROOT, 'skills', 'requirement', 'write-requirement-prd', 'SKILL.md'), 'utf8');
+  // J-4（CR-2026-065）：语义要素 + 零命中；先规范化行尾（本机该文件为 CRLF 检出）。
+  const prd = readTextNormalized(path.join(PACKAGE_ROOT, 'skills', 'requirement', 'write-requirement-prd', 'SKILL.md'));
   for (const banned of ['engineering-docs', 'MCP', 'owClient', '_config.yml', 'validate-doc']) {
     assert.equal(prd.includes(banned), false, `write-requirement-prd 不应含 ${banned}`);
   }
   assert.equal(/crctl validate|Commit：/.test(prd), false, 'write-requirement-prd 不应调用不支持 PRD 的 validate 或输出手工 commit');
-  assert.match(prd, /重新读取 `prd\.md`.*frontmatter 必填字段、七个章节和未替换占位符/, 'write-requirement-prd 保留等价文档校验');
+  // 句内要素：以句读切句后取命中锚点「重新读取」的校验句，断言句内三类对象齐备（不钉措辞/标点/语序）
+  const checkSentences = prd.split(/[。；\n]/).filter((s) => s.includes('重新读取'));
+  assert.ok(checkSentences.length >= 1, 'write-requirement-prd 必须保留含「重新读取」的落盘校验句');
+  for (const sentence of checkSentences) {
+    assert.ok(sentence.includes('frontmatter 必填字段'), `校验句应含 frontmatter 必填字段：${sentence.trim()}`);
+    assert.ok(sentence.includes('七个章节'), `校验句应含七个章节：${sentence.trim()}`);
+    assert.ok(sentence.includes('未替换占位符'), `校验句应含未替换占位符：${sentence.trim()}`);
+  }
   const tasks = readFileSync(path.join(PACKAGE_ROOT, 'skills', 'develop', 'write-dev-tasks', 'SKILL.md'), 'utf8');
   assert.equal(/crctl git commit/.test(tasks), false, 'write-dev-tasks 不应含手工 commit 配方');
   const reg = readFileSync(path.join(PACKAGE_ROOT, 'skills', 'requirement', 'requirement-register', 'SKILL.md'), 'utf8');

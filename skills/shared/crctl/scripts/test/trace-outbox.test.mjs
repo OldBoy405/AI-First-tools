@@ -8,6 +8,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { applyWriteback, resolveRepositories } from '../lib/workspace-transactions.mjs';
 import { git, runCrctl, sha256 } from './merge-fixture.mjs';
+// CR-2026-065 TASK-02（FR-10）：去重契约单一事实源（产品与测试共同 import）
+import {
+  OUTBOX_COMPARED_FIELDS,
+  OUTBOX_EXCLUDED_FIELDS,
+  OUTBOX_VOLATILE_PAYLOAD_KEYS,
+  buildOutboxEvent,
+  buildOutboxComparable,
+} from '../lib/outbox-contract.mjs';
 
 import { makeCodeApprovedFixture, originMasterCount } from './merge-fixture.mjs';
 
@@ -134,6 +142,72 @@ test('TASK-02 AC-3：删除 txws/candidate 后重放仍成功（不触碰 operat
     const j1 = readWritebackJournal(kb, cr);
     assert.equal(j1.writeback.traceOutbox.state, 'emitted');
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+/* ─────────────────── CR-2026-065 TASK-02（FR-10）：去重契约六条不变性 ─────────────────── */
+
+const CONTRACT_SOURCE = fs.readFileSync(new URL('../crctl.mjs', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
+const CONTRACT_KEYS = [...OUTBOX_COMPARED_FIELDS, ...OUTBOX_EXCLUDED_FIELDS].sort();
+
+function sampleEvent(input, now) { return buildOutboxEvent(input, now); }
+function projection(event) { return JSON.stringify(buildOutboxComparable(event)); }
+
+test('CR-2026-065 不变性 1：去重契约单一事实源（crctl.mjs 无第二份字段枚举）', () => {
+  assert.ok(CONTRACT_SOURCE.includes('buildOutboxEvent('), 'emitOutboxEvent 必须使用 buildOutboxEvent');
+  assert.ok(CONTRACT_SOURCE.includes('buildOutboxComparable('), 'emitOutboxEvent 必须使用 buildOutboxComparable');
+  assert.equal(/const comparable\s*=/.test(CONTRACT_SOURCE), false, 'crctl.mjs 不得保留内联比较投影');
+  assert.equal(CONTRACT_SOURCE.includes('OUTBOX_VOLATILE_PAYLOAD_KEYS'), false, 'crctl.mjs 不得复制易变键清单');
+  assert.equal(/[A-Za-z_$][\w$]*\.detected_at/.test(CONTRACT_SOURCE), false, 'crctl.mjs 不得保留易变键语义副本');
+  assert.equal(/from_status: value\./.test(CONTRACT_SOURCE), false, 'crctl.mjs 不得保留字段枚举');
+});
+
+test('CR-2026-065 不变性 2：字段分类集合相等（新增字段未登记进两类之一即红）', () => {
+  const ev = sampleEvent({ event_kind: 'status', cr_id: 'CR-X', payload: { a: 1 } }, '2026-01-01T00:00:00.000Z');
+  assert.deepEqual(Object.keys(ev).sort(), CONTRACT_KEYS, '事件字段集 ≡ 参与字段 ∪ 排除字段');
+  const drifted = { ...ev, unregistered_field: 'x' };
+  assert.notDeepEqual(Object.keys(drifted).sort(), CONTRACT_KEYS, '未登记字段必须使集合相等失败');
+});
+
+test('CR-2026-065 不变性 3：枚举排除非自动（payload.observed_at 仍参与比较）', () => {
+  assert.deepEqual([...OUTBOX_VOLATILE_PAYLOAD_KEYS], ['detected_at'], '易变键清单为人工登记，非自动推导');
+  const a = sampleEvent({ event_kind: 'audit', cr_id: 'CR-X', payload: { observed_at: 't1' } }, 'n1');
+  const b = sampleEvent({ event_kind: 'audit', cr_id: 'CR-X', payload: { observed_at: 't2' } }, 'n1');
+  assert.notEqual(projection(a), projection(b), '未登记的 payload.observed_at 必须仍参与比较（反自动排除）');
+  const c = sampleEvent({ event_kind: 'audit', cr_id: 'CR-X', payload: { detected_at: 't1' } }, 'n1');
+  const d = sampleEvent({ event_kind: 'audit', cr_id: 'CR-X', payload: { detected_at: 't2' } }, 'n2');
+  assert.equal(projection(c), projection(d), '登记易变键的差异不产生冲突');
+});
+
+test('CR-2026-065 不变性 4：投影闭合（登记键绝不出现在投影结果中，含三类边界）', () => {
+  const cases = [
+    sampleEvent({ event_kind: 'audit', cr_id: 'CR-X', payload: { detected_at: 'x', keep: 1 } }, 'n'),
+    sampleEvent({ event_kind: 'audit', cr_id: 'CR-X' }, 'n'),
+    sampleEvent({ event_kind: 'audit', cr_id: 'CR-X', payload: {} }, 'n'),
+    sampleEvent({ event_kind: 'audit', cr_id: 'CR-X', payload: { detected_at: 'x', nested: { detected_at: 'y' } } }, 'n'),
+  ];
+  for (const ev of cases) {
+    const overlap = Object.keys(buildOutboxComparable(ev).payload).filter((k) => OUTBOX_VOLATILE_PAYLOAD_KEYS.includes(k));
+    assert.deepEqual(overlap, [], '登记键不得出现在投影结果中（常量与投影同一键空间）');
+  }
+});
+
+test('CR-2026-065 不变性 5：投影只读（不改入参）', () => {
+  const ev = sampleEvent({ event_kind: 'audit', cr_id: 'CR-X', payload: { detected_at: 'x', keep: 1 } }, 'n');
+  const snapshot = JSON.stringify(ev);
+  buildOutboxComparable(ev);
+  assert.equal(JSON.stringify(ev), snapshot, '投影不得就地修改入参事件');
+  assert.equal(ev.payload.detected_at, 'x', '入参 payload 保持原样');
+});
+
+test('CR-2026-065 不变性 6：行为等价（仅易变面变化 = 已发送；比较面变化 = 冲突）', () => {
+  const input = { event_kind: 'status', cr_id: 'CR-X', from_status: 'drafting', to_status: 'drafting', trigger: 't', commit_sha: 'abc', actor: 'Ray', evidence: { x: 1 }, payload: { detected_at: 't1', keep: 2 } };
+  const a = sampleEvent(input, '2026-01-01T00:00:00.000Z');
+  const b = sampleEvent({ ...input, payload: { detected_at: 't2', keep: 2 } }, '2026-01-02T00:00:00.000Z');
+  assert.equal(projection(a), projection(b), '仅易变面变化 → 仍视为已发送');
+  const c = sampleEvent({ ...input, payload: { detected_at: 't2', keep: 3 } }, '2026-01-02T00:00:00.000Z');
+  assert.notEqual(projection(a), projection(c), '比较面变化 → 冲突');
+  const d = sampleEvent({ ...input, to_status: 'developing' }, '2026-01-02T00:00:00.000Z');
+  assert.notEqual(projection(a), projection(d), '比较面（状态）变化 → 冲突');
 });
 
 /* ─────────────────── TASK-03：archive trace pending 前置门 ─────────────────── */
