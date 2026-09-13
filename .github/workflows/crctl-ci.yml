@@ -108,7 +108,7 @@ jobs:
 
       - name: crctl full test suite
         shell: bash
-        run: node --test --test-concurrency=2 skills/shared/crctl/scripts/test/*.test.mjs
+        run: node skills/shared/crctl/scripts/test/suite-gate.mjs --run
 
       - name: writeback unit tests
         shell: bash
