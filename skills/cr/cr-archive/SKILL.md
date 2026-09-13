@@ -51,15 +51,15 @@ crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 chec
 
 深原语内部完成归档与清理（Skill 不重复、不干预）。
 
-**new mode 的 spec-id 语义**：首跑（archive journal 不存在）省略 `--spec-id` 时由 `crctl` 从 strict authority 解析并持久化；**清理后重跑（cleanup-pending/complete）只读 journal payload，不重新解析已删除的 CR worktree/txws**——省略 `--spec-id` 直接重跑 `recoverCommand` 即可。
+**new mode 的 spec-id 语义**：首跑（archive journal 不存在）省略 `--spec-id` 时由 `crctl` 从 strict authority 解析并持久化；**清理后重跑（cleanup-pending/complete）只读 journal payload，不重新解析已删除的 CR worktree/txws**——省略 `--spec-id` 直接重跑 `recovery` 指向的同一命令即可。
 
 ### Step 3 — 结果分类（只透传深原语 JSON，不发明第二套字段）
 
 | 深原语输出 | 分类与动作 |
 |------|------|
-| exit 0，`phase=complete`，`remaining=[]` | 归档与清理全部完成。固定返回透传：`commit`（已确认 authority SHA）、`lastCleanupError`（cleanup 执行异常码或 null）、`remaining`、`preservedRefs`、`recoverCommand`、`warnings` |
-| exit 0，`phase=cleanup-pending` | **终态 authority 已发布（status 已是终态），仅安全资源清理未完成**。`lastCleanupError=null` 且 `remaining` 非空 = 保守保留现场（dirty/unknown/未证明合入），不是错误；`lastCleanupError` 非空 = cleanup 执行异常。处理 `remaining` 后**只重跑 `recoverCommand` 续清理** |
-| `warnings=[{code:EMIT_FAILED,event_kind:archive}]` | 实时投影事件发送失败，**不表示 Git archive 失败**——authority 已发布。重跑同一 `recoverCommand` 会补发；禁止回滚 commit、重建 commit 或手工生成事件 |
+| exit 0，`phase=complete`，`remaining=[]` | 归档与清理全部完成。固定返回透传：`commit`（已确认 authority SHA）、`lastCleanupError`（cleanup 执行异常码或 null）、`remaining`、`preservedRefs`、`recovery`、`warnings` |
+| exit 0，`phase=cleanup-pending` | **终态 authority 已发布（status 已是终态），仅安全资源清理未完成**。`lastCleanupError=null` 且 `remaining` 非空 = 保守保留现场（dirty/unknown/未证明合入），不是错误；`lastCleanupError` 非空 = cleanup 执行异常。处理 `remaining` 后**只重跑 `recovery`（argv）续清理** |
+| `warnings=[{code:EMIT_FAILED,event_kind:archive}]` | 实时投影事件发送失败，**不表示 Git archive 失败**——authority 已发布。重跑同一 `recovery` 会补发；禁止回滚 commit、重建 commit 或手工生成事件 |
 | `ARCHIVE_TASKS_PENDING` | tasks/_index.yml 仍有非 done 任务，回开发期补齐 |
 | `ARCHIVE_TRACE_PENDING` | trace 事件仍 pending 且补发失败：archive 已零写入、现场保留。只重跑同一 `crctl archive`（前置门会再次确定性补发）；禁止跳门/手工清 journal |
 | `ARCHIVE_TRACE_FACT_MISSING` | writeback traceability journal 缺失或 traceOutbox 意图不完整/digest 漂移，无法证明 trace 事件已发射：硬阻断，人工确认 journal 后重跑同一 archive |
@@ -81,7 +81,7 @@ crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 chec
    preservedRefs   : {rejected/withdrawn 保留的远端 ref 列表，archived 为空}
    remaining       : {待清理现场列表，complete 时为空}
    warnings        : {投影发送失败警告列表，通常为空}
-   恢复            : 未完成时只重跑 recoverCommand: {recoverCommand}
+   恢复            : 未完成时只重跑 recovery: {recovery.executable} {recovery.args 逐元素}（cwd={recovery.cwd}）
    下一步          : 以 `crctl next {cr_id}` 为准（终态 CR 返回 next:null）
 ```
 
@@ -92,5 +92,5 @@ crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 chec
 | 错误 | 处理 |
 |------|------|
 | CR 不在终态 | 停止执行，先完成对应 gate |
-| cleanup-pending | **终态已发布、仅清理未完成**。按 `remaining` 处理现场后只重跑 `recoverCommand`（唯一续跑入口），禁止手工删除未验证资源 |
+| cleanup-pending | **终态已发布、仅清理未完成**。按 `remaining` 处理现场后只重跑 `recovery`（唯一续跑入口），禁止手工删除未验证资源 |
 | 深原语其他非零退出 | 按 Step 3 分类表处理，不做手工补偿 |

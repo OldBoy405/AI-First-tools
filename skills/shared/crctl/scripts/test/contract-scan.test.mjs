@@ -19,6 +19,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
+// CR-2026-064 TASK-04：索引一致性断言的 YAML 子集解析器（与 crctl 同源，禁止复刻解析器）
+import { parseYaml } from '../lib/yaml-subset.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
 const FORBIDDEN = ['repair-instructions', 'fixed-blockers', 'suggestion_policy', 'suggestion-policy'];
@@ -406,4 +408,194 @@ test('CR-2026-065 禁词自测：stdout 报告与人类摘要不含冻结 skip �
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+/* ═══════════ CR-2026-064 TASK-04（FR-11 / SDD §4.4）：恢复字段名退役的整树扫描 ═══════════
+   分名分范围（§4.4-1）：上方 FORBIDDEN / RETIRED / ACTIVE_PATHS 三项（CR-2026-041 面）逐字不动；
+   本段只覆盖两个恢复字段名（RETIRED_RECOVERY），扫描面 = 整树派生 + 两项精确路径排除。
+   活跃性由「是否被显式排除」定义，不由目录 / 扩展名 / 文件名推断（D-5）。 */
+
+const RETIRED_RECOVERY = ['recoverCommand', 'recover_command'];
+const SKIP_DIRS = ['.git', 'node_modules'];
+const SCANNER_REL = 'skills/shared/crctl/scripts/test/contract-scan.test.mjs';
+const HISTORICAL_REL = 'skills/shared/crctl/scripts/test/fixtures/traceability-191k.yml';
+const EXCLUDED = [SCANNER_REL, HISTORICAL_REL];
+const FIXTURES_DIR = 'skills/shared/crctl/scripts/test/fixtures/';
+
+/** 整树枚举（唯一枚举规则，§4.4-2）：只按**路径段**跳过 .git / node_modules；
+ *  返回仓库根相对 POSIX 路径、升序（失败信息可复现）。目录枚举为空 → 硬失败（禁止静默降级）。 */
+function enumerateWorktreeAt(root) {
+  const out = [];
+  for (const entry of readdirSync(root, { withFileTypes: true, recursive: true })) {
+    if (entry.isDirectory()) continue;
+    const abs = path.join(entry.parentPath ?? entry.path, entry.name);
+    const rel = path.relative(root, abs).split(path.sep).join('/');
+    if (rel.split('/').some((seg) => SKIP_DIRS.includes(seg))) continue;
+    out.push(rel);
+  }
+  if (out.length === 0) throw new Error(`整树枚举为空（root=${root}）——扫描面不可判，硬失败`);
+  return out.sort();
+}
+
+const ENUMERATED = enumerateWorktreeAt(ROOT);
+const SCAN_SURFACE = ENUMERATED.filter((rel) => !EXCLUDED.includes(rel));
+
+/** 纯谓词（§4.4-4）：先 CRLF→LF 规范化，再大小写敏感 includes。 */
+function retiredHits(text, names) {
+  return names.some((n) => String(text).replaceAll('\r\n', '\n').includes(n));
+}
+
+function readInRoot(root, rel) { return readFileSync(path.join(root, ...rel.split('/')), 'utf8'); }
+
+function scanScopeWith(files, names, contentsOf) {
+  return files.filter((rel) => retiredHits(contentsOf(rel), names)).sort();
+}
+
+function scanScope(files, names) { return scanScopeWith(files, names, (rel) => readInRoot(ROOT, rel)); }
+
+/** 索引 active 条目（§4.4-2 硬失败面）：数组缺失 / 空 / 0 条 active 一律硬失败。
+ *  路径归一：`./x` 相对索引所在目录；`tools/...` 相对 workspace 根（去前缀）。 */
+function normIndexPath(rel, p) {
+  const s = String(p).replace(/^\.\//, '');
+  if (s.startsWith('tools/')) return path.posix.normalize(s.slice('tools/'.length));
+  return path.posix.normalize(path.posix.join(path.posix.dirname(rel), s));
+}
+
+function activeIndexPathsAt(root, rel, key) {
+  const doc = parseYaml(readInRoot(root, rel).replaceAll('\r\n', '\n'));
+  const list = doc && doc[key];
+  if (!Array.isArray(list)) throw new Error(`${rel} 缺 ${key} 数组（硬失败）`);
+  if (list.length === 0) throw new Error(`${rel} 的 ${key} 为空（硬失败）`);
+  const active = list.filter((e) => e && e.status === 'active').map((e) => String(e.path || ''));
+  if (active.length === 0) throw new Error(`${rel} 解析出 0 条 active（硬失败，禁止静默降级）`);
+  return active.map((p) => normIndexPath(rel, p));
+}
+
+const INDEX_KEYS = [['skills/_index.yml', 'skills'], ['agents/_index.yml', 'agents'], ['pipeline-templates/_index.yml', 'pipeline-templates']];
+
+/** 八条派生根代表性路径（§4.4-4 表）——覆盖 crctl 源码/适配器 hook/requirement-register 生产与测试/
+ *  writeback 生产与测试/pipeline-templates/活跃提示词/活跃测试向量，证明范围非恒真。 */
+const REPRESENTATIVE_PATHS = [
+  'skills/shared/crctl/scripts/lib/workspace-transactions.mjs',
+  'skills/shared/crctl/adapters/claude-code/hooks/pretooluse-guard.mjs',
+  'skills/requirement/requirement-register/scripts/promotion-bind.mjs',
+  'skills/requirement/requirement-register/scripts/test/promotion-bind.test.mjs',
+  'skills/writeback/scripts/writeback-prd-sdd.mjs',
+  'skills/writeback/scripts/test/writeback.test.mjs',
+  'pipeline-templates/emit-registry.mjs',
+  'skills/cr/cr-archive/SKILL.md',
+  'agents/delivery-agent.md',
+  'skills/shared/crctl/scripts/test/fixtures/digest-vectors/expected.json',
+  'skills/shared/crctl/scripts/test/fixtures/digest-vectors/review-annotations-code.yml',
+  'skills/shared/crctl/scripts/test/fixtures/digest-vectors/test-report.md',
+];
+
+test('CR-2026-064 FR-11 结构断言①：三个 active 索引条目全部存在且在扫描面内；Pipeline 索引 ≡ 目录枚举', () => {
+  const counts = [];
+  for (const [rel, key] of INDEX_KEYS) {
+    const active = activeIndexPathsAt(ROOT, rel, key);
+    counts.push(`${key}=${active.length}`);
+    for (const p of active) {
+      assert.ok(p && !p.startsWith('..'), `${rel}: active path 归一化越界: ${p}`);
+      assert.ok(ENUMERATED.includes(p), `${rel}: active 条目不在枚举面内（缺失或落在跳过边界内）: ${p}`);
+      assert.ok(!EXCLUDED.includes(p), `${rel}: active 条目落在排除项内: ${p}`);
+      assert.ok(SCAN_SURFACE.includes(p), `${rel}: active 条目不在扫描面内: ${p}`);
+    }
+  }
+  const pipelineActive = activeIndexPathsAt(ROOT, 'pipeline-templates/_index.yml', 'pipeline-templates').sort();
+  const diskPipelines = readdirSync(path.join(ROOT, 'pipeline-templates'))
+    .filter((f) => f.endsWith('.pipeline.json'))
+    .map((f) => `pipeline-templates/${f}`).sort();
+  assert.deepEqual(pipelineActive, diskPipelines, 'Pipeline 索引 active 集合 ≠ 目录枚举集合（硬失败）');
+  assert.ok(SCAN_SURFACE.length > 20, `扫描面规模（报告值）：枚举 ${ENUMERATED.length} / 面 ${SCAN_SURFACE.length} / ${counts.join(' ')}`);
+});
+
+test('CR-2026-064 FR-11 结构断言②：八条派生根代表性路径全部在扫描面内', () => {
+  for (const rel of REPRESENTATIVE_PATHS) {
+    assert.ok(ENUMERATED.includes(rel), `代表性路径不在枚举面内: ${rel}`);
+    assert.ok(SCAN_SURFACE.includes(rel), `代表性路径不在扫描面内: ${rel}`);
+  }
+});
+
+test('CR-2026-064 FR-11 结构断言③：排除面被冻结为两条精确路径（无通配）且枚举边界只含 .git/node_modules', () => {
+  assert.deepEqual(EXCLUDED, [
+    'skills/shared/crctl/scripts/test/contract-scan.test.mjs',
+    'skills/shared/crctl/scripts/test/fixtures/traceability-191k.yml',
+  ], '排除项必须恰为两条精确路径（新增排除必须改本断言并被评审看见）');
+  assert.deepEqual(SKIP_DIRS, ['.git', 'node_modules'], '枚举边界必须恰为 .git 与 node_modules');
+  for (const rel of EXCLUDED) {
+    assert.ok(!rel.includes('*') && !rel.includes('?'), `排除项不得含通配: ${rel}`);
+    assert.ok(ENUMERATED.includes(rel), `排除项必须存在于磁盘（否则排除无意义）: ${rel}`);
+  }
+  // fixtures/ 下未被排除的文件（本 HEAD 3 个 digest 向量）全部在面内 —— 新增 fixture 默认入面
+  const fixtures = SCAN_SURFACE.filter((rel) => rel.startsWith(FIXTURES_DIR));
+  assert.deepEqual(fixtures, [
+    'skills/shared/crctl/scripts/test/fixtures/digest-vectors/expected.json',
+    'skills/shared/crctl/scripts/test/fixtures/digest-vectors/review-annotations-code.yml',
+    'skills/shared/crctl/scripts/test/fixtures/digest-vectors/test-report.md',
+  ], 'fixtures/ 下除历史 traceability 精确路径外的文件必须全部在扫描面内');
+});
+
+test('CR-2026-064 FR-11 零命中断言：整树扫描面对两个恢复字段名零命中', () => {
+  const hits = scanScope(SCAN_SURFACE, RETIRED_RECOVERY);
+  assert.deepEqual(hits, [], `扫描面命中（任一未列目录/扩展名的活跃文件回流旧名即失败）：${hits.join(', ')}`);
+});
+
+test('CR-2026-064 FR-11 命中即失败：八条派生根代表路径对合成行判为命中（范围非恒真）', () => {
+  const synthetic = `// ${RETIRED_RECOVERY[0]} legacy reference（自测合成行）\n`;
+  for (const rel of REPRESENTATIVE_PATHS) {
+    const withHole = scanScopeWith([rel], RETIRED_RECOVERY, (r) => readInRoot(ROOT, r) + synthetic);
+    assert.deepEqual(withHole, [rel], `合成行未被判为命中（扫描面失焦）: ${rel}`);
+    const clean = scanScopeWith([rel], RETIRED_RECOVERY, (r) => readInRoot(ROOT, r));
+    assert.deepEqual(clean, [], `真实文本已含旧名（迁移未完成）: ${rel}`);
+  }
+  for (const name of RETIRED_RECOVERY) {
+    assert.ok(retiredHits(`x ${name} y`, RETIRED_RECOVERY), `谓词必须对 ${name} 命中`);
+    assert.ok(retiredHits(`x ${name.toUpperCase()} y`, RETIRED_RECOVERY) === false, '判定必须大小写敏感');
+  }
+});
+
+test('CR-2026-064 FR-11 允许排除不误报：唯一被排除的夹具仍含旧名，同目录其余向量在面内且零命中', () => {
+  assert.ok(retiredHits(readInRoot(ROOT, HISTORICAL_REL), RETIRED_RECOVERY), '被排除的历史 traceability 必须仍含旧名（排除依据）');
+  assert.ok(!SCAN_SURFACE.includes(HISTORICAL_REL), '被排除的夹具不得出现在扫描面内');
+  assert.ok(ENUMERATED.includes(HISTORICAL_REL), '被排除的夹具必须真实存在于磁盘');
+  const digestVectors = REPRESENTATIVE_PATHS.filter((rel) => rel.includes('/fixtures/digest-vectors/'));
+  assert.equal(digestVectors.length, 3, '活动测试向量恰 3 个');
+  assert.deepEqual(scanScope(digestVectors, RETIRED_RECOVERY), [], '活动测试向量必须零命中且在面内');
+  assert.ok(retiredHits(readInRoot(ROOT, SCANNER_REL), RETIRED_RECOVERY), '扫描器自身含退役名单（排除依据）');
+  assert.ok(!SCAN_SURFACE.includes(SCANNER_REL), '扫描器自身不得出现在扫描面内');
+});
+
+test('CR-2026-064 FR-11 硬失败面：空枚举 / 全 deprecated 索引 / 缺索引数组一律抛错（禁止静默降级）', () => {
+  const probe = mkdtempSync(path.join(os.tmpdir(), 'cr-2026-064-scan-probe-'));
+  try {
+    assert.throws(() => enumerateWorktreeAt(probe), /整树枚举为空/, '空目录枚举必须硬失败');
+    mkdirSync(path.join(probe, 'skills'), { recursive: true });
+    writeFileSync(path.join(probe, 'skills', '_index.yml'), 'skills:\n  - id: a\n    path: ./a/SKILL.md\n    status: deprecated\n', 'utf8');
+    assert.throws(() => activeIndexPathsAt(probe, 'skills/_index.yml', 'skills'), /0 条 active/, '全 deprecated 索引必须硬失败');
+    writeFileSync(path.join(probe, 'skills', '_index.yml'), 'skills:\n  - id: a\n    path: ./a/SKILL.md\n', 'utf8');
+    assert.throws(() => activeIndexPathsAt(probe, 'skills/_index.yml', 'skills'), /0 条 active/, '缺 status 条目不计 active，仍须硬失败');
+    writeFileSync(path.join(probe, 'skills', '_index.yml'), 'not-skills: []\n', 'utf8');
+    assert.throws(() => activeIndexPathsAt(probe, 'skills/_index.yml', 'skills'), /缺 skills 数组/, '缺索引数组必须硬失败');
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+});
+
+/* CR-2026-064 FR-12（AC-04，SDD §4.5-6）：shell 逃逸守卫 —— 代码消费者一律 argv 边界执行。 */
+const SHELL_ESCAPE_TOKENS = ['shell: true', 'shell:true', 'Invoke-Expression'];
+const LIB_DIR = 'skills/shared/crctl/scripts/lib/';
+
+test('CR-2026-064 FR-12（AC-04）：crctl.mjs 与 lib/*.mjs 对 shell 逃逸零命中，且既有 argv 先例存在', () => {
+  const guardFiles = ['skills/shared/crctl/scripts/crctl.mjs', ...SCAN_SURFACE.filter((rel) => rel.startsWith(LIB_DIR) && rel.endsWith('.mjs'))];
+  assert.ok(guardFiles.length >= 5, `守卫面非空（实际 ${guardFiles.length}）`);
+  let shellFalse = 0;
+  for (const rel of guardFiles) {
+    const text = readInRoot(ROOT, rel);
+    for (const token of SHELL_ESCAPE_TOKENS) {
+      assert.ok(!text.includes(token), `${rel} 不得含 shell 逃逸 ${token}（恢复动作不得降级为字符串执行）`);
+    }
+    shellFalse += (text.match(/shell: *false/g) ?? []).length;
+  }
+  assert.ok(shellFalse >= 1, `必须存在 argv 执行的既有先例（spawnSync(..., { shell: false })），实际 ${shellFalse}`);
 });

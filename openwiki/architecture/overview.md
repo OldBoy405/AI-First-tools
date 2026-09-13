@@ -46,7 +46,7 @@ This dual model ensures the team knowledge base (`specs/`, `delivery/`) always r
 
 ## CR State Machine
 
-The CR lifecycle is governed by an explicit state machine defined in `dir-graph.yaml#change-request-track.state_machine`: **15 named states** (12 active + 3 terminal) plus the pre-registration state `(new)`, **28 declared transitions** that expand to **50** via the `any-active` wildcard. All transitions are triggered by named Skills — no implicit or verbal advancement is allowed, and only [`crctl advance`](/openwiki/operations/drift-governance.md) may write `cr.md` status.
+The CR lifecycle is governed by an explicit state machine defined in `dir-graph.yaml#change-request-track.state_machine`: **15 named states** (12 active + 3 terminal) plus the pre-registration state `(new)`, **31 declared transitions** (29 explicit + 2 wildcard) that expand to **53** via the `any-active` wildcard. All transitions are triggered by named Skills — no implicit or verbal advancement is allowed, and only [`crctl advance`](/openwiki/operations/drift-governance.md) may write `cr.md` status. The same machine is mirrored structurally in `skills/shared/crctl/scripts/test/gate-registry.json#stateMachine` for the [CI suite gate](/openwiki/operations/ci-guards.md). Note: `ARCHITECTURE.md` §5 invariant #5 still records the pre-CR-2026-061 size (28 declared / 50 expanded) and is stale — `dir-graph.yaml` and `gate-registry.json` are the authoritative counts.
 
 ```mermaid
 stateDiagram-v2
@@ -59,6 +59,7 @@ stateDiagram-v2
     requirement_reviewing --> drafting: approve-requirement reject
     requirement_reviewing --> requirement_approved: approve-requirement
     requirement_approved --> tech_designing: write-tech-design
+    requirement_approved --> drafting: write-tech-design prd-blocker
     tech_designing --> tech_design_review_pending: write-tech-design-complete
     tech_design_review_pending --> tech_designing: review-tech-design block
     tech_design_review_pending --> tech_designing: approve-tech-design reject
@@ -71,12 +72,14 @@ stateDiagram-v2
     task_breakdown --> developing: approve-dev-start
     developing --> developing: write-test-report block
     developing --> developing: review-code block
+    developing --> tech_design_reviewed: review-code plan-blocker
     developing --> code_reviewing: review-code
     code_reviewing --> developing: approve-code reject
     code_reviewing --> code_approved: approve-code
     code_approved --> merging: merge-feature-branch
     code_approved --> developing: merge-feature-branch release-drift
     merging --> writing_back: writeback-prd-sdd
+    merging --> code_approved: merge-feature-branch precondition-fail
     writing_back --> archived: cr-archive
 ```
 
@@ -87,6 +90,7 @@ New in the current machine relative to the original CR-2026-001 version:
 - **`task-breakdown`** is a first-class state between `tech-design-reviewed` and `developing`, gated by the **`review-dev-plan`** review (SDD→PLAN→TASK merge review) before `approve-dev-start`.
 - **`review-dev-plan` block** routes back to `tech-design-reviewed` (fix PLAN/TASK) or, for an upstream design blocker, back to `tech-design-review-pending` (fix SDD).
 - **`merge-feature-branch:release-drift`** routes `code-approved` back to `developing` when the published release snapshot no longer matches local code (re-run `implement-code`).
+- **Rollback transitions (CR-2026-061 / AIFI-17)** recover from late-stage drift without re-opening the whole CR: `write-tech-design:prd-blocker` routes `requirement-approved` back to `drafting` (fix the PRD); `review-code:plan-blocker` routes `developing` back to `tech-design-reviewed` (fix PLAN/TASK before coding resumes); `merge-feature-branch:precondition-fail` routes `merging` back to `code-approved` (re-run merge after the failed precondition is resolved).
 
 The state machine is enforced at runtime by either the platform's pipeline execution engine or [`crctl advance`](/openwiki/operations/drift-governance.md) in standalone IDE usage.
 

@@ -12,6 +12,8 @@ import { readTextNormalized } from './assertion-sources.mjs';
 
 const CR = 'CR-2026-033';
 const TOOLS_ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
+// CR-2026-064 TASK-04（SDD §4.5-1）：结构化 recovery 的 args[0] = crctl 脚本绝对路径
+const CRCTL_JS = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
 
 function wtPath(kb, repo, cr) {
   return path.join(kb, '.rayai-worktrees', repo === 'kb' ? 'knowledge-base' : repo, 'requirement', cr);
@@ -212,7 +214,7 @@ test('checkpoint 敏感预检查询失败：损坏 index 后 TX_GIT_FAILED 且�
   } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
 });
 
-test('checkpoint journal 后错误：固定返回 txId/phase/sideEffects/recoverCommand', () => {
+test('checkpoint journal 后错误：固定返回 txId/phase/sideEffects/recovery', () => {
   const f = makeCheckpointFixture();
   try {
     fs.appendFileSync(path.join(f.kbWt, 'kb-doc.txt'), 'fault change\n');
@@ -222,7 +224,11 @@ test('checkpoint journal 后错误：固定返回 txId/phase/sideEffects/recover
     assert.match(r.errJson.error.txId, /^[0-9a-f]{32}$/);
     assert.equal(typeof r.errJson.error.phase, 'string');
     assert.ok(Array.isArray(r.errJson.error.sideEffects));
-    assert.match(r.errJson.error.recoverCommand, /^crctl checkpoint /);
+    assert.equal(r.errJson.error.recovery.executable, 'node');
+    assert.deepEqual(r.errJson.error.recovery.args, [CRCTL_JS, 'checkpoint', CR, '--workspace', f.kb]);
+    assert.equal(r.errJson.error.recovery.cwd, f.kb);
+    assert.equal(r.errJson.error.recovery.requiresTTY, false);
+    assert.deepEqual(r.errJson.error.recovery.promptFor, []);
   } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
 });
 

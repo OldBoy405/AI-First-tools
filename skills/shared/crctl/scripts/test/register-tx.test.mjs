@@ -13,6 +13,8 @@ import { fileURLToPath } from 'node:url';
 import { resolveRepositories, ensureRepoWorkspace } from '../lib/workspace-transactions.mjs';
 
 const CRCTL = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'crctl.mjs');
+// CR-2026-064 TASK-04（SDD §4.5-1）：结构化 recovery 的 args[0] = crctl 脚本绝对路径（与既有 CRCTL 同源）
+const CRCTL_JS = CRCTL;
 const sha256 = (t) => crypto.createHash('sha256').update(t, 'utf8').digest('hex');
 const YEAR = String(new Date().getFullYear());
 
@@ -140,7 +142,22 @@ test('TASK-05 AC-1：happy path 三账本+trailer commit+lease push+三仓 workt
       assert.equal(git(p, ['symbolic-ref', '--short', 'HEAD']), `requirement/${r.json.cr}`);
     }
     assert.equal(readJournal(kb).phase, 'complete');
-    assert.match(r.json.recoverCommand, /crctl register/);
+    // CR-2026-064：register 的成功结果携带单个结构化 recovery（argv 边界，cwd 与 --workspace 同源）
+    assert.equal(r.json.recovery.executable, 'node');
+    assert.deepEqual(r.json.recovery.args, [
+      CRCTL_JS, 'register',
+      '--registration-key', 'key-abc-123',
+      '--title', 'TestCR',
+      '--owner-requirement', 'Ray',
+      '--owner-development', 'Ray',
+      '--owner-test', 'Ray',
+      '--target-version', 'unassigned',
+      '--target-spec-id', 'spec-a',
+      '--workspace', kb,
+    ]);
+    assert.equal(r.json.recovery.cwd, kb);
+    assert.equal(r.json.recovery.requiresTTY, false);
+    assert.deepEqual(r.json.recovery.promptFor, []);
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
@@ -161,7 +178,18 @@ test('origin 归因字段：origin 缺省落空串、合法值入 cr.md+_backlog
     assert.equal(r1.status, 0, r1.stderr);
     assert.match(fs.readFileSync(path.join(f1.kb, 'change-requests', r1.json.cr, 'cr.md'), 'utf8'), new RegExp(`^origin: CR-${YEAR}-013$`, 'm'));
     assert.match(fs.readFileSync(path.join(f1.kb, 'change-requests', '_backlog.yml'), 'utf8'), new RegExp(`^ {4}origin: CR-${YEAR}-013$`, 'm'));
-    assert.match(r1.json.recoverCommand, new RegExp(`--origin CR-${YEAR}-013`));
+    assert.deepEqual(r1.json.recovery.args, [
+      CRCTL_JS, 'register',
+      '--registration-key', 'key-abc-123',
+      '--title', 'TestCR',
+      '--owner-requirement', 'Ray',
+      '--owner-development', 'Ray',
+      '--owner-test', 'Ray',
+      '--origin', `CR-${YEAR}-013`,
+      '--target-version', 'unassigned',
+      '--target-spec-id', 'spec-a',
+      '--workspace', f1.kb,
+    ]);
   } finally { fs.rmSync(f1.base, { recursive: true, force: true }); }
 
   // 非法值：硬失败，且仓库零写入（不静默降级为空串）
@@ -634,7 +662,7 @@ test('CR-2026-057 FR-12/AC-12：同 key 规范化同值续跑；规范化异值 
 
 /* ────────────────────────── CR-2026-060 G1：target-spec-id 注册合同（AC-01/AC-02） ────────────────────────── */
 
-test('CR-2026-060 AC-01：成功注册写入双账本 target-spec-id 全等 + snake_case 同构 JSON + registrationAt 三处相等 + recover_command 含 --target-spec-id', () => {
+test('CR-2026-060 AC-01：成功注册写入双账本 target-spec-id 全等 + snake_case 同构 JSON + registrationAt 三处相等 + 单投影 recovery 含 --target-spec-id', () => {
   const { base, kb } = makeFixture();
   try {
     const r1 = runCrctl(regArgs(kb, { 'target-version': '0.33', 'target-spec-id': 'spec-033' }), { cwd: kb });
@@ -647,7 +675,19 @@ test('CR-2026-060 AC-01：成功注册写入双账本 target-spec-id 全等 + sn
     assert.equal(r1.json.tx_id, r1.json.txId);
     assert.ok(typeof r1.json.operational_workspace === 'string' && r1.json.operational_workspace.length);
     assert.ok(Array.isArray(r1.json.side_effects));
-    assert.match(r1.json.recover_command, /--target-spec-id "spec-033"/);
+    assert.deepEqual(r1.json.recovery.args, [
+      CRCTL_JS, 'register',
+      '--registration-key', 'key-abc-123',
+      '--title', 'TestCR',
+      '--owner-requirement', 'Ray',
+      '--owner-development', 'Ray',
+      '--owner-test', 'Ray',
+      '--target-version', '0.33',
+      '--target-spec-id', 'spec-033',
+      '--workspace', kb,
+    ]);
+    // CR-2026-064（R-08）：恢复字段只有单投影 recovery，旧双投影字段不存在（键集断言，不写字面名）
+    assert.deepEqual(Object.keys(r1.json).filter((k) => /^recover/i.test(k)), ['recovery'], '恢复字段只有单投影');
     assert.deepEqual(r1.json.warnings, []);
     // 双账本字段全等
     const crMd = fs.readFileSync(path.join(kb, 'change-requests', r1.json.cr, 'cr.md'), 'utf8');

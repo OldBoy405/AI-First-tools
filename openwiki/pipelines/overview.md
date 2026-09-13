@@ -78,7 +78,7 @@ Nodes that perform automated review can declare a `reviewLoop`:
 
 ```mermaid
 flowchart LR
-    A["/planning<br/>optional"] --> B["/requirement"]
+    A["/planning (optional)"] --> B["/requirement"]
     B --> C["/architecture"]
     C --> D["/coding"]
     D --> E["/writeback"]
@@ -111,7 +111,7 @@ The three planning pipelines are optional and do not create CRs:
 
 The four required pipelines form the main delivery chain:
 
-**`/requirement`** — CR registration with worktree creation, PRD writing, requirement review (with auto-repair loop), human approval, `approve-requirement` state advance, then a **mandatory approval checkpoint**. Prerequisite: none. Output: `prd.md`, status=`requirement-approved`.
+**`/requirement`** — CR registration with worktree creation, PRD writing, requirement review (with auto-repair loop), human approval, `approve-requirement` state advance, then a **mandatory approval checkpoint**. Prerequisite: none. Output: `prd.md`, status=`requirement-approved`. Since CR-2026-061, `requirement-register` may run an optional **promotion bind** (Step 2.5): when both `promotion_run_id` and `promotion_issue_id` are supplied, it executes `promotion-bind.mjs` to bind the CR to a pre-created promotion run (`multica cr bind-promotion-run`) with fail-closed context validation — binding must complete before the CR may advance to `requirement-reviewing`.
 
 **`/architecture`** — SDD writing based on approved PRD (entry reads the authority path via `crctl workspace inspect`), tech design review (with auto-repair loop), human approval, `approve-tech-design` state advance, then a **mandatory checkpoint**. Prerequisite: status=`requirement-approved`. Output: `sdd.md`, status=`tech-design-reviewed`.
 
@@ -155,7 +155,7 @@ Human approval nodes do not directly change state. They block until a human conf
 | Development start | `approve-dev-start` | `developing` |
 | Code approval | `approve-code` | `code-approved` |
 
-In standalone IDE usage, [crctl approve](/openwiki/operations/drift-governance.md#crctl-subcommands) provides an interactive terminal replacement for human approval.
+In standalone IDE usage, [crctl approve](/openwiki/operations/drift-governance.md) provides an interactive terminal replacement for human approval.
 
 ## Pipeline Contracts
 

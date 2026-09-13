@@ -10,6 +10,9 @@ import { spawnSync } from 'node:child_process';
 import { git, runCrctl, sha256, makeCodeApprovedFixture, originMasterCount } from './merge-fixture.mjs';
 import { archiveCr, resolveRepositories } from '../lib/workspace-transactions.mjs';
 
+// CR-2026-064 TASK-04（SDD §4.5-1）：结构化 recovery 的 args[0] = crctl 脚本绝对路径
+const CRCTL_JS = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
+
 /** merge + 原子 baseline writeback → archive 前置就绪；txws 返回。补齐证据文件 + 写含 evidence 块的 traceability（CR-2026-041 证据门前置）。 */
 function makeWritebackFixture() {
   const f = makeCodeApprovedFixture();
@@ -251,7 +254,7 @@ function outboxEventsForCr(kb, cr) {
     .filter((ev) => ev.cr_id === cr);
 }
 
-test('TASK-01 RED-1：happy path 固定返回 commit/lastCleanupError/recoverCommand/warnings', () => {
+test('TASK-01 RED-1：happy path 固定返回 commit/lastCleanupError/recovery/warnings', () => {
   const { base, kb, cr, txws } = makeWritebackFixture();
   try {
     const r = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
@@ -263,7 +266,11 @@ test('TASK-01 RED-1：happy path 固定返回 commit/lastCleanupError/recoverCom
     assert.equal(r.json.lastCleanupError, null);
     assert.deepEqual(r.json.remaining, []);
     assert.deepEqual(r.json.preservedRefs, []);
-    assert.ok(r.json.recoverCommand.includes('crctl archive ' + cr), 'recoverCommand 可执行续跑');
+    assert.equal(r.json.recovery.executable, 'node');
+    assert.deepEqual(r.json.recovery.args, [CRCTL_JS, 'archive', cr, '--spec-id', 'test-spec', '--workspace', kb]);
+    assert.equal(r.json.recovery.cwd, kb);
+    assert.equal(r.json.recovery.requiresTTY, false);
+    assert.deepEqual(r.json.recovery.promptFor, []);
     assert.deepEqual(r.json.warnings, []);
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
@@ -321,7 +328,8 @@ test('TASK-01 RED-4：cleanup fault → pending + 非空 lastCleanupError + 真�
     const head = git(path.join(base, 'origin-kb.git'), ['rev-parse', 'master']);
     assert.equal(r1.json.commit, head, 'commit 已在 fault 前确认');
     assert.ok(r1.json.lastCleanupError, 'cleanup 执行异常必须非空错误码');
-    assert.ok(r1.json.recoverCommand.includes('crctl archive ' + cr));
+    assert.deepEqual(r1.json.recovery.args, [CRCTL_JS, 'archive', cr, '--spec-id', 'test-spec', '--workspace', kb]);
+    assert.equal(r1.json.recovery.cwd, kb);
     assert.deepEqual(r1.json.warnings, []);
     const n0 = originMasterCount(base, 'kb');
     const r2 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });

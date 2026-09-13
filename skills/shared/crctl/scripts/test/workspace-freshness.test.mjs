@@ -11,6 +11,8 @@ import { TxError, resolveRepositories, classifyWorkspaceFreshness, isAncestorOrT
 import { acquireLock } from '../lib/durable-tx.mjs';
 
 const CR = 'CR-2026-043';
+// CR-2026-064 TASK-04（SDD §4.5-1）：结构化 recovery 的 args[0] = crctl 脚本绝对路径
+const CRCTL_JS = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
 
 function wtPath(kb, repo, cr) {
   return path.join(kb, '.rayai-worktrees', repo === 'kb' ? 'knowledge-base' : repo, 'requirement', cr);
@@ -266,7 +268,11 @@ test('TASK-02：behind-clean ff-only 成功，afterSha==捕获 trunk SHA，journ
     const js = journals(f.kb, CR);
     assert.equal(js.length, 1);
     assert.equal(js[0].phase, 'complete');
-    assert.match(r.recoverCommand, /workspace sync/);
+    assert.equal(r.recovery.executable, 'node');
+    assert.deepEqual(r.recovery.args, [CRCTL_JS, 'workspace', 'sync', CR, '--workspace', f.kb]);
+    assert.equal(r.recovery.cwd, f.kb);
+    assert.equal(r.recovery.requiresTTY, false);
+    assert.deepEqual(r.recovery.promptFor, []);
   } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
 });
 

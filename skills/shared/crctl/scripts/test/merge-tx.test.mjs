@@ -15,6 +15,9 @@ import { fileURLToPath } from 'node:url';
 import { git, runCrctl, sha256, makeFixture, makeCodeApprovedFixture, originMasterCount } from './merge-fixture.mjs';
 import { prepareMergeTree, replaceBacklogEntry, reconcileLocalTrunks, resolveRepositories } from '../lib/workspace-transactions.mjs';
 
+// CR-2026-064 TASK-04（SDD §4.5-1）：结构化 recovery 的 args[0] = crctl 脚本绝对路径
+const CRCTL_JS = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
+
 test('CR-2026-038 TASK-03：backlog 只替换目标完整条目并逐字保留 trunk 其余内容', () => {
   const trunk = 'schema: cr-backlog/v2\r\nchange-requests:\r\n  - id: CR-2026-001\r\n    title: trunk-before\r\n\r\n  # keep target separator\r\n  - id: CR-2026-038\r\n    title: old\r\n    unknown: trunk-old\r\n\r\n  # keep after target\r\n  - id: CR-2026-099\r\n    title: trunk-after\r\n';
   const source = 'schema: cr-backlog/v2\nchange-requests:\n  - id: CR-2026-038\n    title: source\n    owners:\n      development:\n        id: Ray\n    latest-checkpoint:\n      tools: abc123\n    future-v2: keep\n';
@@ -273,7 +276,7 @@ test('TASK-07 AC-1：PRD 漂移零 publish → APPROVED_ARTIFACT_DRIFT 硬阻断
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
-test('CR-2026-044 TASK-01 ③: merge publication preflight — 远端 source 缺失/滞后在首次 prepare 前阻断且 recoverCommand 指向 checkpoint（红测试）', () => {
+test('CR-2026-044 TASK-01 ③: merge publication preflight — 远端 source 缺失/滞后在首次 prepare 前阻断且 recovery 指向 checkpoint（红测试）', () => {
   // A) 任一仓远端 source 缺失
   {
     const { base, kb, others, cr } = makeCodeApprovedFixture();
@@ -283,7 +286,12 @@ test('CR-2026-044 TASK-01 ③: merge publication preflight — 远端 source 缺
       const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
       assert.notEqual(r.status, 0);
       assert.equal(r.errJson.error.code, 'MERGE_SOURCE_MISSING');
-      assert.ok(String(r.errJson.error.recoverCommand || '').includes('checkpoint'), 'publication lag 的 recoverCommand 必须指向 checkpoint');
+      // publication lag 的结构化恢复动作：先 checkpoint 再重跑 merge（cwd 与 --workspace 同源 = installRoot）
+      assert.equal(r.errJson.error.recovery.executable, 'node');
+      assert.deepEqual(r.errJson.error.recovery.args, [CRCTL_JS, 'checkpoint', cr, '--workspace', kb]);
+      assert.equal(r.errJson.error.recovery.cwd, kb, 'publication lag 的 recovery.cwd 为 installRoot');
+      assert.equal(r.errJson.error.recovery.requiresTTY, false);
+      assert.deepEqual(r.errJson.error.recovery.promptFor, []);
       const st = runCrctl(['merge', 'status', cr, '--workspace', kb], { cwd: kb });
       assert.equal(st.json.repos.length, 0, '首次 prepare 前必须零 candidate');
       assert.ok(fs.readFileSync(path.join(kb, 'change-requests', cr, 'cr.md'), 'utf8').includes('status: code-approved'), 'publication lag 不得回退状态');
@@ -298,7 +306,8 @@ test('CR-2026-044 TASK-01 ③: merge publication preflight — 远端 source 缺
       const r = runCrctl(['merge', cr, '--workspace', kb], { cwd: kb });
       assert.notEqual(r.status, 0);
       assert.equal(r.errJson.error.code, 'RELEASE_REMOTE_NOT_PUSHED');
-      assert.ok(String(r.errJson.error.recoverCommand || '').includes('checkpoint'), 'publication lag 的 recoverCommand 必须指向 checkpoint');
+      assert.deepEqual(r.errJson.error.recovery.args, [CRCTL_JS, 'checkpoint', cr, '--workspace', kb]);
+      assert.equal(r.errJson.error.recovery.cwd, kb, 'publication lag 的 recovery.cwd 为 installRoot');
       const st = runCrctl(['merge', 'status', cr, '--workspace', kb], { cwd: kb });
       assert.equal(st.json.repos.length, 0, '首次 prepare 前必须零 candidate');
     } finally { fs.rmSync(base, { recursive: true, force: true }); }

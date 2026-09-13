@@ -72,7 +72,7 @@ CR 通过状态机推进。每个关键节点都要由明确的 Skill 写入证�
 ## 7. 恢复与 `crctl status/next`
 
 - 接手在途 CR：`/resume` 恢复本地 worktree，之后永远以 `crctl status {cr_id}` 看当前状态、以 `crctl next {cr_id}` 看下一步。
-- 中途失败：`crctl` 的深原语（register/checkpoint/merge/writeback-apply/archive）都是事务化且幂等，按输出的 `recoverCommand` 重跑同一条命令即可从断点续跑。
+- 中途失败：`crctl` 的深原语（register/checkpoint/merge/writeback-apply/archive）都是事务化且幂等，按输出里的 `recovery`（结构化 argv：`executable` + `args` + `cwd`）重跑同一条命令即可从断点续跑（消费判定见 `skills/shared/crctl/SKILL.md` 的「`recovery` 消费合同」）。
 - 版本更正：`crctl version-set {cr_id} --to <real-version>` 是 `unassigned → 真实版本` 的唯一更正入口（writeback 事务之外；幂等，`changed=false` 零新 commit），其后新写的产物继续从 `cr.md` 继承；`crctl writeback-apply` 的版本守卫保证版本错误在 candidate/journal 之前短路，且当 cr.md=`unassigned`、输入为真实版本时在 writeback 事务内原子回灌 authority 的 cr.md/_backlog 该条目的 target-version（冻结产物不动，只碰两账本）。
 - 主工作区与 worktree 视图不一致时，`crctl status` 会给出 `STATUS_DIVERGED` 告警并指向权威 worktree。
 

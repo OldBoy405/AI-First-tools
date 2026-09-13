@@ -13,6 +13,9 @@ import {
 } from '../lib/workspace-transactions.mjs';
 import { git, runCrctl, sha256, makeCodeApprovedFixture, originMasterCount } from './merge-fixture.mjs';
 
+// CR-2026-064 TASK-04（SDD §4.5-1）：结构化 recovery 的 args[0] = crctl 脚本绝对路径
+const CRCTL_JS = path.resolve(import.meta.dirname, '..', 'crctl.mjs');
+
 function makeMergedFixture({ targetVersion = '0.2' } = {}) {
   const f = makeCodeApprovedFixture({ targetVersion });
   const { base, kb, cr, kbWt } = f;
@@ -815,7 +818,7 @@ test('CR-2026-058 AC-3.2：窄解析器回退（source=cr-worktree）refill=fals
 });
 
 // AC-6：CLI 信封（公共 CLI 断言，非库函数返回值）
-test('CR-2026-058 AC-6.1：回灌首次成功信封——phase=complete、changed=true、files 含两账本、recoverCommand 规范化版本', () => {
+test('CR-2026-058 AC-6.1：回灌首次成功信封——phase=complete、changed=true、files 含两账本、recovery 规范化版本', () => {
   const { base, kb, cr } = makeMergedFixture({ targetVersion: 'unassigned' });
   try {
     const args = ['writeback-apply', cr, '--stage', 'baseline', '--spec-id', 'test-spec', '--target-version', 'v0.30', '--workspace', kb];
@@ -828,7 +831,17 @@ test('CR-2026-058 AC-6.1：回灌首次成功信封——phase=complete、change
     assert.match(r.json.commit, /^[0-9a-f]{40}$/);
     assert.ok(r.json.files.includes(`change-requests/${cr}/cr.md`), `files 含 cr.md: ${JSON.stringify(r.json.files)}`);
     assert.ok(r.json.files.includes('change-requests/_backlog.yml'), `files 含 _backlog.yml: ${JSON.stringify(r.json.files)}`);
-    assert.ok(r.json.recoverCommand.includes('--target-version "0.30"'), `recoverCommand 含规范化 --target-version: ${r.json.recoverCommand}`);
+    // CR-2026-064：--target-version 为独立 argv 元素，且版本守卫规范化后的值（v0.30 → 0.30）
+    assert.deepEqual(r.json.recovery.args, [
+      CRCTL_JS, 'writeback-apply', cr,
+      '--stage', 'baseline',
+      '--spec-id', 'test-spec',
+      '--target-version', '0.30',
+      '--workspace', kb,
+    ]);
+    assert.equal(r.json.recovery.cwd, kb);
+    assert.equal(r.json.recovery.requiresTTY, false);
+    assert.deepEqual(r.json.recovery.promptFor, []);
     assert.equal(r.errJson, null, '成功路径 stderr 不可解析为 {error:{code}} 冲突信封');
     // 同参第二次：changed=false、commit/files 与首次相同（仍含两账本路径）
     const second = runCrctl(args, { cwd: kb });

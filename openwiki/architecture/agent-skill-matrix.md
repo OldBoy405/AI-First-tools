@@ -96,7 +96,7 @@ Several cross-domain boundaries are explicitly forbidden to prevent process bypa
 - **dev-agent** is forbidden from `writeback-prd-sdd`, `merge-feature-branch`, `cr-archive`
 - **spec-agent** is forbidden from `requirement-register`, `implement-code`, `writeback-prd-sdd`, `writeback-traceability`
 - **delivery-agent** is forbidden from `write-requirement-prd`, `write-tech-design`, `implement-code` (writeback/merge actors do not author product or code artifacts)
-- **quality-reviewer-agent** is forbidden from all `approve-*` skills and from `merge-feature-branch`, `writeback-*`, `cr-archive`, `checkpoint`, `write-test-report`, `coding-discipline` (reviewers cannot advance or write back)
+- **quality-reviewer-agent** is forbidden from all `approve-*` skills and from `register`, `requirement-register`, `merge-feature-branch`, `writeback-*`, `cr-archive`, `push-progress`, `checkpoint`, `write-test-report`, `coding-discipline` (reviewers cannot advance, register CRs, or write back)
 
 ## Editor Conventions
 
