@@ -29,7 +29,7 @@
       "check-agents-contract.test.mjs": 1,
       "check-skill-matrix.test.mjs": 8,
       "checkpoint-tx.test.mjs": 23,
-      "contract-scan.test.mjs": 15,
+      "contract-scan.test.mjs": 17,
       "crctl.test.mjs": 224,
       "durable-tx.test.mjs": 10,
       "fault-harness.test.mjs": 8,

@@ -146,8 +146,9 @@ function walkByExt(dir, ext, out = []) {
   return out;
 }
 
-/** 自测用临时 tools-root（os.tmpdir()，测试结束即删；不入仓、不新增仓库 fixture 目录）。 */
-function makeProbeRoot(files, cases) {
+/** 自测用临时 tools-root（os.tmpdir()，测试结束即删；不入仓、不新增仓库 fixture 目录）。
+ *  `exceptions` 为登记面条目（默认显式空数组）；非空用于 AC-12 / FR-14 的例外判定面自测。 */
+function makeProbeRoot(files, cases, exceptions = []) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cr-2026-065-suite-gate-'));
   const dir = path.join(root, 'skills', 'shared', 'crctl', 'scripts', 'test');
   mkdirSync(dir, { recursive: true });
@@ -155,7 +156,7 @@ function makeProbeRoot(files, cases) {
     schema: 'crctl-suite-gate/v1',
     manifest: { files: [...files].sort(), cases },
     stateMachine: { namedStates: ['a'], wildcards: {}, transitions: [{ from: 'a', to: 'a', trigger: 't' }] },
-    exceptions: [],
+    exceptions: [...exceptions],
   }, null, 2) + '\n', 'utf8');
   for (const f of files) writeFileSync(path.join(dir, f), '// CR-2026-065 自测占位（--report 形态不执行本文件）\n', 'utf8');
   return root;
@@ -336,6 +337,59 @@ test('CR-2026-065 归属自测：同一用例名在两个 file 上各自归属�
     assert.equal(byFile.get('a.test.mjs').state, 'ok');
     assert.equal(byFile.get('b.test.mjs').state, 'failed');
     assert.deepEqual(report.failures, [same], '全局失败集合按名去重');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/* ─────────── AC-12 / FR-14「错误闭包」：到期即红 + 不得自证绿 ───────────
+   交付证据集（cmd-01）以 `exceptions=[]` 判绿，只证明「无例外时退出码 ≡ 失败集合为空」；
+   FR-14.3「到期未清即红」与 FR-14.4「例外标识与实际失败集合不匹配即红」只有在登记面非空时才可观测。
+   下列用例复用既有 probe-root + `--report` 机制：登记面副本写在 os.tmpdir()，不触碰仓库登记面
+   （仓库登记面的零写路径由上方静态断言覆盖）。 */
+
+// 错误闭包①（FR-14.3）：字段齐备、expires 已过（带时区偏移）→ EXCEPTION_EXPIRED + 非零退出；
+// 不得因「已登记」而静默判绿或静默续期。
+test('CR-2026-065 例外治理自测：到期未清的例外 → EXCEPTION_EXPIRED 且退出非零', () => {
+  const expired = {
+    id: 'CR-2026-065-SELFTEST-EXPIRED',
+    kind: 'suite-failure',
+    reason: '自测构造：到期例外',
+    owner: 'Ray',
+    expires: '2020-01-01T00:00:00+08:00',
+    match: 'alpha',
+  };
+  const root = makeProbeRoot(['probe.test.mjs'], { 'probe.test.mjs': 1 }, [expired]);
+  try {
+    const { status, report } = runGateReport([{ file: 'probe.test.mjs', exit_code: 0, converged: true, tap: tapOf('ok', 'alpha') }], root);
+    assert.notEqual(status, 0, '到期未清必须退出非零（到期即红）');
+    assert.equal(report.verdict, 'block');
+    assert.equal(checkOf(report, 'EXCEPTION_EXPIRED').ok, false, '必须落 EXCEPTION_EXPIRED');
+    assert.equal(report.registry.exceptions_count, 1, '登记条数如实计入报告');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// 错误闭包②（FR-14.4）：未到期例外登记的失败名在本次运行中未出现 → EXCEPTION_NOT_OBSERVED + 非零退出。
+// 绿侧 check 不得被牵连（本用例同时钉住「未登记失败」与「陈旧例外」两个判定面互不串台）。
+test('CR-2026-065 例外治理自测：例外标识未匹配本次失败集合 → EXCEPTION_NOT_OBSERVED 且退出非零', () => {
+  const stale = {
+    id: 'CR-2026-065-SELFTEST-STALE',
+    kind: 'suite-failure',
+    reason: '自测构造：未观测例外',
+    owner: 'Ray',
+    expires: '2999-12-31T23:59:59Z',
+    match: 'CR-2026-065 never-observed case',
+  };
+  const root = makeProbeRoot(['probe.test.mjs'], { 'probe.test.mjs': 1 }, [stale]);
+  try {
+    const { status, report } = runGateReport([{ file: 'probe.test.mjs', exit_code: 0, converged: true, tap: tapOf('ok', 'alpha') }], root);
+    assert.notEqual(status, 0, '未观测的例外必须退出非零（不得自证绿）');
+    assert.equal(report.verdict, 'block');
+    assert.equal(checkOf(report, 'EXCEPTION_NOT_OBSERVED').ok, false, '必须落 EXCEPTION_NOT_OBSERVED');
+    assert.equal(checkOf(report, 'SUITE_FAILURES_UNREGISTERED').ok, true, '本次无未登记失败，该 check 应保持 ok');
+    assert.equal(report.registry.exceptions_count, 1, '登记条数如实计入报告');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
