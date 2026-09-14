@@ -5027,33 +5027,41 @@ test('CR-2026-044 TASK-03: workspace 非 healthy（dirty/wrong-branch/missing/pa
   }, 'path-unregistered');
 });
 
-// ── CR-2026-042 静态合同：Pipeline 16 节点 / CI 合并 / README / Skill 收敛 ──
+// ── CR-2026-042 静态合同：Pipeline 节点退役 / CI 合并 / README / Skill 收敛（节点数断言由 CR-2026-066 同步） ──
 
-test('CR-2026-042 静态合同：code Pipeline 16 节点、无 review_llm、无 …0013、后继与 replayNodes', () => {
+test('CR-2026-042 静态合同：code Pipeline 12 节点、无 review_llm、无 …0013、后继与 replayNodes', () => {
   const p = path.join(PACKAGE_ROOT, 'pipeline-templates', 'code-implementation.pipeline.json');
   const raw = readFileSync(p, 'utf8');
   const d = JSON.parse(raw);
-  assert.deepEqual(d.inputs.map((i) => i.key), ['cr_id', 'target_version', 'auto_push_after_task']);
+  assert.ok(Array.isArray(d.nodes) && d.nodes.length > 0, '节点集非空（解析失败必须硬失败）');
+  assert.deepEqual(d.inputs.map((i) => i.key), ['cr_id', 'target_version']);
   const ids = d.nodes.map((n) => n.id);
-  assert.equal(ids.length, 16, '节点数应为 16');
+  // CR-2026-066：节点数从 _index.yml 投影推导（跨文件唯一登记处），不再写第二份字面量。
+  const idxText = readFileSync(path.join(PACKAGE_ROOT, 'pipeline-templates', '_index.yml'), 'utf8').replace(/\r\n/g, '\n');
+  const projected = idxText.match(/- id: code-implementation-v1\n(?:.*\n)*?\s*nodes:\s*(\d+)/);
+  assert.ok(projected, '_index.yml 登记 code-implementation-v1.nodes');
+  assert.equal(ids.length, Number(projected[1]), '节点数 ≡ _index.yml 登记值');
+  assert.equal(ids.length, 12, 'CR-2026-066 删除 4 个 checkpoint 节点后应为 12');
   assert.equal(ids.includes('00000000-0000-0000-0015-000000000013'), false, '…0013 应删除');
   assert.equal(ids.indexOf('00000000-0000-0000-0015-000000000009'), ids.indexOf('00000000-0000-0000-0015-000000000017') + 1, '…0017 直接后继 …0009');
   const rc = d.nodes.find((n) => n.id === '00000000-0000-0000-0015-000000000009');
+  assert.ok(rc && rc.reviewLoop, 'review-code 节点含 reviewLoop');
   const replay = rc.reviewLoop.replayNodes.map((r) => r.nodeId);
   assert.deepEqual(replay, [
     '00000000-0000-0000-0015-000000000006',
     '00000000-0000-0000-0015-000000000007',
-    '00000000-0000-0000-0015-000000000008',
     '00000000-0000-0000-0015-000000000017',
     '00000000-0000-0000-0015-000000000009',
-  ], 'review-code replayNodes 顺序不变');
+  ], 'review-code replayNodes 收敛为 4 项（CR-2026-066 删除 …0008）');
   assert.equal(/review_llm/.test(raw), false, 'review_llm 应零命中');
+  assert.equal(/auto_push_after_task/.test(raw), false, 'auto_push_after_task 零残留');
 });
 
-test('CR-2026-042 静态合同：_index.yml nodes=16 且无 reviewer 选择暂停描述', () => {
+test('CR-2026-042 静态合同：_index.yml nodes=12（CR-2026-066 退役后）且无 reviewer 选择暂停描述', () => {
   const idx = readFileSync(path.join(PACKAGE_ROOT, 'pipeline-templates', '_index.yml'), 'utf8').replace(/\r\n/g, '\n');
   const m = idx.match(/id: code-implementation-v1[\s\S]*?nodes:\s*(\d+)/);
-  assert.equal(Number(m[1]), 16, 'code-implementation nodes 应为 16');
+  assert.ok(m, '_index.yml 登记 code-implementation-v1.nodes');
+  assert.equal(Number(m[1]), 12, 'code-implementation nodes 应为 12');
   assert.equal(/选择代码评审 LLM/.test(idx), false, '不应再有 reviewer 选择暂停描述');
 });
 

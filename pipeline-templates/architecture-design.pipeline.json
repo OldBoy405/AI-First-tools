@@ -91,15 +91,6 @@
       "prompt": "先执行一次 `crctl workspace inspect {{inputs.cr_id}}`：要求全部 resources[].classification=healthy，再消费返回的 operationalWorkspace 作为本节点业务权威路径；任一资源非 healthy 或 operationalWorkspace 为空时中止并指向 /resume。\n\n在 human_approval 通过后调用 approve-tech-design：\n- cr_id: {{inputs.cr_id}}\n\n只传完整 cr_id，消费结构化审批结果；下一步以 `crctl next {{inputs.cr_id}}` 为准。在 node-4.md 输出审批记录路径、当前 status、开发负责人。",
       "onFail": "abort",
       "timeoutMinutes": 5
-    },
-    {
-      "id": "00000000-0000-0000-0016-000000000005",
-      "kind": "skill",
-      "label": "推送架构设计到远端",
-      "ref": "push-progress",
-      "prompt": "先执行一次 `crctl workspace inspect {{inputs.cr_id}}`：要求全部 resources[].classification=healthy，再消费返回的 operationalWorkspace 作为本节点业务权威路径；任一资源非 healthy 或 operationalWorkspace 为空时中止并指向 /resume。\n\n执行 push-progress：\n- cr_id: {{inputs.cr_id}}\n- message: 架构设计已审批\n\n本节点是架构阶段终点完成条件（CR-2026-044 FR-07），不可跳过；失败时保持 tech-design-reviewed，只重跑同一 checkpoint，不重新审批。在 node-5.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
-      "onFail": "abort",
-      "timeoutMinutes": 10
     }
   ],
   "createdAt": "2026-05-18T00:00:00+08:00",

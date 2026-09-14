@@ -1,7 +1,7 @@
 {
   "id": "code-implementation",
   "name": "代码编写",
-  "description": "代码编写流水线：在架构设计审批通过后，根据技术设计文档 sdd.md 生成 plan.md，拆分可执行 TASK，人工确认任务拆分后推进到 developing，并根据配置选择 code generation runtime 调用对应 CLI 完成实际代码编写，随后推送统一 checkpoint、执行代码评审并等待人工审批进入 Review 通过状态。",
+  "description": "代码编写流水线：在架构设计审批通过后，根据技术设计文档 sdd.md 生成 plan.md，拆分可执行 TASK，人工确认任务拆分后推进到 developing，并根据配置选择 code generation runtime 调用对应 CLI 完成实际代码编写，随后执行代码评审并等待人工审批进入 Review 通过状态。",
   "triggerCommand": "coding",
   "scope": "product-dev",
   "isDefault": false,
@@ -21,14 +21,6 @@
       "required": false,
       "placeholder": "v0.16.0",
       "description": "写入 plan.md frontmatter；留空则由 write-dev-plan 推导或标记 tbd"
-    },
-    {
-      "key": "auto_push_after_task",
-      "label": "任务拆分后自动推送远端",
-      "type": "boolean",
-      "required": false,
-      "default": false,
-      "description": "勾选后 plan.md 与 tasks/ 完成后立即 push-progress 到 origin"
     }
   ],
   "nodes": [
@@ -95,15 +87,6 @@
       },
       "onFail": "abort",
       "timeoutMinutes": 30
-    },
-    {
-      "id": "00000000-0000-0000-0015-000000000003",
-      "kind": "skill",
-      "label": "推送设计/任务到远端",
-      "ref": "push-progress",
-      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n若 {{inputs.auto_push_after_task}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则执行 push-progress：cr_id={execution_context.cr_id}，message=计划与任务。\n\n在 node-3.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
-      "onFail": "skip",
-      "timeoutMinutes": 10
     },
     {
       "id": "00000000-0000-0000-0015-000000000004",
@@ -183,15 +166,6 @@
       "timeoutMinutes": 20
     },
     {
-      "id": "00000000-0000-0000-0015-000000000008",
-      "kind": "skill",
-      "label": "推送代码+文档统一 checkpoint",
-      "ref": "push-progress",
-      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n执行 push-progress：cr_id={execution_context.cr_id}，message=代码与测试证据。\n\n在 node-8.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
-      "onFail": "abort",
-      "timeoutMinutes": 15
-    },
-    {
       "id": "00000000-0000-0000-0015-000000000017",
       "kind": "skill",
       "label": "Workspace freshness（评审前）",
@@ -222,11 +196,6 @@
             "nodeId": "00000000-0000-0000-0015-000000000007",
             "ref": "write-test-report",
             "purpose": "regenerate-test-evidence"
-          },
-          {
-            "nodeId": "00000000-0000-0000-0015-000000000008",
-            "ref": "push-progress",
-            "purpose": "publish-repaired-code-and-evidence-checkpoint"
           },
           {
             "nodeId": "00000000-0000-0000-0015-000000000017",
@@ -262,19 +231,10 @@
       "timeoutMinutes": 30
     },
     {
-      "id": "00000000-0000-0000-0015-000000000015",
-      "kind": "skill",
-      "label": "代码评审 PASS 后审批前 checkpoint",
-      "ref": "push-progress",
-      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n执行 push-progress：cr_id={execution_context.cr_id}，message=代码评审通过后审批前 checkpoint。\n\n在节点输出中记录 batchId、repositories、phase；phase 非 complete 时中止，不得进入人工审批。",
-      "onFail": "abort",
-      "timeoutMinutes": 15
-    },
-    {
       "id": "00000000-0000-0000-0015-000000000010",
       "kind": "human_approval",
       "label": "代码审查通过",
-      "approvalPrompt": "代码自动评审已完成，且评审证据须满足 verdict=pass、blockers=[]，test-report.md 须满足 status=pass 后才可进入本节点；当前应为 code-reviewing，且评审后 checkpoint phase=complete。请审查人决定：\n\n✅ 通过：勾选此 Todo，下一节点 approve-code 会记录审批并推进到 code-approved\n❌ 驳回：提交驳回决定及理由，由 approve-code 走 reject 流程记录并回退；开发者修复后重新执行代码编写与 review-code 节点",
+      "approvalPrompt": "代码自动评审已完成，且评审证据须满足 verdict=pass、blockers=[]，test-report.md 须满足 status=pass 后才可进入本节点；当前应为 code-reviewing。请审查人决定：\n\n✅ 通过：勾选此 Todo，下一节点 approve-code 会记录审批并推进到 code-approved\n❌ 驳回：提交驳回决定及理由，由 approve-code 走 reject 流程记录并回退；开发者修复后重新执行代码编写与 review-code 节点",
       "onFail": "abort",
       "timeoutMinutes": 4320
     },
@@ -286,15 +246,6 @@
       "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n在 human_approval 通过后调用 approve-code：\n- cr_id: {{inputs.cr_id}}\n\n只传完整 cr_id，消费结构化审批结果；下一步以 `crctl next {{inputs.cr_id}}` 为准。在 node-11.md 输出审批记录路径、当前 status、开发负责人、测试负责人。",
       "onFail": "abort",
       "timeoutMinutes": 5
-    },
-    {
-      "id": "00000000-0000-0000-0015-000000000012",
-      "kind": "skill",
-      "label": "推送代码审批结果到远端",
-      "ref": "push-progress",
-      "prompt": "读取 node-1.md 末尾的 execution_context，所有 workspace 参数只使用 execution_context.operational_workspace。\n\n执行 push-progress：cr_id={execution_context.cr_id}，message=代码审批结果。\n\n本节点是代码阶段终点完成条件（CR-2026-044 FR-07），不可跳过；失败时保持 code-approved，只重跑同一 checkpoint，不重新审批。\n\n在 node-12.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
-      "onFail": "abort",
-      "timeoutMinutes": 10
     }
   ],
   "createdAt": "2026-05-18T00:00:00+08:00",

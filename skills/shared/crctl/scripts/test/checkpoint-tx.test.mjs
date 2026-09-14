@@ -485,13 +485,27 @@ test('checkpoint editLatestCheckpoint：条目后仍有其他条目时不粘行�
 });
 
 test('checkpoint T05 contract：Pipeline 只编排 Skill，active alignment reader 不读旧 checkpoints[]', () => {
-  const pipelineFiles = ['requirement-authoring.pipeline.json', 'architecture-design.pipeline.json', 'code-implementation.pipeline.json', 'resume-cr.pipeline.json'];
-  for (const name of pipelineFiles) {
+  // CR-2026-066：删除 7 个 checkpoint 节点后，把「filter 后断言」改为**显式枚举**——
+  // requirement / architecture / code 三份的 push-progress 节点集合为空集（显式 deepEqual），
+  // resume-cr 的 list-remote-checkpoints 仍存活并逐条负向断言；枚举非空断言防「过滤为空 → 断言静默失效」。
+  const crProduced = ['requirement-authoring.pipeline.json', 'architecture-design.pipeline.json', 'code-implementation.pipeline.json'];
+  const enumerated = [];
+  for (const name of crProduced) {
     const doc = JSON.parse(fs.readFileSync(path.join(TOOLS_ROOT, 'pipeline-templates', name), 'utf8'));
-    for (const node of doc.nodes.filter((n) => n.ref === 'push-progress' || n.ref === 'list-remote-checkpoints')) {
+    assert.ok(Array.isArray(doc.nodes) && doc.nodes.length > 0, `${name} 节点集非空（解析失败必须硬失败）`);
+    const push = doc.nodes.filter((n) => n.ref === 'push-progress');
+    assert.deepEqual(push, [], `${name} push-progress 节点集合为空集（对象级删除，不是过滤退化）`);
+  }
+  for (const name of ['resume-cr.pipeline.json']) {
+    const doc = JSON.parse(fs.readFileSync(path.join(TOOLS_ROOT, 'pipeline-templates', name), 'utf8'));
+    const readers = doc.nodes.filter((n) => n.ref === 'list-remote-checkpoints');
+    enumerated.push(...readers);
+    for (const node of readers) {
       assert.doesNotMatch(node.prompt, /crctl checkpoint|source commit|lease publish|latest-checkpoint|source-sha|checkpoint-add|git (add|commit|push)/i, `${name}:${node.label}`);
     }
   }
+  assert.ok(enumerated.length > 0, '枚举非空（resume-cr 的 list-remote-checkpoints 必须存活，禁止空集合静默通过）');
+  assert.equal(enumerated.filter((n) => n.ref === 'push-progress').length, 0, '存活枚举项不得含 push-progress');
   // J-2（CR-2026-065）：reader 事实源 = cr.md + _backlog.yml 条目信息；不回写该文件（在 zero_diff 面内）。
   const alignment = readTextNormalized(path.join(TOOLS_ROOT, 'skills', 'review', 'review-alignment', 'SKILL.md'));
   assert.ok(alignment.includes('change-requests/_backlog.yml'), 'reader 读取契约应命中 change-requests/_backlog.yml');

@@ -1,6 +1,6 @@
-// CR-2026-039 TASK-04 / CR-2026-043 TASK-04：code-implementation.pipeline.json 结构测试（node --test，零依赖）。
-// 覆盖 AC-1～AC-4：checkpoint 节点序、onFail/ref、节点 id 全局唯一、reviewLoop.replayNodes 逐字不变、
-// inputs 无 suggestion_policy。
+// CR-2026-039 TASK-04 / CR-2026-043 TASK-04 / CR-2026-066 TASK-01：pipeline 结构测试（node --test，零依赖）。
+// 覆盖 AC-1～AC-4：阶段终点发布点唯一性（节点数 5/4/12、push-progress 节点计数 0、被删 7 个完整 id 零出现）、
+// 节点 id 全局唯一、reviewLoop.replayNodes 按事实源推导、inputs 无 suggestion_policy。
 //
 // 运行：node --test skills/shared/crctl/scripts/test/pipeline-structure.test.mjs
 
@@ -17,40 +17,76 @@ const pipeline = JSON.parse(readFileSync(PIPELINE_PATH, 'utf8').replaceAll('\r\n
 const nodes = pipeline.nodes;
 const bySuffix = (s) => nodes.find((n) => n.id.endsWith(s));
 const REVIEW_CODE = '00000000-0000-0000-0015-000000000009';
-const CHECKPOINT = '00000000-0000-0000-0015-000000000015';
 const HUMAN_APPROVAL = '00000000-0000-0000-0015-000000000010';
 const APPROVE_CODE = '00000000-0000-0000-0015-000000000011';
 
-test('AC-1: 节点序 review-code(…0009) < checkpoint(…0015) < human_approval(…0010) < approve-code(…0011)', () => {
-  const idx = (id) => nodes.findIndex((n) => n.id === id);
-  for (const id of [REVIEW_CODE, CHECKPOINT, HUMAN_APPROVAL, APPROVE_CODE]) assert.notEqual(idx(id), -1, `节点存在: ${id}`);
-  assert.ok(idx(REVIEW_CODE) < idx(CHECKPOINT), 'review-code < checkpoint');
-  assert.ok(idx(CHECKPOINT) < idx(HUMAN_APPROVAL), 'checkpoint < human_approval');
-  assert.ok(idx(HUMAN_APPROVAL) < idx(APPROVE_CODE), 'human_approval < approve-code');
+/* 事实源读取器（CR-2026-066 AC-1/AC-2）：断言一律从 pipeline JSON 与 pipeline-templates/_index.yml 推导，不钉死行数。 */
+const readPipelineOf = (name) => JSON.parse(readFileSync(path.join(TOOLS_ROOT, 'pipeline-templates', name), 'utf8').replaceAll('\r\n', '\n'));
+const INDEX_NODES = (() => {
+  const text = readFileSync(path.join(TOOLS_ROOT, 'pipeline-templates', '_index.yml'), 'utf8').replaceAll('\r\n', '\n');
+  const table = {};
+  for (const m of text.matchAll(/- id: ([\w-]+)\n(?:.*\n)*?\s*nodes:\s*(\d+)/g)) table[m[1]] = Number(m[2]);
+  if (Object.keys(table).length === 0) throw new Error('pipeline-templates/_index.yml 未解析到任何 nodes 计数（硬失败，不得静默通过）');
+  return table;
+})();
+
+/* CR-2026-066 AC-1：阶段终点发布点唯一性（对象级删除的直接判据；删除了 …0015 的旧节点序断言）。 */
+
+test('AC-1: 阶段终点发布点唯一性——节点数 5/4/12 ≡ _index.yml；push-progress 节点计数 0；被删 7 个完整 id 零出现', () => {
+  const cases = [
+    ['requirement-authoring.pipeline.json', 'requirement-authoring-v1', 5],
+    ['architecture-design.pipeline.json', 'architecture-design-v1', 4],
+    ['code-implementation.pipeline.json', 'code-implementation-v1', 12],
+  ];
+  const deletedIds = [
+    '00000000-0000-0000-0011-000000000003',
+    '00000000-0000-0000-0011-000000000007',
+    '00000000-0000-0000-0016-000000000005',
+    '00000000-0000-0000-0015-000000000003',
+    '00000000-0000-0000-0015-000000000008',
+    '00000000-0000-0000-0015-000000000012',
+    '00000000-0000-0000-0015-000000000015',
+  ];
+  const allIds = [];
+  for (const [file, indexId, count] of cases) {
+    const p = readPipelineOf(file);
+    assert.ok(Array.isArray(p.nodes) && p.nodes.length > 0, `${file} 节点集非空（解析失败必须硬失败，不得静默通过）`);
+    assert.equal(p.nodes.length, count, `${file} 节点数为 ${count}（对象级删除后）`);
+    assert.equal(INDEX_NODES[indexId], count, `_index.yml ${indexId} nodes 计数与 JSON 一致`);
+    assert.equal(p.nodes.filter((n) => n.ref === 'push-progress').length, 0, `${file} push-progress 节点计数 = 0`);
+    const approvalIdx = p.nodes.findIndex((n) => n.kind === 'human_approval');
+    assert.notEqual(approvalIdx, -1, `${file} 有 human_approval 节点`);
+    assert.equal(p.nodes.slice(approvalIdx + 1).filter((n) => n.ref === 'push-progress').length, 0, `${file} human_approval 之后不得有 push-progress 节点`);
+    allIds.push(...p.nodes.map((n) => n.id));
+  }
+  assert.equal(new Set(allIds).size, allIds.length, '三份 pipeline 节点 id 全局唯一');
+  const raw = cases.map(([file]) => readFileSync(path.join(TOOLS_ROOT, 'pipeline-templates', file), 'utf8')).join('\n');
+  for (const id of deletedIds) assert.equal(raw.includes(id), false, `被删节点完整 id 零出现：${id}`);
 });
 
-test('AC-2: checkpoint 节点 onFail=abort、ref=push-progress；节点 id 全局唯一（CR-2026-042 后 16 节点）', () => {
-  const n = bySuffix('000000000015');
-  assert.equal(n.onFail, 'abort');
-  assert.equal(n.ref, 'push-progress');
-  assert.equal(n.kind, 'skill');
-  assert.ok(/checkpoint/i.test(n.label), 'label 表达 checkpoint 语义');
-  assert.ok(/\{\{inputs\.cr_id\}\}|\{execution_context\.cr_id\}/.test(n.prompt), 'prompt 引用 cr_id');
+test('AC-2: code pipeline 节点数按事实源推导（12）与节点 id 全局唯一（CR-2026-066 删除 4 个 checkpoint 节点后）', () => {
+  assert.ok(nodes.length > 0, '节点集非空（解析失败必须硬失败）');
   const ids = nodes.map((n) => n.id);
   assert.equal(new Set(ids).size, ids.length, '节点 id 全局唯一');
-  assert.equal(ids.length, 16, 'CR-2026-042 删除 reviewer 选择暂停 …0013 后为 16 节点');
+  assert.equal(nodes.length, INDEX_NODES['code-implementation-v1'], '节点数与 pipeline-templates/_index.yml 计数一致（事实源推导）');
+  assert.equal(nodes.length, 12, 'CR-2026-066 删除 …0003/…0008/…0012/…0015 后为 12 节点');
+  assert.equal(nodes.filter((n) => n.kind === 'code_generation').length, 1, 'code_generation 节点保留');
+  for (const suffix of ['000000000016', '000000000017']) assert.ok(bySuffix(suffix), `workspace-freshness gate 节点保留 ${suffix}`);
 });
 
-test('AC-3: review-code reviewLoop.replayNodes 为 5 项，含 workspace-freshness(…0017) 重核（CR-2026-043）', () => {
+test('AC-3: review-code reviewLoop.replayNodes 为 4 项，含 workspace-freshness(…0017) 重核（CR-2026-043 / CR-2026-066）', () => {
   const n = bySuffix('000000000009');
-  assert.deepEqual(n.reviewLoop.replayNodes, [
+  assert.ok(n && n.reviewLoop, 'review-code 节点含 reviewLoop');
+  const replay = n.reviewLoop.replayNodes;
+  assert.ok(Array.isArray(replay) && replay.length > 0, 'replayNodes 非空（解析失败必须硬失败）');
+  assert.deepEqual(replay, [
     { nodeId: '00000000-0000-0000-0015-000000000006', ref: 'implement-code', purpose: 'repair-code' },
     { nodeId: '00000000-0000-0000-0015-000000000007', ref: 'write-test-report', purpose: 'regenerate-test-evidence' },
-    { nodeId: '00000000-0000-0000-0015-000000000008', ref: 'push-progress', purpose: 'publish-repaired-code-and-evidence-checkpoint' },
     { nodeId: '00000000-0000-0000-0015-000000000017', ref: 'workspace-freshness', purpose: 're-verify-baseline' },
     { nodeId: '00000000-0000-0000-0015-000000000009', ref: 'review-code', purpose: 'rerun-current-review' },
-  ], 'replayNodes 扩为 5 项：重放顺序在 review-code 前插入基线重核');
+  ], 'replayNodes 收敛为 4 项：删除已退役的 …0008（统一 checkpoint）项');
   assert.equal(n.reviewLoop.maxAttempts, 3);
+  for (const x of replay) assert.ok(nodes.some((m) => m.id === x.nodeId), `replayNodes 目标存在：${x.nodeId}`);
 });
 
 test('CR-2026-043: 两个 workspace-freshness gate 位置/ref/onFail 正确', () => {
@@ -67,8 +103,8 @@ test('CR-2026-043: 两个 workspace-freshness gate 位置/ref/onFail 正确', ()
   // 实施前 gate：approve-dev-start(…0005) 之后、implement-code(…0006) 之前
   assert.ok(idx('00000000-0000-0000-0015-000000000005') < idx('00000000-0000-0000-0015-000000000016'), '…016 在 approve-dev-start 后');
   assert.ok(idx('00000000-0000-0000-0015-000000000016') < idx('00000000-0000-0000-0015-000000000006'), '…016 在 implement-code 前');
-  // 评审前 gate：统一 checkpoint push-progress(…0008) 之后、review-code(…0009) 之前（CR-2026-042 删除评审 LLM 选择 …0013）
-  assert.ok(idx('00000000-0000-0000-0015-000000000008') < idx('00000000-0000-0000-0015-000000000017'), '…017 在统一 checkpoint 后');
+  // 评审前 gate：测试报告(…0007) 之后、review-code(…0009) 之前（CR-2026-066 删除统一 checkpoint …0008）
+  assert.ok(idx('00000000-0000-0000-0015-000000000007') < idx('00000000-0000-0000-0015-000000000017'), '…017 在测试报告之后');
   assert.ok(idx('00000000-0000-0000-0015-000000000017') < idx('00000000-0000-0000-0015-000000000009'), '…017 在 review-code 前');
   assert.ok(impl.prompt.includes('implement-start'));
   assert.ok(review.prompt.includes('review-start'));
@@ -111,9 +147,10 @@ test('AC-4: inputs 中无 suggestion_policy', () => {
   assert.ok(!pipeline.inputs.some((i) => i.key === 'suggestion_policy'), 'suggestion_policy 已删除');
 });
 
-test('human_approval(…0010) approvalPrompt 含评审后 checkpoint phase=complete 前提', () => {
+test('human_approval(…0010) approvalPrompt 不含已退役的 checkpoint phase=complete 前提句（CR-2026-066 反向断言）', () => {
   const n = bySuffix('000000000010');
-  assert.ok(n.approvalPrompt.includes('评审后 checkpoint phase=complete'), '审批提示追加 checkpoint 前提');
+  assert.ok(n && typeof n.approvalPrompt === 'string' && n.approvalPrompt.length > 0, 'approvalPrompt 非空（读不到即硬失败）');
+  assert.equal(n.approvalPrompt.includes('评审后 checkpoint phase=complete'), false, '审批提示不得保留 checkpoint 前提句');
 });
 
 /* ── CR-2026-050 FR-01：human approval 不再引导直接编辑受保护账本（review-annotations 指引删除） ── */
@@ -132,9 +169,9 @@ test('FR-01: 三条 CR Pipeline human approval prompt 删除 review-annotations 
     assert.ok(!/review-annotations/.test(text), `${name} approvalPrompt 不得残留 review-annotations 路径`);
     assert.ok(!/补充 reject_reason|reject_reason/.test(text), `${name} approvalPrompt 不得引导直接补 reject_reason`);
     assert.ok(/approve|reject/i.test(text), `${name} approvalPrompt 保留 approve/reject 结构化决定`);
-    // FR-01 保留项：code 代码审批节点 …0010 的 checkpoint phase=complete 前提句
+    // CR-2026-066 反向判据：code 代码审批节点 …0010 的 checkpoint phase=complete 前提句随节点对象一并删除
     if (suffix === '000000000010') {
-      assert.ok(text.includes('评审后 checkpoint phase=complete'), '…0010 保留 checkpoint phase=complete 前提');
+      assert.equal(text.includes('评审后 checkpoint phase=complete'), false, '…0010 不得保留 checkpoint phase=complete 前提');
     }
   }
 });
@@ -166,50 +203,46 @@ test('FR-05: 四个 approve 节点只传 cr_id，无 crctl approve 命令细节/
 const TOOLS_ROOT_044 = path.resolve(import.meta.dirname, '..', '..', '..', '..', '..');
 const readPipeline = (name) => JSON.parse(readFileSync(path.join(TOOLS_ROOT_044, 'pipeline-templates', name), 'utf8').replaceAll('\r\n', '\n'));
 
-test('CR-2026-044 AC-13/14: requirement-authoring 审批后强制 checkpoint（7 节点），草稿 checkpoint 仍可选', () => {
+test('CR-2026-044 AC-13: requirement-authoring 审批后不得有 push-progress、5 节点（CR-2026-066 节点退役后）', () => {
   const p = readPipeline('requirement-authoring.pipeline.json');
-  const idx = (refAfter) => p.nodes.findIndex((n) => n.ref === refAfter);
+  assert.ok(Array.isArray(p.nodes) && p.nodes.length > 0, '节点集非空（解析失败必须硬失败）');
   const approveIdx = p.nodes.findIndex((n) => n.ref === 'approve-requirement');
   assert.notEqual(approveIdx, -1, 'approve-requirement 节点存在');
-  const end = p.nodes[approveIdx + 1];
-  assert.ok(end, 'approve-requirement 后存在终点 checkpoint 节点');
-  assert.equal(end.ref, 'push-progress');
-  assert.equal(end.onFail, 'abort', '审批后 checkpoint 必须 abort');
-  const draft = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_prd/.test(n.prompt));
-  assert.ok(draft && draft.onFail === 'skip', 'PRD 草稿 checkpoint 仍可选');
-  assert.equal(p.nodes.length, 7, '新增终点 checkpoint 后为 7 节点');
+  assert.equal(p.nodes.slice(approveIdx + 1).filter((n) => n.ref === 'push-progress').length, 0, 'approve-requirement 之后不得有 push-progress');
+  assert.equal(p.nodes.filter((n) => n.ref === 'push-progress').length, 0, 'requirement 阶段 push-progress 节点计数 = 0');
+  assert.equal(p.inputs.some((i) => i.key === 'auto_push_after_prd'), false, 'auto_push_after_prd 输入已删除');
+  assert.equal(p.nodes.length, 5, 'CR-2026-066 删除草稿/终点 checkpoint 后为 5 节点');
   const indexText = readFileSync(path.join(TOOLS_ROOT_044, 'pipeline-templates', '_index.yml'), 'utf8').replaceAll('\r\n', '\n');
   const m = indexText.match(/- id: requirement-authoring-v1\n(?:.*\n)*?\s*nodes:\s*(\d+)/);
-  assert.equal(Number(m[1]), 7, '_index.yml requirement-authoring nodes=7');
+  assert.ok(m, '_index.yml 含 requirement-authoring-v1 条目');
+  assert.equal(Number(m[1]), 5, '_index.yml requirement-authoring nodes=5');
 });
 
-test('CR-2026-044 AC-14: architecture-design 删除 auto_push_after_sdd，审批后 checkpoint abort，5 节点不变', () => {
+test('CR-2026-044 AC-14: architecture-design push-progress 节点计数 0、4 节点（CR-2026-066 节点退役后）', () => {
   const p = readPipeline('architecture-design.pipeline.json');
+  assert.ok(Array.isArray(p.nodes) && p.nodes.length > 0, '节点集非空（解析失败必须硬失败）');
   assert.ok(!p.inputs.some((i) => i.key === 'auto_push_after_sdd'), 'auto_push_after_sdd 输入已删除');
-  const push = p.nodes.filter((n) => n.ref === 'push-progress');
-  assert.equal(push.length, 1, '仅一个 checkpoint 节点');
-  assert.equal(push[0].onFail, 'abort', '架构终点 checkpoint 必须 abort');
-  assert.ok(!/SKIPPED|auto_push/.test(push[0].prompt), 'checkpoint prompt 无 skip 分支');
-  assert.doesNotMatch(push[0].prompt, /<[^>]*workspace[^>]*>/i, 'checkpoint prompt 不得含未解析 workspace 占位符');
-  // CR-2026-044 FR-07 溯源：架构终点 checkpoint 不可跳过、失败只重跑不重审批。
-  // 本断言由 CR-2026-050 FR-07.3 修订：prompt 不再含 `crctl checkpoint` 命令字面量
-  // （命令收敛由 push-progress SKILL 承载），语义改由 onFail=abort + phase 消费 + 阶段终点句断言。
-  assert.ok(!/crctl checkpoint/.test(push[0].prompt), 'checkpoint prompt 不含 crctl checkpoint 命令字面量');
-  assert.ok(/phase/.test(push[0].prompt), 'checkpoint prompt 消费 phase');
-  assert.ok(/阶段终点/.test(push[0].prompt), 'checkpoint prompt 保留阶段终点语义');
+  assert.equal(p.nodes.filter((n) => n.ref === 'push-progress').length, 0, '架构阶段 push-progress 节点计数 = 0（对象级删除）');
+  // 阶段终点发布改由评审 PASS 的 review SKILL 承担，节点侧不得保留任何 checkpoint 命令面。
+  for (const n of p.nodes) {
+    if (!n.prompt) continue;
+    assert.ok(!/crctl checkpoint/.test(n.prompt), `${n.ref || n.kind} prompt 不含 crctl checkpoint 命令字面量`);
+    assert.ok(!/\{\{inputs\.auto_push/.test(n.prompt), `${n.ref || n.kind} prompt 无 auto_push 输入面`);
+  }
   const skill = readFileSync(path.join(TOOLS_ROOT_044, 'skills', 'sync', 'push-progress', 'SKILL.md'), 'utf8');
   assert.doesNotMatch(skill, /<installation-workspace>/, 'push-progress Skill 不得保留可误执行的 workspace token');
-  assert.equal(p.nodes.length, 5, '节点数保持 5');
+  assert.equal(p.nodes.length, 4, 'CR-2026-066 删除终点 checkpoint 后为 4 节点');
 });
 
-test('CR-2026-044 AC-13: code-implementation 审批后 checkpoint abort、TASK checkpoint 仍可选、16 节点不变（CR-2026-042 删除评审 LLM 节点后）', () => {
+test('CR-2026-044 AC-13: code-implementation push-progress 节点计数 0、inputs 无 auto_push_after_task、12 节点（CR-2026-066）', () => {
   const p = readPipeline('code-implementation.pipeline.json');
-  const final = p.nodes.find((n) => /审批结果/.test(n.label || '') && n.ref === 'push-progress');
-  assert.ok(final, '审批结果 checkpoint 节点存在');
-  assert.equal(final.onFail, 'abort', '审批后 checkpoint 必须 abort');
-  const taskCkpt = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_task/.test(n.prompt));
-  assert.ok(taskCkpt && taskCkpt.onFail === 'skip', 'TASK checkpoint 仍可选');
-  assert.equal(p.nodes.length, 16, 'CR-2026-042 移除评审 LLM 选择节点后为 16 节点');
+  assert.ok(Array.isArray(p.nodes) && p.nodes.length > 0, '节点集非空（解析失败必须硬失败）');
+  assert.equal(p.nodes.filter((n) => n.ref === 'push-progress').length, 0, 'code 阶段 push-progress 节点计数 = 0');
+  assert.equal(p.inputs.some((i) => i.key === 'auto_push_after_task'), false, 'auto_push_after_task 输入已删除');
+  const raw = readFileSync(path.join(TOOLS_ROOT_044, 'pipeline-templates', 'code-implementation.pipeline.json'), 'utf8');
+  assert.equal(/auto_push_after_task/.test(raw), false, 'auto_push_after_task 在文件中零残留');
+  assert.equal(/SKIPPED/.test(raw), false, 'SKIPPED 字面量零残留');
+  assert.equal(p.nodes.length, 12, 'CR-2026-066 删除 4 个 checkpoint 节点后为 12 节点');
 });
 
 test('CR-2026-044 AC-12: architecture/code 入口取得 authority path，并由 execution_context 原样传给后续节点', () => {
@@ -257,25 +290,28 @@ test('CR-2026-045 AC-02: architecture reviewLoop 复用 rerun-listed-nodes-in-or
   assert.equal(rn.reviewLoop.replayPolicy, undefined);
 });
 
-test('CR-2026-045 AC-03: emit-registry 输出 canonical registry 且 digest 稳定', () => {
+test('CR-2026-045 AC-03: emit-registry 输出 canonical registry 且 digest 格式稳定（CR-2026-066 节点退役后）', () => {
   const r = spawnSync(process.execPath, [EMIT_REGISTRY, '--pipeline', 'architecture-design'], { encoding: 'utf8' });
   assert.equal(r.status, 0, `emit-registry 退出码 0，stderr=${r.stderr}`);
   const reg = JSON.parse(r.stdout);
   assert.equal(reg.schema, 'ai-first.pipeline-registry/architecture-core-v1');
   assert.equal(reg.pipelineOwner, 'dev-agent');
-  assert.equal(reg.nodePermissions.length, 4, 'architecture 有 4 个 skill 节点');
+  const skillNodes = ARCH.nodes.filter((n) => n.kind === 'skill');
+  assert.ok(skillNodes.length > 0, 'architecture skill 节点集非空（解析失败必须硬失败）');
+  assert.equal(reg.nodePermissions.length, skillNodes.length, 'registry 逐节点覆盖 architecture 的全部 skill 节点');
+  assert.equal(reg.nodePermissions.length, 3, '架构 3 个 skill 节点（CR-2026-066 删除 push-progress 后）');
   for (const p of reg.nodePermissions) {
     assert.equal(typeof p.ref, 'string');
     assert.equal(typeof p.owner, 'string');
     assert.equal(p.pipelineOwnerCanCall, true);
   }
+  // CR-2026-066：删除必然改变 digest，故只断格式，不钉死旧 digest（FR-11 只登记不重生成）。
   assert.match(reg.digest, /^sha256:[0-9a-f]{64}$/);
-  // 所有 skill 节点 owner 唯一：write/approve 归 dev-agent，review-tech-design 归 quality-reviewer-agent（CR-2026-053 FR-A1），push-progress 归 system-orchestrator
   const byRef = Object.fromEntries(reg.nodePermissions.map((p) => [p.ref, p.owner]));
   assert.equal(byRef['write-tech-design'], 'dev-agent');
   assert.equal(byRef['review-tech-design'], 'quality-reviewer-agent');
   assert.equal(byRef['approve-tech-design'], 'dev-agent');
-  assert.equal(byRef['push-progress'], 'system-orchestrator');
+  assert.equal(Object.prototype.hasOwnProperty.call(byRef, 'push-progress'), false, 'push-progress 不再出现在 registry');
 });
 
 test('CR-2026-045: commit-scan git show 仅放行 canonical review annotation object', () => {
@@ -301,13 +337,13 @@ test('CR-2026-045: emit-registry 残留双花括号 token 硬失败且不输出�
   assert.equal(r.stdout, '');
 });
 
-/* ── CR-2026-050 FR-12.2：requirement-authoring 关键顺序、execution_context 输出、auto_push 分支、reviewLoop 字段集 ── */
+/* ── CR-2026-050 FR-12.2：requirement-authoring 关键顺序、execution_context 输出、reviewLoop 字段集（CR-2026-066 节点退役后） ── */
 
-test('FR-12.2: requirement-authoring 7 节点顺序、execution_context/owners 输出与 auto_push_after_prd 分支保留', () => {
+test('FR-12.2: requirement-authoring 5 节点顺序、execution_context/owners 输出与 reviewLoop 字段集（CR-2026-066）', () => {
   const p = readPipeline('requirement-authoring.pipeline.json');
   const order = p.nodes.map((n) => n.ref || n.kind);
-  assert.deepEqual(order, ['requirement-register', 'write-requirement-prd', 'push-progress', 'review-requirement', 'human_approval', 'approve-requirement', 'push-progress'], 'register → PRD → 草稿ckpt → review → 审批 → approve → 终点ckpt');
-  assert.equal(p.nodes.length, 7, '7 节点不变（FR-12.4 节点数零改动）');
+  assert.deepEqual(order, ['requirement-register', 'write-requirement-prd', 'review-requirement', 'human_approval', 'approve-requirement'], 'register → PRD → review → 审批 → approve（阶段终点发布由评审 PASS 承担）');
+  assert.equal(p.nodes.length, 5, 'CR-2026-066 删除草稿/终点 checkpoint 后为 5 节点');
   const first = p.nodes[0];
   assert.ok(first.prompt.includes('execution_context:'), 'register 输出机器可读 execution_context');
   assert.ok(first.prompt.includes('operational_workspace:'), 'execution_context 含 operational_workspace（snake_case，逐字透传）');
@@ -315,8 +351,8 @@ test('FR-12.2: requirement-authoring 7 节点顺序、execution_context/owners �
   assert.ok(!first.prompt.includes('knowledge_base_worktree:'), 'execution_context 不再持有 knowledge_base_worktree 快照');
   assert.ok(!/crctl register/.test(first.prompt), 'register 节点无 crctl register 命令参数序列');
   assert.ok(!/\/abs\/path/.test(first.prompt), 'register 节点无绝对路径示例');
-  const draft = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_prd/.test(n.prompt));
-  assert.ok(draft && draft.onFail === 'skip', 'PRD 草稿 checkpoint 保留 auto_push_after_prd 分支');
+  assert.equal(p.inputs.some((i) => i.key === 'auto_push_after_prd'), false, 'auto_push_after_prd 输入已删除（CR-2026-066）');
+  assert.equal(p.nodes.filter((n) => n.ref === 'push-progress').length, 0, 'requirement 阶段 checkpoint 节点计数 = 0');
   const review = p.nodes.find((n) => n.ref === 'review-requirement');
   assert.ok(review.reviewLoop && review.reviewLoop.repairRef === 'write-requirement-prd', 'reviewLoop 机器字段不变');
   assert.deepEqual(
@@ -338,41 +374,38 @@ test('FR-06.1/07.4/07.5: requirement-authoring review/register/PRD 节点收敛�
 
 /* ── CR-2026-050 FR-12.3：code-implementation 两条关键顺序、replayNodes、保留字面量与收敛负向断言 ── */
 
-test('FR-12.3: code-implementation 16 节点关键顺序与 reviewLoop replayNodes 不变', () => {
+test('FR-12.3: code-implementation 12 节点关键顺序与 reviewLoop replayNodes（CR-2026-066 节点退役后）', () => {
   const p = readPipeline('code-implementation.pipeline.json');
-  assert.equal(p.nodes.length, 16, '16 节点不变');
+  assert.ok(Array.isArray(p.nodes) && p.nodes.length > 0, '节点集非空（解析失败必须硬失败）');
+  assert.equal(p.nodes.length, 12, 'CR-2026-066 删除 4 个 checkpoint 节点后为 12 节点');
   const idx = (s) => p.nodes.findIndex((n) => n.id.endsWith(s));
   // plan → TASK → review-dev-plan → 审批 → developing
   assert.ok(idx('000000000001') < idx('000000000002'), 'write-dev-plan < write-dev-tasks');
   assert.ok(idx('000000000002') < idx('000000000014'), 'write-dev-tasks < review-dev-plan');
   assert.ok(idx('000000000014') < idx('000000000004'), 'review-dev-plan < human_approval');
   assert.ok(idx('000000000004') < idx('000000000005'), 'human_approval < approve-dev-start');
-  // implement → test-report → checkpoint → freshness → review-code
+  // implement → test-report → freshness → review-code（统一 checkpoint 节点已退役）
   assert.ok(idx('000000000006') < idx('000000000007'), 'implement < test-report');
-  assert.ok(idx('000000000007') < idx('000000000008'), 'test-report < 统一 checkpoint');
-  assert.ok(idx('000000000008') < idx('000000000017'), 'checkpoint < review-start freshness');
+  assert.ok(idx('000000000007') < idx('000000000017'), 'test-report < review-start freshness');
   assert.ok(idx('000000000017') < idx('000000000009'), 'review-start freshness < review-code');
   const reviewCode = p.nodes.find((n) => n.id.endsWith('000000000009'));
   assert.deepEqual(reviewCode.reviewLoop.replayNodes, [
     { nodeId: '00000000-0000-0000-0015-000000000006', ref: 'implement-code', purpose: 'repair-code' },
     { nodeId: '00000000-0000-0000-0015-000000000007', ref: 'write-test-report', purpose: 'regenerate-test-evidence' },
-    { nodeId: '00000000-0000-0000-0015-000000000008', ref: 'push-progress', purpose: 'publish-repaired-code-and-evidence-checkpoint' },
     { nodeId: '00000000-0000-0000-0015-000000000017', ref: 'workspace-freshness', purpose: 're-verify-baseline' },
     { nodeId: '00000000-0000-0000-0015-000000000009', ref: 'review-code', purpose: 'rerun-current-review' },
-  ], 'review-code replayNodes 5 项不变');
+  ], 'review-code replayNodes 收敛为 4 项（CR-2026-066 删除 …0008）');
 });
 
-test('FR-12.3b: code-implementation 保留字面量（gate 名/checkpoint label/auto_push/task done）与收敛负向断言', () => {
+test('FR-12.3b: code-implementation 保留 gate 名与收敛负向断言（CR-2026-066 退役 checkpoint label/auto_push 断言）', () => {
   const p = readPipeline('code-implementation.pipeline.json');
   const implGate = p.nodes.find((n) => n.id.endsWith('000000000016'));
   const revGate = p.nodes.find((n) => n.id.endsWith('000000000017'));
   assert.ok(implGate.prompt.includes('implement-start'), '实施前 gate 名 implement-start 保留');
   assert.ok(revGate.prompt.includes('review-start'), '评审前 gate 名 review-start 保留');
-  const finalCkpt = p.nodes.find((n) => /审批结果/.test(n.label || '') && n.ref === 'push-progress');
-  assert.ok(finalCkpt, '审批结果 checkpoint 存在');
-  assert.equal(finalCkpt.onFail, 'abort', '审批结果 checkpoint onFail=abort');
-  const taskCkpt = p.nodes.find((n) => n.ref === 'push-progress' && /auto_push_after_task/.test(n.prompt));
-  assert.ok(taskCkpt && taskCkpt.onFail === 'skip', 'TASK checkpoint auto_push_after_task 保留');
+  // CR-2026-066：审批结果 checkpoint 与 TASK checkpoint（auto_push_after_task）已对象级删除，不得再以任何形态复活。
+  assert.equal(p.nodes.filter((n) => n.ref === 'push-progress').length, 0, 'push-progress 节点计数 = 0');
+  assert.equal(p.nodes.some((n) => /auto_push/.test(n.prompt || '')), false, '无 auto_push_* 输入面残留');
   // 收敛负向断言：无 deny 路径字面量残留（lint R1）、无命令细节
   for (const [ref, bad] of [
     ['review-dev-plan', /review-annotations|crctl review-record|--embedded|八类维度合并评审/],
@@ -509,12 +542,12 @@ test('CR-2026-050 AC-10: cr-show 最近三次 checkpoint 使用持久化 metadat
   assert.ok(!/change-requests\/\{cr-id\}\/checkpoints\.yml|_backlog\.yml#checkpoints/.test(text), '不引用不存在的 checkpoint 历史结构');
 });
 
-test('CR-2026-050 AC-12: 8 条 Pipeline 节点数与 UUID 全局唯一保持不变', () => {
+test('CR-2026-050 AC-12: 8 条 Pipeline 节点数（5/4/12）与 UUID 全局唯一保持不变', () => {
   const expected = {
     'product-planning.pipeline.json': 8,
-    'requirement-authoring.pipeline.json': 7,
-    'architecture-design.pipeline.json': 5,
-    'code-implementation.pipeline.json': 16,
+    'requirement-authoring.pipeline.json': 5,
+    'architecture-design.pipeline.json': 4,
+    'code-implementation.pipeline.json': 12,
     'feature-writeback.pipeline.json': 5,
     'resume-cr.pipeline.json': 3,
     'competitive-radar.pipeline.json': 5,
@@ -523,7 +556,8 @@ test('CR-2026-050 AC-12: 8 条 Pipeline 节点数与 UUID 全局唯一保持不�
   const ids = [];
   for (const [name, count] of Object.entries(expected)) {
     const p = readPipeline(name);
-    assert.equal(p.nodes.length, count, `${name} 节点数不变`);
+    assert.ok(Array.isArray(p.nodes) && p.nodes.length > 0, `${name} 节点集非空（解析失败必须硬失败）`);
+    assert.equal(p.nodes.length, count, `${name} 节点数（CR-2026-066 退役后口径）`);
     ids.push(...p.nodes.map((n) => n.id));
   }
   assert.equal(new Set(ids).size, ids.length, '8 条 Pipeline UUID 全局唯一');
