@@ -781,3 +781,189 @@ test('CR-2026-060 AC-13：new mode 首跑 txws 缺失 → ARCHIVE_SPEC_REQUIRED�
     assert.equal(a.errJson.error.code, 'ARCHIVE_SPEC_REQUIRED', a.stderr);
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
+
+/* ═══════════ CR-2026-066 TASK-03（FR-10 / AC-8）：归档尾部 localTrunkSync ═══════════
+   六项用例覆盖：① 三个成功返回点均含该字段；② 4 状态 × 6 reason 分类正确（静态赋值路径 + ①/③ 的活值交叉核对）；
+   ③ dirty/wrong-branch ⇒ skipped 且本地逐字节未变；④ argv 级命令面白名单（硬失败）；⑤ changed=false 重放仍返回且零新 commit；
+   ⑥ cr-archive SKILL 分类/输出块含该字段。函数体与 argv 抽取一律「抽不到 ⇒ 抛错」，禁止降级为空串/空集。 */
+
+const AC8_WT_LIB = path.resolve(import.meta.dirname, '..', 'lib', 'workspace-transactions.mjs');
+const AC8_ROW_KEYS = ['after', 'before', 'reason', 'remote', 'repo', 'status', 'trunk'];
+const AC8_STATUSES = ['unchanged', 'synced', 'skipped', 'failed'];
+const AC8_REASONS = ['wrong-branch', 'dirty', 'diverged', 'fetch-failed', 'trunk-unavailable', 'ff-only-failed'];
+const AC8_OPTION_SIGS = ['--prune', '--verify', '--is-ancestor', '--ff-only'];
+const AC8_EXPECTED_SIGS = ['fetch --prune', 'merge --ff-only', 'merge-base --is-ancestor', 'rev-parse', 'rev-parse --verify', 'status', 'symbolic-ref'];
+
+/** 抽 `export function reconcileLocalTrunks` 起至下一个顶层 `}` 的函数体文本；抽不到 ⇒ 抛错（硬失败）。 */
+function ac8ExtractReconcileBody() {
+  const text = fs.readFileSync(AC8_WT_LIB, 'utf8').replaceAll('\r\n', '\n');
+  const lines = text.split('\n');
+  const start = lines.findIndex((l) => l.startsWith('export function reconcileLocalTrunks'));
+  if (start < 0) throw new Error('AC-8④ 抽取失败：workspace-transactions.mjs 未找到 export function reconcileLocalTrunks');
+  const body = [];
+  for (let i = start; i < lines.length; i++) {
+    body.push(lines[i]);
+    if (i > start && lines[i] === '}') break;
+  }
+  const out = body.join('\n');
+  if (!out.startsWith('export function reconcileLocalTrunks') || out.length < 200 || !out.trimEnd().endsWith('}')) {
+    throw new Error(`AC-8④ 抽取失败：函数体结构不符（length=${out.length}）`);
+  }
+  return out;
+}
+
+/** 抽函数体内全部 gitRun/gitMust 调用的第二实参 argv 数组字面量；解析不到 ⇒ 抛错（硬失败）。 */
+function ac8ExtractArgvs(body) {
+  const argvs = [];
+  const callRe = /git(?:Run|Must)\([^,()]+,\s*(\[[^\]]*\])/g;
+  let m;
+  while ((m = callRe.exec(body))) {
+    const items = [];
+    const itemRe = /'([^']*)'/g;
+    let s;
+    while ((s = itemRe.exec(m[1]))) items.push(s[1]);
+    if (items.length === 0) throw new Error(`AC-8④ argv 解析失败：${m[1]}`);
+    argvs.push(items);
+  }
+  if (argvs.length === 0) throw new Error('AC-8④ argv 解析失败：函数体内未解析到任何 gitRun/gitMust 调用（硬失败，不降级为空集）');
+  return argvs;
+}
+
+/** argv → 归一化签名（取首 token；含 --prune/--verify/--is-ancestor/--ff-only 之一时并入该选项）。 */
+function ac8Signature(items) {
+  const opt = items.find((x) => AC8_OPTION_SIGS.includes(x));
+  return opt ? `${items[0]} ${opt}` : items[0];
+}
+
+/** 逐行校验 localTrunkSync 行形状（非空数组、七键全等、状态/原因取值合法、unchanged|synced ⇒ reason=null）。 */
+function ac8AssertRows(rows, label) {
+  assert.ok(Array.isArray(rows) && rows.length > 0, `${label}: localTrunkSync 必须是逐仓非空数组（字段缺失即红）`);
+  for (const row of rows) {
+    assert.deepEqual(Object.keys(row).sort(), AC8_ROW_KEYS, `${label}: 行形状必须恰为七键`);
+    assert.ok(AC8_STATUSES.includes(row.status), `${label}: ${row.repo} status=${row.status} 必须在 4 状态枚举内`);
+    if (row.status === 'unchanged' || row.status === 'synced') {
+      assert.equal(row.reason, null, `${label}: ${row.repo} status=${row.status} ⇒ reason 必须为 null`);
+    } else {
+      assert.ok(AC8_REASONS.includes(row.reason), `${label}: ${row.repo} status=${row.status} ⇒ reason=${row.reason} 必须在 6 reason 枚举内`);
+    }
+  }
+  return rows;
+}
+
+test('CR-2026-066 AC-8① 三个成功返回点均含 localTrunkSync', () => {
+  const { base, kb, cr, txws } = makeWritebackFixture();
+  try {
+    // 返回点 3/3：cleanup 被 fault 中断 ⇒ phase=cleanup-pending
+    const r1 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb, env: { CRCTL_FAULT_POINT: 'archive-during-cleanup' } });
+    assert.equal(r1.status, 0, r1.stderr);
+    assert.equal(r1.json.phase, 'cleanup-pending', JSON.stringify(r1.json || r1.errJson));
+    const rows1 = ac8AssertRows(r1.json.localTrunkSync, 'cleanup-pending');
+    // 返回点 2/3：续跑清理 ⇒ phase=complete
+    const r2 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.equal(r2.json.phase, 'complete', JSON.stringify(r2.json || r2.errJson));
+    const rows2 = ac8AssertRows(r2.json.localTrunkSync, 'complete');
+    // 返回点 1/3：幂等重放早退（changed=false，按当次实况重新计算）
+    const r3 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.equal(r3.status, 0, r3.stderr);
+    assert.equal(r3.json.changed, false);
+    const rows3 = ac8AssertRows(r3.json.localTrunkSync, 'replay');
+    // 活值交叉核对（AC-8②）：kb 已随归档批次前移 ⇒ synced；其余仓已是最新 ⇒ unchanged。
+    assert.deepEqual(rows1.map((r) => r.repo).sort(), ['kb', 'multica', 'tools'], '逐仓行覆盖全部 active repo');
+    assert.equal(rows1.find((r) => r.repo === 'kb').status, 'synced', 'kb 主 checkout 被 ff-only 前移到 origin trunk');
+    assert.ok(rows1.filter((r) => r.repo !== 'kb').every((r) => r.status === 'unchanged'), '未前移的仓判 unchanged');
+    assert.ok(rows2.length > 0 && rows3.length > 0, '三个返回点均返回逐仓行');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-066 AC-8② 4 状态 × 6 reason 分类正确（赋值路径 + 逐项无多无少）', () => {
+  const body = ac8ExtractReconcileBody();
+  const assign = (s) => new RegExp(`row\\.status = '${s}'`);
+  const reasonRe = (r) => new RegExp(`row\\.reason = '${r}'`);
+  // 4 状态：每个状态恰有一条赋值分支。
+  for (const s of AC8_STATUSES) assert.match(body, assign(s), `函数体必须含 row.status = '${s}' 分支`);
+  for (const r of AC8_REASONS) assert.match(body, reasonRe(r), `函数体必须含 row.reason = '${r}' 分支`);
+  // unchanged|synced 分支不得同段赋值 reason（行级判定：同一行不得同时出现 status 与 reason 赋值）。
+  for (const s of ['unchanged', 'synced']) {
+    const hits = body.split('\n').filter((l) => assign(s).test(l));
+    assert.ok(hits.length > 0, `静态可判：${s} 分支存在`);
+    for (const l of hits) assert.equal(/row\.reason = /.test(l), false, `status=${s} 的行不得赋值 reason（null 由初始值承担）`);
+  }
+  // 枚举闭包：函数体内出现的 reason 字面量集合恰为 6 项（无多无少）。
+  const found = new Set((body.match(/row\.reason = '([^']+)'/g) || []).map((x) => x.split("'")[1]));
+  assert.deepEqual([...found].sort(), [...AC8_REASONS].sort(), 'reason 字面量集合恰为 6 项');
+  // 判据活性负控（非证据）：内存中抹掉一个 reason 字面量后同一判据必须失败。
+  const mutated = body.replaceAll("'diverged'", "'diverged-x'");
+  const mutatedFound = new Set((mutated.match(/row\.reason = '([^']+)'/g) || []).map((x) => x.split("'")[1]));
+  assert.notDeepEqual([...mutatedFound].sort(), [...AC8_REASONS].sort(), '负控：抹掉一个 reason 必须使枚举闭包判据失败');
+});
+
+test('CR-2026-066 AC-8③ dirty / wrong-branch ⇒ skipped 且本地逐字节未变', () => {
+  const { base, kb, cr } = makeWritebackFixture();
+  const others = { multica: path.join(base, 'multica'), tools: path.join(base, 'tools') };
+  try {
+    // tools 主 checkout 制造未提交内容；multica 主 checkout 切到非 trunk 分支 ⇒ 两类 skipped。
+    const wipPath = path.join(others.tools, 'local-wip.txt');
+    fs.writeFileSync(wipPath, 'local work in progress\r\nsecond line\r\n');
+    const before = sha256(fs.readFileSync(wipPath, 'utf8').replaceAll('\r\n', '\n'));
+    git(others.multica, ['checkout', '-q', '-b', 'sync-probe']);
+    const r = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.equal(r.status, 0, r.stderr);
+    const rows = ac8AssertRows(r.json.localTrunkSync, 'archive');
+    const toolsRow = rows.find((x) => x.repo === 'tools');
+    const multicaRow = rows.find((x) => x.repo === 'multica');
+    assert.equal(toolsRow.status, 'skipped', 'tools 主 checkout dirty ⇒ skipped');
+    assert.equal(toolsRow.reason, 'dirty');
+    assert.equal(multicaRow.status, 'skipped', 'multica 主 checkout 非 trunk 分支 ⇒ skipped');
+    assert.equal(multicaRow.reason, 'wrong-branch');
+    assert.equal(multicaRow.after, multicaRow.before, 'wrong-branch 行不得前移');
+    const after = sha256(fs.readFileSync(wipPath, 'utf8').replaceAll('\r\n', '\n'));
+    assert.equal(after, before, 'dirty 仓工作区内容逐字节未变');
+    assert.ok(fs.existsSync(wipPath), '未提交文件零删除');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-066 AC-8④ argv 级命令面白名单（7 个调用点，硬失败）', () => {
+  const body = ac8ExtractReconcileBody();
+  const argvs = ac8ExtractArgvs(body);
+  assert.equal(argvs.length, 7, `实测 gitRun/gitMust 调用点数 = 7（实得 ${argvs.length}）`);
+  const sigs = [...new Set(argvs.map(ac8Signature))].sort();
+  assert.deepEqual(sigs, [...AC8_EXPECTED_SIGS].sort(), '归一化签名集合恰为 7 项（无多无少）');
+  for (const item of argvs.flat()) {
+    for (const bad of ['reset', 'clean', 'stash', '--force', 'push']) {
+      assert.equal(item.includes(bad), false, `argv 元素 "${item}" 不得含 ${bad}`);
+    }
+  }
+  // 判据活性负控（非证据）：内存中把一个 argv 元素换成含 push ⇒ 同一谓词必须失败。
+  const mutated = body.replaceAll("'fetch', '--prune', 'origin'", "'fetch', '--prune', 'push'");
+  const mutatedFlat = ac8ExtractArgvs(mutated).flat();
+  assert.ok(mutatedFlat.some((x) => x.includes('push')), '负控：注入 push 元素必须被同一谓词命中');
+});
+
+test('CR-2026-066 AC-8⑤ changed=false 重放仍返回且零新 commit', () => {
+  const { base, kb, cr } = makeWritebackFixture();
+  try {
+    const r1 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.equal(r1.status, 0, r1.stderr);
+    assert.equal(r1.json.phase, 'complete', JSON.stringify(r1.json || r1.errJson));
+    const n0 = originMasterCount(base, 'kb');
+    const r2 = runCrctl(['archive', cr, '--spec-id', 'test-spec', '--workspace', kb], { cwd: kb });
+    assert.equal(r2.status, 0, r2.stderr);
+    assert.equal(r2.json.changed, false, '重放 changed=false');
+    assert.equal(r2.json.phase, 'complete');
+    ac8AssertRows(r2.json.localTrunkSync, 'replay');
+    assert.equal(originMasterCount(base, 'kb'), n0, '重放零新 commit');
+    assert.equal(r2.json.commit, r1.json.commit, '重放返回同一 authority commit');
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+test('CR-2026-066 AC-8⑥ cr-archive SKILL 分类/输出块含 localTrunkSync 与 4×6 口径', () => {
+  const text = fs.readFileSync(path.resolve(import.meta.dirname, '..', '..', '..', '..', 'cr', 'cr-archive', 'SKILL.md'), 'utf8').replaceAll('\r\n', '\n');
+  assert.ok(text.length > 1000, 'cr-archive SKILL 文本读出且非空（读不到即硬失败）');
+  assert.ok(text.includes('localTrunkSync'), '分类/输出块含 localTrunkSync');
+  for (const s of AC8_STATUSES) assert.ok(text.includes(`\`${s}\``), `分类表含状态 ${s}`);
+  for (const reason of AC8_REASONS) assert.ok(text.includes(`\`${reason}\``), `分类表含 reason ${reason}`);
+  assert.ok(text.includes('`status=unchanged|synced` 时 `reason=null`'), '写明 unchanged|synced ⇒ reason=null 口径');
+  assert.ok(/fetch --prune origin/.test(text) && /merge --ff-only origin\/\{trunk\}/.test(text), '含 skipped/failed 的人类补救指引');
+});
+

@@ -3543,7 +3543,7 @@ export async function archiveCr(ctx, input) {
     let did = false;
     const save = async (phase) => { payload.phase = phase; journal.phase = phase; await saveJournal({ path: journalPath, journal }); };
     // FR-01：统一固定返回构造——所有成功/待清理/幂等重放路径复用，不导出、不新建模块。
-    const result = (phase, changed, warnings = [], outbox) => {
+    const result = (phase, changed, warnings = [], outbox, localTrunkSync = null) => {
       if ((payload.pushed || payload.phase === 'complete') && !payload.commit) {
         throw new TxError('TX_JOURNAL_INVALID', `archive journal 损坏：pushed/complete 但 commit 为空，不得返回占位 SHA`, { cr });
       }
@@ -3556,10 +3556,15 @@ export async function archiveCr(ctx, input) {
         remaining: payload.remaining ?? [],
         preservedRefs: payload.preservedRefs ?? [],
         recovery,
+        localTrunkSync,
         warnings,
         ...(outbox ? { outbox } : {}),
       };
     };
+    // CR-2026-066 FR-10：归档尾部把各仓主 checkout ff-only 对齐 origin（复用既有 reconcileLocalTrunks，
+    // 不改其判据/分类），与 recovery 同级返回 localTrunkSync；best-effort，不改变退出码与 phase 分类。
+    const resultWithTrunkSync = (phase, changed, warnings, outbox) =>
+      result(phase, changed, warnings, outbox, reconcileLocalTrunks(ctx));
     // FR-03/FR-04/FR-05：首次发送与恢复补发（SDD §4.2）。仅 writing-back；journal outboxEmitted 阻断重复；
     // 失败只追加 warning 不改变 phase；成功先持久化发送事实再继续。回调抛错同失败处理。
     const emitArchiveIfNeeded = async () => {
@@ -3594,7 +3599,7 @@ export async function archiveCr(ctx, input) {
     // FR-04：历史/失败 journal（phase=complete 但 outboxEmitted 未标记）重放仍重试事件，不新增 commit。
     if (payload.phase === 'complete') {
       const { warnings, outbox } = await emitArchiveIfNeeded();
-      return result('complete', false, warnings, outbox);
+      return resultWithTrunkSync('complete', false, warnings, outbox);
     }
 
     // authority 与终态判定（仅 publish 阶段需要；cleanup 续跑时 CR worktree 可能已被删，跳过解析）：
@@ -3754,9 +3759,9 @@ export async function archiveCr(ctx, input) {
     }
     if (payload.remaining.length === 0 && !payload.lastCleanupError) {
       await save('complete');
-      return result('complete', did && !wasComplete, warnings, outbox);
+      return resultWithTrunkSync('complete', did && !wasComplete, warnings, outbox);
     }
-    return result('cleanup-pending', did && !wasComplete, warnings, outbox);
+    return resultWithTrunkSync('cleanup-pending', did && !wasComplete, warnings, outbox);
   } finally {
     await lock.release();
   }
