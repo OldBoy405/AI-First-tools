@@ -200,6 +200,14 @@ export function parseGeneratedTraceability(text, { cr, specId }) {
   if (!Array.isArray(doc.milestones)) {
     fail('TRACE_SEMANTIC_INVALID', 'traceability milestones 不是数组', { cr, specId });
   }
+  // AIFI-28（CR-2026-061..066 trace 死信复盘）：YAML 裸数字（如 `milestone: 0.39`）回读为 number，冻结进
+  // trace payload 后被服务端 `Milestone string` 反序列化整条拒绝（BAD_TRACE_PAYLOAD，3 次后进 outbox/dead）。
+  // payload 契约要求 milestones[].milestone 全为 JSON 字符串：此处读侧归一，不改写既有 YAML 段文本。
+  for (const m of doc.milestones) {
+    if (m && typeof m === 'object' && !Array.isArray(m) && typeof m.milestone === 'number') {
+      m.milestone = String(m.milestone);
+    }
+  }
   // YAML 文本中 `- cr:` 数量必须等于对象数组长度（防 parser 与文本不一致）
   const rawLines = normalize(text).split('\n').filter((l) => !/^\s*#/.test(l));
   const textCount = rawLines.filter((l) => /^\s*- cr:\s+\S/.test(l)).length;

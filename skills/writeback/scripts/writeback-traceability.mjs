@@ -138,6 +138,14 @@ const ms = mode === 'new' ? buildNewMilestone() : (() => {
   return parsed;
 })();
 
+/* ── payload/YAML 契约（AIFI-28）：milestone 必须是字符串 ──
+ * 裸数字（如 `milestone: 0.39`）写进 YAML 后回读为 number，冻结进 trace payload 会被服务端
+ * `Milestone string` 反序列化整条拒（BAD_TRACE_PAYLOAD）；缺失值不得序列化成 "undefined"。 */
+if (ms.milestone == null || ms.milestone === '') {
+  fail('STRUCTURE_MISMATCH', 'milestone 缺失（不得序列化为 "undefined"）', { cr });
+}
+ms.milestone = String(ms.milestone);
+
 /* ── 幂等判据：specs 侧已含 - cr: {cr} 段 ── */
 const old = readFile(tracePath);
 if (old !== null && new RegExp(`- cr: ${escapeRe(cr)}$`, 'm').test(old)) {
@@ -250,7 +258,7 @@ function renderField(v) {
 function buildSegment(evidence) {
   const lines = [
     `  - cr: ${ms.cr}`,
-    `    milestone: ${ms.milestone}`,
+    `    milestone: ${JSON.stringify(ms.milestone)}`,
     `    target-version: ${JSON.stringify(ms['target-version'])}`,
   ];
   lines.push('    merge-commits:');

@@ -283,6 +283,29 @@ test('traceability: candidate-only + 追加保留 + 幂等 + evidence 注入 + �
   fs.rmSync(f3.ws, { recursive: true, force: true });
 });
 
+test('traceability: 数字 milestone 归一为字符串（新段带引号 + 冻结 payload 全段 string；CR-061..066 复盘）', () => {
+  const { ws, msFile } = makeTraceWs();
+  const tracePath = path.join(ws, 'specs', 'test-spec', 'traceability.yml');
+  // 历史段裸数字 milestone：YAML 回读为 number，正是 CR-2026-061..066 trace 尸体（dead/）的根因
+  const oldText = fs.readFileSync(tracePath, 'utf8').replace('milestone: M0', 'milestone: 0.34');
+  fs.writeFileSync(tracePath, oldText);
+  const oldSeg = oldText.slice(oldText.indexOf('milestones:'));
+  // milestone-file 亦为数字形式：新段值经未加引号的 YAML 输出回读同样变成 number
+  fs.writeFileSync(msFile, fs.readFileSync(msFile, 'utf8').replace('milestone: T2', 'milestone: 0.35'));
+  const out = traceOut(ws);
+  const r = run(TRACE, ws, ['--workspace', ws, '--cr', 'CR-2099-003', '--spec', 'test-spec', '--version', '0.35', '--milestone-file', msFile, '--candidate-out', out]);
+  assert.equal(r.code, 0, r.stderr);
+  const after = fs.readFileSync(path.join(out, 'specs', 'test-spec', 'traceability.yml'), 'utf8');
+  assert.ok(after.includes(oldSeg), '既有 milestones 段被改写（应逐字节保留）');
+  assert.ok(/^    milestone: "0\.35"$/m.test(after), '新段 milestone 必须写成带引号字符串');
+  // 冻结 payload（manifest v2 event）：全部 milestone 必须是 JSON string，含历史裸数字段
+  const m = JSON.parse(fs.readFileSync(path.join(out, 'manifest.json'), 'utf8'));
+  const segs = m.event.payload.traceability.milestones;
+  assert.ok(segs.every((s) => typeof s.milestone === 'string'), `冻结 payload 含非字符串 milestone：${JSON.stringify(segs.map((s) => s.milestone))}`);
+  assert.deepEqual(segs.map((s) => s.milestone), ['0.34', '0.35']);
+  fs.rmSync(ws, { recursive: true, force: true });
+});
+
 test('traceability: 证据缺失/状态不通过 → EVIDENCE_INVALID 硬失败，零 candidate', () => {
   const { ws, msFile } = makeTraceWs();
   // test-report 状态非 pass
