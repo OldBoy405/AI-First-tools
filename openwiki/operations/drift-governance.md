@@ -77,9 +77,9 @@ The command surface is grouped into three tiers:
 |------------|---------|----------|
 | `status` | Reads `cr.md` frontmatter (the **status authority**) + state machine; outputs current status, legal next steps, gate gaps, and `STATUS_DIVERGED` when the worktree view disagrees | Model-guessed status (drift ①) |
 | `next` | Reads status + review/test evidence → outputs the next node to run; never returns `human_approval` if blockers remain | Minimal pipeline runner (drift ④) |
-| `gate` | Validates without writing — for pre-checks and CI; emits EVIDENCE_DRIFT audit events | Pipeline `passCondition` (drift ②) |
+| `gate` | Validates without writing — for pre-checks and CI; emits EVIDENCE_DRIFT audit events. `--mode pre-review` is restricted to `--for requirement-reviewing`; any other target fails `BAD_ARGS` with `contractDrift: true` and a structured `recovery` object (`executable` + `args[]` + `requiresTTY` + `promptFor[]`, no free text; a non-canonical CR-ID is omitted from `args` and declared in `promptFor`) (CR-2026-063 / CR-2026-064) | Pipeline `passCondition` (drift ②) |
 | `advance` | Validates `(current, next, trigger)` transition + gate checks; writes `cr.md` frontmatter only if all pass; CAS-based; emits outbox status event | `cr-status-set` (drifts ①②⑧) |
-| `attempt` / `review-loop reset` | `attempt` is the sole counter for review-loop attempts (reads `maxAttempts` from pipeline JSON; `LOOP_EXHAUSTED` when exceeded). `review-loop reset` is the TTY-only human reset to the next cycle with audit | `reviewLoop.maxAttempts` (drift ⑧) |
+| `attempt` / `review-loop reset` | `attempt` is the sole counter for review-loop attempts (reads `maxAttempts` from pipeline JSON; `LOOP_EXHAUSTED` when exceeded). `review-loop reset` is the TTY-only human reset to the next cycle; since CR-2026-063 it writes `review-loop.yml` through a single-file ledger transaction with commit-isolation preflight and in-process rollback (`REVIEW_LOOP_RESET_COMMIT_FAILED` / `REVIEW_LOOP_RESET_COMMIT_ROLLBACK_FAILED`) | `reviewLoop.maxAttempts` (drift ⑧) |
 | `test` | Runs lint/test/build commands with real exit codes; generates `test-report.md` skeleton (status/tester/commands are tool-generated); raw output to `test-evidence/` | `write-test-report` (drift ②) |
 | `validate <file>` | Schema validation for `cr.md`, `_backlog.yml`, `test-report.md`, `approval.yml` (incl. server-approve signature re-verification), `traceability.yml`; emits EVIDENCE_DRIFT audit events | `validate-doc` (drift ⑨) |
 | `git` | Whitelisted git adapter with ternary authorization (subcommand + form + caller) from `rules.json`; `FORBIDDEN_SUBCOMMAND` / `SHELL_UNAVAILABLE` on violations; full audit log; checkpoint outbox events on push | `controlled-shell` (drift ③) |
@@ -143,6 +143,8 @@ The outbox is a local event projection channel (`crctl advance` success → stat
 **Event idempotency**: Status events in `--embedded` mode use `pendingCommitSha()` (process-unique placeholder with `pending:` prefix) to avoid `cr_sync_event` key collisions — the server daemon fills in the real commit SHA when it sees the follow-up checkpoint event.
 
 **Windows safety**: Outbox filenames are sanitized (colons replaced) for Windows file system compatibility. Event content is never altered.
+
+**Dedup contract (CR-2026-065)**: event construction and dedup comparison are centralized in `skills/shared/crctl/scripts/lib/outbox-contract.mjs` — the single source of truth shared by `crctl.mjs` (product) and tests. `buildOutboxEvent` fixes field order/defaults; `buildOutboxComparable` projects only `OUTBOX_COMPARED_FIELDS`, excludes the top-level `occurred_at`, and enumerates only `payload.detected_at` as a volatile key (no name/type auto-exclusion). A byte-equal comparable means "already sent" (file reused, not overwritten); otherwise `OUTBOX_DEDUP_CONFLICT`.
 
 ## Unified Evidence Digest & Dual-Track Approval
 

@@ -17,7 +17,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 // CR-2026-039 TASK-03：纯函数单测直接 import（与 archive-tx/checkpoint-tx 等测试同模式；不改变 CLI 公开面）
-import { crMdStatusText, refreshCrMdUpdated, classifyRepoWorkspace, normalizeTargetVersion, readCrMdTargetVersion, resolveRepositories, guardWritebackVersion, planVersionRefill, applyTargetVersionToCrMd, editBacklogEntryTargetVersion } from '../lib/workspace-transactions.mjs';
+import { crMdStatusText, refreshCrMdUpdated, classifyRepoWorkspace, normalizeTargetVersion, readCrMdTargetVersion, resolveRepositories, guardWritebackVersion, planVersionRefill, applyTargetVersionToCrMd, editBacklogEntryTargetVersion, buildRecovery } from '../lib/workspace-transactions.mjs';
 // CR-2026-065 TASK-01（FR-1/FR-3/FR-6）：事实源推导（只读、硬失败）——BR-1/BR-3/BR-4 的推导面
 import { deriveStateMachine, readTextNormalized } from './assertion-sources.mjs';
 
@@ -3461,8 +3461,8 @@ test('CR-2026-049：review-loop reset 耗尽态开启下一 cycle，保留 attem
     const out = JSON.parse(r.rawStdout);
     assert.equal(out['current-cycle'], 2);
     assert.equal(out['current-attempt'], 0);
-    // CR-2026-063 AC-9③：成功结果的字段集不变，不含 recoverCommand
-    assert.equal(out.recoverCommand, undefined, '成功结果不含 recoverCommand');
+    // CR-2026-063 AC-9③ + CR-2026-064：成功结果的字段集不变，不含任何恢复字段
+    assert.deepEqual(Object.keys(out).filter((k) => /^recover/i.test(k)), [], '成功结果不含恢复字段');
     const text = readFileSync(path.join(crDir, 'review-loop.yml'), 'utf8');
     assert.match(text, /current-cycle: 2/);
     assert.match(text, /current-attempt: 0/);
@@ -3533,7 +3533,7 @@ test('CR-2026-063 AC-9②W1：tx-apply-before-complete 崩溃 → 同命令下�
 });
 
 test('CR-2026-063 AC-9②W2：commit 失败 → REVIEW_LOOP_RESET_COMMIT_FAILED/changed=false/rolled_back=true，文件与 index 回到执行前', () => {
-  // 向量①：非规范位置参数（CR-TEST-1）→ recoverCommand 回退占位符 <CR-ID>（不内插）
+  // 向量①：非规范位置参数（CR-TEST-1）→ recovery.args 省略该元素并声明 promptFor: ['CR-ID']（不内插）
   const { ws, crDir } = makeResetWorkspace();
   try {
     installPreCommitHook(ws, []);
@@ -3545,7 +3545,13 @@ test('CR-2026-063 AC-9②W2：commit 失败 → REVIEW_LOOP_RESET_COMMIT_FAILED/
     assert.equal(r.stderr.error.code, 'REVIEW_LOOP_RESET_COMMIT_FAILED');
     assert.equal(r.stderr.error.changed, false);
     assert.equal(r.stderr.error.rolled_back, true);
-    assert.equal(r.stderr.error.recoverCommand, 'crctl review-loop reset <CR-ID> --loop write-test-report --reason <reason>');
+    assert.deepEqual(r.stderr.error.recovery, {
+      executable: 'node',
+      args: [CRCTL, 'review-loop', 'reset', '--loop', 'write-test-report'],
+      cwd: ws,
+      requiresTTY: true,
+      promptFor: ['reason', 'CR-ID'],
+    });
     assert.equal(readFileSync(loopP, 'utf8'), before, '文件回到执行前');
     assert.equal(git(ws, ['status', '--porcelain', '--untracked-files=no']), '', 'tracked clean baseline 恢复');
     assert.equal(git(ws, ['rev-parse', 'HEAD']), head0, 'HEAD 不变');
@@ -3555,7 +3561,7 @@ test('CR-2026-063 AC-9②W2：commit 失败 → REVIEW_LOOP_RESET_COMMIT_FAILED/
     assert.equal(audits[0].fromCycle, 1);
     assert.equal(audits[0].toCycle, 2);
   } finally { rmSync(ws, { recursive: true, force: true }); }
-  // 向量②：规范 CR-ID（CR-2026-063）→ 内插该 CR；--reason 位置恒为占位符（NFR-3）
+  // 向量②：规范 CR-ID（CR-2026-063）→ 内插该 CR；--reason 恒走 promptFor（NFR-3）
   const f2 = makeResetWorkspace('CR-2026-063');
   try {
     installPreCommitHook(f2.ws, []);
@@ -3564,9 +3570,70 @@ test('CR-2026-063 AC-9②W2：commit 失败 → REVIEW_LOOP_RESET_COMMIT_FAILED/
     ]);
     assert.equal(r2.status, 1);
     assert.equal(r2.stderr.error.code, 'REVIEW_LOOP_RESET_COMMIT_FAILED');
-    assert.equal(r2.stderr.error.recoverCommand, 'crctl review-loop reset CR-2026-063 --loop write-test-report --reason <reason>');
-    assert.ok(!r2.stderr.error.recoverCommand.includes('human processed blockers'), '用户文本不进恢复串');
+    assert.deepEqual(r2.stderr.error.recovery, {
+      executable: 'node',
+      args: [CRCTL, 'review-loop', 'reset', 'CR-2026-063', '--loop', 'write-test-report'],
+      cwd: f2.ws,
+      requiresTTY: true,
+      promptFor: ['reason'],
+    });
+    assert.ok(!JSON.stringify(r2.stderr.error.recovery).includes('human processed blockers'), '用户文本不进恢复合同');
   } finally { rmSync(f2.ws, { recursive: true, force: true }); }
+});
+
+test('CR-2026-064 TASK-04：参数边界与构造器契约 —— 独立 argv 元素 / 含空格路径免引号 / 固定键序 / 四条不变量守卫', () => {
+  const boundaryWs = path.join(os.tmpdir(), 'crctl boundary', 'CR-2026-064 ws');
+  const rec = buildRecovery(['workspace', 'sync', 'CR-2026-064', '--workspace', boundaryWs], { cwd: boundaryWs });
+  assert.deepEqual(rec.args, [CRCTL, 'workspace', 'sync', 'CR-2026-064', '--workspace', boundaryWs], 'CR-ID / workspace / branch-ref 各占独立元素、顺序与 CLI 合同一致');
+  assert.equal(rec.cwd, boundaryWs, '含空格路径原样传递，无需引号');
+  assert.ok(rec.args.every((a) => typeof a === 'string'), 'args 每元素为一个完整 argv（string）');
+  assert.ok(!rec.args.some((a) => /["'`]/.test(a)), 'args 不含残留 shell 引号/反引号');
+  assert.deepEqual(Object.keys(rec), ['executable', 'args', 'cwd', 'requiresTTY', 'promptFor'], '键序固定');
+  assert.equal(rec.executable, 'node');
+  const noCwd = buildRecovery(['workspace', 'inspect']);
+  assert.deepEqual(Object.keys(noCwd), ['executable', 'args', 'requiresTTY', 'promptFor'], 'cwd 省略时对象不含该键');
+  assert.ok(!('cwd' in noCwd));
+  assert.deepEqual(noCwd.args, [CRCTL, 'workspace', 'inspect']);
+  assert.equal(noCwd.requiresTTY, false);
+  assert.deepEqual(noCwd.promptFor, []);
+  assert.throws(() => buildRecovery(['x', 1]), (e) => e.code === 'RECOVERY_CONTRACT_INVALID');
+  assert.throws(() => buildRecovery('x'), (e) => e.code === 'RECOVERY_CONTRACT_INVALID');
+  assert.throws(() => buildRecovery(['x'], { cwd: 'relative/path' }), (e) => e.code === 'RECOVERY_CONTRACT_INVALID');
+  assert.throws(() => buildRecovery(['x'], { requiresTTY: 'yes' }), (e) => e.code === 'RECOVERY_CONTRACT_INVALID');
+  assert.throws(() => buildRecovery(['x'], { promptFor: ['ok', 2] }), (e) => e.code === 'RECOVERY_CONTRACT_INVALID');
+});
+
+/* CR-2026-064 TASK-04（SDD §4.5-4）：review-loop reset 的 6 类用户输入向量 ——
+ * 每类断言四件事：args 不含该值、promptFor 含 reason、requiresTTY === true、
+ * JSON.stringify(recovery) 中该值不出现（数据而非 shell command）。 */
+const RESET_INPUT_VECTORS = [
+  'normal reason',
+  'reason with "double quotes"',
+  'reason with ; semicolon && chain',
+  'reason with\nnewline',
+  'reason with $(substitution)',
+  'reason with `backtick` expression',
+];
+
+test('CR-2026-064 TASK-04：reset 6 类用户输入向量 —— 全部只经 promptFor，args 与序列化文本均不含该值', () => {
+  assert.equal(RESET_INPUT_VECTORS.length, 6);
+  for (const vector of RESET_INPUT_VECTORS) {
+    const { ws } = makeResetWorkspace();
+    try {
+      installPreCommitHook(ws, []);
+      const r = runCrctlInTty(['review-loop', 'reset', 'CR-TEST-1', '--loop', 'write-test-report', '--reason', vector, '--workspace', ws]);
+      assert.equal(r.status, 1, `向量 ${JSON.stringify(vector)}：pre-commit 失败必须非零退出`);
+      assert.equal(r.stderr.error.code, 'REVIEW_LOOP_RESET_COMMIT_FAILED');
+      const recovery = r.stderr.error.recovery;
+      assert.ok(recovery && typeof recovery === 'object', `向量 ${JSON.stringify(vector)}：错误面必须携带结构化 recovery`);
+      assert.equal(recovery.requiresTTY, true, `向量 ${JSON.stringify(vector)}：requiresTTY 必须为 true`);
+      assert.ok(recovery.promptFor.includes('reason'), `向量 ${JSON.stringify(vector)}：promptFor 必含 reason`);
+      assert.ok(!recovery.args.includes(vector), `向量 ${JSON.stringify(vector)}：args 不得含用户取值`);
+      assert.ok(!recovery.args.some((a) => a.includes(vector)), `向量 ${JSON.stringify(vector)}：args 任一元素不得包含用户取值`);
+      assert.ok(!JSON.stringify(recovery).includes(vector), `向量 ${JSON.stringify(vector)}：序列化后仍不得出现用户取值`);
+      assert.equal(recovery.cwd, ws, `向量 ${JSON.stringify(vector)}：cwd 为执行 reset 的工作区`);
+    } finally { rmSync(ws, { recursive: true, force: true }); }
+  }
 });
 
 test('CR-2026-063 AC-9②W2b：执行前已有 staged 变更 → 不 commit、不夹带；回滚复核失败 → ROLLBACK_FAILED（affected）', () => {
@@ -3581,7 +3648,7 @@ test('CR-2026-063 AC-9②W2b：执行前已有 staged 变更 → 不 commit、�
     assert.equal(r.status, 1);
     assert.equal(r.stderr.error.code, 'REVIEW_LOOP_RESET_COMMIT_ROLLBACK_FAILED');
     assert.deepEqual(r.stderr.error.affected, [loopRel]);
-    assert.equal(r.stderr.error.recoverCommand, undefined, '本码不带 recoverCommand（同族口径）');
+    assert.equal(r.stderr.error.recovery, undefined, '本码不带 recovery（同族口径）');
     assert.equal(git(ws, ['rev-parse', 'HEAD']), head0, '不执行 commit（HEAD 不变）');
     assert.equal(readFileSync(loopP, 'utf8'), before, 'review-loop.yml 已按 journal 还原');
     assert.equal(git(ws, ['diff', '--name-only', '--cached']), 'scratch.txt', '无关 staged 变更保持原样、未被夹带');
@@ -3631,7 +3698,7 @@ test('CR-2026-063 AC-9④：reset 三条既有拒绝保持（NOT_TTY / 缺参 BA
     const noReason = runCrctlInTty(['review-loop', 'reset', 'CR-TEST-1', '--loop', 'write-test-report', '--workspace', ws]);
     assert.equal(noReason.status, 1);
     assert.equal(noReason.stderr.error.code, 'BAD_ARGS');
-    // 未耗尽（非规范 CR-ID 的失败向量在 W2 中已覆盖 recoverCommand 占位符面）
+    // 未耗尽（非规范 CR-ID 的失败向量在 W2 中已覆盖 recovery 的 CR-ID 声明面）
     const notExhausted = runCrctlInTty(['review-loop', 'reset', 'CR-X', '--loop', 'review-code', '--reason', 'x', '--workspace', ws]);
     assert.equal(notExhausted.status, 1);
     assert.equal(notExhausted.stderr.error.code, 'LOOP_NOT_EXHAUSTED');
@@ -5445,7 +5512,7 @@ function treeHashes(dir) {
   return out;
 }
 
-test('CR-2026-063 AC-7：gate --mode pre-review 错配 → BAD_ARGS + contractDrift:true + recoverCommand 双向量 + 零写入', () => {
+test('CR-2026-063 AC-7：gate --mode pre-review 错配 → BAD_ARGS + contractDrift:true + 结构化 recovery 双向量 + 零写入', () => {
   const ws = makeWorkspace();
   try {
     const before = treeHashes(ws);
@@ -5454,14 +5521,26 @@ test('CR-2026-063 AC-7：gate --mode pre-review 错配 → BAD_ARGS + contractDr
     assert.equal(r.status, 1, '错配必须非零退出');
     assert.equal(r.stderr.error.code, 'BAD_ARGS');
     assert.equal(r.stderr.error.contractDrift, true);
-    assert.equal(r.stderr.error.recoverCommand, 'crctl workspace inspect CR-2026-063');
+    assert.deepEqual(r.stderr.error.recovery, {
+      executable: 'node',
+      args: [CRCTL, 'workspace', 'inspect', 'CR-2026-063'],
+      cwd: ws,
+      requiresTTY: false,
+      promptFor: [],
+    });
     assert.equal(r.stdout, null, '错配路径不输出 stdout JSON');
-    // 向量②：非规范位置参数 → 回退占位符 <CR-ID>（不内插，恢复串不含自由文本）
+    // 向量②：非规范位置参数 → 省略 CR-ID 元素并声明 promptFor（args 不含自由文本）
     const r2 = runCrctl(['gate', 'CR-X', '--for', 'requirement-approved', '--mode', 'pre-review', '--workspace', ws]);
     assert.equal(r2.status, 1);
     assert.equal(r2.stderr.error.code, 'BAD_ARGS');
     assert.equal(r2.stderr.error.contractDrift, true);
-    assert.equal(r2.stderr.error.recoverCommand, 'crctl workspace inspect <CR-ID>');
+    assert.deepEqual(r2.stderr.error.recovery, {
+      executable: 'node',
+      args: [CRCTL, 'workspace', 'inspect'],
+      cwd: ws,
+      requiresTTY: false,
+      promptFor: ['CR-ID'],
+    });
     // 零写入：执行前后整棵 workspace 的文件哈希集合零变化
     assert.deepEqual(treeHashes(ws), before);
   } finally { rmSync(ws, { recursive: true, force: true }); }

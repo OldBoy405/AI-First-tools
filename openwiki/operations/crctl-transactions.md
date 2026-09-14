@@ -11,7 +11,7 @@ openwiki:
     - skills/shared/crctl/scripts/lib/durable-tx.mjs
     - skills/shared/crctl/scripts/lib/workspace-transactions.mjs
     - skills/shared/crctl/scripts/lib/yaml-subset.mjs
-  symbols: [acquireLock, loadOrCreateJournal, applyWriteSet, beginLedgerTransaction, registerCr, checkpointCr, mergeCr, applyWriteback, archiveCr]
+  symbols: [acquireLock, loadOrCreateJournal, applyWriteSet, beginLedgerTransaction, buildRecovery, registerCr, checkpointCr, mergeCr, applyWriteback, archiveCr]
   test_paths:
     - skills/shared/crctl/scripts/test/durable-tx.test.mjs
     - skills/shared/crctl/scripts/test/fault-harness.test.mjs
@@ -22,9 +22,10 @@ openwiki:
     - skills/shared/crctl/scripts/test/archive-tx.test.mjs
   invariants:
     - Cross-file and cross-repo ledger writes only happen through a durable journal envelope with a recoverable write-set.
-    - Deep primitives are idempotent and recoverable via the recoverCommand returned on interruption.
+    - Deep primitives are idempotent and recoverable via the single structured recovery object returned on interruption (executable + args + cwd + requiresTTY + promptFor).
+    - recovery is consumed as an argv contract with shell:false; there is no shell-string fallback.
     - git is authoritative; the outbox is only a projection and never blocks the main operation.
-  validation_commands: ["node --test --test-concurrency=2 skills/shared/crctl/scripts/test/*.test.mjs"]
+  validation_commands: ["node skills/shared/crctl/scripts/test/suite-gate.mjs --run"]
 ---
 
 # crctl Transactions & Deep Primitives
@@ -41,9 +42,9 @@ The [crctl CLI](/openwiki/operations/drift-governance.md) is no longer a single 
 
 ```mermaid
 flowchart TD
-    CLI["crctl.mjs<br/>status/gate/advance/approve/review-record/…"] -->|single-file CAS| Y["lib/yaml-subset.mjs"]
+    CLI["crctl.mjs (status/gate/advance/approve/review-record/…)"] -->|single-file CAS| Y["lib/yaml-subset.mjs"]
     CLI -->|multi-file / cross-repo| W["lib/workspace-transactions.mjs"]
-    W --> D["lib/durable-tx.mjs<br/>lock + journal + write-set + ledger tx"]
+    W --> D["lib/durable-tx.mjs (lock + journal + write-set + ledger tx)"]
     W --> Y
     D --> Y
 ```
@@ -51,6 +52,7 @@ flowchart TD
 - **`lib/yaml-subset.mjs`** — a line-oriented YAML reader/writer (`parseYaml`, `matchEntryBlock`) with a strict mode that hard-fails on duplicate keys. This is the only YAML parsing the package uses; it deliberately avoids a generic serializer so comments and field order survive.
 - **`lib/durable-tx.mjs`** — generic durability primitives: `acquireLock` (directory lock via `owner.json`), `loadOrCreateJournal`/`saveJournal` (journal envelope), `applyWriteSet`/`recoverWriteSet`/`cleanupTxBlobs` (recoverable write-set with `write-set.json` + content-addressed `blobs/`), `beginLedgerTransaction`/`recoverLedgerTransaction`/`abortLedgerTransaction`/`finishLedgerTransaction` (command-level ledger transaction), and `FAULT_POINTS`/`faultPoint` for deterministic fault injection.
 - **`lib/workspace-transactions.mjs`** — the deep primitives that own the actual Git and ledger algorithms, plus the repository resolver and authority-path logic.
+- **`lib/outbox-contract.mjs`** — the single source of truth for outbox event construction and dedup comparison (CR-2026-065), imported by both `crctl.mjs` and the test suite so field lists are never duplicated.
 
 `lib/` never depends back on the CLI, and there is no second command entry point. This mirrors the [architecture layering rule](/openwiki/architecture/overview.md) that dependencies point only downward.
 
@@ -62,9 +64,21 @@ Every deep primitive runs under the same envelope:
 2. **Journal** — `loadOrCreateJournal` writes `journal.json` under `.crctl/transactions/{op}/{cr-or-key}/{txId}/`. The journal records `txId`, `op`, `phase`, timestamps, and an op-specific payload.
 3. **Phase checkpoints** — each primitive advances its payload through named phases (e.g. `preflight`, `prepared`, `pushed`, `complete`) and saves after each, so an interrupted run can resume from the last durable phase.
 4. **Write-set** — multi-file writes are staged as a `write-set.json` manifest plus content-addressed `blobs/`, then applied atomically (tmp + rename). `recoverWriteSet` re-applies only missing/divergent entries.
-5. **Recovery** — a primitive that fails mid-run returns a `recoverCommand` (e.g. `crctl checkpoint <CR> --workspace …`); re-running that same command resumes from the journal, never re-issuing a completed step.
+5. **Recovery** — every deep primitive returns one structured `recovery` object; error paths carry the same shape under `error.recovery`. It is a structured argv contract (`executable` + `args[]` + optional `cwd` + `requiresTTY` + `promptFor[]`) that consumers spawn with `shell: false`. Re-running the same argv resumes from the journal, never re-issuing a completed step (see [Recovery Contract](#recovery-contract) below).
 
 The primitive operations are enumerated in `durable-tx.mjs` `OPS = ['register', 'workspace', 'merge', 'writeback', 'archive', 'ledger', 'checkpoint', 'test']`.
+
+### Recovery Contract
+
+`buildRecovery` in `workspace-transactions.mjs` is the single constructor of the structured recovery object (CR-2026-064). Every deep primitive returns one `recovery`; error paths (including `TxError.extra`) carry the same shape under `error.recovery`. The shape:
+
+- `executable` — always the string `node`.
+- `args` — string array; `args[0]` is always the absolute path to `crctl.mjs`, and every following element is one complete argv token (no shell quotes, operators, or placeholders).
+- `cwd` (optional) — absolute working directory.
+- `requiresTTY` — boolean; when `true` the recovery needs a trusted TTY.
+- `promptFor` — logical value names (`reason`, `plan`, `CR-ID`) whose argv elements are deliberately omitted from `args` and must be re-obtained from the matching CLI entry.
+
+Consumers spawn `executable` + `args` (+ `cwd`) directly with `shell: false`; they must not re-render a shell command, execute via a string (`shell: true` / `Invoke-Expression`), or synthesize a fallback. The authoritative consumption decision order (contract validation → TTY check → `promptFor` input) lives in `skills/shared/crctl/SKILL.md`「`recovery` 消费合同」and is not duplicated here.
 
 ## Deep Primitives
 
@@ -87,7 +101,7 @@ The primitive operations are enumerated in `durable-tx.mjs` `OPS = ['register', 
 
 ## Ledger Transactions (single-command multi-file)
 
-Commands that must update several ledger files in one atomic unit — `approve`, `review-record`, `owner-set`, `version-set` — use the command-level ledger transaction in `durable-tx.mjs` rather than `casWriteMulti` (which has been deleted). A ledger transaction snapshots `before` hashes, applies the write-set, and on commit writes an `AI-First-Tx` trailer so an interrupted post-commit run can confirm authority and clean up only the journal. Other single-file ledger commands continue to use hash-CAS; all paths share `.crctl/audit.log` and controlled Git.
+Commands that must update ledger files in one atomic unit — `approve`, `review-record`, `owner-set`, `version-set`, and (since CR-2026-063) `review-loop reset` — use the command-level ledger transaction in `durable-tx.mjs` rather than `casWriteMulti` (which has been deleted). A ledger transaction snapshots `before` hashes, applies the write-set, and on commit writes an `AI-First-Tx` trailer so an interrupted post-commit run can confirm authority and clean up only the journal. `review-loop reset` is the first single-file user: it wraps the `review-loop.yml` rewrite in `beginLedgerCommand` with commit-isolation preflight (assert the index stages exactly that one path before committing), then rolls back via `abortLedgerTransaction` on any failure. Other single-file ledger commands continue to use hash-CAS; all paths share `.crctl/audit.log` and controlled Git.
 
 ## Hard Invariants
 
@@ -104,11 +118,11 @@ These are the architectural invariants this layer exists to enforce (full text i
 
 - **Adding a new ledger write** must go through either a deep primitive (cross-repo/multi-file) or the ledger transaction (single-command multi-file), never a new ad-hoc `fs.writeFileSync` path. Update `OPS` and add a fault-injection vector in `durable-tx.test.mjs` / `fault-harness.test.mjs`.
 - **Changing the state machine** requires a coordinated edit to `dir-graph.yaml` and `gates.json` (they are the single source of truth) and a re-check of the state-machine size invariant in [ARCHITECTURE.md §5 inv 5](/openwiki/architecture/overview.md).
-- **Changing a deep primitive's phases** must keep idempotency: re-run from the returned `recoverCommand` must resume, not redo.
+- **Changing a deep primitive's phases** must keep idempotency: re-running the returned structured `recovery` argv (spawned with `shell:false`) must resume, not redo. When an argv changes, update the corresponding `buildRecovery(...)` call so success and error paths keep the same shape.
 - **Do not** add a second transaction framework or generic YAML serializer — both are explicitly rejected in [ARCHITECTURE.md §6](/openwiki/architecture/overview.md).
 
 ## Validation
 
 - Focused: `node --test skills/shared/crctl/scripts/test/crctl.test.mjs`
-- Full transaction + fault suite (matches CI): `node --test --test-concurrency=2 skills/shared/crctl/scripts/test/*.test.mjs`
+- Full transaction + fault suite (matches CI): `node skills/shared/crctl/scripts/test/suite-gate.mjs --run`
 - Run the full suite when changing `lib/durable-tx.mjs`, `lib/workspace-transactions.mjs`, or `lib/yaml-subset.mjs`; a focused test file is sufficient for a single-primitive change.

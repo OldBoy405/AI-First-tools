@@ -17,6 +17,27 @@ export { TxError } from './durable-tx.mjs';
 
 const sha256 = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 
+/* ────────────────────────── recovery 合同（CR-2026-064 TASK-01） ──────────────────────────
+ * 恢复动作的唯一结构化载体：executable / args[] / cwd / requiresTTY / promptFor[]。
+ * 键序固定（供指纹与结构断言）；executable 恒为 'node'、args[0] 恒为 crctl 脚本绝对路径；
+ * args 每元素是一个完整 argv，禁止在其中携带 shell 引号或占位符。 */
+const CRCTL_SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'crctl.mjs');
+
+export function buildRecovery(args, { cwd, requiresTTY = false, promptFor = [] } = {}) {
+  // 内部不变量守卫：仅由程序员错误触发，任何合法输入不可达（不改变既有 CLI 合同）。
+  if (!Array.isArray(args) || args.some((a) => typeof a !== 'string')) throw new TxError('RECOVERY_CONTRACT_INVALID', 'recovery.args 必须是字符串数组');
+  if (cwd != null && !path.isAbsolute(cwd)) throw new TxError('RECOVERY_CONTRACT_INVALID', `recovery.cwd 必须是绝对路径: ${cwd}`);
+  if (typeof requiresTTY !== 'boolean') throw new TxError('RECOVERY_CONTRACT_INVALID', 'recovery.requiresTTY 必须是 boolean');
+  if (!Array.isArray(promptFor) || promptFor.some((v) => typeof v !== 'string')) throw new TxError('RECOVERY_CONTRACT_INVALID', 'recovery.promptFor 必须是字符串数组');
+  return {
+    executable: 'node',
+    args: [CRCTL_SCRIPT_PATH, ...args],
+    ...(cwd == null ? {} : { cwd }),
+    requiresTTY,
+    promptFor,
+  };
+}
+
 /**
  * Installation Workspace（InstWS）：dir-graph.yaml、.rayai-worktrees/ 与 .crctl/ 的解析基准。
  * linked worktree 场景 git common-dir 指向主 checkout 的 .git，其 dirname 即主 checkout 根；
@@ -774,14 +795,21 @@ export async function registerCr(ctx, input) {
     owners: { requirement: owners.requirement, development: owners.development, test: owners.test },
   }));
   const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
-  const recoverCommand = `crctl register --registration-key ${input.registrationKey} --title ${JSON.stringify(input.title)}` +
-    ` --owner-requirement ${owners.requirement} --owner-development ${owners.development} --owner-test ${owners.test}` +
-    (summary ? ` --summary ${JSON.stringify(summary)}` : '') +
-    (input.source ? ` --source ${JSON.stringify(input.source)}` : '') +
-    (origin ? ` --origin ${origin}` : '') +
-    (input.targetVersion ? ` --target-version ${JSON.stringify(input.targetVersion)}` : '') +
-    ` --target-spec-id ${JSON.stringify(targetSpecId)}` +
-    ` --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`;
+  const registerWorkspace = input.workspace || ctx.installRoot;
+  const recovery = buildRecovery([
+    'register',
+    '--registration-key', input.registrationKey,
+    '--title', input.title,
+    '--owner-requirement', String(owners.requirement),
+    '--owner-development', String(owners.development),
+    '--owner-test', String(owners.test),
+    ...(summary ? ['--summary', String(summary)] : []),
+    ...(input.source ? ['--source', String(input.source)] : []),
+    ...(origin ? ['--origin', String(origin)] : []),
+    ...(input.targetVersion ? ['--target-version', String(input.targetVersion)] : []),
+    '--target-spec-id', targetSpecId,
+    '--workspace', registerWorkspace,
+  ], { cwd: registerWorkspace });
   const lock = await acquireLock({ root: ctx.installRoot, scope: `register-${keyHash.slice(0, 16)}`, op: 'register' });
   try {
     let journal, journalPath;
@@ -898,7 +926,7 @@ export async function registerCr(ctx, input) {
       faultPoint('register-between-worktrees', { repo: repo.id });
     }
     await save('complete');
-    return { cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete, sideEffects: buildSideEffects(payload), targetVersion, targetSpecId, registrationAt: payload.registrationAt, recoverCommand };
+    return { cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete, sideEffects: buildSideEffects(payload), targetVersion, targetSpecId, registrationAt: payload.registrationAt, recovery };
   } finally {
     await lock.release();
   }
@@ -1071,7 +1099,7 @@ function syncOneRepo(ctx, cr, rec) {
 
 export async function syncWorkspaceToTrunk(ctx, { cr }) {
   if (!/^CR-\d{4}-\d{3,}$/.test(cr || '')) throw new TxError('WORKSPACE_CR_INVALID', `CR-ID 非法: ${cr}`);
-  const recoverCommand = `crctl workspace sync ${cr} --workspace ${JSON.stringify(ctx.installRoot)}`;
+  const recovery = buildRecovery(['workspace', 'sync', cr, '--workspace', ctx.installRoot], { cwd: ctx.installRoot });
   const lock = await acquireLock({ root: ctx.installRoot, scope: `workspace-sync-${cr}`, op: 'workspace', cr });
   try {
     const existing = loadExistingJournal({ root: ctx.installRoot, op: 'workspace', cr });
@@ -1115,7 +1143,7 @@ export async function syncWorkspaceToTrunk(ctx, { cr }) {
         faultPoint('ws-sync-after-repo', { repo: rec.repo });
       }
       await save('complete');
-      return { cr, txId: journal.txId, phase: 'complete', changed, repositories: payload.repos, recoverCommand };
+      return { cr, txId: journal.txId, phase: 'complete', changed, repositories: payload.repos, recovery };
     }
 
     // 无在途 journal（含 latest 为 complete）：锁内全仓 preflight，任何 worktree 写入前。
@@ -1125,7 +1153,7 @@ export async function syncWorkspaceToTrunk(ctx, { cr }) {
       action: r.freshness === 'behind-clean' ? 'pending' : 'unchanged',
     }));
     if (fresh.allFresh) {
-      return { cr, txId: null, phase: 'complete', changed: false, repositories: unhandled, recoverCommand };
+      return { cr, txId: null, phase: 'complete', changed: false, repositories: unhandled, recovery };
     }
     const blocker = fresh.repositories.find((r) => r.freshness !== 'fresh' && r.freshness !== 'behind-clean');
     if (blocker) {
@@ -1155,7 +1183,7 @@ export async function syncWorkspaceToTrunk(ctx, { cr }) {
       faultPoint('ws-sync-after-repo', { repo: rec.repo });
     }
     await save('complete');
-    return { cr, txId: journal.txId, phase: 'complete', changed, repositories: payload.repos, recoverCommand };
+    return { cr, txId: journal.txId, phase: 'complete', changed, repositories: payload.repos, recovery };
   } finally {
     await lock.release();
   }
@@ -1509,7 +1537,8 @@ export async function mergeCr(ctx, input) {
   if (opWs.source !== 'cr-worktree') {
     throw new TxError('MERGE_STATE_MISMATCH', `merge 只接受 code-approved（authority=CR worktree），当前 ${opWs.phase}`, { cr, phase: opWs.phase });
   }
-  const recoverCommand = `crctl merge ${cr} --workspace ${JSON.stringify((input && input.workspace) || ctx.installRoot)}`;
+  const mergeWorkspace = (input && input.workspace) || ctx.installRoot;
+  const recovery = buildRecovery(['merge', cr, '--workspace', mergeWorkspace], { cwd: mergeWorkspace });
   const lock = await acquireLock({ root: ctx.installRoot, scope: `merge-${cr}`, op: 'merge' });
   try {
     let journal, journalPath;
@@ -1548,13 +1577,13 @@ export async function mergeCr(ctx, input) {
         throw new TxError('RELEASE_SUBJECT_DRIFT', `已有 trunk publish 后 release-subjects 漂移（kind=${v.kind}），保持 blocked，恢复原 ref 后才能续跑`, { cr, kind: v.kind, ...v.details });
       }
       // 零 publish 的 code/source/TASK drift：原子标记审批 stale，回退转换由 crctl 层执行
-      return { cr, txId: journal.txId, phase: 'release-drift', changed: false, drift: { kind: v.kind, ...v.details }, recoverCommand };
+      return { cr, txId: journal.txId, phase: 'release-drift', changed: false, drift: { kind: v.kind, ...v.details }, recovery };
     }
 
     // CR-2026-044 FR-05：新事务全仓 publication preflight——远端 requirement source 精确等于本地 HEAD 才允许
-    // 首次 prepare；publication lag 错误携带 checkpoint recoverCommand，状态保持 code-approved。
+    // 首次 prepare；publication lag 错误携带 checkpoint recovery，状态保持 code-approved。
     // 既有 prepare/publish journal 的恢复不重跑 preflight（按已持久化 sourceSha 续跑，不采纳移动 ref）。
-    const checkpointRecoverCommand = `crctl checkpoint ${cr} --workspace ${JSON.stringify(ctx.installRoot)}`;
+    const checkpointRecovery = buildRecovery(['checkpoint', cr, '--workspace', ctx.installRoot], { cwd: ctx.installRoot });
     let publicationFacts = null;
     if (!(payload.repos || []).length) {
       publicationFacts = new Map();
@@ -1567,10 +1596,10 @@ export async function mergeCr(ctx, input) {
         const sourceRef = `refs/remotes/origin/${branchForCr(cr)}`;
         const src = gitRun(repo.rootPath, ['rev-parse', '--verify', '--quiet', sourceRef]);
         if (src.status !== 0) {
-          throw new TxError('MERGE_SOURCE_MISSING', `${repo.id} 缺少远端 source ref ${sourceRef}（被评审分支未 checkpoint，先执行 recoverCommand 再重跑 merge）`, { repo: repo.id, ref: sourceRef, recoverCommand: checkpointRecoverCommand });
+          throw new TxError('MERGE_SOURCE_MISSING', `${repo.id} 缺少远端 source ref ${sourceRef}（被评审分支未 checkpoint，先执行 recovery 指向的 checkpoint 再重跑 merge）`, { repo: repo.id, ref: sourceRef, recovery: checkpointRecovery });
         }
         if (src.stdout !== localHead) {
-          throw new TxError('RELEASE_REMOTE_NOT_PUSHED', `${repo.id} 远端 ${sourceRef} 未同步本地 HEAD（publication lag，先执行 recoverCommand 再重跑 merge）`, { repo: repo.id, head: localHead, remote: src.stdout, recoverCommand: checkpointRecoverCommand });
+          throw new TxError('RELEASE_REMOTE_NOT_PUSHED', `${repo.id} 远端 ${sourceRef} 未同步本地 HEAD（publication lag，先执行 recovery 指向的 checkpoint 再重跑 merge）`, { repo: repo.id, head: localHead, remote: src.stdout, recovery: checkpointRecovery });
         }
         publicationFacts.set(repo.id, { sourceSha: src.stdout, baseSha: gitMust(repo.rootPath, ['rev-parse', `refs/remotes/origin/${repo.trunk}`]) });
       }
@@ -1757,7 +1786,7 @@ export async function mergeCr(ctx, input) {
     const localTrunkSync = reconcileLocalTrunks(ctx);
     return {
       cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete,
-      sideEffects: buildMergeSideEffects(payload), recoverCommand,
+      sideEffects: buildMergeSideEffects(payload), recovery,
       operationalWorkspace: txws, mergedStatus: payload.mergedStatus,
       localTrunkSync,
     };
@@ -1940,7 +1969,12 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
   const branch = branchForCr(cr);
   const remoteRef = `refs/heads/${branch}`;
   const inputDigest = sha256(JSON.stringify({ cr, graphDigest: ctx.graphDigest }));
-  const recoverCommand = `crctl checkpoint ${cr}${message ? ` --message ${JSON.stringify(message)}` : ''} --workspace ${JSON.stringify(workspace || ctx.installRoot)}`;
+  const checkpointWorkspace = workspace || ctx.installRoot;
+  const recovery = buildRecovery([
+    'checkpoint', cr,
+    ...(message ? ['--message', String(message)] : []),
+    '--workspace', checkpointWorkspace,
+  ], { cwd: checkpointWorkspace });
   let journal = null, journalPath = null, payload = null;
   const lock = await acquireLock({ root: ctx.installRoot, scope: `checkpoint-${cr}`, op: 'checkpoint' });
   try {
@@ -1987,7 +2021,7 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
         if (synced && checkpointBatchId({ cr, graphDigest: ctx.graphDigest, repositories: latest.repositories }) === latest.batchId) {
           return { cr, txId: null, phase: 'complete', batchId: latest.batchId,
             repositories: latest.repositories.map((x) => ({ ...x, confirmed: true })),
-            metadataCommit: gitMust(kbCrRoot, ['rev-parse', 'HEAD']), changed: false, sideEffects: [], recoverCommand };
+            metadataCommit: gitMust(kbCrRoot, ['rev-parse', 'HEAD']), changed: false, sideEffects: [], recovery };
         }
       }
     }
@@ -2223,12 +2257,12 @@ export async function checkpointCr(ctx, { cr, message, workspace }) {
 
     return { cr, txId: journal.txId, phase: 'complete', batchId: payload.batchId,
       repositories: payload.repositories.map((r) => ({ repo: r.repo, sourceSha: r.sourceSha, remoteRef: r.remoteRef, confirmed: true })),
-      metadataCommit: payload.metadataCommit, changed: did, sideEffects: checkpointBuildSideEffects(payload), recoverCommand };
+      metadataCommit: payload.metadataCommit, changed: did, sideEffects: checkpointBuildSideEffects(payload), recovery };
   } catch (e) {
     if (e instanceof TxError && journal) {
       throw new TxError(e.code, e.message, {
         ...e.extra, txId: journal.txId, phase: payload && payload.phase || journal.phase,
-        sideEffects: checkpointBuildSideEffects(payload || {}), recoverCommand,
+        sideEffects: checkpointBuildSideEffects(payload || {}), recovery,
       });
     }
     throw e;
@@ -2798,6 +2832,15 @@ async function applyWritebackAtomic(ctx, input) {
       if (sha256(JSON.stringify(intent.payload)) !== intent.payloadSha256) {
         throw new TxError('TX_JOURNAL_INVALID', `${traceKey} journal traceOutbox payload digest 漂移`, { txId: done.journal.txId });
       }
+      const traceReplayWorkspace = input.workspace || ctx.installRoot;
+      const traceReplayRecovery = buildRecovery([
+        'writeback-apply', cr,
+        '--stage', 'traceability',
+        '--spec-id', specId,
+        '--target-version', String(input.targetVersion || ''),
+        ...(input.mode === 'new' ? [] : ['--milestone-file', String(input.milestoneFile || '')]),
+        '--workspace', traceReplayWorkspace,
+      ], { cwd: traceReplayWorkspace });
       let name = null;
       try {
         if (typeof input.emitTraceEvent !== 'function') throw new Error('emitTraceEvent callback missing');
@@ -2809,14 +2852,14 @@ async function applyWritebackAtomic(ctx, input) {
         return {
           cr, txId: done.journal.txId, phase: 'complete', changed: false, replayedTrace: true,
           commit: wb.commit, files: (wb.files || []).map((f) => f.path), warnings: [],
-          recoverCommand: `crctl writeback-apply ${cr} --stage traceability --spec-id ${JSON.stringify(specId)} --target-version ${JSON.stringify(input.targetVersion || '')}${input.mode === 'new' ? '' : ` --milestone-file ${JSON.stringify(input.milestoneFile || '')}`} --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`,
+          recovery: traceReplayRecovery,
         };
       }
       return {
         cr, txId: done.journal.txId, phase: 'complete', changed: false, replayedTrace: false,
         commit: wb.commit, files: (wb.files || []).map((f) => f.path),
         warnings: [{ code: 'EMIT_FAILED', event_kind: 'trace', message: 'trace pending 补发失败，journal 保持 pending（archive 前置门将再次补发）' }],
-        recoverCommand: `crctl writeback-apply ${cr} --stage traceability --spec-id ${JSON.stringify(specId)} --target-version ${JSON.stringify(input.targetVersion || '')}${input.mode === 'new' ? '' : ` --milestone-file ${JSON.stringify(input.milestoneFile || '')}`} --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`,
+        recovery: traceReplayRecovery,
       };
     }
   }
@@ -2877,11 +2920,17 @@ async function applyWritebackAtomic(ctx, input) {
   const { snapshot } = prepared;
   const manifestDigest = snapshot.digest;
   const inputDigest = sha256(JSON.stringify({ businessInputDigest: business.digest, manifestDigest }));
-  const recoverCommand = `crctl writeback-apply ${cr} --stage ${stage} --spec-id ${JSON.stringify(specId)} --target-version ${JSON.stringify(business.value.targetVersion)}`
-    + (business.value.milestoneName == null ? '' : ` --milestone-name ${JSON.stringify(business.value.milestoneName)}`)
-    + (business.value.brief == null ? '' : ` --brief ${JSON.stringify(business.value.brief)}`)
-    + (business.value.milestoneFile == null ? '' : ` --milestone-file ${JSON.stringify(business.value.milestoneFile)}`)
-    + ` --workspace ${JSON.stringify(input.workspace || ctx.installRoot)}`;
+  const writebackWorkspace = input.workspace || ctx.installRoot;
+  const recovery = buildRecovery([
+    'writeback-apply', cr,
+    '--stage', stage,
+    '--spec-id', specId,
+    '--target-version', String(business.value.targetVersion),
+    ...(business.value.milestoneName == null ? [] : ['--milestone-name', String(business.value.milestoneName)]),
+    ...(business.value.brief == null ? [] : ['--brief', String(business.value.brief)]),
+    ...(business.value.milestoneFile == null ? [] : ['--milestone-file', String(business.value.milestoneFile)]),
+    '--workspace', writebackWorkspace,
+  ], { cwd: writebackWorkspace });
 
   let advanceCandidate = null;
   if (!found) {
@@ -3124,7 +3173,7 @@ async function applyWritebackAtomic(ctx, input) {
     return {
       cr, txId: journal.txId, phase: 'complete', changed: did && !wasComplete,
       commit: payload.commit, status: payload.statusTransition?.to || opWs.phase,
-      files: (payload.files || []).map((f) => f.path), warnings, recoverCommand,
+      files: (payload.files || []).map((f) => f.path), warnings, recovery,
     };
   } finally { await lock.release(); }
 }
@@ -3455,7 +3504,12 @@ export async function archiveCr(ctx, input) {
     throw new TxError('ARCHIVE_EMITTER_REQUIRED', 'archive 需要 emitArchiveEvent adapter（cmdArchive 注入 emitOutboxEvent）', { cr });
   }
   const kb = getRepository(ctx, ctx.knowledgeBaseRepoId);
-  const recoverCommand = `crctl archive ${cr}${specId ? ` --spec-id ${JSON.stringify(specId)}` : ''} --workspace ${JSON.stringify((input && input.workspace) || ctx.installRoot)}`;
+  const archiveWorkspace = (input && input.workspace) || ctx.installRoot;
+  const recovery = buildRecovery([
+    'archive', cr,
+    ...(specId ? ['--spec-id', specId] : []),
+    '--workspace', archiveWorkspace,
+  ], { cwd: archiveWorkspace });
   // CR-2026-060 G4（SDD §2.2.4）：幂等键不编入可省 spec-id（new mode 首跑解析值、清理后重放省略值，两态必须命中同一 journal）。
   const inputDigest = sha256(`archive:${cr}`);
   const lock = await acquireLock({ root: ctx.installRoot, scope: `archive-${cr}`, op: 'archive', cr });
@@ -3501,7 +3555,7 @@ export async function archiveCr(ctx, input) {
         lastCleanupError: payload.lastCleanupError ?? null,
         remaining: payload.remaining ?? [],
         preservedRefs: payload.preservedRefs ?? [],
-        recoverCommand,
+        recovery,
         warnings,
         ...(outbox ? { outbox } : {}),
       };
@@ -4175,13 +4229,13 @@ export function renderTestsTraceability(existing, input) {
   return (norm.endsWith('\n') ? norm : norm + '\n') + block + '\n';
 }
 
-function buildTestResponse({ cr, status, commandDigest, attempt, results, report, traceability, reviewLoop, changed }) {
+function buildTestResponse({ cr, status, commandDigest, attempt, results, report, traceability, reviewLoop, changed, workspace }) {
   return {
     op: 'test', cr, status, commandDigest, attempt,
     commands: results,
     report, traceability, reviewLoop,
     changed,
-    recoverCommand: `node {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs test ${cr} --plan <plan> --workspace <worktree>`,
+    recovery: buildRecovery(['test', cr, '--workspace', workspace], { cwd: workspace, promptFor: ['plan'] }),
   };
 }
 
@@ -4243,7 +4297,7 @@ export async function testCr(ctx, { cr, workspace, planPath }) {
     const existing = latestTestJournal(workspace, cr, inputDigest);
     if (existing && existing.journal.phase === 'complete' && existing.journal.inputDigest === inputDigest) {
       const jt = existing.journal.test;
-      return buildTestResponse({ cr, status: jt.status, commandDigest: jt.commandDigest, attempt: jt.attempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: false });
+      return buildTestResponse({ cr, status: jt.status, commandDigest: jt.commandDigest, attempt: jt.attempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, workspace, changed: false });
     }
     if (existing && existing.journal.phase !== 'complete') {
       if (existing.journal.inputDigest !== inputDigest) {
@@ -4256,13 +4310,13 @@ export async function testCr(ctx, { cr, workspace, planPath }) {
         jt.phase = 'complete';
         existing.journal.phase = 'complete';
         await saveJournal({ path: existing.journalPath, journal: existing.journal });
-        return buildTestResponse({ cr, status: jt.status, commandDigest: jt.commandDigest, attempt: jt.attempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: true });
+        return buildTestResponse({ cr, status: jt.status, commandDigest: jt.commandDigest, attempt: jt.attempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, workspace, changed: true });
       }
       if (jt && currentAttempt === jt.attempt) {
         jt.phase = 'complete';
         existing.journal.phase = 'complete';
         await saveJournal({ path: existing.journalPath, journal: existing.journal });
-        return buildTestResponse({ cr, status: jt.status, commandDigest: jt.commandDigest, attempt: jt.attempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: false });
+        return buildTestResponse({ cr, status: jt.status, commandDigest: jt.commandDigest, attempt: jt.attempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, workspace, changed: false });
       }
     }
     if (currentAttempt >= maxAttempts) {
@@ -4328,7 +4382,7 @@ export async function testCr(ctx, { cr, workspace, planPath }) {
     saved.test.phase = 'complete';
     saved.phase = 'complete';
     await saveJournal({ path: journalPath, journal: saved });
-    return buildTestResponse({ cr, status: overall, commandDigest, attempt: nextAttempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, changed: true });
+    return buildTestResponse({ cr, status: overall, commandDigest, attempt: nextAttempt, results, report: reportRel, traceability: traceRel, reviewLoop: loopRel, workspace, changed: true });
   } finally {
     try { fs.rmSync(tempLogs, { recursive: true, force: true }); } finally { if (lock) await lock.release(); }
   }

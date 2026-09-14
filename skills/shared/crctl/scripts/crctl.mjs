@@ -29,7 +29,7 @@ import {
   assertSupportedBacklogSchemaText,
   buildReleaseSubjects, verifyReleaseSubjects, renderReleaseSubjects,
   matchFrontmatter, crMdStatusText, refreshCrMdUpdated, mergeCr, mergeStatus, resolveOperationalWorkspace,
-  applyWriteback, archiveCr, checkUpgrade, checkpointCr, renderLoopText, testCr,
+  applyWriteback, archiveCr, checkUpgrade, checkpointCr, renderLoopText, testCr, buildRecovery,
   normalizeTargetVersion, readCrMdTargetVersion, crWorktreePath, txWorkspacePath,
   resolveTargetSpecMode, resolveWritebackAuthorityStrict,
 } from './lib/workspace-transactions.mjs';
@@ -932,13 +932,13 @@ function cmdStatus(ws, cr, gates, flags) {
   });
 }
 
-/* CR-2026-063 TASK-01（SDD §4.1.1，FR-7/FR-9 共用）：恢复方向里的 CR-ID 片段。
- * 位置参数形如 CR-YYYY-NNN 时内插（得到可直接复制的恢复方向）；否则回退占位符，
- * 保证恢复串在任何 argv 下都不含自由文本（NFR-3）。一处定义、两处调用：
- * cmdGate 的 pre-review 错配分支与 cmdReviewLoopReset 的提交失败分支。
- * 语法校验形态与既有 archive / version-set / workspace-transactions.mjs 的 CR_DIR_RE 一致。 */
-function crIdForRecover(cr) {
-  return /^CR-\d{4}-\d{3,}$/.test(String(cr)) ? String(cr) : '<CR-ID>';
+/* CR-2026-064（SDD §4.1 站点 10/11，决策 D-4）：恢复动作里的 CR-ID argv 元素判定。
+ * 规范 CR-YYYY-NNN 时作为独立 argv 元素内插；否则**省略该元素**并在 promptFor 声明 'CR-ID'
+ * （占位符既不进 args 也不进任何 shell string）。一处定义、两处调用：cmdGate 的 pre-review
+ * 错配分支与 cmdReviewLoopReset 的提交失败分支。语法校验形态与 archive / version-set /
+ * workspace-transactions.mjs 的 CR_DIR_RE 一致。 */
+function recoveryCrId(cr) {
+  return /^CR-\d{4}-\d{3,}$/.test(String(cr)) ? String(cr) : null;
 }
 
 function cmdGate(ws, cr, gates, flags) {
@@ -946,10 +946,15 @@ function cmdGate(ws, cr, gates, flags) {
   if (flags.mode === 'pre-review') {
     if (flags.for !== 'requirement-reviewing') {
       // SDD §3.1：错误码不变（BAD_ARGS）；新增 contractDrift（恒 true 的固定提示，§3.1.1）
-      // 与 recoverCommand（固定形态，无自由文本）。本分支在任何写路径之前，零写入由结构保证。
+      // 与结构化 recovery（固定 argv 形态，无自由文本；CR-ID 非规范时省略该元素并声明 promptFor）。
+      // 本分支在任何写路径之前，零写入由结构保证。
+      const recoverCr = recoveryCrId(cr);
       fail('BAD_ARGS', '--mode pre-review 仅支持 --for requirement-reviewing；该调用与版本化 Skill/Pipeline 的声明不一致（contractDrift=true），请复核权威 Skill/Pipeline 中该 stage 的门禁入口，勿继续按当前参数重试', {
         contractDrift: true,
-        recoverCommand: `crctl workspace inspect ${crIdForRecover(cr)}`,
+        recovery: buildRecovery(['workspace', 'inspect', ...(recoverCr ? [recoverCr] : [])], {
+          cwd: ws,
+          promptFor: recoverCr ? [] : ['CR-ID'],
+        }),
       });
     }
     const result = runPreReviewGateChecks(ws, cr);
@@ -1878,16 +1883,21 @@ async function cmdReviewLoopReset(ws, cr, gates, flags) {
       fail('REVIEW_LOOP_RESET_COMMIT_ROLLBACK_FAILED', `提交失败后的恢复未完成：${String((e && e.message) || e)}`, { affected: [rel] });
     }
     auditLog(ws, { kind: 'review-loop-reset', cr, loop: loopRef, fromCycle, toCycle: nextCycle, reason, by: identity(ws), result: 'commit-failed' });
+    const recoverCr = recoveryCrId(cr);
     fail('REVIEW_LOOP_RESET_COMMIT_FAILED', 'review-loop.yml 变更提交失败：已按 journal 还原并撤销暂存（执行前 tracked-clean 时工作区已完全恢复）', {
       changed: false,
       rolled_back: true,
-      recoverCommand: `crctl review-loop reset ${crIdForRecover(cr)} --loop ${loopRef} --reason <reason>`,
+      recovery: buildRecovery(['review-loop', 'reset', ...(recoverCr ? [recoverCr] : []), '--loop', loopRef], {
+        cwd: ws,
+        requiresTTY: true,
+        promptFor: recoverCr ? ['reason'] : ['reason', 'CR-ID'],
+      }),
     });
   }
   await injectLedgerFault('ledger-after-commit'); // 与 approve 同款崩溃窗口挂接
   await runTxAsync(finishLedgerTransaction(ledgerTx));
   auditLog(ws, { kind: 'review-loop-reset', cr, loop: loopRef, fromCycle, toCycle: nextCycle, reason, by: identity(ws) });
-  // 成功输出字段集与改造前一致（不含 recoverCommand）。
+  // 成功输出字段集与改造前一致（不含恢复项）。
   ok({ op: 'review-loop-reset', cr, loop: loopRef, 'current-cycle': nextCycle, 'current-attempt': 0, file: p, reason });
 }
 
@@ -2728,7 +2738,7 @@ function buildRegisterResult(ctx, r) {
   return {
     cr: r.cr, txId: r.txId, phase: r.phase, changed: r.changed,
     targetVersion: r.targetVersion, targetSpecId: r.targetSpecId, registrationAt: r.registrationAt,
-    sideEffects: r.sideEffects, recoverCommand: r.recoverCommand, operationalWorkspace,
+    sideEffects: r.sideEffects, recovery: r.recovery, operationalWorkspace,
   };
 }
 
@@ -3279,7 +3289,7 @@ async function cmdRegister(ws, flags) {
     targetSpecId: r.targetSpecId, target_spec_id: r.targetSpecId,
     registrationAt: r.registrationAt, registration_at: r.registrationAt,
     sideEffects: r.sideEffects, side_effects: r.sideEffects,
-    recoverCommand: r.recoverCommand, recover_command: r.recoverCommand,
+    recovery: r.recovery,
     operationalWorkspace: r.operationalWorkspace, operational_workspace: r.operationalWorkspace,
     outbox: null, warnings: [],
   };

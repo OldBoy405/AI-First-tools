@@ -35,9 +35,9 @@ scope: drift-governance
 | `test` | 结构化测试闭环：`--plan <cr-test-plan/v1>` 单一入口，`spawnSync(executable, args, {shell:false})` 执行，原子发布 `test-report.md` 机器区 + `traceability.yml#tests` + `review-loop.yml`（write-test-report）+ `test-evidence/cmd-NN.log`；业务 non-zero/timeout 记 `status=block`（exit 0），schema/路径/executable/事务等技术错误非零退出且 canonical 零变化；`--cmd`/`--cwd`/`--timeout` 已移除 | `write-test-report` 证据部分 |
 | `next` | 按 status + 评审/测试证据输出下一个该跑的节点；blocker 未清空**绝不**返回 `human_approval`；writing-back 态改查 specs/{spec}/traceability.yml（FR-21） | 最小 pipeline-runner |
 | `register` | 幂等注册事务（CR-2026-031 TASK-05，TASK-10 起取代旧注册子命令）：`--registration-key <k> --title <t> --owner-* <id>`——CR-ID + 三账本 recoverable write-set + trailer commit/lease push + 逐仓 worktree ensure，同 key 同输入续跑、输入漂移/trunk dirty/history rewrite 零写或硬阻断 | requirement-register |
-| `merge` | 可恢复跨仓 merge saga（CR-2026-031 TASK-07）：只消费 approval.yml#code.release-subjects（纯本地重核，不读远端）；新事务首次 prepare 前先全仓 publication preflight（远端 requirement source 精确等于本地 HEAD 才继续；缺失 `MERGE_SOURCE_MISSING`/滞后 `RELEASE_REMOTE_NOT_PUSHED` 携 checkpoint recoverCommand，状态保持 code-approved，CR-2026-044 FR-05）；commit-tree 无副作用 prepare（冲突 MERGE_PREPARE_CONFLICT 零远端副作用）→ 逐仓 lease publish（confirmed 跳过/pushable 续推/rebuild 用冻结 sourceSha 重做/history-rewritten 硬阻断）→ 全部 confirmed 后 detached Transaction Workspace 单 finalize commit（status=merging + merge-commits.yml + merge-verification.md）；零 publish 的本地 code/TASK drift 经回退转换 `code-approved -> developing`，PRD/SDD drift → APPROVED_ARTIFACT_DRIFT；`merge status` 只读快照 | writeback/merge 阶段 |
+| `merge` | 可恢复跨仓 merge saga（CR-2026-031 TASK-07）：只消费 approval.yml#code.release-subjects（纯本地重核，不读远端）；新事务首次 prepare 前先全仓 publication preflight（远端 requirement source 精确等于本地 HEAD 才继续；缺失 `MERGE_SOURCE_MISSING`/滞后 `RELEASE_REMOTE_NOT_PUSHED` 携 checkpoint `recovery`，状态保持 code-approved，CR-2026-044 FR-05）；commit-tree 无副作用 prepare（冲突 MERGE_PREPARE_CONFLICT 零远端副作用）→ 逐仓 lease publish（confirmed 跳过/pushable 续推/rebuild 用冻结 sourceSha 重做/history-rewritten 硬阻断）→ 全部 confirmed 后 detached Transaction Workspace 单 finalize commit（status=merging + merge-commits.yml + merge-verification.md）；零 publish 的本地 code/TASK drift 经回退转换 `code-approved -> developing`，PRD/SDD drift → APPROVED_ARTIFACT_DRIFT；`merge status` 只读快照 | writeback/merge 阶段 |
 | `writeback-apply` | 业务输入原子回写：`--stage baseline|tasks|traceability --spec-id <id> --target-version <ver>`（traceability 另需 workspace-relative `--milestone-file`）。crctl 内部固定 generator 与 `.crctl/candidates/{CR-ID}/{stage}`，journal 前完整 preflight；baseline 文件与 `merging→writing-back` 同 write-set/commit/lease push，origin-confirmed 后幂等发送 status outbox/advance audit。公共接口拒绝 candidate/generator/manifest 路径 | writeback 阶段 |
-| `archive` | 单一幂等归档（CR-2026-031 TASK-09；CR-2026-032 固定返回）：`[--spec-id <id>]`——四账本（cr.md/_backlog/_history/_index）同批 recoverable write-set + archive commit + lease push；origin confirmed 后 cleanup（txws/CR worktree/本地 ref，clean 才删），失败返回 phase=cleanup-pending（status 恒 archived）重跑只续清理；rejected/withdrawn 远端未合并 ref 保留为 preservedRefs。统一固定返回 commit/lastCleanupError/remaining/preservedRefs/recoverCommand/warnings；writing-back 在 origin confirmed 后、cleanup 前发 schema v1 archive outbox（EMIT_FAILED 仅 warning，重跑补发不阻断归档） | cr-archive |
+| `archive` | 单一幂等归档（CR-2026-031 TASK-09；CR-2026-032 固定返回）：`[--spec-id <id>]`——四账本（cr.md/_backlog/_history/_index）同批 recoverable write-set + archive commit + lease push；origin confirmed 后 cleanup（txws/CR worktree/本地 ref，clean 才删），失败返回 phase=cleanup-pending（status 恒 archived）重跑只续清理；rejected/withdrawn 远端未合并 ref 保留为 preservedRefs。统一固定返回 commit/lastCleanupError/remaining/preservedRefs/recovery/warnings；writing-back 在 origin confirmed 后、cleanup 前发 schema v1 archive outbox（EMIT_FAILED 仅 warning，重跑补发不阻断归档） | cr-archive |
 | `checkpoint` | 单一深原语：全仓 source commit + 非 KB lease publish + KB latest-checkpoint/metadata commit；前置态 = 非终态（CR-2026-033） | push-progress |
 | `workspace freshness` / `workspace sync` | 基线新鲜度窄子命令（CR-2026-043）：定位为远端 trunk 新鲜度预检（CR-2026-044 FR-08）——freshness 只读分类各仓 CR 分支对 trunk 的新鲜度（fresh/behind-clean/diverged/unknown）；sync 仅对 behind-clean 仓执行显式 ff-only 前移（幂等续跑，失败重跑同一命令）；fetch/sync 失败可中止 Pipeline 节点但不改 status/approval/review/attempt；不被状态门禁、approve 或本地 release verifier 调用；能力面声明，算法与错误码以 `crctl.mjs`/`workspace-transactions.mjs` 实现为准 | workspace-freshness |
 | `workspace inspect` | 各 active repo workspace 事实分类（只读）；CR-2026-044 FR-06 起额外返回既有 authority resolver 的单一 `operationalWorkspace` 路径（missing/inconsistent 时为 null + `operationalWorkspaceError` 结构化错误，不猜路径）；architecture/code pipeline 入口消费该字段并原样传递 | implement-code / write-tech-design 入口 |
@@ -73,6 +73,47 @@ node {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs git status --short --cwd
 - **写入**：`cr.md` frontmatter 的 status/updated（行级定点编辑，写前 sha256 CAS 复核，防并发覆盖）；`tasks/_index.yml`（仅 `task init`/`task append`/`task done`）；`approval.yml`（仅 approve）；`review-loop.yml`（仅 attempt）；`test-report.md` 与 `test-evidence/`（仅 test）；`.crctl/audit.log`（审计，自动 gitignore）。时间戳与执行者身份一律由本工具生成，**拒绝调用方传入**。
 - **状态推进**：只经 `advance`；`standalone` 模式自动 commit `[cr] status {CR-ID} {from} -> {to}`（经自身 git 白名单执行），`--embedded` 只写文件由调用方同事务提交。
 - **失败处理**：结构化 JSON 错误到 stderr + 非零退出。错误码：`CR_STATUS_NOT_FOUND` / `CR_STATUS_CURRENT_MISMATCH` / `CR_STATUS_TRANSITION_NOT_ALLOWED` / `GATE_BLOCKED` / `APPROVAL_REQUIRES_HUMAN` / `APPROVAL_DECLINED` / `LOOP_EXHAUSTED` / `FORBIDDEN_SUBCOMMAND` / `CAS_CONFLICT` / `OWNER_WORKTREE_DIRTY` / `OWNER_PROJECTION_DRIFT` / `OWNER_COMMIT_FAILED` / `OWNER_COMMIT_ROLLBACK_FAILED` / `GRANT_STATE_MISMATCH` / `GRANT_STATE_UNCOMMITTED` / `ADVANCE_COMMIT_FAILED` / `APPROVAL_DECLINED_ROLLED_BACK` 等。任何校验失败都不写文件。
+
+## `recovery` 消费合同（单一事实源，CR-2026-064 FR-17 / SDD §3.5）
+
+深原语在成功结果顶层返回 `recovery`、在错误面 `error.recovery` 返回同一形状的结构化恢复动作；
+本小节是该字段**消费判定**的唯一事实源，其余 Skill / Agent 只引用本小节、不复述判定规则：
+
+```ts
+interface Recovery {
+  executable: string;    // 恒为 'node'
+  args: string[];        // args[0] = {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs 绝对路径
+  cwd?: string;          // 绝对路径
+  requiresTTY: boolean;
+  promptFor: string[];   // 逻辑值名，按序；对应 argv 元素**不在** args 中
+}
+```
+
+判定顺序固定，**首个**不满足项即唯一结论（禁止「A 或 B」式并列）：
+
+| # | 检查 | 不满足时 |
+|---|---|---|
+| 1 | `executable` 存在、非空字符串、不含空格分隔参数与任何 shell 运算符 | 停止执行 + 报告合同错误 |
+| 2 | `args` 是数组且每元素为字符串（每元素是一个完整 argv） | 停止执行 + 报告合同错误 |
+| 3 | `cwd` 若存在则为绝对路径 | 停止执行 + 报告合同错误 |
+| 4 | `requiresTTY=true` ⇒ 当前环境具备可信 TTY | 停止执行 + 报告所需人类动作（不得在非 TTY 环境执行） |
+| 5 | `promptFor` 非空 ⇒ 存在允许的人类/调用方输入入口（取值后方可执行） | 停止执行 + 报告所需人类动作 |
+
+四类错误（合同字段缺失或类型错误 / `executable` 违反安全约束 / TTY 要求不满足 / `promptFor` 无输入入口）
+统一闭合为：**停止执行 + 报告合同错误 + 零执行副作用 + 明确的人类/调用方动作**：
+
+- 不得回退旧字段（结构上已删除，无 alias/shim/fallback）；
+- 不得猜测恢复命令、不得降级为字符串执行（`shell: true` / `Invoke-Expression` 一律禁止）；
+- 人类界面若需显示命令，只能从 `recovery` 渲染，且显示结果不得反向作为执行输入；
+- 执行方按 `executable` + `args` + `cwd` 直接 spawn（argv 边界，`shell: false`）。
+
+`promptFor` 的元素是**逻辑值名**，按值名对应到目标 CLI 的既有入口取新值，且不得从旧错误消息、评论或日志中复用旧值：
+
+| 值名 | 目标 CLI 入口 | 若被忽略（不取值直接执行） |
+|---|---|---|
+| `reason` | 可信 TTY 中由人重新输入 `--reason <text>` | `BAD_ARGS`，零写入 |
+| `plan` | `--plan <temp-json>` | `BAD_ARGS`，零写入 |
+| `CR-ID` | 位置参数 `<cr_id>`（非规范 `CR-YYYY-NNN` 时该元素在 `args` 中被省略） | `BAD_ARGS`，零写入 |
 
 ## IDE 适配器（adapters/）
 

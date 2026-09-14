@@ -42,7 +42,7 @@ standalone 场景若没有 `CRCTL_WORKSPACE`，由调用方通过 `--workspace` 
 
 - `phase=complete` 且 `changed=true`：完整批次已保存；输出 `batchId`、`repositories[]`（每仓 `sourceSha`+`confirmed`）与 `metadataCommit`。
 - `phase=complete` 且 `changed=false`（no-op）：无新变化，未创建 commit/push。
-- 错误：按 `code` 与 `recoverCommand` 分流；`CHECKPOINT_SENSITIVE_PATH`/`CHECKPOINT_REMOTE_*` 等为硬阻断，`recoverCommand` 为重跑补齐。
+- 错误：按 `code` 与 `recovery` 分流；`CHECKPOINT_SENSITIVE_PATH`/`CHECKPOINT_REMOTE_*` 等为硬阻断，`recovery` 为重跑补齐（按 `skills/shared/crctl/SKILL.md` 的「`recovery` 消费合同」判定）。
 
 ### Step 3 — 输出摘要
 
@@ -65,5 +65,5 @@ standalone 场景若没有 `CRCTL_WORKSPACE`，由调用方通过 `--workspace` 
 | `CHECKPOINT_SENSITIVE_PATH` | 敏感路径/私钥头命中，全仓零 add/commit/push；移除敏感文件后重试 |
 | `CHECKPOINT_REMOTE_ADVANCED` | 某仓 remote 领先 source，先执行 pull-progress 后重新 checkpoint |
 | `CHECKPOINT_REMOTE_DIVERGED` / `CHECKPOINT_REMOTE_HISTORY_REWRITTEN` | 硬阻断，不 merge/force；人工确认 remote 历史 |
-| 其它事务错误（`TX_*` / `GRAPH_CHANGED_DURING_TRANSACTION`） | 按 `recoverCommand` 重跑同一命令补齐 |
+| 其它事务错误（`TX_*` / `GRAPH_CHANGED_DURING_TRANSACTION`） | 按 `recovery` 重跑同一命令补齐 |
 | 终态 CR（`ILLEGAL_LEDGER_STATE`） | 停止执行，展示当前状态 |

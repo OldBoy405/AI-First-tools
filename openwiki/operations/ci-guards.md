@@ -12,7 +12,9 @@ openwiki:
     - skills/shared/crctl/scripts/check-skill-matrix.mjs
     - skills/shared/crctl/scripts/check-agents-contract.mjs
     - skills/shared/crctl/scripts/lint-prompts.mjs
-  symbols: [check-skill-matrix, check-agents-contract, lint-prompts]
+    - skills/shared/crctl/scripts/test/suite-gate.mjs
+    - skills/shared/crctl/scripts/test/gate-registry.json
+  symbols: [check-skill-matrix, check-agents-contract, lint-prompts, suite-gate]
   test_paths:
     - skills/shared/crctl/scripts/test/check-skill-matrix.test.mjs
     - skills/shared/crctl/scripts/test/check-agents-contract.test.mjs
@@ -28,10 +30,10 @@ The Phase0 tools package uses a layered verification system to ensure the [Agent
 
 ```mermaid
 flowchart TD
-    DEV["Developer commit"] --> PRE["pre-commit hook<br/>check-skill-matrix + check-agents-contract + lint-prompts"]
+    DEV["Developer commit"] --> PRE["pre-commit hook: 3 check scripts"]
     PRE -->|pass| PUSH["git push"]
     PRE -->|fail| BLOCK["commit rejected"]
-    PUSH --> CI["GitHub Actions crctl-ci<br/>Ubuntu + Windows"]
+    PUSH --> CI["GitHub Actions crctl-ci (Ubuntu + Windows)"]
     CI -->|fail| ALERT["PR/commit flagged"]
     CI -->|pass| OK["merge allowed"]
 ```
@@ -77,7 +79,7 @@ Added in CR-2026-021 and switched to `--mode enforce` (hard block) in CR-2026-02
 | R1 | Hand-written `cr.md`/`_backlog.yml`/`review-loop.yml` ledger edits |
 | R2 | Raw `git` invocations instead of `crctl git` |
 | R5 | Hand-written test-report blocks that `crctl test` should generate |
-| R7 | Stale `crctl advance --to/--trigger` flag shapes, full-width/pseudo flags, non-whitelisted `backlog-set` reads |
+| R7 | Stale `crctl advance --to/--trigger` flag shapes, full-width/pseudo flags, non-whitelisted `backlog-set` reads, and (CR-2026-063) `gate --mode pre-review` calls that omit `--for requirement-reviewing` |
 | R8 | Manual `inbox-emit` calls with non-whitelisted `--event` enums |
 
 `report` mode lists findings; `enforce` mode fails. The pre-commit hook and CI both run `enforce`.
@@ -96,10 +98,22 @@ Added in CR-2026-021 and switched to `--mode enforce` (hard block) in CR-2026-02
 | Skill matrix consistency | `node skills/shared/crctl/scripts/check-skill-matrix.mjs` |
 | Agents contract invariants | `node skills/shared/crctl/scripts/check-agents-contract.mjs` |
 | Pipeline JSON structure | inline assertion: every template parses, has unique node ids, and references only `active` skills with valid `repairNodeId`/`replayNodes` |
-| crctl full test suite | `node --test --test-concurrency=2 skills/shared/crctl/scripts/test/*.test.mjs` |
+| crctl full test suite | `node skills/shared/crctl/scripts/test/suite-gate.mjs --run` |
 | writeback unit tests | `node --test skills/writeback/scripts/test/*.test.mjs` |
 
 The dual-OS matrix exists to exercise line-ending (autocrlf/CRLF) and Windows-path invariants that have historically caused false positives.
+
+## Test Suite Gate (suite-gate.mjs)
+
+Since CR-2026-065, the `crctl full test suite` step no longer invokes `node --test` directly. It runs the **suite gate** wrapper `skills/shared/crctl/scripts/test/suite-gate.mjs`, which guards against silent test-loss by comparing what actually ran against a committed manifest:
+
+- **I1 (ownership)** — each `*.test.mjs` file runs as its own `node --test --test-reporter=tap <abs file>` subprocess; the file set is read from disk (`readTestFileSet` in `assertion-sources.mjs`), never from report contents.
+- **I2 (case baseline)** — each file's top-level TAP `plan` must equal its top-level result-line count, and that count must be `>=` the committed baseline in `gate-registry.json#manifest.cases`. A drop below baseline fails with `SUITE_MANIFEST_CASE_DROP`.
+- **I3 (fail-closed)** — any unparseable/undecidable input hard-fails (`SUITE_REPORT_UNPARSEABLE`, `SUITE_FILE_LOAD_FAILURE`, `SUITE_MANIFEST_FILE_DRIFT`) rather than degrading to an empty pass.
+
+`gate-registry.json` (schema `crctl-suite-gate/v1`) is the **human-maintained** registry: `manifest.files` + `manifest.cases` (per-file baseline case counts), a `stateMachine` mirror of `dir-graph.yaml`, and an `exceptions[]` allowlist. Its only write path is manual editing + `git commit` — the suite gate is strictly read-only toward it, a property enforced by static assertions in `contract-scan.test.mjs`. `--rc` (per-file return-code input) was removed; per-file exit codes live in the report's `files[]` records.
+
+The suite gate supports two forms: `--run` (spawn the files) and `--report <ndjson>` (re-judge an existing per-file NDJSON stream), both emitting a fixed-field JSON report plus a `skipped_cases`/`skipped_file_level` summary (the literal word `skipped` is a forbidden token in stdout). `CONCURRENCY` is the single source for pool size (null → `max(1, availableParallelism()-1)`).
 
 ## Pre-Commit Hook
 
@@ -142,5 +156,9 @@ Together they form a complete governance system: the matrix and prompts can't dr
 | Skill matrix checker | `skills/shared/crctl/scripts/check-skill-matrix.mjs` |
 | Agent contract checker | `skills/shared/crctl/scripts/check-agents-contract.mjs` |
 | Prompt-drift lint | `skills/shared/crctl/scripts/lint-prompts.mjs` |
+| Test suite gate | `skills/shared/crctl/scripts/test/suite-gate.mjs` |
+| Suite gate registry | `skills/shared/crctl/scripts/test/gate-registry.json` |
+| Assertion source derivation | `skills/shared/crctl/scripts/test/assertion-sources.mjs` |
+| Outbox dedup contract | `skills/shared/crctl/scripts/lib/outbox-contract.mjs` |
 | Agent contract invariants | `dir-graph.yaml#agents.contract` |
 | OpenWiki update workflow | `.github/workflows/openwiki-update.yml` |
