@@ -188,9 +188,11 @@ actors:
       - cr-show
       - controlled-shell
       - crctl
+      - push-progress
     external: []
     # crctl 仅允许：status、next、对应 review Skill 要求的 gate、
-    # review-record、以及对应 review Skill 明确要求的 advance。
+    # review-record、只读 workspace inspect（CR-2026-066），以及对应 review Skill
+    # 明确要求的 advance 与其评审 PASS 分支内的一次 push-progress（CR-2026-066）。
     # review-alignment 路径不允许 review-record/advance 或任何写入操作。
     forbidden:
       - approve-requirement
@@ -204,7 +206,6 @@ actors:
       - writeback-tasks
       - writeback-traceability
       - cr-archive
-      - push-progress
       - checkpoint
       - write-test-report
       - coding-discipline

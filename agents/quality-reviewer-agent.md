@@ -35,7 +35,13 @@ permission:
 ## 权限事实源
 
 - 权限矩阵：`agent-skill-matrix.yml`
+- crctl 允许面：`status` / `next` / 对应 review Skill 要求的 gate / `review-record` / 只读 `workspace inspect`（CR-2026-066）/ 对应 review Skill 明确要求的 `advance` / 对应 review SKILL 的 PASS 分支内一次 `push-progress`（CR-2026-066）；`checkpoint` 与其余写入型子命令仍在本 Agent 禁止面内。
 - 状态与门禁：以 `crctl status/next` 为准
+
+## 发布职责与搭车硬规则（CR-2026-066 FR-1 / FR-7）
+
+- **评审 PASS 后由本 Agent 发布**：在对应 review SKILL 的 PASS 分支内执行一次 `push-progress`（`message=<阶段>评审通过`），并在发布后按该 SKILL 的对账判据核对「发布的必须是被评审的」；BLOCK 分支不发布。本 Agent 只发布：不修改业务文件、不推进状态（除该 SKILL 明确要求的 `advance`）、不改 verdict；发布失败不改 verdict、不重评、不代作者提交、不回退状态，按结构化 `recovery` 重试同一个 `push-progress`。
+- 跨人工 gate 的第一份委派必须显式携带上一阶段尚未闭合的发布动作（在同一 run 内执行、只回报结果）；**禁止为单个 `push-progress` / checkpoint 节点单独开委派**。
 
 ## 约束
 

@@ -28,12 +28,12 @@ pipeline-templates:
     name: 需求编写
     scope: product-design
     trigger: requirement
-    nodes: 7  # CR-2026-044：审批后新增强制终点 checkpoint
+    nodes: 5  # CR-2026-066：删除草稿/审批后 checkpoint 节点与 auto_push_after_prd 输入，7 -> 5
     status: active
     brief: >-
       需求编写期主流水线：CR 注册（含需求/开发/测试三角色 owner 与 assigned-at）+ active repo worktree 创建 → PRD 编写
-      → PRD 草稿 checkpoint（可选）→ 需求评审 → 人工审批 → approve-requirement 状态推进 → 审批结果 checkpoint（强制）。
-      产物落 change-requests/CR-*/prd.md，specs/ 保持不动。
+      → 需求评审（PASS 时由评审者发布阶段批次）→ 人工审批 → approve-requirement 状态推进。
+      阶段终点发布发生在评审 PASS 的 review SKILL 内。产物落 change-requests/CR-*/prd.md，specs/ 保持不动。
     added: "2026-05-07"
 
   - id: architecture-design-v1
@@ -41,11 +41,12 @@ pipeline-templates:
     name: 架构设计
     scope: product-dev
     trigger: architecture
-    nodes: 5
+    nodes: 4  # CR-2026-066：删除审批后 checkpoint 节点，5 -> 4
     status: active
     brief: >-
       架构设计流水线：承接已审批需求 PRD（入口经 workspace inspect 取 authority path），输出 sdd.md 技术设计文档
-      → 技术设计评审 → 人工审批 → approve-tech-design 状态推进 → 架构 checkpoint（强制，CR-2026-044 起删除 auto_push_after_sdd）。
+      → 技术设计评审（PASS 时由评审者发布阶段批次）→ 人工审批 → approve-tech-design 状态推进。
+      阶段终点发布发生在评审 PASS 的 review SKILL 内。
       前置 CR status=requirement-approved，审批后 CR status=tech-design-reviewed，可进入 /coding。
     added: "2026-05-18"
 
@@ -54,14 +55,14 @@ pipeline-templates:
     name: 代码编写
     scope: product-dev
     trigger: coding
-    nodes: 16  # CR-2026-042：移除代码评审 runner 选择暂停（删一个输入字段与一个人工选择节点），17 -> 16
+    nodes: 12  # CR-2026-042：移除代码评审 runner 选择暂停（17 -> 16）；CR-2026-066：删除 4 个 checkpoint 节点与 auto_push_after_task（16 -> 12）
     status: active
     brief: >-
       代码编写流水线：根据已评审 SDD 生成 plan.md → 拆分 TASK
-      → 远端 checkpoint（可选）→ 人工确认进入 developing
+      → 人工确认进入 developing
       → 根据配置调用 code generation runtime/CLI 编码
-      → 生成测试报告 → 统一 checkpoint → 代码评审 → 代码审批（人工）→ approve-code 状态推进
-      → 审批结果 checkpoint（强制，CR-2026-044）。入口经 workspace inspect 取 authority path。
+      → 生成测试报告 → 代码评审（PASS 时由评审者发布阶段批次）→ 代码审批（人工）→ approve-code 状态推进。
+      阶段终点发布发生在评审 PASS 的 review SKILL 内。入口经 workspace inspect 取 authority path。
       前置 CR status=tech-design-reviewed，审批后 CR status=code-approved，可进入 writeback。
     added: "2026-05-18"
 

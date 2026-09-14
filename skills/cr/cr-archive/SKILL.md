@@ -68,6 +68,22 @@ crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 chec
 | `ARCHIVE_STATE_MISMATCH` | CR 不在可归档状态，先完成对应 pipeline gate |
 | `ARCHIVE_STAGED_MISMATCH` / `ARCHIVE_REMOTE_HISTORY_REWRITTEN` | 硬阻断，人工介入 |
 
+**`localTrunkSync`（CR-2026-066 FR-10：归档尾部主 checkout 同步）**
+
+三个成功返回点（幂等重放早退 / `phase=complete` / `phase=cleanup-pending`）都带该字段（与 `recovery` 同级），值 = 逐仓行数组 `{repo, trunk, before, remote, after, status, reason}`：
+
+| `status` | 含义 | `reason` |
+|------|------|------|
+| `unchanged` | 主 checkout 已等于 `origin/{trunk}` | `null` |
+| `synced` | 已 ff-only 前移到 `origin/{trunk}` | `null` |
+| `skipped` | 零改动本地、未同步：非 trunk 分支 / 工作区 dirty / 与 `origin/{trunk}` 分叉 | `wrong-branch` \| `dirty` \| `diverged` |
+| `failed` | best-effort 同步失败：`fetch --prune origin` 失败 / 远端 trunk ref 不可得 / ff-only 不成立 | `fetch-failed` \| `trunk-unavailable` \| `ff-only-failed` |
+
+- `status=unchanged|synced` 时 `reason=null`；其余状态必有 reason（取值穷尽上表 6 项，无其它取值）。
+- **永不破坏本地**：只对 `dir-graph.yaml#repositories` 的主 checkout 执行 `fetch --prune origin` 与 `merge --ff-only origin/{trunk}`；dirty / wrong-branch / diverged 一律跳过并如实报告；不做 `reset` / `clean` / `stash` / 强推，不碰 CR worktree。
+- **失败不阻断归档**：`localTrunkSync` 只出现在返回值中（不落盘、不写账本），不改变退出码与 `phase` 分类；逐仓失败只反映在行内 `status` / `reason`。
+- 人类补救（`skipped` / `failed` 仓）：先处理该仓现场（提交或归还本地在途修改 / 切回 trunk 分支 / 人工对账分叉），再在主 checkout 执行 `fetch --prune origin` 与 `merge --ff-only origin/{trunk}`。
+
 ---
 
 ## 输出
@@ -81,6 +97,7 @@ crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 chec
    preservedRefs   : {rejected/withdrawn 保留的远端 ref 列表，archived 为空}
    remaining       : {待清理现场列表，complete 时为空}
    warnings        : {投影发送失败警告列表，通常为空}
+   localTrunkSync  : {逐仓主 checkout 同步行 repo/status/reason；未同步仓附补救说明}
    恢复            : 未完成时只重跑 recovery: {recovery.executable} {recovery.args 逐元素}（cwd={recovery.cwd}）
    下一步          : 以 `crctl next {cr_id}` 为准（终态 CR 返回 next:null）
 ```

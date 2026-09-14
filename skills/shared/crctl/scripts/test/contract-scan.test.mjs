@@ -78,14 +78,14 @@ test('AC-2b: architecture-design reviewLoop 结构快照不变', () => {
   );
 });
 
-test('AC-2c: code-implementation review-code reviewLoop 结构快照（CR-2026-043：replayNodes 插入 workspace-freshness 基线重核）', () => {
+test('AC-2c: code-implementation review-code reviewLoop 结构快照（CR-2026-043 插入 workspace-freshness；CR-2026-066 收敛掉 push-progress 项）', () => {
   const p = JSON.parse(readFileSync(path.join(ROOT, 'pipeline-templates', 'code-implementation.pipeline.json'), 'utf8'));
   const n = p.nodes.find((x) => x.ref === 'review-code');
   assert.equal(n.reviewLoop.repairNodeId, '00000000-0000-0000-0015-000000000006');
   assert.equal(n.reviewLoop.repairRef, 'implement-code');
   assert.equal(n.reviewLoop.replayPolicy, 'rerun-listed-nodes-in-order');
   assert.equal(n.reviewLoop.maxAttempts, 3);
-  assert.deepEqual(n.reviewLoop.replayNodes.map((r) => r.ref), ['implement-code', 'write-test-report', 'push-progress', 'workspace-freshness', 'review-code']);
+  assert.deepEqual(n.reviewLoop.replayNodes.map((r) => r.ref), ['implement-code', 'write-test-report', 'workspace-freshness', 'review-code']);
   assert.deepEqual(n.reviewLoop.passCondition, {
     allOf: [
       { path: 'verdict', equals: 'pass' },
@@ -598,4 +598,16 @@ test('CR-2026-064 FR-12（AC-04）：crctl.mjs 与 lib/*.mjs 对 shell 逃逸零
     shellFalse += (text.match(/shell: *false/g) ?? []).length;
   }
   assert.ok(shellFalse >= 1, `必须存在 argv 执行的既有先例（spawnSync(..., { shell: false })），实际 ${shellFalse}`);
+});
+
+/* ********** CR-2026-066 TASK-04（FR-7）：搭车硬规则的静态文本断言 ********** */
+
+test('CR-2026-066 FR-7: tools 三份 Prompt 均含搭车硬规则（push-progress + 单独开委派/同 run）', () => {
+  const prompts = ['agents/dev-agent.md', 'agents/quality-reviewer-agent.md', 'agents/delivery-agent.md'];
+  for (const rel of prompts) {
+    const text = readInRoot(ROOT, rel).replaceAll('\r\n', '\n');
+    assert.ok(text.length > 500, `${rel} 文本读出且非空（读不到即硬失败，禁止空集合静默通过）`);
+    assert.ok(text.includes('push-progress'), `${rel} 缺硬规则 token push-progress`);
+    assert.ok(text.includes('单独开委派') || text.includes('同 run'), `${rel} 缺硬规则 token 单独开委派/同 run`);
+  }
 });

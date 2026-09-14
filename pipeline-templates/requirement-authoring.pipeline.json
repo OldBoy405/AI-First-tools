@@ -1,7 +1,7 @@
 {
   "id": "requirement-authoring",
   "name": "需求编写",
-  "description": "需求编写期主流水线：先在 knowledge-base trunk 注册 CR → 按 dir-graph active repos 派生同名 worktree → 写 prd.md → 评审 → 人工审批。支持中途推送到远端 checkpoint，方便换机或协作者接手。",
+  "description": "需求编写期主流水线：先在 knowledge-base trunk 注册 CR → 按 dir-graph active repos 派生同名 worktree → 写 prd.md → 评审 → 人工审批。阶段终点发布发生在评审 PASS 的 review SKILL 内。",
   "triggerCommand": "requirement",
   "scope": "product-design",
   "isDefault": false,
@@ -77,14 +77,6 @@
       "required": true,
       "placeholder": "test-owner",
       "description": "写入 cr.md owners.test.id，并记录 assigned-at"
-    },
-    {
-      "key": "auto_push_after_prd",
-      "label": "PRD 完成后自动推送远端",
-      "type": "boolean",
-      "required": false,
-      "default": false,
-      "description": "勾选后 PRD 起草完成立即 push-progress 推送到 origin，方便换机续写"
     }
   ],
   "nodes": [
@@ -105,15 +97,6 @@
       "prompt": "读取 node-1.md 的 execution_context。调用 write-requirement-prd：\n- cr_id: {execution_context.cr_id}\n- source: {{inputs.source}}\n- runtime_context: {execution_context}\n- review_feedback: {reviewLoop.review_feedback，可为空}\n- self_repair_attempt: {reviewLoop.self_repair_attempt，可为空}\n\n消费 PRD 路径、摘要与字数统计；失败按 Skill 语义中止。在 node-2.md 输出结构化结果并继续传递 execution_context。",
       "onFail": "abort",
       "timeoutMinutes": 25
-    },
-    {
-      "id": "00000000-0000-0000-0011-000000000003",
-      "kind": "skill",
-      "label": "推送 PRD 草稿到远端",
-      "ref": "push-progress",
-      "prompt": "若 {{inputs.auto_push_after_prd}}=false 则在 node-3.md 输出 SKIPPED 并 return。\n否则读取 node-1.md 的 execution_context，执行 push-progress：cr_id={execution_context.cr_id}，message=PRD 草稿。\n\n在 node-3.md 输出 batchId、repositories、phase 与远端分支 URL（若可获取）；phase 非 complete 时中止。",
-      "onFail": "skip",
-      "timeoutMinutes": 10
     },
     {
       "id": "00000000-0000-0000-0011-000000000004",
@@ -160,15 +143,6 @@
       "prompt": "读取 node-1.md 的 execution_context。在 human_approval 通过后调用 approve-requirement：\n- cr_id: {execution_context.cr_id}\n\n只传完整 cr_id，消费结构化审批结果；下一步以 `crctl next {execution_context.cr_id}` 为准。在 node-6.md 输出审批记录路径、当前 status、需求负责人。",
       "onFail": "abort",
       "timeoutMinutes": 5
-    },
-    {
-      "id": "00000000-0000-0000-0011-000000000007",
-      "kind": "skill",
-      "label": "推送需求审批结果 checkpoint",
-      "ref": "push-progress",
-      "prompt": "读取 node-1.md 的 execution_context，执行 push-progress：cr_id={execution_context.cr_id}，message=需求审批结果。\n\n本节点是需求阶段终点完成条件（CR-2026-044 FR-07），不可跳过；失败时保持 requirement-approved，只重跑同一 checkpoint，不重新审批。\n\n在 node-7.md 输出 batchId、repositories、phase；phase 非 complete 时中止。",
-      "onFail": "abort",
-      "timeoutMinutes": 10
     }
   ],
   "createdAt": "2026-05-07T00:00:00+08:00",

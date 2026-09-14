@@ -1,7 +1,7 @@
 ---
 type: Architecture
 title: Pipeline Templates & Workflows
-description: The 8 pipeline templates that orchestrate the full R&D lifecycle — JSON structure, node types, review loops, human approval gates, dev-plan review, mandatory checkpoints, and how pipelines connect skills and agents.
+description: The 8 pipeline templates that orchestrate the full R&D lifecycle — JSON structure, node types, review loops, human approval gates, dev-plan review, stage-terminal review-PASS checkpoints, and how pipelines connect skills and agents.
 tags: [pipelines, workflows, orchestration, review-loop, templates]
 openwiki:
   roles: [architecture, workflow]
@@ -70,7 +70,7 @@ Nodes that perform automated review can declare a `reviewLoop`:
 - **`maxAttempts`**: Maximum self-repair cycles (default 3)
 - **`passCondition`**: Machine-readable conditions using `allOf` / `anyOf` with expressions like `verdict==pass`, `blockers==[]`, `approved==true`
 - **`repairNodeId`**: The node to jump back to when blockers are found
-- **`replayNodes[]`**: When repair requires rerunning multiple nodes (e.g., code fix → test report → checkpoint → re-review)
+- **`replayNodes[]`**: When repair requires rerunning multiple nodes (e.g., code fix → test report → baseline re-verify → re-review)
 
 ## The 8 Active Pipelines
 
@@ -111,11 +111,11 @@ The three planning pipelines are optional and do not create CRs:
 
 The four required pipelines form the main delivery chain:
 
-**`/requirement`** — CR registration with worktree creation, PRD writing, requirement review (with auto-repair loop), human approval, `approve-requirement` state advance, then a **mandatory approval checkpoint**. Prerequisite: none. Output: `prd.md`, status=`requirement-approved`. Since CR-2026-061, `requirement-register` may run an optional **promotion bind** (Step 2.5): when both `promotion_run_id` and `promotion_issue_id` are supplied, it executes `promotion-bind.mjs` to bind the CR to a pre-created promotion run (`multica cr bind-promotion-run`) with fail-closed context validation — binding must complete before the CR may advance to `requirement-reviewing`.
+**`/requirement`** — CR registration with worktree creation, PRD writing, requirement review (with auto-repair loop), human approval, `approve-requirement` state advance; the review PASS publishes the stage batch (mandatory, once per stage). Prerequisite: none. Output: `prd.md`, status=`requirement-approved`. Since CR-2026-061, `requirement-register` may run an optional **promotion bind** (Step 2.5): when both `promotion_run_id` and `promotion_issue_id` are supplied, it executes `promotion-bind.mjs` to bind the CR to a pre-created promotion run (`multica cr bind-promotion-run`) with fail-closed context validation — binding must complete before the CR may advance to `requirement-reviewing`.
 
-**`/architecture`** — SDD writing based on approved PRD (entry reads the authority path via `crctl workspace inspect`), tech design review (with auto-repair loop), human approval, `approve-tech-design` state advance, then a **mandatory checkpoint**. Prerequisite: status=`requirement-approved`. Output: `sdd.md`, status=`tech-design-reviewed`.
+**`/architecture`** — SDD writing based on approved PRD (entry reads the authority path via `crctl workspace inspect`), tech design review (with auto-repair loop), human approval, `approve-tech-design` state advance; the review PASS publishes the stage batch (mandatory, once per stage). Prerequisite: status=`requirement-approved`. Output: `sdd.md`, status=`tech-design-reviewed`.
 
-**`/coding`** — Development plan → task breakdown → **dev-plan review** (`review-dev-plan`, the pre-coding SDD→PLAN→TASK quality gate) → human approval to start → code implementation (via external coding runtime) → test report generation (with auto-fix loop) → unified checkpoint → code review (with auto-fix loop) → human approval → `approve-code` state advance → mandatory approval checkpoint. Prerequisite: status=`tech-design-reviewed`. Output: code, `test-report.md`, status=`code-approved`. Entry reads the authority path via `crctl workspace inspect`.
+**`/coding`** — Development plan → task breakdown → **dev-plan review** (`review-dev-plan`, the pre-coding SDD→PLAN→TASK quality gate) → human approval to start → code implementation (via external coding runtime) → test report generation (with auto-fix loop) → code review (with auto-fix loop) → human approval → `approve-code` state advance; the review PASS publishes the stage batch (mandatory, once per stage). Prerequisite: status=`tech-design-reviewed`. Output: code, `test-report.md`, status=`code-approved`. Entry reads the authority path via `crctl workspace inspect`.
 
 ```mermaid
 flowchart TD
@@ -131,13 +131,11 @@ flowchart TD
     D6 --> D7["write-test-report"]
     D7 --> D7G{"test pass?"}
     D7G -- "no: blocks" --> D6
-    D7G -- "yes" --> D8["checkpoint"]
-    D8 --> D9["review-code"]
+    D7G -- "yes" --> D9["review-code"]
     D9 --> D9G{"review pass?"}
     D9G -- "no: blocks" --> D6
     D9G -- "yes" --> D10["human_approval (code)"]
     D10 --> D11["approve-code"]
-    D11 --> D12["checkpoint (mandatory)"]
 ```
 
 **`/writeback`** — Merge CR branches to trunk → writeback PRD/SDD to `specs/` → writeback TASKs to `delivery/task/` → generate traceability chain → archive CR (move to `_history.yml`, clean up worktrees). Prerequisite: status=`code-approved`. Output: `specs/{id}/`, `delivery/task/`, `traceability.yml`, status=`archived`.
@@ -169,7 +167,7 @@ When modifying pipelines, observe these rules from `dir-graph.yaml#pipeline_temp
 6. CR-class loops must sync to `traceability.yml`
 7. `feature-writeback` must require `spec_id` and `target_version` — empty values are not allowed
 8. `review-dev-plan` is the pre-coding quality gate in `task-breakdown` state: a block routes back to `write-dev-plan` (or `write-tech-design` on an upstream design blocker) before `approve-dev-start`
-9. Requirement/architecture/code approval-stage terminal checkpoints are mandatory (CR-2026-044): failure keeps the already-approved status, and re-running the same checkpoint does not re-approve
+9. Stage terminal completion = the review PASS checkpoint published by the reviewer once per stage (CR-2026-066); there are no post-approval checkpoint nodes, and an unpublished approval commit is carried by the next stage review checkpoint or by `merge`'s publication preflight
 10. Pipeline entry nodes that need the authority workspace resolve it via `crctl workspace inspect`, not by assuming a fixed path
 
 ## Source References

@@ -37,6 +37,20 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 
 ### Step 1 — 读取输入
 
+0. **只读 clean 前置（CR-2026-066 FR-2；本 Skill 的第一个动作，在后续任何读取/评审动作之前）**：
+
+   ```text
+   r = crctl workspace inspect {cr_id} --workspace <worktree>     # 只读、零写入
+   require ∀ resources: classification == 'healthy'              # healthy ⇒ dirty=false；还要求 worktree 已注册且 HEAD 在 requirement/{cr_id} 分支
+   否则：报告逐仓 classification/dirty 事实与该仓未提交文件清单
+         给出「存在未提交内容，请作者先提交」
+         → 不写临时 payload、不 review-record、不 advance、不改 status、不发布
+         → 评审者不得对作者工作区执行任何写操作（add / commit / stash / 清理）
+   ```
+
+   - 判据取 `classification`（**不得**写成 `dirty=false` 的等价式——那会漏掉 wrong-branch / path-unregistered 两类不干净工作区）。
+   - 本前置不新增 crctl 子命令、不新增错误码；只消费既有 `workspace inspect` JSON 字段（`resources[].classification` / `dirty` / `worktreePath`）。
+
 以 `workspace` 读取过程文档：`change-requests/{cr_id}/prd.md`（获取 FR 列表）、`change-requests/{cr_id}/sdd.md`（待评审文档）；架构约束参考只从 `resources[]` 中目标仓的 `worktreePath` 读取（若 `write-tech-design` 本轮标注"新起草"，一并快速核查内容是否贴合仓库实际，视为本轮"架构合理性"维度的一部分，不单独加审批节点）。代码事实取证只按 `resources[].worktreePath`，不使用目录命名拼接、主工作区回退或会话记忆替代；`workspace` 与 `resources` 概念不得混用。
 
 ### Step 2 — 评审维度
@@ -127,7 +141,22 @@ SDD 的既有实现依赖必须来自名为“既有实现依赖与事实”的�
 - 最后调用 `crctl next {cr_id}` 确认下一步（next 由 crctl 唯一计算）。
 - 有 blocker → 调用 `crctl advance --to tech-designing --trigger "review-tech-design:block -> write-tech-design" --expect tech-design-review-pending`，输出 `repair-target=write-tech-design`，pipeline 自动带 `review_feedback` 回到 SDD 修订节点；不得进入 `human_approval`
 
-### Step 5 — 输出摘要
+### Step 5 — PASS 发布与对账（CR-2026-066 FR-1 / FR-3；仅 `verdict=pass` 且 `blockers=[]` 分支）
+
+1. **触发顺序固定、不得调换**：Step 3 的 `crctl review-record` 已落盘 → Step 4 按 `files[]` 提交 → 本阶段 PASS **无** `advance`（保持 `tech-design-review-pending`，**不得**为本步新造状态转换）→ 本步的发布前置 → 发布 → 对账 → 报告。
+2. **发布前置**：`crctl workspace inspect {cr_id} --workspace <worktree>`，要求 ∀ resources `classification == 'healthy'`（不干净即中止本次发布，不代作者提交）。
+3. **发布**：调用既有 `push-progress` Skill，`cr_id={cr_id}`、`message=技术设计评审通过`；要求 `phase == complete`（`changed=false` 幂等重放亦视为成功）。
+4. **对账（发布的必须是被评审的）**：
+   - 非 KB 仓：`repositories[].sourceSha` 必须等于 `crctl git rev-parse HEAD --cwd <resources[].worktreePath>`。
+   - KB 仓：`crctl git rev-parse HEAD --cwd <kb worktreePath>` 必须等于 `metadataCommit`，且 `crctl git rev-parse --verify HEAD^ --cwd <kb worktreePath>` 必须等于 KB `sourceSha`（`dirty=false`）；在该关系成立的前提下，于 KB 工作区对 `sdd.md` 复算 **LF-only** sha256，必须全等于 `review-annotations/sdd.yml#subject-sha256`。
+   - 复算前先把读入内容 `\r\n → \n` 归一；解析失败**硬失败报错**（禁止「匹配不到 → 空集 → 静默通过」）。
+   - SHA 关系不成立时**禁止**改用工作区文件复算（等于自证）；禁止以 `show` 型只读命令（`crctl git show` 仅向 `system-orchestrator` 放行 `review-annotations/*`）替代 SHA 关系取证。
+   - 判定不等 → **`CONTRACT_DRIFT` 技术中止**：不改 verdict、不重评、不回退状态；报告期望值/实际值与复算内容来源。
+5. **报告**：`phase` / `batchId` / `repositories[]` / `metadataCommit` 逐字进入评审报告与摘要。
+6. **失败语义**：发布失败时 verdict 与评审账本保持已落盘结果不变——不重评、不改 verdict、不代作者提交、不回退状态；报告原始错误码与结构化 `recovery`，并按该 `recovery` 重试**同一个** `push-progress`；发布失败不阻塞任何本地门禁。
+7. **BLOCK 分支不含任何发布调用**（回修中间态不上远端）。
+
+### Step 6 — 输出摘要
 
 ```
 ✅ 技术设计评审完成
