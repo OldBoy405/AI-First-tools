@@ -50,6 +50,14 @@ export function makeFixture() {
   // CR-2026-057：受控 shell 规则（version-set/owner-set 的 tracked-clean 前置与受控 add/commit 消费）
   fs.mkdirSync(path.join(pkg, 'skills', 'shared', 'controlled-shell'), { recursive: true });
   fs.copyFileSync(path.join(realTools, 'skills', 'shared', 'controlled-shell', 'rules.json'), path.join(pkg, 'skills', 'shared', 'controlled-shell', 'rules.json'));
+  // AIFI-28：declared Tools Root（{InstWS}/dir-graph.yaml#workspace.tools_package_path）必须能解析固定 generator
+  // —— crctl 的 generator 解析口径 = <toolsRoot>/skills/writeback/scripts/，不再上翻相对锚点。
+  for (const rel of ['lib.mjs', 'writeback-prd-sdd.mjs', 'writeback-tasks.mjs', 'writeback-traceability.mjs']) {
+    fs.mkdirSync(path.dirname(path.join(pkg, 'skills', 'writeback', 'scripts', rel)), { recursive: true });
+    fs.copyFileSync(path.join(realTools, 'skills', 'writeback', 'scripts', rel), path.join(pkg, 'skills', 'writeback', 'scripts', rel));
+  }
+  fs.mkdirSync(path.join(pkg, 'skills', 'shared', 'crctl', 'scripts', 'lib'), { recursive: true });
+  fs.copyFileSync(path.join(realTools, 'skills', 'shared', 'crctl', 'scripts', 'lib', 'yaml-subset.mjs'), path.join(pkg, 'skills', 'shared', 'crctl', 'scripts', 'lib', 'yaml-subset.mjs'));
   fs.writeFileSync(path.join(pkg, 'AGENTS.md'), '');
   fs.writeFileSync(path.join(pkg, 'skills', '_index.yml'), '');
   fs.writeFileSync(path.join(pkg, 'skills', 'shared', 'crctl', 'scripts', 'crctl.mjs'), '');

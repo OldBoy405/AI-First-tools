@@ -77,15 +77,32 @@ test('TASK-01：writeback 业务输入使用固定键序 canonical digest', () =
 });
 
 test('TASK-01：固定 generator 只在 ignored candidate 目录生成单次 snapshot', () => {
-  const { base, cr, txws } = makeMergedFixture();
+  const { base, kb, cr, txws } = makeMergedFixture();
   try {
     const expected = resolveWritebackCandidate(txws, cr, 'baseline');
-    const got = prepareWritebackCandidate({ txws, cr, stage: 'baseline', specId: 'test-spec', targetVersion: 'v0.2' });
+    const got = prepareWritebackCandidate({ txws, cr, stage: 'baseline', specId: 'test-spec', targetVersion: 'v0.2', installRoot: kb });
     assert.equal(got.noop, false);
     assert.equal(got.candidate.manifest, expected.manifest);
     assert.equal(got.snapshot.parsed.targetVersion, '0.2');
     assert.deepEqual(got.snapshot.files.map((f) => f.path), ['specs/_index.yml', 'specs/test-spec/PRD.md', 'specs/test-spec/SDD.md']);
     assert.equal(spawnSync('git', ['check-ignore', '-q', expected.dir], { cwd: txws }).status, 0);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
+// AIFI-28：固定 generator 的唯一解析口径 = declared Tools Root（{InstWS}/dir-graph.yaml#workspace.tools_package_path），
+// 不是「本模块位置上翻 4 层」的相对锚点——平台把技能扁平物化（<skillsDir>/<技能>/…）时后者落空。
+// 红/绿判据：declared root 下的副本带 sentinel 标记（sha 与锚点那份不同），manifest 自证 sha 必须等于它。
+test('AIFI-28：固定 generator 解析走 declared Tools Root，而非 4 层相对锚点', () => {
+  const { base, kb, cr, txws } = makeMergedFixture();
+  try {
+    const declaredGen = path.join(base, 'tools-pkg', 'skills', 'writeback', 'scripts', 'writeback-prd-sdd.mjs');
+    fs.appendFileSync(declaredGen, '\n// declared-root sentinel：只有 declared Tools Root 下的这份被 spawn\n');
+    const declaredSha = sha256(fs.readFileSync(declaredGen, 'utf8'));
+    const anchorGen = path.resolve(import.meta.dirname, '..', '..', '..', '..', 'writeback', 'scripts', 'writeback-prd-sdd.mjs');
+    assert.notEqual(declaredSha, sha256(fs.readFileSync(anchorGen, 'utf8')), 'sentinel 必须使两份生成器可区分');
+    const got = prepareWritebackCandidate({ txws, cr, stage: 'baseline', specId: 'test-spec', targetVersion: 'v0.2', installRoot: kb });
+    assert.equal(got.noop, false);
+    assert.equal(got.snapshot.parsed.generator.sha256, declaredSha);
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 

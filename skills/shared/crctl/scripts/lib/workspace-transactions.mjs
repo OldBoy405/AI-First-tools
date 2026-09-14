@@ -2372,7 +2372,33 @@ export function writebackAllowlist(stage, specId) {
   throw new TxError('WRITEBACK_STAGE_INVALID', `stage 非法: ${stage}`, { stage });
 }
 
-function validateWritebackManifest(m, { cr, stage, specId, targetVersion, candidate, txws }) {
+/* ────────────────────────── 固定 generator 解析（AIFI-28） ──────────────────────────
+ * 唯一口径：{InstWS}/dir-graph.yaml#workspace.tools_package_path → <toolsRoot>/skills/writeback/scripts/。
+ * 与 crctl.mjs#resolveToolsRoot（CR-2026-028 FR-1/FR-3）、resolveTestMaxAttempts 同源；无回退。
+ * 取代旧的「本模块位置上翻 4 层」相对锚点——平台把技能扁平物化（<skillsDir>/<技能>/…）时后者落空。 */
+function writebackGeneratorPath(installRoot, fileName) {
+  if (typeof installRoot !== 'string' || !installRoot) {
+    throw new TxError('TOOLS_PACKAGE_NOT_FOUND', 'generator 解析需要 InstWS（installRoot）', { installRoot: installRoot ?? null });
+  }
+  const graphPath = path.join(installRoot, 'dir-graph.yaml');
+  let cfg;
+  try { cfg = parseYaml(fs.readFileSync(graphPath, 'utf8').replaceAll('\r\n', '\n')); }
+  catch (e) { throw new TxError('TOOLS_PACKAGE_NOT_FOUND', `dir-graph.yaml 无法解析: ${e.message}`, { path: graphPath }); }
+  const declared = cfg && cfg.workspace && cfg.workspace.tools_package_path;
+  if (typeof declared !== 'string' || !declared.trim()) {
+    throw new TxError('TOOLS_PACKAGE_NOT_FOUND', 'dir-graph.yaml#workspace.tools_package_path 缺失或非法', { path: graphPath });
+  }
+  let toolsRoot;
+  try { toolsRoot = fs.realpathSync(path.isAbsolute(declared) ? declared : path.resolve(installRoot, declared)); }
+  catch (e) { throw new TxError('TOOLS_PACKAGE_NOT_FOUND', `Tools Root 不存在: ${declared}`, { path: declared, why: e.message }); }
+  const generatorPath = path.join(toolsRoot, 'skills', 'writeback', 'scripts', fileName);
+  if (!fs.existsSync(generatorPath)) {
+    throw new TxError('TOOLS_PACKAGE_NOT_FOUND', `Tools Root 下缺固定 generator: ${generatorPath}`, { path: generatorPath, toolsRoot });
+  }
+  return generatorPath;
+}
+
+function validateWritebackManifest(m, { cr, stage, specId, targetVersion, candidate, txws, installRoot }) {
   if (!m || typeof m !== 'object') throw new TxError('WRITEBACK_MANIFEST_INVALID', 'manifest 非对象');
   // CR-2026-049 TASK-02：traceability 必须 v2（含 event），baseline/tasks 保持 v1
   const wantV = stage === 'traceability' ? 2 : 1;
@@ -2397,7 +2423,7 @@ function validateWritebackManifest(m, { cr, stage, specId, targetVersion, candid
   if (path.basename(candidateReal) !== 'manifest.json' || candidateRel.startsWith(`..${path.sep}`) || path.isAbsolute(candidateRel)) {
     throw new TxError('WRITEBACK_CANDIDATE_OUTSIDE_TX', `candidate 必须是 Transaction Workspace 内的 manifest.json: ${candidate}`, { candidate });
   }
-  const generatorPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'writeback', 'scripts', `${m.generator.id}.mjs`);
+  const generatorPath = writebackGeneratorPath(installRoot, `${m.generator.id}.mjs`);
   const actualGeneratorSha = sha256(fs.readFileSync(generatorPath, 'utf8'));
   if (m.generator.sha256 !== actualGeneratorSha) {
     throw new TxError('WRITEBACK_GENERATOR_MISMATCH', `generator SHA 与当前版本化脚本不一致: ${m.generator.id}`, { expected: actualGeneratorSha, actual: m.generator.sha256 });
@@ -2474,14 +2500,14 @@ function generatorError(result) {
   return new TxError(e?.code || 'WRITEBACK_GENERATOR_FAILED', e?.message || `固定 generator 失败（exit=${result.status}）: ${(result.stderr || result.stdout || '').trim()}`, e || {});
 }
 
-function readPreparedCandidate({ txws, candidate, cr, stage, specId, targetVersion, checkBefore = true }) {
+function readPreparedCandidate({ txws, candidate, cr, stage, specId, targetVersion, installRoot, checkBefore = true }) {
   let manifestText;
   try { manifestText = fs.readFileSync(candidate.manifest, 'utf8').replaceAll('\r\n', '\n'); }
   catch { throw new TxError('WRITEBACK_MANIFEST_MISSING', `固定 generator 未生成 manifest: ${candidate.manifest}`); }
   let manifest;
   try { manifest = JSON.parse(manifestText); }
   catch { throw new TxError('WRITEBACK_MANIFEST_INVALID', `manifest JSON 非法: ${candidate.manifest}`); }
-  const validated = validateWritebackManifest(manifest, { cr, stage, specId, targetVersion, candidate: candidate.manifest, txws });
+  const validated = validateWritebackManifest(manifest, { cr, stage, specId, targetVersion, candidate: candidate.manifest, txws, installRoot });
   if (checkBefore) {
     for (const f of validated.files) {
       assertNoSymlinkParents(txws, f.path);
@@ -2520,7 +2546,7 @@ export function prepareWritebackCandidate(input) {
   if (gitRun(txws, ['check-ignore', '-q', candidate.dir]).status !== 0) {
     throw new TxError('WRITEBACK_CANDIDATE_NOT_IGNORED', `candidate 目录未被 Git ignore: ${candidate.dir}`);
   }
-  const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'writeback', 'scripts', WRITEBACK_GENERATORS[stage]);
+  const script = writebackGeneratorPath(input.installRoot, WRITEBACK_GENERATORS[stage]);
   const args = [script, '--workspace', txws, '--cr', cr, '--spec', specId, '--version', business.value.targetVersion, '--candidate-out', candidate.dir];
   if (stage === 'traceability' && mode === 'new') args.push('--mode', 'new');
   if (business.value.milestoneName != null) args.push('--milestone-name', String(business.value.milestoneName));
@@ -2534,7 +2560,7 @@ export function prepareWritebackCandidate(input) {
 
   return {
     noop: false, business, candidate,
-    snapshot: readPreparedCandidate({ txws, candidate, cr, stage, specId, targetVersion: business.value.targetVersion }),
+    snapshot: readPreparedCandidate({ txws, candidate, cr, stage, specId, targetVersion: business.value.targetVersion, installRoot: input.installRoot }),
   };
 }
 
@@ -2559,8 +2585,8 @@ const EVIDENCE_TO_ARCHIVE = {
   EVIDENCE_INVALID: 'ARCHIVE_EVIDENCE_MISSING',
 };
 
-function runFixedEvidenceValidator({ editRoot, cr, specId }) {
-  const script = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..', 'writeback', 'scripts', WRITEBACK_GENERATORS.traceability);
+function runFixedEvidenceValidator({ editRoot, cr, specId, installRoot }) {
+  const script = writebackGeneratorPath(installRoot, WRITEBACK_GENERATORS.traceability);
   const args = [script, '--validate-evidence', '--workspace', editRoot, '--cr', cr, '--spec', specId];
   const result = spawnSync(process.execPath, args, { cwd: editRoot, encoding: 'utf8', shell: false });
   if (result.status === 0) return { ok: true };
@@ -2901,7 +2927,7 @@ async function applyWritebackAtomic(ctx, input) {
     }
     const snapshot = readPreparedCandidate({
       txws, candidate: fixedCandidate, cr, stage, specId,
-      targetVersion: business.value.targetVersion, checkBefore: false,
+      targetVersion: business.value.targetVersion, installRoot: ctx.installRoot, checkBefore: false,
     });
     const composite = sha256(JSON.stringify({ businessInputDigest: business.digest, manifestDigest: snapshot.digest }));
     if (found.journal.inputDigest !== composite) {
@@ -2909,7 +2935,7 @@ async function applyWritebackAtomic(ctx, input) {
     }
     prepared = { noop: false, business, candidate: fixedCandidate, snapshot };
   } else {
-    prepared = prepareWritebackCandidate({ ...input, txws });
+    prepared = prepareWritebackCandidate({ ...input, txws, installRoot: ctx.installRoot });
     if (prepared.noop) {
       if (stage === 'baseline' && opWs.phase === 'merging') {
         throw new TxError('WRITEBACK_ATOMIC_FACT_MISSING', 'baseline 已 noop 但状态仍为 merging，且无复合事务 journal 可证明原子事实');
@@ -3525,7 +3551,7 @@ export async function archiveCr(ctx, input) {
       if (opWs0.phase === 'writing-back') {
         const effSpec0 = specId ?? p0?.specId ?? null;
         if (!effSpec0) throw new TxError('ARCHIVE_SPEC_REQUIRED', 'archive writing-back 路径需要 --spec-id（writeback-spec-id 入账；new mode 可省略由 strict authority 解析或 journal payload 重放）', { cr });
-        runFixedEvidenceValidator({ editRoot: opWs0.path, cr, specId: effSpec0 });
+        runFixedEvidenceValidator({ editRoot: opWs0.path, cr, specId: effSpec0, installRoot: ctx.installRoot });
         // CR-2026-049 TASK-03（TD-B2）：trace pending 前置门——在 archive journal 创建、authority commit、
         // 任何 cleanup 之前读 writeback traceability journal：emitted 放行；pending 用 replayTraceEvent 补发，
         // 成功持久化后放行；仍失败 ARCHIVE_TRACE_PENDING 零写入保留现场；缺失/意图不完整 ARCHIVE_TRACE_FACT_MISSING。
