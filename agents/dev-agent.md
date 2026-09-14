@@ -49,6 +49,8 @@ Pipeline 节点顺序、reviewLoop 与失败动作由 `pipeline-templates/*.pipe
 - 只读命令出现零写入 `BAD_ARGS` 时，可按 crctl 明示的恢复方向恢复一次；
 - 错误命令来自版本化 Skill/Pipeline 时，当前 run 可按安全恢复完成，但必须同时报告 `CONTRACT_DRIFT`，不得以成功掩盖合同错误；
 - 禁止创建无 Issue 上下文的 reviewer task；运行环境不支持创建独立 reviewer 任务时，停在当前 review 节点，提示用户另开独立会话以 `quality-reviewer-agent` 身份运行同一 review Skill（FR-A6），不得退化为作者自评。
+- 评审 PASS 即发布：阶段批次由 reviewer 在对应 review SKILL 的 PASS 分支内执行一次 `push-progress`（发布失败不改 verdict、不重评，按结构化 `recovery` 重试同一个 `push-progress`）；作者 run 不承担发布、不等待审批后 checkpoint 节点，收到评审结果后直接进入下一节点或按 blocker 回修。
+- 跨人工 gate 的第一份委派必须显式携带上一阶段尚未闭合的发布动作（在同一 run 内执行、只回报结果）；**禁止为单个 `push-progress` / checkpoint 节点单独开委派**。
 
 ## 人工决策边界
 

@@ -175,7 +175,7 @@ pipeline_templates:
     - "human_approval 节点如涉及状态推进，后续节点必须是显式 approve-* 或写入型 Skill"
     - "code-implementation 必须在 review-code 前生成并消费 test-report.md"
     - "自动审查节点必须声明 reviewLoop；blocker 未清空时必须回到 repairRef 节点并传入 review_feedback，完整通过 Review 后才可进入 human_approval"
-    - "若修复后必须重跑多个节点，reviewLoop 必须声明 replayNodes[]，按顺序列出修复、证据、checkpoint 与当前评审节点"
+    - "若修复后必须重跑多个节点，reviewLoop 必须声明 replayNodes[]，按顺序列出修复、证据、基线重核与当前评审节点"
     - "自动审查节点必须持久化 review-loop.current-attempt 与 review-loop.attempts[]；CR 类闭环必须同步写入 traceability.yml"
 
 target_workspace_contract:

@@ -28,7 +28,7 @@ TASK 结构与索引生成由 `writeback-tasks` 负责，本 Agent 不手写索�
 
 ## 交付汇报纪律
 
-- 必须按「合并 → PRD/SDD 回写 → TASK 回写 → 追溯链 → 归档」顺序完成全部交付流程后，才发一条评论做最终交付汇报，内容包含：合并结果、各回写产物清单、归档状态。
+- 必须按「合并 → PRD/SDD 回写 → TASK 回写 → 追溯链 → 归档」顺序完成全部交付流程后，才发一条评论做最终交付汇报，内容包含：合并结果、各回写产物清单、归档状态（含 `localTrunkSync` 逐仓行摘要与未同步仓的补救说明）。
 - 任一步骤失败立即停止后续步骤并 @ `cr-coordinator-agent` 说明失败点，不得部分汇报、不得跳步继续。
 - @ 启动规则：一条评论只 mention 一个当前应启动的 Agent；「下一步由谁处理」用反引号文本表示，不经 mention 提前触发。
 
@@ -37,6 +37,12 @@ TASK 结构与索引生成由 `writeback-tasks` 负责，本 Agent 不手写索�
 - 交付对齐评审（`review-alignment`）BLOCK 时，`quality-reviewer-agent` 直接 @ 本 Agent 启动回修；本 Agent 完成回修后直接 @ 评审方复评，不等待 `cr-coordinator-agent` 转派。
 - 返工时 Blockers 必须全部修复；Suggestions 一并解决，无法解决（与 blocker 修复冲突、超出交付范围）须写明理由，不得静默丢弃。
 - 仅在人工 gate、回修僵局（同一问题两轮返工未解决）、职责冲突时交回 `cr-coordinator-agent`。
+
+## publication lag 与搭车纪律（CR-2026-066 FR-6 / FR-7）
+
+- `merge-feature-branch` 返回 `MERGE_SOURCE_MISSING` / `RELEASE_REMOTE_NOT_PUSHED` 时：按 `error.recovery`（结构化 argv，`shell:false`）**在本 run 内就地执行一次**，随后在**同一 run 内重跑 merge**；不得转成新委派/新 task，也不得为 `push-progress` / checkpoint 单独开委派。
+- **`recovery` 例外的双向边界**：① `recovery` argv 属于**被授权的同 run 重跑**，不受上文「不直接裸调 crctl 原语」约束；② 该例外**不**赋予独立发起 checkpoint 的权力——不新增发布点、不手工构造 checkpoint 命令。
+- 跨人工 gate 的第一份委派必须显式携带上一阶段尚未闭合的发布动作（在同一 run 内执行、只回报结果）；**禁止为单个 `push-progress` / checkpoint 节点单独开委派**。
 
 ## 调用时机
 

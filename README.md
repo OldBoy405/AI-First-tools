@@ -62,7 +62,7 @@ CR 通过状态机推进。每个关键节点都要由明确的 Skill 写入证�
 
 | 机制 | 一句话区别 |
 |------|-----------|
-| **checkpoint** | 随时把全部 active repo 的进度打包提交并推送远端，供换机或协作者续接（`crctl checkpoint`）；需求/架构/代码三个阶段审批后的阶段终点 checkpoint 是 Pipeline 完成条件，不可跳过，失败保持已审批状态、重跑同一 checkpoint 不重新审批（CR-2026-044） |
+| **checkpoint** | 随时把全部 active repo 的进度打包提交并推送远端，供换机或协作者续接（`crctl checkpoint`）；阶段终点完成条件 = **评审 PASS 的 checkpoint**（由评审者在对应 review SKILL 的 PASS 分支内执行，每阶段一次）；审批后不再有 checkpoint 节点，未发布的审批提交由下一阶段评审 checkpoint 或 `merge` 的 publication preflight 搭车承担；发布失败保持当前状态、重跑同一 checkpoint，不重新评审/不重新审批（CR-2026-044 FR-07，CR-2026-066 修正口径） |
 | **merge** | 回写期第一步，把所有参与仓的同名分支合并回各自 trunk（`crctl merge`） |
 | **operational workspace** | merge 之后、archive 之前的唯一编辑位置，回写节点在此累积 specs/delivery 产物 |
 | **archive** | 回写完成后把 CR 移入 `_history.yml` 并清理事务现场（`crctl archive`） |

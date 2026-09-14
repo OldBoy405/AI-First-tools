@@ -6,7 +6,7 @@ description: "调用一次 crctl checkpoint 深原语，将同一 CR 全部 acti
 # Skill: push-progress
 
 **类型**: 远端同步 Skill（sync/ 组，跨阶段通用）
-**调用时机**: 随时可调用；在三条主 pipeline 中按位置区分（CR-2026-044 FR-07）：PRD 草稿与 TASK checkpoint 仍为可选节点；需求/架构/代码审批后的阶段终点 checkpoint 为强制完成条件（`onFail=abort`），失败保持已审批状态，重跑同一 checkpoint，不重新审批。
+**调用时机**: 随时可调用（通用 checkpoint 语义不变）；在三条主 pipeline 中，阶段终点完成条件 = **评审 PASS 的 checkpoint**——由评审者（quality-reviewer-agent）在对应 review SKILL 的 PASS 分支内执行，每阶段一次；**审批之后不再有 checkpoint 节点**，未发布的审批提交由下一阶段评审 checkpoint 或 `merge` 的 publication preflight 搭车承担；发布失败保持当前状态、按结构化 `recovery` 重跑同一 checkpoint，不重新评审、不重新审批（CR-2026-044 FR-07 经 CR-2026-066 修正口径）。
 
 ---
 

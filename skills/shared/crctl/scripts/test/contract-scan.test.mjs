@@ -599,3 +599,15 @@ test('CR-2026-064 FR-12（AC-04）：crctl.mjs 与 lib/*.mjs 对 shell 逃逸零
   }
   assert.ok(shellFalse >= 1, `必须存在 argv 执行的既有先例（spawnSync(..., { shell: false })），实际 ${shellFalse}`);
 });
+
+/* ********** CR-2026-066 TASK-04（FR-7）：搭车硬规则的静态文本断言 ********** */
+
+test('CR-2026-066 FR-7: tools 三份 Prompt 均含搭车硬规则（push-progress + 单独开委派/同 run）', () => {
+  const prompts = ['agents/dev-agent.md', 'agents/quality-reviewer-agent.md', 'agents/delivery-agent.md'];
+  for (const rel of prompts) {
+    const text = readInRoot(ROOT, rel).replaceAll('\r\n', '\n');
+    assert.ok(text.length > 500, `${rel} 文本读出且非空（读不到即硬失败，禁止空集合静默通过）`);
+    assert.ok(text.includes('push-progress'), `${rel} 缺硬规则 token push-progress`);
+    assert.ok(text.includes('单独开委派') || text.includes('同 run'), `${rel} 缺硬规则 token 单独开委派/同 run`);
+  }
+});
