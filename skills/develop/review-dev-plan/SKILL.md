@@ -6,7 +6,7 @@ description: 对 change-requests/{CR-ID}/plan.md 与 tasks/ 执行编码前合�
 # Skill: review-dev-plan
 
 **类型**: 开发期 Skill（develop/ 组）
-**调用时机**: code-implementation pipeline 中 write-dev-tasks 之后、push-progress 之前
+**调用时机**: code-implementation pipeline 中 write-dev-tasks 之后、开发启动人工审批之前
 
 ---
 
@@ -32,6 +32,19 @@ description: 对 change-requests/{CR-ID}/plan.md 与 tasks/ 执行编码前合�
 
 ### Step 1 — 前置校验
 
+0. **只读 clean 前置（CR-2026-066 FR-2；本 Skill 的第一个动作，在后续任何读取/评审动作之前）**：
+
+   ```text
+   r = crctl workspace inspect {cr_id} --workspace <worktree>     # 只读、零写入
+   require ∀ resources: classification == 'healthy'              # healthy ⇒ dirty=false；还要求 worktree 已注册且 HEAD 在 requirement/{cr_id} 分支
+   否则：报告逐仓 classification/dirty 事实与该仓未提交文件清单
+         给出「存在未提交内容，请作者先提交」
+         → 不写临时 payload、不 review-record、不 advance、不改 status、不发布
+         → 评审者不得对作者工作区执行任何写操作（add / commit / stash / 清理）
+   ```
+
+   - 判据取 `classification`（**不得**写成 `dirty=false` 的等价式——那会漏掉 wrong-branch / path-unregistered 两类不干净工作区）。
+   - 本前置的 inspect **只用于 clean 判定**（`classification` / `dirty`），**不用于取 `resources`**：下方事实取证仍只使用传入的 `resources[].worktreePath`（不由此重取、不因此改变既有参数面）。
 1. CR status 必须为 `task-breakdown`（普通轨重放时允许 `tech-design-reviewed`）。
 2. 以下输入必须存在：`sdd.md`（已审批技术设计，权威输入）、`plan.md`、`tasks/_index.yml`、至少一个 `TASK-*.md`、`review-annotations/sdd.yml`（技术评审已知风险）。
 3. `prd.md` 仅按 SDD 引用定位抽查，不得全量复审 PRD（D-15）。
@@ -129,11 +142,26 @@ suggestions: []
 
 按 annotation 顶层 `repair-target`（或 review-record 输出的 route）分流：
 
-- **PASS**（verdict=pass 且 blockers=[]）：保持 `task-breakdown`，输出摘要，进入现有 push-progress → human_approval → approve-dev-start。**证据绑定（CR-2026-039）**：PASS 落盘时 crctl 将 plan.md + 全部 `TASK-*.md` 的 composite digest 写入 annotation `subject-sha256`；此后 plan/TASK 正文任何修订都会使旧 PASS 失效——`crctl next` 改建议重审/重建（按缺失类型路由 review-dev-plan/write-dev-plan/write-dev-tasks），`approve-dev-start`（含 grant）硬失败零写入；重跑一次 review-dev-plan 即刷新证据。
+- **PASS**（verdict=pass 且 blockers=[]）：保持 `task-breakdown`（**不得**为本阶段新造 `advance`），输出摘要，随后按 **Step 5** 发布本阶段批次，再进入开发启动人工审批（`approve-dev-start`）。**证据绑定（CR-2026-039）**：PASS 落盘时 crctl 将 plan.md + 全部 `TASK-*.md` 的 composite digest 写入 annotation `subject-sha256`；此后 plan/TASK 正文任何修订都会使旧 PASS 失效——`crctl next` 改建议重审/重建（按缺失类型路由 review-dev-plan/write-dev-plan/write-dev-tasks），`approve-dev-start`（含 grant）硬失败零写入；重跑一次 review-dev-plan 即刷新证据。
 - **NORMAL**（repair-target=write-dev-plan，缺省）：调用 `crctl advance --to tech-design-reviewed --trigger "review-dev-plan:block -> write-dev-plan" --expect task-breakdown --embedded` 完成回退（CR-2026-030 FR-8：权威完整 trigger），pipeline 按 write-dev-plan → write-dev-tasks → review-dev-plan 重放（≤3 轮）。
 - **UPSTREAM**（repair-target=write-tech-design）：调用 `crctl advance --to tech-design-review-pending --trigger review-dev-plan:upstream-design-blocker --expect task-breakdown --embedded` 回退到 `tech-design-review-pending`，停止自动重放，输出结构化业务结果 `UPSTREAM_DESIGN_BLOCKER`（含 route=upstream、verdict=block、review feedback 与回退状态），由人工走既有技术设计修订、重新评审与审批流程。本节点不得修改或覆盖 `review-annotations/sdd.yml`（US-5）。
 
-### Step 5 — 输出摘要
+### Step 5 — PASS 发布与对账（CR-2026-066 FR-1 / FR-3；仅 `verdict=pass` 且 `blockers=[]` 分支）
+
+1. **触发顺序固定、不得调换**：Step 3 的 `crctl review-record` 已落盘 → `files[]` 提交 → 本阶段 PASS **无** `advance`（保持 `task-breakdown`，**不得**为本步新造状态转换）→ 本步的发布前置 → 发布 → 对账 → 报告。
+2. **发布前置**：`crctl workspace inspect {cr_id} --workspace <worktree>`，要求 ∀ resources `classification == 'healthy'`（不干净即中止本次发布，不代作者提交）。
+3. **发布**：调用既有 `push-progress` Skill，`cr_id={cr_id}`、`message=开发计划评审通过`；要求 `phase == complete`（`changed=false` 幂等重放亦视为成功）。
+4. **对账（发布的必须是被评审的）**：
+   - 非 KB 仓：`repositories[].sourceSha` 必须等于 `crctl git rev-parse HEAD --cwd <resources[].worktreePath>`。
+   - KB 仓：`crctl git rev-parse HEAD --cwd <kb worktreePath>` 必须等于 `metadataCommit`，且 `crctl git rev-parse --verify HEAD^ --cwd <kb worktreePath>` 必须等于 KB `sourceSha`（`dirty=false`）；在该关系成立的前提下，于 KB 工作区对 `plan.md` ＋ 全部 `TASK-*.md` 按既有 composite 口径（集合、路径、排序、`path:sha256` 行序逐字一致）复算 digest，必须全等于 `review-annotations/dev-plan.yml#subject-sha256`。
+   - 复算前先把读入内容 `\r\n → \n` 归一；解析失败**硬失败报错**（禁止「匹配不到 → 空集 → 静默通过」）。
+   - SHA 关系不成立时**禁止**改用工作区文件复算（等于自证）；禁止以 `show` 型只读命令（`crctl git show` 仅向 `system-orchestrator` 放行 `review-annotations/*`）替代 SHA 关系取证。
+   - 判定不等 → **`CONTRACT_DRIFT` 技术中止**：不改 verdict、不重评、不回退状态；报告期望值/实际值与复算内容来源。
+5. **报告**：`phase` / `batchId` / `repositories[]` / `metadataCommit` 逐字进入评审报告与摘要。
+6. **失败语义**：发布失败时 verdict 与评审账本保持已落盘结果不变——不重评、不改 verdict、不代作者提交、不回退状态；报告原始错误码与结构化 `recovery`，并按该 `recovery` 重试**同一个** `push-progress`；发布失败不阻塞任何本地门禁。
+7. **BLOCK 分支不含任何发布调用**（回修中间态不上远端）。
+
+### Step 6 — 输出摘要
 
 ```
 ✅ 开发计划与 TASK 合并评审完成

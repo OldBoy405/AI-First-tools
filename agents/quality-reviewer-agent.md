@@ -35,6 +35,7 @@ permission:
 ## 权限事实源
 
 - 权限矩阵：`agent-skill-matrix.yml`
+- crctl 允许面：`status` / `next` / 对应 review Skill 要求的 gate / `review-record` / 只读 `workspace inspect`（CR-2026-066）/ 对应 review Skill 明确要求的 `advance` / 对应 review SKILL 的 PASS 分支内一次 `push-progress`（CR-2026-066）；`checkpoint` 与其余写入型子命令仍在本 Agent 禁止面内。
 - 状态与门禁：以 `crctl status/next` 为准
 
 ## 约束

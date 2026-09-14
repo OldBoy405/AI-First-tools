@@ -7,13 +7,13 @@ description: 读取 CR 代码 worktree 的代码 diff、验证日志、change-re
 # Skill: review-code
 
 **类型**: 开发期 Skill（develop/ 组，改造自旧 review/review-code）  
-**调用时机**: code-implementation pipeline 第 8 节点（代码编写与统一 checkpoint 后）
+**调用时机**: code-implementation pipeline 第 8 节点（代码编写之后；评审 PASS 时由本 Skill 发布阶段批次）
 
 ---
 
 ## 用途
 
-在开发者完成编码并推送统一 checkpoint 后，基于 CR 代码 worktree 的只读 diff、验证日志与 CR 设计文档执行代码评审。release snapshot 由 `review-record --stage code` 从本地 healthy committed worktree 构造，不要求远端 requirement ref 已同步；远端发布完整性由 checkpoint/merge 处理（CR-2026-044）。评审通过时推进 CR status 到 `code-reviewing`，等待 `approve-code` 做人工审批；有 blocker 或 `test-report.status=block` 时回退到 `developing`，并由 pipeline `reviewLoop` 自动回到 `implement-code` 修复。blocker 未清空前不得进入 `human_approval`。
+在开发者完成编码后（评审 PASS 时由本 Skill 发布阶段批次），基于 CR 代码 worktree 的只读 diff、验证日志与 CR 设计文档执行代码评审。release snapshot 由 `review-record --stage code` 从本地 healthy committed worktree 构造，不要求远端 requirement ref 已同步；远端发布完整性由 checkpoint/merge 处理（CR-2026-044）。评审通过时推进 CR status 到 `code-reviewing`，等待 `approve-code` 做人工审批；有 blocker 或 `test-report.status=block` 时回退到 `developing`，并由 pipeline `reviewLoop` 自动回到 `implement-code` 修复。blocker 未清空前不得进入 `human_approval`。
 
 <!-- lint-prompts:ignore --> 反例说明：仅凭统计信息不足
 > **证据要求**：仅有 `git diff --stat` 或 commit log 不足以支撑代码评审。必须读取实际 diff、变更文件、lint/test/build 输出或明确的不适用说明。
@@ -34,6 +34,20 @@ description: 读取 CR 代码 worktree 的代码 diff、验证日志、change-re
 ## 执行步骤
 
 ### Step 1 — 获取代码评审证据
+
+0. **只读 clean 前置（CR-2026-066 FR-2；本 Skill 的第一个动作，在后续任何取证/评审动作之前）**：
+
+   ```text
+   r = crctl workspace inspect {cr_id} --workspace <worktree>     # 只读、零写入
+   require ∀ resources: classification == 'healthy'              # healthy ⇒ dirty=false；还要求 worktree 已注册且 HEAD 在 requirement/{cr_id} 分支
+   否则：报告逐仓 classification/dirty 事实与该仓未提交文件清单
+         给出「存在未提交内容，请作者先提交」
+         → 不写临时 payload、不 review-record、不 advance、不改 status、不发布
+         → 评审者不得对作者工作区执行任何写操作（add / commit / stash / 清理）
+   ```
+
+   - 判据取 `classification`（**不得**写成 `dirty=false` 的等价式——那会漏掉 wrong-branch / path-unregistered 两类不干净工作区）。
+   - 本前置不新增 crctl 子命令、不新增错误码；只消费既有 `workspace inspect` JSON 字段（`resources[].classification` / `dirty` / `worktreePath`）。
 
 在各参与代码仓的 CR worktree 中解析 trunk，并执行只读命令。不要用已推送的 `origin/requirement/{cr_id}...HEAD` 作为唯一 diff range；checkpoint 推送后该范围可能为空。应比较 trunk merge-base 到当前 HEAD：
 ```bash
@@ -142,7 +156,22 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 - verdict=pass 且 blockers 为空且 `test-report.status=pass` → 调用 `crctl advance --to code-reviewing --trigger review-code --expect developing`，允许进入 `human_approval`
 - verdict=block、blockers 非空或 `test-report.status=block` → 调用 `crctl advance --to developing --trigger "review-code:block -> implement-code" --expect developing`，输出 `repair-target=implement-code`，pipeline 自动带 `review_feedback` 回到代码实现节点；不得进入 `human_approval`
 
-### Step 6 — 输出摘要
+### Step 6 — PASS 发布与对账（CR-2026-066 FR-1 / FR-3；仅 `verdict=pass`、`blockers=[]` 且 `test-report.status=pass` 分支）
+
+1. **触发顺序固定、不得调换**：Step 4 的 `crctl review-record` 已落盘 → Step 5 按 `files[]` 提交 → Step 5 的 PASS `advance`（`--to code-reviewing --trigger review-code --expect developing`，既有语义不变）→ 本步的发布前置 → 发布 → 对账 → 报告。
+2. **发布前置**：`crctl workspace inspect {cr_id} --workspace <worktree>`，要求 ∀ resources `classification == 'healthy'`（不干净即中止本次发布，不代作者提交）。
+3. **发布**：调用既有 `push-progress` Skill，`cr_id={cr_id}`、`message=代码评审通过`；要求 `phase == complete`（`changed=false` 幂等重放亦视为成功）。
+4. **对账（发布的必须是被评审的）**：
+   - 非 KB 仓：`repositories[].sourceSha` 必须与 `review-annotations/code.yml#release-subjects[].reviewed-source-sha` **逐仓全等**（仓名一一对应；取证用 `crctl git rev-parse HEAD --cwd <resources[].worktreePath>`）。
+   - KB 仓：`reviewed-source-sha` 必须是当前 KB HEAD 的**祖先**，且受控 artifact 的逐文件 sha256、文件集合与 `artifacts.digest` 全等（= 既有 `verifyReleaseSubjects` 的 KB 语义：白名单外路径零漂移）。
+   - 复算前先把读入内容 `\r\n → \n` 归一；解析失败**硬失败报错**（禁止「匹配不到 → 空集 → 静默通过」）。
+   - SHA 关系不成立时**禁止**改用工作区文件复算（等于自证）；禁止以 `show` 型只读命令（`crctl git show` 仅向 `system-orchestrator` 放行 `review-annotations/*`）替代 SHA 关系取证。
+   - 判定不等 → **`CONTRACT_DRIFT` 技术中止**：不改 verdict、不重评、不回退状态；报告期望值/实际值与复算内容来源。
+5. **报告**：`phase` / `batchId` / `repositories[]` / `metadataCommit` 逐字进入评审报告与摘要。
+6. **失败语义**：发布失败时 verdict 与评审账本保持已落盘结果不变——不重评、不改 verdict、不代作者提交、不回退状态；报告原始错误码与结构化 `recovery`，并按该 `recovery` 重试**同一个** `push-progress`；发布失败不阻塞任何本地门禁。
+7. **BLOCK 分支不含任何发布调用**（回修中间态不上远端）。
+
+### Step 7 — 输出摘要
 
 ```
 ✅ 代码评审完成

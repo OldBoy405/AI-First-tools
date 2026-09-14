@@ -630,3 +630,82 @@ test('CR-2026-055 blocker 修复: 权限解释文档同步新增 can-call 关系
   assert.match(matrixDoc, /quality-reviewer-agent.*controlled-shell/s, '权限文档记录 reviewer 的 controlled-shell can-call');
   assert.ok(matrixDoc.includes('仅用于 `review-tech-design` 与 `review-dev-plan`'), '权限文档记录只读约束');
 });
+
+/* ── CR-2026-066 TASK-02：评审 PASS 发布 / clean 前置 / 权限面（AC-3 / AC-4②③④ + S-13 负向面） ── */
+
+const REVIEW_SKILLS = [
+  ['skills/requirement/review-requirement/SKILL.md', '需求评审通过'],
+  ['skills/develop/review-tech-design/SKILL.md', '技术设计评审通过'],
+  ['skills/develop/review-dev-plan/SKILL.md', '开发计划评审通过'],
+  ['skills/develop/review-code/SKILL.md', '代码评审通过'],
+];
+const readToolsFile = (rel) => readFileSync(path.join(TOOLS_ROOT, ...rel.split('/')), 'utf8').replaceAll('\r\n', '\n');
+/** 取某个稳定节名起至下一个 `## ` 标题（含各级标题）之间的文本；节缺失返回 null。 */
+const sectionOf = (text, heading) => {
+  const lines = text.split('\n');
+  const start = lines.findIndex((l) => l.trim() === heading);
+  if (start < 0) return null;
+  const out = [];
+  for (let i = start; i < lines.length; i++) {
+    if (i > start && /^#{1,3} /.test(lines[i])) break;
+    out.push(lines[i]);
+  }
+  return out.join('\n');
+};
+
+test('CR-2026-066 AC-3/AC-4: 四 review SKILL 的 clean 前置 + PASS 发布 + 对账 + 权限面四处载体（断言 A/B/C/D）', () => {
+  const matrix = readToolsFile('agent-skill-matrix.yml');
+  const matrixDoc = readToolsFile('AGENT-SKILL-MATRIX.md');
+  const qrDoc = readToolsFile('agents/quality-reviewer-agent.md');
+
+  // A：四个 review SKILL 的四要素（clean 前置 / PASS 发布 / 对账 / BLOCK 不发布）
+  for (const [rel, message] of REVIEW_SKILLS) {
+    const text = readToolsFile(rel);
+    assert.ok(text.length > 3000, `${rel} 文本读出且非空（读不到即硬失败）`);
+    for (const token of ['crctl workspace inspect', 'healthy', '请作者先提交', 'classification']) {
+      assert.ok(text.includes(token), `${rel} 缺 clean 前置 token ${token}`);
+    }
+    assert.ok(text.includes('push-progress'), `${rel} 缺发布步骤 push-progress`);
+    assert.ok(text.includes(message), `${rel} 缺本阶段发布 message：${message}`);
+    for (const token of ['phase', 'batchId', 'repositories', 'metadataCommit']) {
+      assert.ok(text.includes(token), `${rel} 缺发布结果消费字段 ${token}`);
+    }
+    assert.ok(text.includes('CONTRACT_DRIFT'), `${rel} 缺对账失败语义 CONTRACT_DRIFT`);
+    assert.ok(text.includes('不改 verdict'), `${rel} 缺「不改 verdict」对账失败语义`);
+    assert.ok(text.includes('BLOCK 分支不含任何发布调用'), `${rel} 缺 BLOCK 分支不含发布的表述`);
+  }
+
+  // B：tools 三处载体（① 矩阵 + ② 派生表 + ③a 权限事实源）与 A 的前置同一条断言内校验
+  const canCall = matrix.match(/  quality-reviewer-agent:\n(?:.*\n)*?\s*can-call:\n((?:\s+- \S+\n)*)/);
+  assert.ok(canCall, '① agent-skill-matrix.yml 的 quality-reviewer-agent.can-call 存在');
+  assert.ok(/- push-progress\n/.test(canCall[1]), '① can-call 含 push-progress');
+  const forbidden = matrix.match(/  quality-reviewer-agent:\n(?:.*\n)*?\s*forbidden:\n((?:\s+- \S+\n)*)/);
+  assert.ok(forbidden, '① agent-skill-matrix.yml 的 quality-reviewer-agent.forbidden 存在');
+  assert.equal(/- push-progress\n/.test(forbidden[1]), false, '① forbidden 已移除 push-progress');
+  assert.ok(/- checkpoint\n/.test(forbidden[1]), '① forbidden 仍含 checkpoint');
+  assert.ok(/只读 workspace inspect/.test(matrix), '① 矩阵块注释声明只读 workspace inspect');
+  const permSection = sectionOf(matrixDoc, '## 本 CR 权限变更');
+  assert.ok(permSection, '② AGENT-SKILL-MATRIX.md 有「本 CR 权限变更」节');
+  const crRow = permSection.split('\n').find((l) => l.includes('CR-2026-066'));
+  assert.ok(crRow, '② 本 CR 权限变更节含 CR-2026-066 行');
+  assert.ok(crRow.includes('workspace inspect'), '② 本 CR 行含只读 workspace inspect');
+  assert.ok(crRow.includes('push-progress'), '② 本 CR 行含 push-progress');
+  const factSection = sectionOf(qrDoc, '## 权限事实源');
+  assert.ok(factSection && factSection.includes('workspace inspect'), '③a 权限事实源节含只读 workspace inspect');
+
+  // C：反向断言——四个 review SKILL 不含 crctl checkpoint（发布只经 push-progress Skill）
+  for (const [rel] of REVIEW_SKILLS) {
+    const text = readToolsFile(rel);
+    assert.ok(text.length > 3000, `${rel} 文本读出且非空（防空集合静默通过）`);
+    assert.equal(text.includes('crctl checkpoint'), false, `${rel} 不得含 crctl checkpoint`);
+  }
+
+  // D：S-13 负向断言——旧 checkpoint 前提句三个 token 零命中
+  for (const [rel] of REVIEW_SKILLS) {
+    const text = readToolsFile(rel);
+    assert.ok(text.length > 3000, `${rel} 文本读出且非空（防空集合静默通过）`);
+    for (const token of ['push-progress 之后', 'push-progress 之前', '统一 checkpoint 后']) {
+      assert.equal(text.includes(token), false, `${rel} 保留旧 checkpoint 前提句 ${token}`);
+    }
+  }
+});

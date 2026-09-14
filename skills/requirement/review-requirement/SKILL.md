@@ -7,7 +7,7 @@ description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审�
 # Skill: review-requirement
 
 **类型**: 需求期 Skill（requirement/ 组）  
-**调用时机**: requirement-authoring pipeline 第 4 节点（push-progress 之后）
+**调用时机**: requirement-authoring pipeline 第 4 节点（评审 PASS 后由本 Skill 发布阶段批次）
 
 ---
 
@@ -31,6 +31,19 @@ description: 对 change-requests/{CR-ID}/prd.md 进行质量评审，将评审�
 
 ### Step 1 — 前置校验
 
+0. **只读 clean 前置（CR-2026-066 FR-2；本 Skill 的第一个动作，在后续任何读取/评审动作之前）**：
+
+   ```text
+   r = crctl workspace inspect {cr_id} --workspace <worktree>     # 只读、零写入
+   require ∀ resources: classification == 'healthy'              # healthy ⇒ dirty=false；还要求 worktree 已注册且 HEAD 在 requirement/{cr_id} 分支
+   否则：报告逐仓 classification/dirty 事实与该仓未提交文件清单
+         给出「存在未提交内容，请作者先提交」
+         → 不写临时 payload、不 review-record、不 advance、不改 status、不发布
+         → 评审者不得对作者工作区执行任何写操作（add / commit / stash / 清理）
+   ```
+
+   - 判据取 `classification`（**不得**写成 `dirty=false` 的等价式——那会漏掉 wrong-branch / path-unregistered 两类不干净工作区）。
+   - 本前置不新增 crctl 子命令、不新增错误码；只消费既有 `workspace inspect` JSON 字段（`resources[].classification` / `dirty` / `worktreePath`）。
 1. 确认 `change-requests/{cr_id}/prd.md` 存在
 2. CR status 必须为 `drafting` 或 `requirement-reviewing`（允许重审）
 
@@ -131,7 +144,22 @@ crctl gate {cr_id} --for requirement-reviewing --mode pre-review --workspace <wo
 - 若评审通过（无 blocker）：调用 `crctl advance --to requirement-reviewing --trigger review-requirement` 将 status 推进到 `requirement-reviewing`，允许进入 `human_approval`（省略 `--expect`：状态机声明 `drafting→requirement-reviewing` 与 `requirement-reviewing→requirement-reviewing` 两条合法转换，单值写死会误拒合法自环；省略后 `findTransition` 仍拦非法转换）
 - 若有 blocker：保持或回退到 `drafting`，输出 `repair-target=write-requirement-prd` 与 blocker 列表（每条 blocker 内含可执行修复说明），pipeline 自动带 `review_feedback` 回到 PRD 修复节点；不得进入 `human_approval`
 
-### Step 6 — 输出摘要
+### Step 6 — PASS 发布与对账（CR-2026-066 FR-1 / FR-3；仅 `verdict=pass` 且 `blockers=[]` 分支）
+
+1. **触发顺序固定、不得调换**：Step 3 的 `crctl review-record` 已落盘 → Step 4 按 `files[]` 提交 → Step 5 的既有 PASS `advance` → 本步的发布前置 → 发布 → 对账 → 报告。
+2. **发布前置**：`crctl workspace inspect {cr_id} --workspace <worktree>`，要求 ∀ resources `classification == 'healthy'`（不干净即中止本次发布，不代作者提交）。
+3. **发布**：调用既有 `push-progress` Skill，`cr_id={cr_id}`、`message=需求评审通过`；要求 `phase == complete`（`changed=false` 幂等重放亦视为成功）。
+4. **对账（发布的必须是被评审的）**：
+   - 非 KB 仓：`repositories[].sourceSha` 必须等于 `crctl git rev-parse HEAD --cwd <resources[].worktreePath>`。
+   - KB 仓：`crctl git rev-parse HEAD --cwd <kb worktreePath>` 必须等于 `metadataCommit`，且 `crctl git rev-parse --verify HEAD^ --cwd <kb worktreePath>` 必须等于 KB `sourceSha`（`dirty=false`）；在该关系成立的前提下，于 KB 工作区对 `prd.md` 复算 **LF-only** sha256，必须全等于 `review-annotations/requirement.yml#subject-sha256`。
+   - 复算前先把读入内容 `\r\n → \n` 归一；解析失败**硬失败报错**（禁止「匹配不到 → 空集 → 静默通过」）。
+   - SHA 关系不成立时**禁止**改用工作区文件复算（等于自证）；禁止以 `show` 型只读命令（`crctl git show` 仅向 `system-orchestrator` 放行 `review-annotations/*`）替代 SHA 关系取证。
+   - 判定不等 → **`CONTRACT_DRIFT` 技术中止**：不改 verdict、不重评、不回退状态；报告期望值/实际值与复算内容来源。
+5. **报告**：`phase` / `batchId` / `repositories[]` / `metadataCommit` 逐字进入评审报告与摘要。
+6. **失败语义**：发布失败时 verdict 与评审账本保持已落盘结果不变——不重评、不改 verdict、不代作者提交、不回退状态；报告原始错误码与结构化 `recovery`，并按该 `recovery` 重试**同一个** `push-progress`；发布失败不阻塞任何本地门禁。
+7. **BLOCK 分支不含任何发布调用**（回修中间态不上远端）。
+
+### Step 7 — 输出摘要
 
 ```
 ✅ 需求评审完成

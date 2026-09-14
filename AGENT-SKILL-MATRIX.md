@@ -50,6 +50,7 @@
 | Actor | 新增 can-call | 约束 |
 |---|---|---|
 | `quality-reviewer-agent` | `controlled-shell` | 仅用于 `review-tech-design` 与 `review-dev-plan` 的文件和 Git 只读取证，不包含写操作、状态推进或审批 |
+| `quality-reviewer-agent`（`CR-2026-066`） | `push-progress` | 仅在对应 review SKILL 的 PASS 分支内发布一次，不修改业务文件、不推进状态、不改 verdict；crctl 允许面新增只读 `workspace inspect` |
 
 ## 设计缺口
 
