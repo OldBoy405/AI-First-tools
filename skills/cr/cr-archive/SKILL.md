@@ -13,7 +13,7 @@ description: "归档终态 CR：一次调用 crctl archive 深原语完成归档
 ## 用途
 
 把终态 CR（`writing-back` / `rejected` / `withdrawn`）归档。
-全部事务逻辑由深原语 `crctl archive` 独占完成（CR-2026-031 TASK-09）。
+全部事务逻辑由深原语 `crctl archive` 独占完成（CR-2026-031 TASK-09），**含归档后的零风险现场清理**：txws 与各仓 CR worktree、各仓同名分支的本地与 `origin` 删除（先用 ancestry 证明已合入 trunk，未证明零删除）、以及主 checkout 与 `origin/{trunk}` 的 best-effort 同步。
 
 本 Skill 只拥有：**前置确认、一次深原语调用、结果分类**。不写 Git 命令序列、不手写任何账本、不做清理算法。
 
@@ -49,7 +49,7 @@ description: "归档终态 CR：一次调用 crctl archive 深原语完成归档
 crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 checkout}
 ```
 
-深原语内部完成归档与清理（Skill 不重复、不干预）。
+深原语内部完成归档与清理（Skill 不重复、不干预）。清理在 origin confirmed 之后逐单元落盘执行：txws → 各仓 CR worktree → 该仓 `origin` 同名分支 → 该仓本地同名分支；分支删除均以 `merge-base --is-ancestor <ref> origin/{trunk}` 为前置，dirty / 未合入 / 删除失败一律转入 `remaining` 而不强删；`rejected` / `withdrawn` 的未合并远端 ref 转入 `preservedRefs` 且本地分支不删。Skill 不再另外执行任何分支/worktree/同步命令。
 
 **new mode 的 spec-id 语义**：首跑（archive journal 不存在）省略 `--spec-id` 时由 `crctl` 从 strict authority 解析并持久化；**清理后重跑（cleanup-pending/complete）只读 journal payload，不重新解析已删除的 CR worktree/txws**——省略 `--spec-id` 直接重跑 `recovery` 指向的同一命令即可。
 
@@ -94,8 +94,8 @@ crctl archive {cr_id} [--spec-id {spec_id}] --workspace {knowledge-base 主 chec
    phase           : {complete | cleanup-pending}
    commit          : {已确认 authority SHA}
    lastCleanupError: {cleanup 执行异常码 | null}
-   preservedRefs   : {rejected/withdrawn 保留的远端 ref 列表，archived 为空}
-   remaining       : {待清理现场列表，complete 时为空}
+   preservedRefs   : {rejected/withdrawn 保留的远端 ref 列表（`{repo}:refs/heads/requirement/{cr_id}`），archived 为空}
+   remaining       : {待清理现场列表，complete 时为空；kind ⇒ txws | cr-worktree | remote-ref | local-ref，why ⇒ dirty | remove-failed | not-merged | delete-failed}
    warnings        : {投影发送失败警告列表，通常为空}
    localTrunkSync  : {逐仓主 checkout 同步行 repo/status/reason；未同步仓附补救说明}
    恢复            : 未完成时只重跑 recovery: {recovery.executable} {recovery.args 逐元素}（cwd={recovery.cwd}）
