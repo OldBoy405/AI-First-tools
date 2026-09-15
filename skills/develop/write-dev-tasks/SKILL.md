@@ -47,7 +47,7 @@ description: 将 change-requests/{CR-ID}/plan.md 拆解为独立可执行的 TAS
 
 若存在 `review_feedback`（来自 review-dev-plan 普通轨 BLOCK）：
 
-1. 逐条消费 blockers（每条内含可执行修复说明），**重新生成** TASK 卡并调用 `crctl task init` 刷新 `_index.yml`；不保留已被评审判废/删除的旧 TASK。
+1. 逐条消费 blockers（每条内含可执行修复说明），并执行 plan→TASK delta 重算：`write-dev-plan` 完成 SDD→plan delta 后继续同步 plan→TASK；重算**直接受影响 TASK**（普通轨 blockers 指向的 TASK 与 SDD→plan delta 波及的 TASK 都是「直接受影响」的来源）及其**下游依赖闭包**（`depends-on` 可达的传递闭包），同步更新受影响 TASK 的输入、输出、接口（接口契约节的消费/产出签名）、命令、`depends-on`、完成标志与回滚；未受影响 TASK 保留；`crctl task init` 只用于刷新 `_index.yml` 索引，不承担重算语义（被评审判废/删除的 TASK 从文件集移除后由索引刷新反映）。
 2. 禁止只刷新评审证据而不修改被指出的产物。
 3. 回修期间允许 status=`tech-design-reviewed`（普通轨重放态）。
 
