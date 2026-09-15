@@ -79,7 +79,7 @@ description: 对 change-requests/{CR-ID}/plan.md 与 tasks/ 执行编码前合�
 - `sdd-to-plan`：核对每条 AC 设计落点与 SDD 交付物是否在 plan/TASK 有对应，不重新裁决已审批设计；
 - `task-executability`：核对 TASK 新造/细化的目标、输入、输出、文件、完成标志与责任边界；
 - `interface-contracts`：核对 TASK 新造函数、事件、SQL、签名与 nil 责任层事实是否与目标 worktree 相符；
-- `acceptance-verifiability`：核对 TASK 验收步骤是否在真实责任边界组合证明 AC，拒绝无关依赖的假绿短路。
+- `acceptance-verifiability`：核对 TASK 验收步骤是否在真实责任边界组合证明 AC，拒绝无关依赖的假绿短路；同一判据覆盖证据命令的证明力——**观测面窄于声称面即 blocker**（命令无法观测该表行声称的 AC 结果、`--list` 类命令声称浏览器行为、文件级 `--name-only` 声称符号级不变量、子集测试声称全量），**命令形态越受控边界即 blocker**（涉及 Git 的命令未使用 `rules.json` 已允许的受控入口、命令算法只存在于委派评论而不在证据命令表行），不留到 implement 阶段才暴露。判据落在既有维度内，不新增维度名或证据账本。
 
 TASK 新事实只能按 `resources[].worktreePath` 取证：事实不存在或与目标 worktree 不符形成 blocker，不得静默记录 N/A；资源缺失或不可读为技术失败，不写临时 payload。若新事实反证 SDD 或 SDD 设计落点本身断裂，`repair-target` 设为 `write-tech-design` 走 UPSTREAM；仅 plan/TASK 翻译问题走 `write-dev-plan` 普通回修轨。
 

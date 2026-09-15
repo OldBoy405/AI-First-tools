@@ -92,7 +92,7 @@
       "id": "00000000-0000-0000-0015-000000000004",
       "kind": "human_approval",
       "label": "确认进入代码开发",
-      "approvalPrompt": "TASK 拆分已完成（change-requests/{{inputs.cr_id}}/plan.md 与 tasks/），当前应为 task-breakdown。请确认是否进入代码开发：\n\n✅ 通过：勾选此 Todo，下一节点 approve-dev-start 会记录确认并推进到 developing\n❌ 暂缓：补充任务拆分意见，重新执行 write-dev-tasks 后再确认",
+      "approvalPrompt": "TASK 拆分已完成（change-requests/{{inputs.cr_id}}/plan.md 与 tasks/），当前应为 task-breakdown。请确认是否进入代码开发，并一并确认 plan.md「验收与发布策略」声明的环境静态前提：\n\n环境静态前提（只确认静态事实，不要求审批时所有服务在线）：环境 owner 已明确、建立方式已写明、可获得性已声明。动态健康状态由 implement-code 在第一个依赖环境的 TASK 前用 plan 指定的 readiness 证据即时验证，审批不为其背书。\n\n✅ 通过：勾选此 Todo，下一节点 approve-dev-start 会记录确认并推进到 developing\n❌ 暂缓：补充任务拆分意见或环境前提说明后，按缺口所属产物回到对应写作节点（plan 侧环境声明回 write-dev-plan、TASK 拆分侧回 write-dev-tasks）重新执行后再确认",
       "onFail": "abort",
       "timeoutMinutes": 4320
     },
