@@ -109,6 +109,8 @@ description: 在同一 CR workspace 内按 prd/sdd/tasks 执行代码编写，�
 - `ENVIRONMENT_MISMATCH` 是稳定技术失败标签：不写入 crctl 状态、gate、账本、评审 blocker 或测试证据 schema；由既有 Pipeline `onFail=abort` 中止。
 - 临时隔离实例例外：任务明确要求且由当前步骤创建、验证后清理的临时实例不属于共享服务；共享服务指任务范围外、可能被其他任务共享或需要调整既有生命周期的实例。
 - 验证环境已受控建立时，可归因于当前变更的失败必须按普通代码失败进入既有回修路径，不得用环境标签掩盖。
+- 即时 readiness：在**第一个依赖环境的 TASK 前**执行 plan 指定的 readiness `cmd-NN`；该命令是既有「一次环境检查」在环境依赖 TASK 上的执行内容（不是新的反复探测），仍受「最多一次重跑」、测试计划 timeout 与受控入口约束。
+- 失败时按既有 `ENVIRONMENT_MISMATCH` 中止并报告所需建立动作；**环境无关 TASK 不被提前阻断**（readiness 未通过只阻断依赖该环境的 TASK）。
 
 ## 禁止事项
 
