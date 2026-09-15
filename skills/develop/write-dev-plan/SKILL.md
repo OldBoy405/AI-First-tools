@@ -54,7 +54,10 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 2. **任务依赖图** — 各模块/接口任务的依赖关系（文字描述或 ASCII 图）
 3. **资源与分工** — 预计工时分配
 4. **风险与回滚策略** — 技术风险列表及对应回滚方案
-5. **验收与发布策略** — 发布前 checklist / feature-flag 计划
+5. **验收与发布策略** — 发布前 checklist / feature-flag 计划；若验收证据依赖常驻服务、浏览器或数据库，本节必须同时写明环境的静态前提与即时验证口径（不新增第八节）：
+   - 环境 owner、建立方式、可获得性：责任人与获得途径，不写具体命令；
+   - readiness 证据：必须复用**该环境所保障的那一行 FR 的既有 `cmd-NN`**（证据ID 照抄证据命令表，不新增命令行）。两张稳定表「验收证据 ↔ 证据ID」双向唯一映射不得放宽；确实无法复用时，该诉求超出本计划边界，**另立 CR** 修改稳定表合同与对应评审判据，本计划不放宽该映射；
+   - 缺失时处置：按既有 `ENVIRONMENT_MISMATCH` 标签中止并报告所需建立动作（该标签的唯一详细事实源是 `implement-code`，此处只引用不复述）。
 6. **两张稳定表（契约必填节，不是可选附录；CR-2026-060 AC-07）**——plan.md 必须恰含以下两张表，表头固定，不得增删列、不得用散文替代：
 
    **交付覆盖表（稳定表 1/2）**：每个 in-scope FR 恰出现一次，列固定为：
@@ -66,7 +69,10 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
    - `SDD交付项`：SDD 中对应设计落点（章节引用）
    - `主责/关联TASK`：唯一主责 TASK（可并写关联 TASK）；必须写 canonical 完整 id `{cr_id}-TASK-NN`（与 `tasks/_index.yml` 的 id 集一致），不得用短名 `TASK-NN`
    - `验收证据`：稳定标识 `cmd-NN`（两位十进制，与 `crctl test` 机器区 `commands` 1-based 下标及 `test-evidence/cmd-NN.log` 全等）；该命令必须实际覆盖本行所声称的验收面，不得只覆盖其中一部分造成假绿
-   - `回滚`：该 FR 的回滚单元（如 revert 某 TASK commit）
+     - 观测面 ≥ 声称面：每个 `cmd-NN` 必须能观测该表行声称的 AC 结果；命令的可执行形态（`executable` / `args` / `cwd` / `timeout` 四项）沿用证据命令表 bullets 的既有口径，此处只引用不复述细节，不另立第二套形态判据。
+     - 四类典型错配：`--list` 类命令不能证明浏览器行为；文件级 `--name-only` 不能证明符号级不变量；子集测试不能声称全量；涉及 Git 的命令必须使用 `rules.json` 已允许的受控入口（不新开裸面、不改 `rules.json`）。
+     - 命令算法唯一事实源 = 证据命令表行；不得通过委派评论补写命令算法。
+   - `回滚`：该 FR 的回滚单元（如 revert 某 TASK commit）；被其它 TASK 消费的共享改动，其回滚单元必须包含受影响下游消费者，并与第 4 章「风险与回滚策略」的逆拓扑顺序一致；单点 revert 会破坏下游时不得声明为单点回滚。
 
    **证据命令表（稳定表 2/2）**：每条验证命令一行，列固定为：
 
@@ -75,6 +81,7 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 
    - `证据ID` = `cmd-NN`（与交付覆盖表「验收证据」列同一标识）
    - `args` 为 JSON token 数组；`executable` 直接可 spawn（如 `node`，不用 shell 内建/管道/重定向）；`cwd` 为 tools CR worktree 内相对路径；`timeout` 为秒
+   - 证据命令表的命令行是 `cmd-NN` 的唯一事实源：命令算法只写在表内（`executable` / `args` / `cwd` / `timeout`），不得另行改写或补写。
 
 7. **AC/业务闭环覆盖矩阵**（契约必填节，CR-2026-057 FR-8）——每条关键 AC 或业务闭环一行，表头固定：
 
@@ -90,6 +97,13 @@ updated: {YYYY-MM-DDTHH:mm:ss+08:00}
 1. 逐条消费 blockers（每条内含可执行修复说明），修订同一份 `plan.md`；只处理评审指出的问题，不扩散 SDD 范围。
 2. 禁止只刷新评审证据而不修改被指出的产物（空转由下一轮评审重新读取实际产物继续 BLOCK 兜底）。
 3. 回修期间允许 status=`tech-design-reviewed`（普通轨重放态），不因非 task-breakdown abort。
+
+**upstream 轨（SDD 重新批准后的增量回修）**：当回修输入来自 `review-dev-plan:upstream-design-blocker` 之后的 SDD 修订与重新批准（人工修订 → 重新评审 → 重新批准 → 按 pipeline 既有 reviewLoop 重放本节点）时：
+
+1. 输入 = **新旧批准 SDD 的变更 delta** 与**同轮未闭合 plan blockers**；不把旧 plan 当作整轮作废。
+2. 在**同一份 `plan.md`** 上只重算受影响章节、稳定表行、证据与回滚；未受影响内容逐字保留（重写面与 delta 成正比）。
+3. coordinator 只传 subject、delta 与 canonical feedback 引用，**不指定具体行如何修改**。
+4. 本轨不修改 review-route 枚举、不把 `repair-target` 改成多值：路由仍由既有 `review-dev-plan` Step 4 UPSTREAM 分支与状态机既有转换承载。
 
 ### Step 3 — 落盘并 commit
 
