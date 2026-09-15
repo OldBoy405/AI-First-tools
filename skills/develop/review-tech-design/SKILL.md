@@ -55,7 +55,7 @@ description: 对 change-requests/{CR-ID}/sdd.md 执行技术评审，检查 PRD�
 
 ### Step 2 — 评审维度
 
-> **批准范围前置（CR-2026-057 FR-5/AC-5）**：其余维度之前，先核对 SDD「批准范围」固定章节——必须存在且承载四字段 `scope_in` / `scope_out` / `zero_diff` / `follow_up`（空字段须显式写 `无` 或 `N/A` 加理由）。缺章节或缺字段 → blocker（`本轮新增：`），本轮仍继续完成其余维度后统一生成 verdict。
+> **批准范围前置（CR-2026-057 FR-5/AC-5）**：其余维度之前，先核对 SDD「批准范围」固定章节——必须存在且承载四字段 `scope_in` / `scope_out` / `zero_diff` / `follow_up`（空字段须显式写 `无` 或 `N/A` 加理由）。缺章节或缺字段 → blocker（`本轮新增：`），本轮仍继续完成其余维度后统一生成 verdict。四字段自洽判据（与 `write-tech-design` 章节 9 逐条同表述；判据只针对四字段之间的自相矛盾与必需条件错位，不针对详尽程度）：① `scope_in` 与 `zero_diff` 不得对同一对象同时要求「修改」与「不修改」；② 外部治理规则强制修改时，必须在 SDD 阶段把该对象纳入 `scope_in`、修订 `zero_diff`、或给出已有的合法出口；③ 不得用 `scope_out` 隐藏当前交付必须发生的治理修改；④ `follow_up` 不得承载当前 AC 的必要条件。任一一型命中 → blocker（`本轮新增：`），必须在 SDD 阶段形成，不得留到 dev-plan 再由 `review-dev-plan` 的 `upstream-design-blocker` 轨触发。
 
 | 维度 | 检查项 |
 |------|-------|
@@ -84,9 +84,9 @@ else: pass with landing + observable + reachability evidence
 
 这是既有「PRD↔SDD 对齐」与「可测试性」维度的细化，不新增 annotation dimension；关键前置条件包括过滤条件、状态门槛、权限判定、事件触发顺序、空值分支和跨仓依赖初始化。`landing_conflicts_with_prd` 判定前，必须先区分 PRD 中的「现有实现基线描述」（当前代码事实引用）与「目标契约」（FR/AC 正文要求），不得把基线描述误读为目标契约。
 
-SDD 的既有实现依赖必须来自名为“既有实现依赖与事实”的显式小节。该小节按正文首次依赖出现顺序维护有序清单，每项固定包含 `repo`、`relative path`、`stable symbol/对象` 和“依赖结论”，并可附 `commit SHA`。`sdd.explicit_existing_dependencies` 仅指该清单，不由 reviewer 扫描全仓库或临时猜测；reviewer 还必须交叉检查正文同类事实是否漏列。
+SDD 的既有实现依赖必须来自名为“既有实现依赖与事实”的显式小节。该小节按正文首次依赖出现顺序维护有序清单，每项以稳定标识 `dep-N`（N 为正整数）开头，固定包含 `repo`、`relative path`、`stable symbol/对象`、`commit SHA` 和“依赖结论”五要素，其中 `commit SHA` 为必填的 40 位 SHA（缺失或与取证结果不符形成 blocker）。`sdd.explicit_existing_dependencies` 仅指该清单，不由 reviewer 扫描全仓库或临时猜测；reviewer 还必须核验 `dep-N` 引用规则：正文出现的 `dep-N` 必须在表中已定义，判据从「正文同类事实是否漏列」的集合比较升级为「正文引用是否由 `dep-N` 承载」的关系式——正文出现未通过 `dep-N` 引用承载的当前实现事实形成 blocker。本规则是 Prompt 合同，不宣称对自由文本事实的机械识别——判定仍属评审判断，不新增 crctl 校验面、lint 规则或 annotation dimension。
 
-只核验 SDD 明确写入且设计成立依赖的既有实现事实，不做全仓库无界扫描：对每项依赖按 `resources` 找到匹配 `repo`，用受控只读取证 `crctl git rev-parse HEAD` 取 commit SHA，并核验文件/稳定符号；事实缺失或行为不符形成业务 blocker（附 repo/SHA/path/symbol/conclusion 证据），资源缺失或不可读为技术失败且不写临时 payload。SDD 正文存在但未列入依赖清单的同类事实引用形成 blocker；只有正文与依赖清单均无依赖时才记录 `N/A（本 CR 无既有实现依赖）`。行号只作辅助，不作唯一证据；评审不执行 lint/build/test。
+只核验 SDD 明确写入且设计成立依赖的既有实现事实，不做全仓库无界扫描：对每项依赖按 `resources` 找到匹配 `repo`，用受控只读取证 `crctl git rev-parse HEAD` 取 commit SHA，并核验文件/稳定符号；事实缺失或行为不符形成业务 blocker（附 repo/SHA/path/symbol/conclusion 证据），资源缺失或不可读为技术失败且不写临时 payload。SDD 正文出现未被 `dep-N` 引用承载的当前实现事实形成 blocker；只有正文与依赖清单均无依赖时才记录 `N/A（本 CR 无既有实现依赖）`。行号只作辅助，不作唯一证据；评审不执行 lint/build/test。
 
 ### Step 2.2 — 首轮全量汇总与回修复核
 

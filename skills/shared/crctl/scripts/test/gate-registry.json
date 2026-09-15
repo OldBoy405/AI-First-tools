@@ -35,7 +35,7 @@
       "fault-harness.test.mjs": 8,
       "lint-prompts.test.mjs": 38,
       "merge-tx.test.mjs": 17,
-      "pipeline-structure.test.mjs": 35,
+      "pipeline-structure.test.mjs": 36,
       "register-tx.test.mjs": 26,
       "test-cr.test.mjs": 27,
       "trace-outbox.test.mjs": 12,

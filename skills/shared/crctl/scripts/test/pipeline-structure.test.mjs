@@ -615,11 +615,11 @@ test('CR-2026-055 AC-8 负向: reviewer 节点 prompt 无 review-record/账本�
 
 test('CR-2026-055 blocker 修复: SDD 依赖清单输出与 reviewer 消费规则明确', () => {
   const writer = readFileSync(path.join(TOOLS_ROOT, 'skills/develop/write-tech-design/SKILL.md'), 'utf8').replaceAll('\r\n', '\n');
-  for (const term of ['### 既有实现依赖与事实', '正文首次出现顺序', 'repo:', 'relative path:', 'stable symbol/对象:', 'commit SHA:', '依赖结论:', 'sdd.explicit_existing_dependencies']) {
+  for (const term of ['### 既有实现依赖与事实', '正文首次出现顺序', 'dep-N', 'repo:', 'relative path:', 'stable symbol/对象:', 'commit SHA:', '依赖结论:', 'sdd.explicit_existing_dependencies']) {
     assert.ok(writer.includes(term), `write-tech-design 合同含 ${term}`);
   }
   const reviewer = readFileSync(path.join(TOOLS_ROOT, 'skills/develop/review-tech-design/SKILL.md'), 'utf8').replaceAll('\r\n', '\n');
-  for (const term of ['名为“既有实现依赖与事实”的显式小节', '有序清单', 'sdd.explicit_existing_dependencies', '正文同类事实是否漏列']) {
+  for (const term of ['名为“既有实现依赖与事实”的显式小节', '有序清单', '`dep-N` 引用规则', '`commit SHA` 为必填的 40 位 SHA', 'sdd.explicit_existing_dependencies', '正文同类事实是否漏列']) {
     assert.ok(reviewer.includes(term), `review-tech-design 规则含 ${term}`);
   }
 });
