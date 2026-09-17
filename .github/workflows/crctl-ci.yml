@@ -7,6 +7,8 @@ on:
   push:
     paths:
       - 'skills/**'
+      - 'output-guard/**'
+      - 'skills/shared/metrics/**'
       - 'pipeline-templates/**'
       - 'dir-graph.yaml'
       - 'agent-skill-matrix.yml'
@@ -20,6 +22,8 @@ on:
   pull_request:
     paths:
       - 'skills/**'
+      - 'output-guard/**'
+      - 'skills/shared/metrics/**'
       - 'pipeline-templates/**'
       - 'dir-graph.yaml'
       - 'agent-skill-matrix.yml'
@@ -113,3 +117,19 @@ jobs:
       - name: writeback unit tests
         shell: bash
         run: node --test skills/writeback/scripts/test/*.test.mjs
+
+      # CR-2026-069：output-guard 与 metrics 的测试不在 readTestFileSet 的扫描目录内，
+      # 因此必须有独立步骤，否则新合同无回归保护（SDD §6.4 / dep-19）。
+      # Pi 适配器入口是 .ts，需要 Node 内建的 type stripping（Node >= 22.18 / 23.6），
+      # 故这两个步骤显式切到与 CR 证据命令同一版本（Node 24）；上方既有步骤保持 Node 20 不变。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: OutputGuard contracts (core / conformance / adapters)
+        shell: bash
+        run: node --test output-guard/test/*.test.mjs
+
+      - name: metrics contracts (cr-cost)
+        shell: bash
+        run: node --test skills/shared/metrics/test/*.test.mjs

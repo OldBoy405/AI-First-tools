@@ -65,6 +65,17 @@ node {TOOLS_ROOT}/skills/shared/crctl/scripts/crctl.mjs git status --short --cwd
 <!-- lint-prompts:ignore --> 描述性：CLI 说明
 要求 Node >= 18。`--workspace <path>` 可显式指定目标 workspace，默认从 cwd 向上探测 `change-requests/_backlog.yml`。
 
+### 输出投影与 `--detail`（CR-2026-069 FR-2）
+
+<!-- lint-prompts:ignore --> 描述性：CLI 说明
+成功出口默认输出 **compact summary**，但**只对注册了投影的命令生效**：注册表与每命令的投影函数是唯一事实源，见 `skills/shared/crctl/scripts/lib/summary-projectors.mjs`（本文件不复刻字段清单）。
+
+- **默认面**：命令在注册表内 ⇒ 输出 summary JSON（字段是改造前完整字段集的真子集）；不在表内 ⇒ 与改造前逐字相同。
+- **`--detail`**：布尔型开关（**不消费后随 token**，位置参数不受影响）。加上后，无论命令是否被投影，均输出改造前的**完整字段集**。
+- 未注册的命令收到 `--detail` 等价于现状（不报错）；`--detail` 不参与状态判定、门禁、审批与 CAS。
+- **错误面不变**：退出码与错误码 / 错误体完全未改；`fail()` 路径不进投影。
+- 需要 summary 之外的字段时**显式**加 `--detail`（哪些调用点需要，见 `skills/shared/crctl/scripts/test/caller-contract.test.mjs` 的人工审过白名单）。
+
 ## 读取 / 写入 / 状态推进 / 失败处理
 
 <!-- lint-prompts:ignore --> 描述性：CLI 说明

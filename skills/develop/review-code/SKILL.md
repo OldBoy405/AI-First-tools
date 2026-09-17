@@ -38,7 +38,7 @@ description: 读取 CR 代码 worktree 的代码 diff、验证日志、change-re
 0. **只读 clean 前置（CR-2026-066 FR-2；本 Skill 的第一个动作，在后续任何取证/评审动作之前）**：
 
    ```text
-   r = crctl workspace inspect {cr_id} --workspace <worktree>     # 只读、零写入
+   r = crctl workspace inspect {cr_id} --workspace <worktree> --detail     # 只读、零写入
    require ∀ resources: classification == 'healthy'              # healthy ⇒ dirty=false；还要求 worktree 已注册且 HEAD 在 requirement/{cr_id} 分支
    否则：报告逐仓 classification/dirty 事实与该仓未提交文件清单
          给出「存在未提交内容，请作者先提交」
@@ -120,6 +120,14 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 
 **回修可重验（FR-4）**：逐条给出旧 blocker 的解决状态，禁止只写「已修复」；不得在报告文本或 canonical 字段中重新引入已删除的旧字段名（见 contract-scan 禁止清单）。
 
+### Step 3.1 — 取证完整性：`complete=false` 不得作最终判断（CR-2026-069 AC-16）
+
+工具结果若带 `[output-guard action=truncate complete=false …]` trailer，表示**模型可见正文不等于工具原始正文**（被 OutputGuard 按 policy 收窄）：
+
+- **不得**以该结果作为门禁 / 审批的充分证据；作最终判断前必须继续取证：按 trailer 与正文给出的 `offset/limit` 切片读取，或收窄命令范围重跑；
+- 需要一次性完整正文时，在命令首行加逃生阀 `# output-guard: full reason=<一句话>` 重跑（逃生阀只跳过 OutputGuard 封顶，不影响 controlled-shell / 审批 / 账本写入控制）；
+- `coverage=unavailable`（结构不可安全保留）时结果逐字未改，按原样消费即可，但需在报告中登记该路径未被治理。
+
 ### Step 4 — 平台绑定前置步骤 + 评审判断写临时 payload，canonical 写入交 crctl review-record（S1）
 
 0. **平台绑定前置步骤（FR-B7，CR-2026-053）**：若当前运行具有 Multica task-scoped context（`mat_` task token 注入的 task 上下文）：
@@ -159,7 +167,7 @@ crctl git log --oneline {merge-base}..HEAD --cwd <worktree>
 ### Step 6 — PASS 发布与对账（CR-2026-066 FR-1 / FR-3；仅 `verdict=pass`、`blockers=[]` 且 `test-report.status=pass` 分支）
 
 1. **触发顺序固定、不得调换**：Step 4 的 `crctl review-record` 已落盘 → Step 5 按 `files[]` 提交 → Step 5 的 PASS `advance`（`--to code-reviewing --trigger review-code --expect developing`，既有语义不变）→ 本步的发布前置 → 发布 → 对账 → 报告。
-2. **发布前置**：`crctl workspace inspect {cr_id} --workspace <worktree>`，要求 ∀ resources `classification == 'healthy'`（不干净即中止本次发布，不代作者提交）。
+2. **发布前置**：`crctl workspace inspect {cr_id} --workspace <worktree> --detail`，要求 ∀ resources `classification == 'healthy'`（不干净即中止本次发布，不代作者提交）。
 3. **发布**：调用既有 `push-progress` Skill，`cr_id={cr_id}`、`message=代码评审通过`；要求 `phase == complete`（`changed=false` 幂等重放亦视为成功）。
 4. **对账（发布的必须是被评审的）**：
    - 非 KB 仓：`repositories[].sourceSha` 必须与 `review-annotations/code.yml#release-subjects[].reviewed-source-sha` **逐仓全等**（仓名一一对应；取证用 `crctl git rev-parse HEAD --cwd <resources[].worktreePath>`）。

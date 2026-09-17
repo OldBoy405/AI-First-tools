@@ -1,0 +1,88 @@
+{
+  "schema": "crctl-detail-golden/v1",
+  "command": "crctl status",
+  "argv": [
+    "status",
+    "CR-2026-901"
+  ],
+  "subject": "改造前（未加投影层）的成功出口原样输出",
+  "capturedFrom": "unmodified crctl.mjs",
+  "fieldPaths": [
+    {
+      "path": "cr",
+      "kind": "stable"
+    },
+    {
+      "path": "gateBlockers.requirement-reviewing[]",
+      "kind": "stable"
+    },
+    {
+      "path": "legalNext[].to",
+      "kind": "stable"
+    },
+    {
+      "path": "legalNext[].trigger",
+      "kind": "stable"
+    },
+    {
+      "path": "owners.development.assigned-at",
+      "kind": "volatile"
+    },
+    {
+      "path": "owners.development.id",
+      "kind": "stable"
+    },
+    {
+      "path": "owners.requirement.assigned-at",
+      "kind": "volatile"
+    },
+    {
+      "path": "owners.requirement.id",
+      "kind": "stable"
+    },
+    {
+      "path": "owners.test.assigned-at",
+      "kind": "volatile"
+    },
+    {
+      "path": "owners.test.id",
+      "kind": "stable"
+    },
+    {
+      "path": "source.backlog",
+      "kind": "volatile"
+    },
+    {
+      "path": "source.backlogSha256",
+      "kind": "volatile"
+    },
+    {
+      "path": "source.crMd",
+      "kind": "volatile"
+    },
+    {
+      "path": "source.stateMachine",
+      "kind": "volatile"
+    },
+    {
+      "path": "status",
+      "kind": "stable"
+    }
+  ],
+  "stableValues": {
+    "cr": "CR-2026-901",
+    "owners.development.id": "Ray",
+    "owners.requirement.id": "Ray",
+    "owners.test.id": "Ray",
+    "status": "requirement-reviewing"
+  },
+  "volatileTypes": {
+    "owners.development.assigned-at": "string",
+    "owners.requirement.assigned-at": "string",
+    "owners.test.assigned-at": "string",
+    "source.backlog": "string",
+    "source.backlogSha256": "string",
+    "source.crMd": "string",
+    "source.stateMachine": "string"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "$comment": "Codex hooks 模板。matcher 为正则；非托管 command hook 需经 /hooks 审查-信任（按哈希），脚本变更后需重新信任。{TOOLS_ROOT} 安装时物化为绝对路径。",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{TOOLS_ROOT}/output-guard/adapters/codex/pretooluse-guard.mjs\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{TOOLS_ROOT}/output-guard/adapters/codex/posttooluse-guard.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "$comment": "Claude Code hooks 模板（OutputGuard）。把 hooks 段合并进目标 workspace 的 .claude/settings.json（团队共享）或 settings.local.json（个人）。{TOOLS_ROOT} 安装时物化为 tools 包绝对路径。与 skills/shared/crctl/adapters/claude-code 的模板各自独立、不共用事实源。",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{TOOLS_ROOT}/output-guard/adapters/claude/pretooluse-guard.mjs\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{TOOLS_ROOT}/output-guard/adapters/claude/posttooluse-guard.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}

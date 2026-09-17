@@ -3,10 +3,12 @@
   "manifest": {
     "files": [
       "archive-tx.test.mjs",
+      "caller-contract.test.mjs",
       "check-agents-contract.test.mjs",
       "check-skill-matrix.test.mjs",
       "checkpoint-tx.test.mjs",
       "contract-scan.test.mjs",
+      "crctl-summary.test.mjs",
       "crctl.test.mjs",
       "durable-tx.test.mjs",
       "fault-harness.test.mjs",
@@ -26,10 +28,12 @@
     ],
     "cases": {
       "archive-tx.test.mjs": 24,
+      "caller-contract.test.mjs": 8,
       "check-agents-contract.test.mjs": 1,
       "check-skill-matrix.test.mjs": 8,
       "checkpoint-tx.test.mjs": 23,
       "contract-scan.test.mjs": 17,
+      "crctl-summary.test.mjs": 8,
       "crctl.test.mjs": 224,
       "durable-tx.test.mjs": 10,
       "fault-harness.test.mjs": 8,

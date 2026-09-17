@@ -87,6 +87,9 @@ CR 通过状态机推进。每个关键节点都要由明确的 Skill 写入证�
 | Skill 定义 | `skills/` |
 | Pipeline 编排 | `pipeline-templates/*.pipeline.json` |
 | 受控 shell 约束 | `skills/shared/controlled-shell/rules.json` |
+| Runtime 工具结果裁剪（阈值 / 能力 / 向量） | `output-guard/README.md` → `output-guard/policy.json`、`capabilities.json`、`conformance.json` |
+| crctl 默认输出投影面 | `skills/shared/crctl/scripts/lib/summary-projectors.mjs` |
+| 离线成本与质量度量 | `skills/shared/metrics/scripts/cr-cost.mjs` |
 | 架构地图与硬不变量 | `ARCHITECTURE.md` |
 | 各阶段该做什么 | `skills/{阶段组}/{skill-name}/SKILL.md` |
 

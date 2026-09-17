@@ -1,0 +1,78 @@
+{
+  "schema": "crctl-detail-golden/v1",
+  "command": "crctl advance",
+  "argv": [
+    "advance",
+    "CR-2026-901",
+    "--to",
+    "requirement-approved",
+    "--trigger",
+    "approve-requirement",
+    "--expect",
+    "requirement-reviewing",
+    "--no-commit"
+  ],
+  "subject": "改造前（未加投影层）的成功出口原样输出",
+  "capturedFrom": "unmodified crctl.mjs",
+  "fieldPaths": [
+    {
+      "path": "advanced",
+      "kind": "stable"
+    },
+    {
+      "path": "commit",
+      "kind": "stable"
+    },
+    {
+      "path": "committed",
+      "kind": "stable"
+    },
+    {
+      "path": "cr",
+      "kind": "stable"
+    },
+    {
+      "path": "crMd.path",
+      "kind": "volatile"
+    },
+    {
+      "path": "crMd.updated",
+      "kind": "stable"
+    },
+    {
+      "path": "files[]",
+      "kind": "volatile"
+    },
+    {
+      "path": "from",
+      "kind": "stable"
+    },
+    {
+      "path": "outbox",
+      "kind": "volatile"
+    },
+    {
+      "path": "to",
+      "kind": "stable"
+    },
+    {
+      "path": "trigger",
+      "kind": "stable"
+    }
+  ],
+  "stableValues": {
+    "advanced": true,
+    "commit": "embedded：由调用方在同一事务中提交上述文件",
+    "committed": false,
+    "cr": "CR-2026-901",
+    "crMd.updated": true,
+    "from": "requirement-reviewing",
+    "to": "requirement-approved",
+    "trigger": "approve-requirement"
+  },
+  "volatileTypes": {
+    "crMd.path": "string",
+    "files[]": "string",
+    "outbox": "string"
+  }
+}
