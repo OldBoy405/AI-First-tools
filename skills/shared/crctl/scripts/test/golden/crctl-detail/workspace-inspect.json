@@ -1,0 +1,77 @@
+{
+  "schema": "crctl-detail-golden/v1",
+  "command": "crctl workspace inspect",
+  "argv": [
+    "workspace",
+    "inspect",
+    "CR-2026-901"
+  ],
+  "subject": "改造前（未加投影层）的成功出口原样输出",
+  "capturedFrom": "unmodified crctl.mjs",
+  "fieldPaths": [
+    {
+      "path": "changed",
+      "kind": "stable"
+    },
+    {
+      "path": "cr",
+      "kind": "stable"
+    },
+    {
+      "path": "mode",
+      "kind": "stable"
+    },
+    {
+      "path": "op",
+      "kind": "stable"
+    },
+    {
+      "path": "operationalWorkspaceError.code",
+      "kind": "stable"
+    },
+    {
+      "path": "operationalWorkspaceError.message",
+      "kind": "volatile"
+    },
+    {
+      "path": "resources[].branch",
+      "kind": "volatile"
+    },
+    {
+      "path": "resources[].classification",
+      "kind": "stable"
+    },
+    {
+      "path": "resources[].dirty",
+      "kind": "stable"
+    },
+    {
+      "path": "resources[].localBranch",
+      "kind": "stable"
+    },
+    {
+      "path": "resources[].remoteBranch",
+      "kind": "stable"
+    },
+    {
+      "path": "resources[].repo",
+      "kind": "stable"
+    },
+    {
+      "path": "resources[].worktreePath",
+      "kind": "volatile"
+    }
+  ],
+  "stableValues": {
+    "changed": false,
+    "cr": "CR-2026-901",
+    "mode": "inspect",
+    "op": "workspace-inspect",
+    "operationalWorkspaceError.code": "CR_WORKTREE_STATUS_MISSING"
+  },
+  "volatileTypes": {
+    "operationalWorkspaceError.message": "string",
+    "resources[].branch": "string",
+    "resources[].worktreePath": "string"
+  }
+}

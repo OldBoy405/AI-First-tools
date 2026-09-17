@@ -1,0 +1,27 @@
+{
+  "$comment": "Qoder hooks 模板（OutputGuard）。三级 .lingma/settings.json（用户级 / 项目级 / 项目本地）。{TOOLS_ROOT} 安装时物化为绝对路径。",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Shell|run_in_terminal",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{TOOLS_ROOT}/output-guard/adapters/qoder/pretooluse-guard.mjs\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Shell|run_in_terminal",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"{TOOLS_ROOT}/output-guard/adapters/qoder/posttooluse-guard.mjs\""
+          }
+        ]
+      }
+    ]
+  }
+}

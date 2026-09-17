@@ -1,0 +1,90 @@
+{
+  "schema": "output-guard/capabilities/v1",
+  "$comment": "Runtime 能力的唯一声明源（SDD §2.2.2）。level 是声明，真实性由 conformance.json 的 full 向量逐 Adapter 验证；preserve 的取值闭包 {present, absent-by-runtime}，absent-by-runtime 表示该 Runtime 的结果结构不存在该字段（不是被丢弃），见 SDD §4.2 / D-6。任一 Runtime 由 full 降级即 AC-4 未达成，须回人工 scope amendment。",
+  "enableOrder": ["pi", "claude", "codebuddy", "qoder", "codex"],
+  "runtimes": {
+    "pi": {
+      "level": "full",
+      "preHook": "tool_call",
+      "postHook": "tool_result",
+      "startRecord": "extension-load",
+      "preserve": {
+        "toolName": "present",
+        "toolCallId": "present",
+        "isError": "present",
+        "exitCode": "absent-by-runtime"
+      },
+      "paths": [
+        { "id": "bash", "coverage": "full" },
+        { "id": "read", "coverage": "full" }
+      ]
+    },
+    "claude": {
+      "level": "full",
+      "preHook": "PreToolUse",
+      "postHook": "PostToolUse",
+      "startRecord": "session-start",
+      "preserve": {
+        "toolName": "present",
+        "toolCallId": "present",
+        "isError": "absent-by-runtime",
+        "exitCode": "absent-by-runtime"
+      },
+      "paths": [
+        { "id": "Bash", "coverage": "full" },
+        { "id": "Read", "coverage": "full" },
+        { "id": "Grep", "coverage": "full" }
+      ]
+    },
+    "codebuddy": {
+      "level": "full",
+      "preHook": "PreToolUse",
+      "postHook": "PostToolUse",
+      "startRecord": "session-start",
+      "preserve": {
+        "toolName": "present",
+        "toolCallId": "present",
+        "isError": "absent-by-runtime",
+        "exitCode": "absent-by-runtime"
+      },
+      "paths": [
+        { "id": "Bash", "coverage": "full" },
+        { "id": "Read", "coverage": "full" }
+      ]
+    },
+    "qoder": {
+      "level": "full",
+      "preHook": "PreToolUse",
+      "postHook": "PostToolUse",
+      "startRecord": "none",
+      "preserve": {
+        "toolName": "present",
+        "toolCallId": "present",
+        "isError": "absent-by-runtime",
+        "exitCode": "absent-by-runtime"
+      },
+      "paths": [
+        { "id": "run_in_terminal", "coverage": "full" },
+        { "id": "read_file", "coverage": "full" }
+      ]
+    },
+    "codex": {
+      "level": "partial",
+      "preHook": "PreToolUse",
+      "postHook": "PostToolUse",
+      "startRecord": "session-start",
+      "preserve": {
+        "toolName": "present",
+        "toolCallId": "present",
+        "isError": "absent-by-runtime",
+        "exitCode": "absent-by-runtime"
+      },
+      "paths": [
+        { "id": "Bash", "coverage": "partial" },
+        { "id": "apply_patch", "coverage": "full" },
+        { "id": "hosted-WebSearch", "coverage": "unavailable", "uncovered": true },
+        { "id": "codex-cloud-tasks", "coverage": "unavailable", "uncovered": true }
+      ]
+    }
+  }
+}

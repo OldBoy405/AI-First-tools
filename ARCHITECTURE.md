@@ -16,7 +16,7 @@ updated: "2026-08-05T15:10:00+08:00"
 
 ## 1. 鸟瞰（Bird's Eye View）
 
-本包是 `multica-ai` 生态之外的独立方法论层：9 Agent / 56 Skill / 8 Pipeline，驱动使用方仓库（如 AI First Platform）的 CR（Change Request）全流程，配合 `crctl` 状态机 CLI 做状态与账本的单一权威写入。本包自身不含业务代码，只含**提示词合约（Skill）**、**流程编排（Pipeline）**与**一个可执行治理工具（crctl）**。
+本包是 `multica-ai` 生态之外的独立方法论层：9 Agent / 56 Skill / 8 Pipeline，驱动使用方仓库（如 AI First Platform）的 CR（Change Request）全流程，配合 `crctl` 状态机 CLI 做状态与账本的单一权威写入。本包自身不含业务代码，只含**提示词合约（Skill）**、**流程编排（Pipeline）**、**一个可执行治理工具（crctl）**，以及两个只读/旁路执行面：`output-guard/`（Runtime 侧工具结果确定性裁剪，CR-2026-069）与 `skills/shared/metrics/`（离线成本与质量度量，CR-2026-069）。
 
 核心数据流：`CR 需求输入` → requirement-authoring → architecture-design → code-implementation → feature-writeback（各 Pipeline 依次驱动，状态权威写入 `{workspace}/change-requests/{CR-ID}/cr.md`）→ `specs/ + delivery/` 累积基线
 
@@ -65,6 +65,14 @@ CR 状态机（15 具名状态 + 注册前 `(new)`，**28 条声明转移、wild
 ### `crctl/adapters/`
 
 claude-code（SessionStart/PreCompact 注入）与 CI 两类适配器，只经 crctl 子命令读取状态/门禁结果，不直接解析账本文件。
+
+### `output-guard/`
+
+Runtime 侧的工具结果裁剪执行面（CR-2026-069 FR-1）：`core.mjs` 纯函数 + `policy.json` / `capabilities.json` / `conformance.json` 三份唯一事实源 + 五个 Runtime 的 `adapters/<runtime>/` hook 入口与安装模板 + 只读启动检查 `scripts/check-install.mjs`。与既有 `skills/shared/crctl/adapters/` **分目录、分模板、分安装入口**；唯一联合点是 Managed scope 下 multica daemon 对 claude 的单写入点合成。零第三方依赖，只经相对说明符读取同一 Release 的 Core 与 policy。
+
+### `skills/shared/metrics/`
+
+离线成本与质量度量面（CR-2026-069 FR-8）：`scripts/cr-cost.mjs` 的 `baseline` / `after` / `replay` / `verify-selection` 四个子命令 + `scripts/lib/{sessions,aggregate,select,render}.mjs` 纯函数分层。**只读**三仓与 session 目录，唯一写入面是调用方显式指定的 `--out`；不推进 CR、不参与门禁、不写状态与账本。
 
 ## 4. 分层与依赖方向
 

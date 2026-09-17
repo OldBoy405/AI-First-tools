@@ -1,0 +1,75 @@
+{
+  "schema": "crctl-detail-golden/v1",
+  "command": "crctl review-record",
+  "argv": [
+    "review-record",
+    "CR-2026-902",
+    "--stage",
+    "tech-design",
+    "--from",
+    "<fixture>/.crctl/tmp/review-tech-design.yml"
+  ],
+  "subject": "改造前（未加投影层）的成功出口原样输出",
+  "capturedFrom": "unmodified crctl.mjs",
+  "fieldPaths": [
+    {
+      "path": "attempt.bumped",
+      "kind": "stable"
+    },
+    {
+      "path": "attempt.current",
+      "kind": "stable"
+    },
+    {
+      "path": "attempt.max",
+      "kind": "stable"
+    },
+    {
+      "path": "cr",
+      "kind": "stable"
+    },
+    {
+      "path": "file",
+      "kind": "volatile"
+    },
+    {
+      "path": "files[]",
+      "kind": "volatile"
+    },
+    {
+      "path": "op",
+      "kind": "stable"
+    },
+    {
+      "path": "route",
+      "kind": "stable"
+    },
+    {
+      "path": "stage",
+      "kind": "stable"
+    },
+    {
+      "path": "trace",
+      "kind": "volatile"
+    },
+    {
+      "path": "verdict",
+      "kind": "stable"
+    }
+  ],
+  "stableValues": {
+    "attempt.bumped": false,
+    "attempt.current": 0,
+    "attempt.max": 3,
+    "cr": "CR-2026-902",
+    "op": "review-record",
+    "route": "pass",
+    "stage": "tech-design",
+    "verdict": "pass"
+  },
+  "volatileTypes": {
+    "file": "string",
+    "files[]": "string",
+    "trace": "string"
+  }
+}

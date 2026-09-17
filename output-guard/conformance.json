@@ -1,0 +1,154 @@
+{
+  "schema": "output-guard/conformance/v1",
+  "$comment": "跨 Adapter 共享测试向量（SDD §2.2.3）。四个 kind 与 AC-4/AC-6/AC-8/AC-3 一一对应；declaredVectorCount 由 conformance.test.mjs 断言与实际执行向量数相等（本 CR 唯一用于新增测试面的计数棘轮）。input.op 选定被驱动的 Core 纯函数，input.args 为该函数的实参。",
+  "vectors": [
+    {
+      "id": "esc-01",
+      "kind": "escape-hatch",
+      "input": { "op": "parseEscapeHatch", "args": { "firstLine": "# output-guard: full reason=need the raw tail once" } },
+      "expect": { "state": "valid" }
+    },
+    {
+      "id": "esc-02",
+      "kind": "escape-hatch",
+      "input": { "op": "parseEscapeHatch", "args": { "firstLine": "# output-guard: full reason=" } },
+      "expect": { "state": "absent" }
+    },
+    {
+      "id": "esc-03",
+      "kind": "escape-hatch",
+      "input": { "op": "parseEscapeHatch", "args": { "firstLine": "grep -rn needle ." } },
+      "expect": { "state": "absent" }
+    },
+    {
+      "id": "dec-01",
+      "kind": "decision",
+      "input": {
+        "op": "parseCall",
+        "args": { "runtime": "pi", "toolName": "bash", "toolInput": { "command": "grep -rn needle ." } }
+      },
+      "expect": { "action": "block", "family": "grep" }
+    },
+    {
+      "id": "dec-02",
+      "kind": "decision",
+      "input": {
+        "op": "parseCall",
+        "args": { "runtime": "claude", "toolName": "Bash", "toolInput": { "command": "cat src/big.mjs" } }
+      },
+      "expect": { "action": "rewrite", "family": "read" }
+    },
+    {
+      "id": "dec-03",
+      "kind": "decision",
+      "input": {
+        "op": "parseCall",
+        "args": { "runtime": "pi", "toolName": "bash", "toolInput": { "command": "grep -rn needle . | head -5" } }
+      },
+      "expect": { "action": "passthrough", "ruleId": "not-a-family-or-indeterminate" }
+    },
+    {
+      "id": "dec-04",
+      "kind": "decision",
+      "policyPatch": { "thresholds": { "resultTokensCap": 4 } },
+      "input": {
+        "op": "evaluateResult",
+        "args": {
+          "runtime": "qoder",
+          "toolName": "run_in_terminal",
+          "toolCallId": "call-dec-04",
+          "isError": false,
+          "structure": "content-parts",
+          "body": "L01\nL02\nL03\nL04\nL05\nL06\nL07\nL08\nL09\nL10\nL11\nL12\nL13\nL14\nL15\nL16\nL17\nL18\nL19\nL20\nL21\nL22\nL23\nL24\nL25\nL26\nL27\nL28\nL29\nL30\nL31\nL32\nL33\nL34\nL35\nL36\nL37\nL38\nL39\nL40"
+        }
+      },
+      "expect": { "action": "truncate", "complete": false }
+    },
+    {
+      "id": "deg-01",
+      "kind": "degradation",
+      "input": {
+        "op": "evaluateResult",
+        "args": { "runtime": "codex", "toolName": "Bash", "body": "short body", "structure": "text" }
+      },
+      "expect": { "action": "unavailable", "coverage": "unavailable" }
+    },
+    {
+      "id": "idem-01",
+      "kind": "idempotence",
+      "policyPatch": { "thresholds": { "resultTokensCap": 4 } },
+      "input": {
+        "op": "idempotence",
+        "args": {
+          "policyVersion": "v1",
+          "ruleId": "truncate-generic",
+          "runtime": "codebuddy",
+          "toolName": "Bash",
+          "normalizedInput": { "command": "find . -name needle" },
+          "result": {
+            "runtime": "codebuddy",
+            "toolName": "Bash",
+            "toolCallId": "call-idem-01",
+            "isError": false,
+            "structure": "text",
+            "body": "N1\nN2\nN3\nN4\nN5\nN6\nN7\nN8\nN9\nN10\nN11\nN12"
+          }
+        }
+      },
+      "expect": { "secondRunEqualsFirst": true }
+    },
+    {
+      "id": "neg-01",
+      "kind": "escape-hatch",
+      "input": {
+        "op": "parseCall",
+        "args": {
+          "runtime": "claude",
+          "toolName": "Bash",
+          "toolInput": { "command": "# output-guard: full reason=raw git needed\ngit commit -m probe" }
+        }
+      },
+      "expect": { "action": "passthrough", "ruleId": "escape-hatch" }
+    },
+    {
+      "id": "neg-02",
+      "kind": "escape-hatch",
+      "input": {
+        "op": "parseCall",
+        "args": {
+          "runtime": "claude",
+          "toolName": "Bash",
+          "toolInput": { "command": "# output-guard: full reason=raw write needed\ncat > change-requests/_backlog.yml" }
+        }
+      },
+      "expect": { "action": "passthrough", "ruleId": "escape-hatch" }
+    },
+    {
+      "id": "neg-03",
+      "kind": "escape-hatch",
+      "input": {
+        "op": "parseCall",
+        "args": {
+          "runtime": "claude",
+          "toolName": "Bash",
+          "toolInput": { "command": "# output-guard: full reason=approval write needed\ncat > change-requests/CR-1/approval.yml" }
+        }
+      },
+      "expect": { "action": "passthrough", "ruleId": "escape-hatch" }
+    },
+    {
+      "id": "neg-04",
+      "kind": "escape-hatch",
+      "input": {
+        "op": "parseCall",
+        "args": {
+          "runtime": "claude",
+          "toolName": "Bash",
+          "toolInput": { "command": "# output-guard: full reason=ledger write needed\ncat > change-requests/CR-1/review-annotations/code.yml" }
+        }
+      },
+      "expect": { "action": "passthrough", "ruleId": "escape-hatch" }
+    }
+  ],
+  "declaredVectorCount": 13
+}

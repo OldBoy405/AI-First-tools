@@ -1,0 +1,32 @@
+{
+  "policyVersion": "v1",
+  "$comment": "FR-1 阈值与规则的唯一事实源（SDD §2.2.1）。thresholds 五值由 CR-2026-069 TASK-01 的 baseline 实测分布产出（resultTokensCap/lineWindow/maxHits = p90；headLines = p50；tailLines = p25），代码内零阈值常量。",
+  "families": [
+    { "id": "grep", "kind": "search", "match": ["grep", "rg"] },
+    { "id": "find", "kind": "list", "match": ["find", "Get-ChildItem"] },
+    { "id": "read", "kind": "read", "match": ["cat", "Get-Content"] }
+  ],
+  "thresholds": {
+    "resultTokensCap": 2011,
+    "lineWindow": 138,
+    "maxHits": 66,
+    "headLines": 21,
+    "tailLines": 6
+  },
+  "truncation": {
+    "search": { "keep": "unique-file-list", "extra": "hit-count", "hint": "narrow", "fold": "same-file-hits-folded" },
+    "list": { "keep": "unique-paths-sorted", "extra": "entry-count", "hint": "narrow" },
+    "read": { "keep": "contiguous-line-window", "extra": "original-line-numbers", "hint": "nextOffset" },
+    "generic": { "keep": "head-lines", "extra": "tail-lines", "hint": "omitted" }
+  },
+  "hints": {
+    "narrow": "收窄范围后重试：按目录或文件扩展名限定 {family}（上限 {cap}）；或把首行写成 {marker} reason=<一句话> 一次性取全文",
+    "nextOffset": "继续读取：offset={nextOffset} limit={window}",
+    "omitted": "…已省略 {omitted} 行…"
+  },
+  "escapeHatch": {
+    "marker": "# output-guard: full",
+    "reasonMaxLength": 120,
+    "singleLine": true
+  }
+}
