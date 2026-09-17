@@ -12,6 +12,8 @@ daemon 侧对 CodeBuddy **只写记忆文件与 skills 发现目录**，**没有
 
 安装动作 = 把 [settings.template.json](settings.template.json) 的 `hooks` 段**并入**目标配置并物化 `{TOOLS_ROOT}`；与既有用户 hooks 段取并集，不得覆盖整份文件。本工具不做自动合并。
 
+模板的 `matcher` 覆盖 `capabilities.json` 中本 Runtime **已声明的全部路径**（含 `Read` 这类非 shell 路径：它不走命令族判定，封顶由 Post 面承担）；`matcher` 与声明的双向一致性由 `test/adapters-contract.test.mjs` 机械核对。
+
 ## 2. 生效与验证
 
 配置在会话启动时快照 ⇒ 需**重启到新会话**生效。Windows 下 hook command 经 Git Bash 执行，模板命令形态为 `node "<绝对路径>"`，不依赖 `cmd`/`PowerShell` 内建。

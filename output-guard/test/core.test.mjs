@@ -207,6 +207,69 @@ test('A5/§3.8：reason 四值闭包且 renderTrailer 归一为单行', () => {
   assert.equal(renderTrailer({ trailer: '' }), '');
 });
 
+test('A3/B-2：读取窗口起点非 1 ⇒ 行号与续读锚点都锚在真实文件行号（不得重编号）', () => {
+  const policy = withCap(4);
+  const body = Array.from({ length: 200 }, (_, i) => 'file-line-' + String(500 + i)).join('\n');
+  const base = { runtime: 'pi', toolName: 'read', toolCallId: 'c-offset', isError: false, structure: 'content-parts', body };
+  const at500 = evaluateResult({ ...base, offset: 500 }, policy);
+  assert.equal(at500.kind, 'read');
+  const first = at500.body.split('\n')[0];
+  assert.ok(first.startsWith('500\tfile-line-500'), '窗口起点 500 的首行必须为 500\\tfile-line-500，实际 ' + JSON.stringify(first));
+  assert.ok(at500.body.includes('offset=' + String(500 + policy.thresholds.lineWindow) + ' limit=' + String(policy.thresholds.lineWindow)), '续读锚点 = 窗口起点 + kept');
+  // 缺省（无 offset / 非法 offset）行为与改造前逐字相同：首行 1、续读 1 + lineWindow
+  for (const d of [evaluateResult(base, policy), evaluateResult({ ...base, offset: 0 }, policy), evaluateResult({ ...base, offset: 1.5 }, policy)]) {
+    assert.ok(d.body.split('\n')[0].startsWith('1\t'), '缺省窗口起点必须是第 1 行');
+    assert.ok(d.body.includes('offset=' + String(1 + policy.thresholds.lineWindow) + ' '), '缺省续读锚点 = 1 + kept');
+  }
+});
+
+test('A2/B-1：Post 面回放同一调用的逃生阀 ⇒ 无 trailer、无回填、正文逐字（无跨调用状态）', () => {
+  const policy = withCap(4);
+  const body = Array.from({ length: 40 }, (_, i) => 'RAW' + String(i)).join('\n');
+  const base = { runtime: 'claude', toolName: 'Bash', toolCallId: 'c-esc', isError: false, structure: 'text', body };
+  const escaped = evaluateResult({ ...base, callCommand: '# output-guard: full reason=raw once\ncat src/big.mjs' }, policy);
+  assert.equal(escaped.action, 'passthrough');
+  assert.equal(escaped.ruleId, 'escape-hatch');
+  assert.equal(escaped.trailer, '');
+  assert.equal(escaped.body, body);
+  assert.equal(escaped.keptTokens, estimateTokens(body));
+  assert.equal(escaped.coverage, 'full');
+  // 不合法标记 ⇒ 视为不存在：该调用按普通路径裁剪（不新增第二套错误码）
+  const bogus = evaluateResult({ ...base, callCommand: '# output-guard: full reason=\ncat src/big.mjs' }, policy);
+  assert.equal(bogus.action, 'truncate');
+  // 非 shell 工具无逃生阀面（§4.1 步骤 3）
+  const readTool = evaluateResult({ ...base, toolName: 'Read', callCommand: '# output-guard: full reason=x\ncat f' }, policy);
+  assert.notEqual(readTool.action, 'passthrough');
+  // 跨调用零状态：不带 callCommand 的同类调用仍被裁剪
+  const plain = evaluateResult(base, policy);
+  assert.equal(plain.action, 'truncate');
+});
+
+test('A3/B-3：结果类型以调用级命令族优先（shell 读取族/列举族/搜索族各归其算法）', () => {
+  const policy = withCap(4);
+  const codeBody = Array.from({ length: 200 }, (_, i) => 'const alpha' + String(i + 1) + ' = ' + String(i + 1) + ';').join('\n');
+  const base = { runtime: 'claude', toolName: 'Bash', toolCallId: 'c-kind', isError: false, structure: 'text', body: codeBody };
+  // 同一条正文：无 callCommand 时正文推断为 generic；带 cat ⇒ 读取面算法
+  assert.equal(evaluateResult(base, policy).kind, 'generic');
+  assert.equal(evaluateResult({ ...base, callCommand: 'cat output-guard/core.mjs' }, policy).kind, 'read');
+  assert.equal(evaluateResult({ ...base, callCommand: 'Get-Content ./a.mjs' }, policy).kind, 'read');
+  const pathBody = Array.from({ length: 200 }, (_, i) => 'src/mod' + String(i) + '.mjs').join('\n');
+  assert.equal(evaluateResult({ ...base, body: pathBody, callCommand: 'find . -name needle' }, policy).kind, 'list');
+  const searchBody = Array.from({ length: 60 }, (_, i) => 'src/a.mjs:' + String(i + 1) + ':needle').join('\n');
+  assert.equal(evaluateResult({ ...base, body: searchBody, callCommand: 'grep -rn needle .' }, policy).kind, 'search');
+  // 不确定命令（管道）不夺取判定：回落到正文形态推断
+  assert.equal(evaluateResult({ ...base, callCommand: 'cat output-guard/core.mjs | head -5' }, policy).kind, 'generic');
+});
+
+test('A2/§2.2.4：trailer 数值字段形态冻结（original≈/kept≈ 为整数 + 字面 k）', () => {
+  const d = evaluateResult(
+    { runtime: 'pi', toolName: 'bash', toolCallId: 'c-t', isError: false, body: Array.from({ length: 40 }, (_, i) => 'x' + String(i)).join('\n'), structure: 'text' },
+    withCap(4),
+  );
+  assert.match(d.trailer, /original≈\d+k kept≈\d+k reason=output-cap/, 'trailer 数值口径：整数 + 字面 k（k = ×1000 近似表示）');
+  assert.ok(!/≈\d+k\)/.test(d.trailer));
+});
+
 test('策略只经入参进入 Core：同一正文在不同阈值下结果不同（无内建常量）', () => {
   const body = Array.from({ length: 40 }, (_, i) => 'l' + String(i)).join('\n');
   const strict = withCap(2);

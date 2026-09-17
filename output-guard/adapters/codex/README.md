@@ -4,7 +4,7 @@ Codex 的结果回填不是透明替换，走 `PostToolUse` 的 block/feedback �
 
 ## 1. 安装（宿主级 / 项目级，显式一次）
 
-把 [hooks.json.template](hooks.json.template) 的 `hooks` 段并入 `~/.codex/hooks.json`（用户级）或 `<repo>/.codex/hooks.json`（项目级）；`config.toml` 的 `[hooks]` 表与其等效。matcher 为正则。物化 `{TOOLS_ROOT}` 为绝对路径。
+把 [hooks.json.template](hooks.json.template) 的 `hooks` 段并入 `~/.codex/hooks.json`（用户级）或 `<repo>/.codex/hooks.json`（项目级）；`config.toml` 的 `[hooks]` 表与其等效。matcher 为正则。物化 `{TOOLS_ROOT}` 为绝对路径。模板的 `matcher` 覆盖 `capabilities.json` 中本 Runtime **已声明的已覆盖路径**（含 `apply_patch`；它不走命令族判定，封顶由 Post 面承担）；`matcher` 与声明的双向一致性由 `test/adapters-contract.test.mjs` 机械核对。
 
 ## 2. 信任步骤（前置，不可跳过）
 

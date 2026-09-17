@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Shell|run_in_terminal",
+        "matcher": "Bash|Read|Grep",
         "hooks": [
           {
             "type": "command",
@@ -14,7 +14,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|Shell|run_in_terminal",
+        "matcher": "Bash|Read|Grep",
         "hooks": [
           {
             "type": "command",

@@ -80,6 +80,11 @@ export async function handleToolResult(event) {
   const body = bodyOf(event.content);
   // 不伪造 Runtime 未提供的字段：缺失即不传出（由 Core 的可保持性检查裁定）。
   const input = { runtime: RUNTIME, toolName: event.toolName, structure: 'content-parts', body };
+  // 本调用自身的入参（core.mjs 的 ResultInput JSDoc：callCommand / offset）：逃生阀首行判定与读取窗口起点由 Core 消费。
+  // `tool_result` 事件带本调用 input（V-1，docs/extensions.md L842-855）；只读该事件字段，无跨调用状态（AC-6）。
+  const callInput = event.input && typeof event.input === 'object' ? event.input : {};
+  if (typeof callInput.command === 'string' && callInput.command) input.callCommand = callInput.command;
+  if (Number.isInteger(callInput.offset) && callInput.offset > 0) input.offset = callInput.offset;
   if (event.toolCallId !== undefined) input.toolCallId = String(event.toolCallId);
   if (event.isError !== undefined) input.isError = Boolean(event.isError);
   if (event.exitCode !== undefined) input.exitCode = event.exitCode;

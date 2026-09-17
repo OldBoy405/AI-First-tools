@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Shell|run_in_terminal",
+        "matcher": "Bash|apply_patch",
         "hooks": [
           {
             "type": "command",
@@ -14,7 +14,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|Shell|run_in_terminal",
+        "matcher": "Bash|apply_patch",
         "hooks": [
           {
             "type": "command",

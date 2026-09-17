@@ -231,11 +231,13 @@ function truncateList(lines, policy) {
   return { body, kept: shown.length, dropped: Math.max(0, uniq.length - shown.length), hint: policy.hints.narrow };
 }
 
-function truncateRead(lines, policy) {
+// windowStart = 本调用读取窗口的起始文件行号（§4.3 读取行不变量：行号必须是原始文件行号，不得重编号）。
+// 无窗口起点信息时缺省 1（普通 `cat`/`Get-Content` 从第 1 行开始输出）；续读锚点 = windowStart + kept。
+function truncateRead(lines, policy, windowStart) {
   const window = policy.thresholds.lineWindow;
   const shown = lines.slice(0, window);
-  const numbered = shown.map((l, i) => String(i + 1) + '\t' + l);
-  const next = shown.length + 1;
+  const numbered = shown.map((l, i) => String(windowStart + i) + '\t' + l);
+  const next = windowStart + shown.length;
   const body = numbered.join('\n') + '\n' + hintText(policy.hints.nextOffset, hintVars(policy, { nextOffset: next, window }));
   return { body, kept: shown.length, dropped: Math.max(0, lines.length - shown.length), hint: policy.hints.nextOffset };
 }
@@ -269,8 +271,54 @@ function unavailableDecision(input, reason) {
   };
 }
 
+/**
+ * 调用级终态回放（§4.2 步骤②）：同一 payload 内本调用的原始命令首行为合法逃生阀 ⇒ 跳过全部封顶。
+ * Post 面与 Pre 面共用同一判定函数与同一「无跨调用状态」约束（AC-6）：命令文本只来自本调用自身入参。
+ * 非 shell 工具（如 read 工具）不存在逃生阀（§4.1 步骤 3）。
+ */
+function callEscapeHatch(input, policy) {
+  if (!SHELL_TOOLS.includes(String(input.toolName || ''))) return { state: 'absent' };
+  const command = normalizeText(input.callCommand);
+  if (!command.trim()) return { state: 'absent' };
+  return parseEscapeHatch(command.split('\n')[0], policy);
+}
+
+/**
+ * 结果类型判定（§4.3 映射）：调用级命令族优先（与 Pre 面同一 classifyFamily，只取已判定族），
+ * 其次结果工具名与正文形态推断（inferKind）。族判定不可得时行为与改造前逐字相同。
+ */
+function resultKind(input, body, policy) {
+  if (input.kind && typeof input.kind === 'string') return input.kind;
+  const fam = classifyFamily(normalizeText(input.callCommand), policy);
+  if (fam.family && fam.kind && fam.determinate) return fam.kind;
+  return inferKind(body, input.toolName);
+}
+
+/**
+ * A2 Post 面裁决（§4.2 步骤④）。`ResultInput` 的实例契约以本 JSDoc 为落点（SDD §3.2 的类型块是结构化草图，原话「实施时以 JSDoc 承载」）：
+ *   { runtime, toolName, toolCallId, isError, exitCode?, body, structure }  ← SDD §3.2 已宣告字段（名字与语义未变）
+ *   kind?        本调用已判定的结果类型（显式传入时优先于任何推断，§4.3）
+ *   callCommand? 本调用原始命令文本（仅 shell 工具传入）：§4.2 步骤② 在 Post 面的回放依据（逃生阀）
+ *   offset?      本调用读取窗口的起始文件行号（正整数，缺省 1）：§4.3 读取行的行号锚点
+ * 三个可选字段均为**同一次调用、同一个 payload** 的映射结果，不引入任何跨调用状态（AC-6）。
+ */
 export function evaluateResult(input, policy) {
   const has = (k) => Object.prototype.hasOwnProperty.call(input, k) && input[k] !== undefined && input[k] !== null;
+  const body = normalizeText(input.body);
+  // 步骤② 的 Post 面回放（§4.2「命中即终态」）：逃生阀 ⇒ action=passthrough，跳过全部封顶。
+  // 不写 trailer、不改正文（判断先于可保持性检查：不裁剪即无需回填）。
+  if (callEscapeHatch(input, policy).state === 'valid') {
+    return {
+      action: 'passthrough',
+      ruleId: 'escape-hatch',
+      complete: true,
+      coverage: 'full',
+      body,
+      trailer: '',
+      keptTokens: estimateTokens(body),
+      droppedTokens: 0,
+    };
+  }
   const caps = policy.capabilities || null;
   const preserve = caps && caps.runtimes && caps.runtimes[input.runtime] ? caps.runtimes[input.runtime].preserve : null;
   // 可保持性检查（AC-15 唯一判据）：present 必保留；absent-by-runtime 不作要求（D-6）。
@@ -285,7 +333,6 @@ export function evaluateResult(input, policy) {
   if (preserve && preserve.exitCode === 'present' && !has('exitCode')) {
     return unavailableDecision(input, 'structure-not-preserved');
   }
-  const body = normalizeText(input.body);
   if (estimateTokens(body) <= policy.thresholds.resultTokensCap) {
     return {
       action: 'passthrough',
@@ -299,11 +346,12 @@ export function evaluateResult(input, policy) {
     };
   }
   const lines = body.split('\n');
-  const kind = input.kind && typeof input.kind === 'string' ? input.kind : inferKind(body, input.toolName);
+  const kind = resultKind(input, body, policy);
+  const windowStart = Number.isInteger(input.offset) && input.offset > 0 ? input.offset : 1;
   const picked =
     kind === 'search' ? truncateSearch(lines, policy)
       : kind === 'list' ? truncateList(lines, policy)
-        : kind === 'read' ? truncateRead(lines, policy)
+        : kind === 'read' ? truncateRead(lines, policy, windowStart)
           : truncateGeneric(lines, policy);
   const out = picked.body + '\n' + hintText(policy.hints.narrow, hintVars(policy, { family: kind, cap: policy.thresholds.maxHits }));
   const original = estimateTokens(body);

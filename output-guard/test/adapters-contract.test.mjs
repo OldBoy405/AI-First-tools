@@ -64,6 +64,10 @@ function prePayload(rt, args) {
 }
 
 function postPayload(rt, args) {
+  // 本调用自身的入参（SDD §3.2 的 callCommand/offset）：逃生阀首行与读取窗口起点都在同一 payload 内。
+  const toolInput = {};
+  if (typeof args.callCommand === 'string') toolInput.command = args.callCommand;
+  if (Number.isInteger(args.offset)) toolInput.offset = args.offset;
   // 不补造 Runtime 未提供的字段：向量缺 call-id 时必须原样缺（可保持性检查的可达面）。
   if (rt === 'pi') {
     const payload = {
@@ -71,6 +75,7 @@ function postPayload(rt, args) {
       toolName: args.toolName,
       isError: Boolean(args.isError),
       content: [{ type: 'text', text: args.body }],
+      input: toolInput,
     };
     if (args.toolCallId !== undefined) payload.toolCallId = args.toolCallId;
     return payload;
@@ -78,11 +83,25 @@ function postPayload(rt, args) {
   const payload = {
     hook_event_name: 'PostToolUse',
     tool_name: args.toolName,
-    tool_input: {},
+    tool_input: toolInput,
     tool_response: { content: [{ type: 'text', text: args.body }] },
   };
   if (args.toolCallId !== undefined) payload.tool_use_id = args.toolCallId;
   return payload;
+}
+
+/** probe：对回填/裁剪后正文的机械断言，与 conformance.test.mjs 同一口径（无跨文件依赖）。 */
+function assertProbe(body, vector, label) {
+  const probe = vector.probe;
+  if (!probe) return;
+  const text = typeof body === 'string' ? body : '';
+  if (probe.bodyEquals !== undefined) assert.equal(text, probe.bodyEquals, label + ' probe.bodyEquals 不等');
+  if (probe.bodyFirstLinePrefix !== undefined) {
+    const first = text.split('\n')[0];
+    assert.ok(first.startsWith(probe.bodyFirstLinePrefix), label + ' probe.bodyFirstLinePrefix：首行 ' + JSON.stringify(first));
+  }
+  for (const s of probe.bodyIncludes || []) assert.ok(text.includes(s), label + ' probe.bodyIncludes 缺 ' + s);
+  for (const s of probe.bodyExcludes || []) assert.ok(!text.includes(s), label + ' probe.bodyExcludes 命中 ' + s);
 }
 
 function drive(rt, phase, payload, env) {
@@ -155,7 +174,7 @@ test('ac-02 逐 Runtime 执行同一组 Pre 向量（逃生阀 / 命令族 / 不
   }
 });
 
-test('ac-03 逐 Runtime 执行同一组 Post 向量（裁剪与不可保持降级）', () => {
+test('ac-03 逐 Runtime 执行同一组 Post 向量（裁剪、无回填与不可保持降级）', () => {
   for (const rt of RUNTIMES) {
     for (const v of postVectors) {
       const env = patchedPolicyFile(v) ? { OUTPUT_GUARD_POLICY_PATH: patchedPolicyFile(v) } : undefined;
@@ -163,6 +182,12 @@ test('ac-03 逐 Runtime 执行同一组 Post 向量（裁剪与不可保持降�
       assert.ok(!res.missing, rt + ' Post 入口缺失');
       assert.equal(res.status, 0, rt + ' ' + v.id + ' 退出码非零: ' + res.stderr);
       const text = postText(rt, res.out);
+      if (v.adapterExpect && v.adapterExpect.patch === false) {
+        // B-1：逃生阀在 Post 面 ⇒ 本调用既无 updatedToolOutput / patch，也无 trailer
+        assert.equal(text, null, rt + ' ' + v.id + ' Post 面必须无回填，实际: ' + JSON.stringify(res.out));
+        assert.ok(!String(res.stdout || '').includes('complete='), rt + ' ' + v.id + ' 无回填结果不得出现 trailer');
+        continue;
+      }
       assert.notEqual(text, null, rt + ' ' + v.id + ' 未回填结果');
       if (v.expect.action === 'truncate') {
         assert.ok(text.includes('complete=false'), rt + ' ' + v.id + ' 裁剪结果缺 complete=false trailer');
@@ -171,6 +196,7 @@ test('ac-03 逐 Runtime 执行同一组 Post 向量（裁剪与不可保持降�
         assert.ok(text.includes('coverage=unavailable'), rt + ' ' + v.id + ' 不可保持路径缺 coverage 标记');
         assert.ok(text.includes(v.input.args.body), rt + ' ' + v.id + ' 不可保持路径必须逐字保留原正文');
       }
+      assertProbe(text, v, rt + ' ' + v.id);
     }
   }
 });
@@ -251,3 +277,41 @@ test('ac-08 check-install 逐 Runtime 恰一行稳定读数，且与 capabilitie
     assert.equal(hits[0], 'output-guard runtime=' + rt + ' coverage=' + expect + ' policy=v1');
   }
 });
+
+test('ac-09 AC-4/B-4：capabilities.paths 与安装面 matcher 双向一致（full ⊆ matcher，matcher ⊆ 已声明路径）', () => {
+  const TEMPLATE = {
+    claude: 'settings.template.json',
+    codebuddy: 'settings.template.json',
+    qoder: 'settings.template.json',
+    codex: 'hooks.json.template',
+  };
+  for (const rt of RUNTIMES) {
+    const paths = Array.isArray(CAPS.runtimes[rt].paths) ? CAPS.runtimes[rt].paths : [];
+    const full = paths.filter((p) => p.coverage === 'full').map((p) => p.id);
+    const declared = paths.filter((p) => p.uncovered !== true).map((p) => p.id);
+    if (rt === 'pi') {
+      // Pi 的安装面是扩展入口（tool_call / tool_result 事件面，全工具可见），不受 matcher 约束；
+      // 入口存在性由 ac-01 断言，此处只钉住其 full 路径非空（防静默清空声明）。
+      assert.ok(full.length > 0, 'pi 声明了 0 条 full 路径');
+      assert.ok(entryPath(rt, 'post') !== null, 'pi 缺 tool_result 入口（声明无从落地）');
+      continue;
+    }
+    const file = path.join(ROOT, 'adapters', rt, TEMPLATE[rt]);
+    assert.ok(fs.existsSync(file), rt + ' 缺安装模板 ' + TEMPLATE[rt]);
+    const tpl = fs.readFileSync(file, 'utf8').split('\r\n').join('\n');
+    const matchers = [...tpl.matchAll(/"matcher":\s*"([^"]+)"/g)].map((m) => m[1]);
+    assert.equal(matchers.length, 2, rt + ' 模板 matcher 条目数 = ' + matchers.length + '（期望 Pre/Post 各一）');
+    const tokens = new Set();
+    for (const m of matchers) for (const tok of m.split('|')) if (tok.trim()) tokens.add(tok.trim());
+    for (const id of full) {
+      assert.ok(tokens.has(id), rt + ' 安装面 matcher 未覆盖 full 路径 ' + id + '（matcher=' + matchers.join(' ; ') + '）');
+    }
+    for (const id of declared) {
+      assert.ok(tokens.has(id), rt + ' 安装面 matcher 未覆盖已声明（非 uncovered）路径 ' + id);
+    }
+    for (const tok of tokens) {
+      assert.ok(paths.some((p) => p.id === tok), rt + ' matcher 覆盖了未在 capabilities.paths 声明的工具名 ' + tok);
+    }
+  }
+});
+

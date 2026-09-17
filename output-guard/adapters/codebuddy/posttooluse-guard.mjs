@@ -79,6 +79,11 @@ export async function handle(payload) {
     if (body === null) return { ok: true, out: null };
     // 不伪造 Runtime 未提供的字段：缺失即不传出（由 Core 的可保持性检查裁定）。
     const input = { runtime: RUNTIME, toolName: String(payload.tool_name || ''), structure: body.structure, body: body.text };
+    // 本调用自身的入参（core.mjs 的 ResultInput JSDoc：callCommand / offset）：逃生阀首行判定与读取窗口起点由 Core 消费。
+    // 只读同一 payload 内的字段，不引入任何跨调用状态（AC-6）。
+    const toolInput = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input : {};
+    if (typeof toolInput.command === 'string' && toolInput.command) input.callCommand = toolInput.command;
+    if (Number.isInteger(toolInput.offset) && toolInput.offset > 0) input.offset = toolInput.offset;
     if (payload.tool_use_id !== undefined) input.toolCallId = String(payload.tool_use_id);
     if (payload.tool_response && typeof payload.tool_response.isError === 'boolean') input.isError = payload.tool_response.isError;
     if (payload.tool_response && payload.tool_response.exitCode !== undefined) input.exitCode = payload.tool_response.exitCode;

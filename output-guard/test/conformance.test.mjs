@@ -63,6 +63,23 @@ function assertSubset(expect, actual, id) {
   }
 }
 
+/**
+ * probe：对裁剪后正文的机械断言（本轮回修新增的向量面，B-1/B-2/B-3）。
+ * 只检查实际返回的 body 字符串，不新增 Core 导出面；Adapter 合同面复用同一断言。
+ */
+function assertProbe(actual, vector, label) {
+  const probe = vector.probe;
+  if (!probe) return;
+  const body = typeof actual.body === 'string' ? actual.body : '';
+  if (probe.bodyEquals !== undefined) assert.equal(body, probe.bodyEquals, label + ' probe.bodyEquals 不等');
+  if (probe.bodyFirstLinePrefix !== undefined) {
+    const first = body.split('\n')[0];
+    assert.ok(first.startsWith(probe.bodyFirstLinePrefix), label + ' probe.bodyFirstLinePrefix：首行 ' + JSON.stringify(first));
+  }
+  for (const s of probe.bodyIncludes || []) assert.ok(body.includes(s), label + ' probe.bodyIncludes 缺 ' + s);
+  for (const s of probe.bodyExcludes || []) assert.ok(!body.includes(s), label + ' probe.bodyExcludes 命中 ' + s);
+}
+
 test('conf-01 声明向量数 = 实际向量数（自棘轮）', () => {
   assert.equal(CONF.schema, 'output-guard/conformance/v1');
   assert.ok(Array.isArray(CONF.vectors));
@@ -96,7 +113,22 @@ test('conf-05 全部向量逐条通过 Core', async () => {
   for (const v of CONF.vectors) {
     const actual = await runVector(core, v);
     assertSubset(v.expect, actual, v.id);
+    assertProbe(actual, v, v.id);
     executed += 1;
   }
   assert.equal(executed, CONF.declaredVectorCount);
+});
+
+test('conf-06 本轮回修的三个 Post 面向量齐备且带机械断言（B-1/B-2/B-3）', () => {
+  const byId = (id) => CONF.vectors.filter((v) => v.id === id)[0];
+  const b1 = byId('dec-05');
+  assert.ok(b1.adapterExpect && b1.adapterExpect.patch === false, 'dec-05 必须声明 Post 面无回填');
+  assert.equal(b1.expect.trailer, '', 'dec-05：逃生阀不得追加 trailer');
+  assert.equal(b1.expect.body, b1.input.args.body, 'dec-05：正文必须逐字');
+  const b2 = byId('dec-06');
+  assert.ok(b2.input.args.offset > 1, 'dec-06 必须是非 1 窗口起点');
+  assert.ok(Array.isArray(b2.probe.bodyExcludes) && b2.probe.bodyExcludes.length >= 2, 'dec-06 必须同时钉住旧行为负向');
+  const b3 = byId('dec-07');
+  assert.ok(typeof b3.input.args.callCommand === 'string' && /^cat\s/.test(b3.input.args.callCommand), 'dec-07 必须是 shell 读取族命令词');
+  assert.equal(b3.expect.kind, 'read', 'dec-07 必须走读取面算法');
 });

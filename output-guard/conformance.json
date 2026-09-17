@@ -1,6 +1,6 @@
 {
   "schema": "output-guard/conformance/v1",
-  "$comment": "跨 Adapter 共享测试向量（SDD §2.2.3）。四个 kind 与 AC-4/AC-6/AC-8/AC-3 一一对应；declaredVectorCount 由 conformance.test.mjs 断言与实际执行向量数相等（本 CR 唯一用于新增测试面的计数棘轮）。input.op 选定被驱动的 Core 纯函数，input.args 为该函数的实参。",
+  "$comment": "跨 Adapter 共享测试向量（SDD §2.2.3）。四个 kind 与 AC-4/AC-6/AC-8/AC-3 一一对应；declaredVectorCount 由 conformance.test.mjs 断言与实际执行向量数相等（本 CR 唯一用于新增测试面的计数棘轮）。input.op 选定被驱动的 Core 纯函数，input.args 为该函数的实参；probe 为对裁剪后正文的机械断言（bodyFirstLinePrefix / bodyIncludes / bodyExcludes，Core 与 Adapter 两侧同断言），adapterExpect.patch=false 表示该向量在 Post 面必须「无回填」（既不写 updatedToolOutput / patch，也不追加 trailer）。",
   "vectors": [
     {
       "id": "esc-01",
@@ -148,7 +148,67 @@
         }
       },
       "expect": { "action": "passthrough", "ruleId": "escape-hatch" }
+    },
+    {
+      "id": "dec-05",
+      "kind": "decision",
+      "note": "B-1：逃生阀在 Post 面（同一调用的 callCommand）⇒ 无回填、无 trailer、正文逐字",
+      "policyPatch": { "thresholds": { "resultTokensCap": 4 } },
+      "input": {
+        "op": "evaluateResult",
+        "args": {
+          "runtime": "claude",
+          "toolName": "Bash",
+          "toolCallId": "call-dec-05",
+          "isError": false,
+          "structure": "text",
+          "callCommand": "# output-guard: full reason=need raw tail once\ncat src/big.mjs",
+          "body": "RAW1\nRAW2\nRAW3\nRAW4\nRAW5\nRAW6"
+        }
+      },
+      "expect": { "action": "passthrough", "ruleId": "escape-hatch", "complete": true, "coverage": "full", "trailer": "", "body": "RAW1\nRAW2\nRAW3\nRAW4\nRAW5\nRAW6" },
+      "adapterExpect": { "patch": false }
+    },
+    {
+      "id": "dec-06",
+      "kind": "decision",
+      "note": "B-2：读取窗口起点非 1（本调用 offset=500）⇒ 原始行号 + 续读锚点 offset+kept",
+      "policyPatch": { "thresholds": { "resultTokensCap": 300 } },
+      "input": {
+        "op": "evaluateResult",
+        "args": {
+          "runtime": "pi",
+          "toolName": "read",
+          "toolCallId": "call-dec-06",
+          "isError": false,
+          "structure": "content-parts",
+          "offset": 500,
+          "body": "file-line-500\nfile-line-501\nfile-line-502\nfile-line-503\nfile-line-504\nfile-line-505\nfile-line-506\nfile-line-507\nfile-line-508\nfile-line-509\nfile-line-510\nfile-line-511\nfile-line-512\nfile-line-513\nfile-line-514\nfile-line-515\nfile-line-516\nfile-line-517\nfile-line-518\nfile-line-519\nfile-line-520\nfile-line-521\nfile-line-522\nfile-line-523\nfile-line-524\nfile-line-525\nfile-line-526\nfile-line-527\nfile-line-528\nfile-line-529\nfile-line-530\nfile-line-531\nfile-line-532\nfile-line-533\nfile-line-534\nfile-line-535\nfile-line-536\nfile-line-537\nfile-line-538\nfile-line-539\nfile-line-540\nfile-line-541\nfile-line-542\nfile-line-543\nfile-line-544\nfile-line-545\nfile-line-546\nfile-line-547\nfile-line-548\nfile-line-549\nfile-line-550\nfile-line-551\nfile-line-552\nfile-line-553\nfile-line-554\nfile-line-555\nfile-line-556\nfile-line-557\nfile-line-558\nfile-line-559\nfile-line-560\nfile-line-561\nfile-line-562\nfile-line-563\nfile-line-564\nfile-line-565\nfile-line-566\nfile-line-567\nfile-line-568\nfile-line-569\nfile-line-570\nfile-line-571\nfile-line-572\nfile-line-573\nfile-line-574\nfile-line-575\nfile-line-576\nfile-line-577\nfile-line-578\nfile-line-579\nfile-line-580\nfile-line-581\nfile-line-582\nfile-line-583\nfile-line-584\nfile-line-585\nfile-line-586\nfile-line-587\nfile-line-588\nfile-line-589\nfile-line-590\nfile-line-591\nfile-line-592\nfile-line-593\nfile-line-594\nfile-line-595\nfile-line-596\nfile-line-597\nfile-line-598\nfile-line-599\nfile-line-600\nfile-line-601\nfile-line-602\nfile-line-603\nfile-line-604\nfile-line-605\nfile-line-606\nfile-line-607\nfile-line-608\nfile-line-609\nfile-line-610\nfile-line-611\nfile-line-612\nfile-line-613\nfile-line-614\nfile-line-615\nfile-line-616\nfile-line-617\nfile-line-618\nfile-line-619\nfile-line-620\nfile-line-621\nfile-line-622\nfile-line-623\nfile-line-624\nfile-line-625\nfile-line-626\nfile-line-627\nfile-line-628\nfile-line-629\nfile-line-630\nfile-line-631\nfile-line-632\nfile-line-633\nfile-line-634\nfile-line-635\nfile-line-636\nfile-line-637\nfile-line-638\nfile-line-639\nfile-line-640\nfile-line-641\nfile-line-642\nfile-line-643\nfile-line-644\nfile-line-645\nfile-line-646\nfile-line-647\nfile-line-648\nfile-line-649"
+        }
+      },
+      "expect": { "action": "truncate", "kind": "read", "complete": false },
+      "probe": { "bodyFirstLinePrefix": "500\t", "bodyIncludes": ["offset=638 limit=138"], "bodyExcludes": ["1\tfile-line-500", "offset=139 limit=138"] }
+    },
+    {
+      "id": "dec-07",
+      "kind": "decision",
+      "note": "B-3：shell 读取族（cat）⇒ 走读取面算法（连续行窗口）而非通用头尾保留",
+      "policyPatch": { "thresholds": { "resultTokensCap": 300 } },
+      "input": {
+        "op": "evaluateResult",
+        "args": {
+          "runtime": "claude",
+          "toolName": "Bash",
+          "toolCallId": "call-dec-07",
+          "isError": false,
+          "structure": "text",
+          "callCommand": "cat output-guard/core.mjs",
+          "body": "const alpha1 = 1;\nconst alpha2 = 2;\nconst alpha3 = 3;\nconst alpha4 = 4;\nconst alpha5 = 5;\nconst alpha6 = 6;\nconst alpha7 = 7;\nconst alpha8 = 8;\nconst alpha9 = 9;\nconst alpha10 = 10;\nconst alpha11 = 11;\nconst alpha12 = 12;\nconst alpha13 = 13;\nconst alpha14 = 14;\nconst alpha15 = 15;\nconst alpha16 = 16;\nconst alpha17 = 17;\nconst alpha18 = 18;\nconst alpha19 = 19;\nconst alpha20 = 20;\nconst alpha21 = 21;\nconst alpha22 = 22;\nconst alpha23 = 23;\nconst alpha24 = 24;\nconst alpha25 = 25;\nconst alpha26 = 26;\nconst alpha27 = 27;\nconst alpha28 = 28;\nconst alpha29 = 29;\nconst alpha30 = 30;\nconst alpha31 = 31;\nconst alpha32 = 32;\nconst alpha33 = 33;\nconst alpha34 = 34;\nconst alpha35 = 35;\nconst alpha36 = 36;\nconst alpha37 = 37;\nconst alpha38 = 38;\nconst alpha39 = 39;\nconst alpha40 = 40;\nconst alpha41 = 41;\nconst alpha42 = 42;\nconst alpha43 = 43;\nconst alpha44 = 44;\nconst alpha45 = 45;\nconst alpha46 = 46;\nconst alpha47 = 47;\nconst alpha48 = 48;\nconst alpha49 = 49;\nconst alpha50 = 50;\nconst alpha51 = 51;\nconst alpha52 = 52;\nconst alpha53 = 53;\nconst alpha54 = 54;\nconst alpha55 = 55;\nconst alpha56 = 56;\nconst alpha57 = 57;\nconst alpha58 = 58;\nconst alpha59 = 59;\nconst alpha60 = 60;\nconst alpha61 = 61;\nconst alpha62 = 62;\nconst alpha63 = 63;\nconst alpha64 = 64;\nconst alpha65 = 65;\nconst alpha66 = 66;\nconst alpha67 = 67;\nconst alpha68 = 68;\nconst alpha69 = 69;\nconst alpha70 = 70;\nconst alpha71 = 71;\nconst alpha72 = 72;\nconst alpha73 = 73;\nconst alpha74 = 74;\nconst alpha75 = 75;\nconst alpha76 = 76;\nconst alpha77 = 77;\nconst alpha78 = 78;\nconst alpha79 = 79;\nconst alpha80 = 80;\nconst alpha81 = 81;\nconst alpha82 = 82;\nconst alpha83 = 83;\nconst alpha84 = 84;\nconst alpha85 = 85;\nconst alpha86 = 86;\nconst alpha87 = 87;\nconst alpha88 = 88;\nconst alpha89 = 89;\nconst alpha90 = 90;\nconst alpha91 = 91;\nconst alpha92 = 92;\nconst alpha93 = 93;\nconst alpha94 = 94;\nconst alpha95 = 95;\nconst alpha96 = 96;\nconst alpha97 = 97;\nconst alpha98 = 98;\nconst alpha99 = 99;\nconst alpha100 = 100;\nconst alpha101 = 101;\nconst alpha102 = 102;\nconst alpha103 = 103;\nconst alpha104 = 104;\nconst alpha105 = 105;\nconst alpha106 = 106;\nconst alpha107 = 107;\nconst alpha108 = 108;\nconst alpha109 = 109;\nconst alpha110 = 110;\nconst alpha111 = 111;\nconst alpha112 = 112;\nconst alpha113 = 113;\nconst alpha114 = 114;\nconst alpha115 = 115;\nconst alpha116 = 116;\nconst alpha117 = 117;\nconst alpha118 = 118;\nconst alpha119 = 119;\nconst alpha120 = 120;\nconst alpha121 = 121;\nconst alpha122 = 122;\nconst alpha123 = 123;\nconst alpha124 = 124;\nconst alpha125 = 125;\nconst alpha126 = 126;\nconst alpha127 = 127;\nconst alpha128 = 128;\nconst alpha129 = 129;\nconst alpha130 = 130;\nconst alpha131 = 131;\nconst alpha132 = 132;\nconst alpha133 = 133;\nconst alpha134 = 134;\nconst alpha135 = 135;\nconst alpha136 = 136;\nconst alpha137 = 137;\nconst alpha138 = 138;\nconst alpha139 = 139;\nconst alpha140 = 140;\nconst alpha141 = 141;\nconst alpha142 = 142;\nconst alpha143 = 143;\nconst alpha144 = 144;\nconst alpha145 = 145;\nconst alpha146 = 146;\nconst alpha147 = 147;\nconst alpha148 = 148;\nconst alpha149 = 149;\nconst alpha150 = 150;"
+        }
+      },
+      "expect": { "action": "truncate", "kind": "read", "complete": false },
+      "probe": { "bodyFirstLinePrefix": "1\t", "bodyIncludes": ["offset=139 limit=138"], "bodyExcludes": ["已省略"] }
     }
   ],
-  "declaredVectorCount": 13
+  "declaredVectorCount": 16
 }

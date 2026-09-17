@@ -6,11 +6,13 @@
 |---|---|---|
 | Project | `<project-root>/.claude/settings.json`（可提交、团队共享）或 `.claude/settings.local.json` | 显式安装一次（本目录模板） |
 | User | `~/.claude/settings.json` | 显式安装一次（本目录模板） |
-| Managed | `{workDir}/.claude/settings.json`（Multica 每任务 env） | daemon 单写入点合成，**不由本目录安装**；目标文件已存在时不写/不合并/不覆盖 |
+| Managed | `{workDir}/.claude/settings.json`（Multica 每任务 env） | daemon 单写入点合成，**不由本目录安装**；目标文件已存在时不写/不合并/不覆盖。开关 = daemon 读环境变量 `MULTICA_OUTPUT_GUARD_TOOLS_ROOT`（指向 Tools Release 根）：**未配置即整体跳过挂载**，`prepareCRGuard` 的既有行为逐字不变 |
 
 ## 2. 安装（Project / User，一次）
 
 把 [settings.template.json](settings.template.json) 的 `hooks` 段**并入**目标配置（合并、不是覆盖），并把 `{TOOLS_ROOT}` 物化为 tools 包绝对路径。已有 hooks 段取并集，不得覆盖他人配置；本工具不做自动合并。
+
+模板的 `matcher` 覆盖 `capabilities.json` 中本 Runtime **已声明的全部路径**（含 `Read` / `Grep` 这类非 shell 路径：它们不走命令族判定，封顶由 Post 面承担）；`matcher` 与声明的双向一致性由 `test/adapters-contract.test.mjs` 机械核对。
 
 ## 3. 生效与验证
 
